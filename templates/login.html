@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="{{ lang }}" {% if lang=='fa' %}dir="rtl" {% endif %}>
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ site_settings.title or 'Amnezia Panel' }} — {{ _('login') }}</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <link rel="stylesheet" href="/static/css/style.css">
+    <script>!function () { var t = localStorage.getItem('theme') || 'dark'; document.documentElement.setAttribute('data-theme', t) }()</script>
+    <style>
+        .login-wrapper {
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: var(--space-lg);
+            background: var(--bg);
+        }
+
+        .login-card {
+            width: 100%;
+            max-width: 400px;
+        }
+
+        .login-logo {
+            text-align: center;
+            margin-bottom: var(--space-xl);
+        }
+
+        .login-logo .logo-icon {
+            width: 72px;
+            height: 72px;
+            font-size: 2rem;
+            margin: 0 auto var(--space-md);
+        }
+
+        .login-logo .logo-text {
+            font-size: 1.6rem;
+            font-weight: 700;
+        }
+
+        .login-logo .logo-subtitle {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+        }
+
+        .login-error {
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            color: #ef4444;
+            padding: var(--space-sm) var(--space-md);
+            border-radius: var(--radius-md);
+            font-size: 0.85rem;
+            margin-bottom: var(--space-md);
+            display: none;
+        }
+
+        .login-error.visible {
+            display: block;
+        }
+
+        .lang-check {
+            color: var(--success);
+            font-weight: 700;
+        }
+
+        [dir="rtl"] .lang-check {
+            margin-right: auto;
+        }
+
+        [dir="ltr"] .lang-check {
+            margin-left: auto;
+        }
+    </style>
+</head>
+
+<body>
+    <button class="theme-toggle" onclick="openModal('langModal')" id="langToggle"
+        style="position:fixed; top:20px; {% if lang == 'fa' %}left:65px;{% else %}right:65px;{% endif %} z-index:10;"
+        title="{{ _('select_lang') }}">
+        {% if lang == 'ru' %}🇷🇺{% elif lang == 'fr' %}🇫🇷{% elif lang == 'zh' %}🇨🇳{% elif lang == 'fa' %}🇮🇷{%
+        else %}🇺🇸{% endif %}
+    </button>
+    <button class="theme-toggle" onclick="toggleTheme()" id="themeToggle"
+        style="position:fixed; top:20px; {% if lang == 'fa' %}left:20px;{% else %}right:20px;{% endif %} z-index:10;"
+        title="{{ _('toggle_theme') }}">🌙</button>
+
+    <div class="login-wrapper">
+        <div class="login-card">
+            <div class="login-logo">
+                <div class="logo-icon">{{ site_settings.logo or '🛡' }}</div>
+                <div class="logo-text">{{ site_settings.title or 'Amnezia Panel' }}</div>
+                <div class="logo-subtitle">{{ site_settings.subtitle or 'Web Panel' }}</div>
+            </div>
+
+            <div class="card">
+                <h2 style="font-size:1.2rem; font-weight:600; margin-bottom:var(--space-lg); text-align:center;">{{
+                    _('login_title') }}</h2>
+
+                <div class="login-error" id="loginError"></div>
+
+                <form id="loginForm" onsubmit="return doLogin(event)">
+                    <div class="form-group">
+                        <label class="form-label">{{ _('username') }}</label>
+                        <input class="form-input" type="text" id="username" placeholder="admin" required autofocus>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">{{ _('password') }}</label>
+                        <input class="form-input" type="password" id="password" placeholder="••••••••" required>
+                    </div>
+
+                    {% if captcha_settings.enabled %}
+                    <div class="form-group">
+                        <label class="form-label">{{ _('captcha') }}</label>
+                        <div
+                            style="display: flex; margin-bottom: var(--space-xs); border-radius: var(--radius-md); overflow: hidden; border: 1px solid var(--border-color);">
+                            <img id="captchaImage" src="/api/auth/captcha" alt="Captcha"
+                                style="width: 100%; height: 65px; object-fit: cover; object-position: center; cursor: pointer; background: #fff;"
+                                onclick="refreshCaptcha()" title="{{ _('captcha_hint') }}">
+                        </div>
+                        <input class="form-input" type="text" id="captcha" placeholder="{{ _('captcha_placeholder') }}"
+                            required>
+                    </div>
+                    {% endif %}
+
+                    <button type="submit" class="btn btn-primary" id="loginBtn"
+                        style="width:100%; margin-top:var(--space-md);">
+                        <span id="loginBtnText">{{ _('login') }}</span>
+                        <div class="spinner hidden" id="loginSpinner"></div>
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== Language Modal ===== -->
+    <div class="modal-backdrop" id="langModal">
+        <div class="modal" style="max-width: 320px;">
+            <div class="modal-header">
+                <h2 class="modal-title">{{ _('select_lang') }}</h2>
+                <button class="modal-close" onclick="closeModal('langModal')">×</button>
+            </div>
+            <div style="display: flex; flex-direction: column; gap: var(--space-sm);">
+                {% set langs = [
+                ('en', '🇺🇸', 'lang_en'),
+                ('ru', '🇷🇺', 'lang_ru'),
+                ('fr', '🇫🇷', 'lang_fr'),
+                ('zh', '🇨🇳', 'lang_zh'),
+                ('fa', '🇮🇷', 'lang_fa')
+                ] %}
+                {% for l_code, l_flag, l_key in langs %}
+                <a href="/set_lang/{{ l_code }}" class="btn btn-secondary"
+                    style="justify-content: flex-start; gap: var(--space-md); padding: var(--space-md);">
+                    <span style="font-size: 1.4rem;">{{ l_flag }}</span>
+                    <span style="font-weight: 500;">{{ _(l_key) }}</span>
+                    {% if lang == l_code %}
+                    <span class="lang-check">✓</span>
+                    {% endif %}
+                </a>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+
+    <script>
+        window.I18N = {{ translations_json | safe }};
+        window._ = function (key) { return window.I18N[key] || key; };
+
+        /* Theme toggle */
+        (function () {
+            const saved = localStorage.getItem('theme') || 'dark';
+            document.documentElement.setAttribute('data-theme', saved);
+
+            const updateUI = () => {
+                const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+                document.querySelectorAll('.theme-toggle').forEach(btn => {
+                    if (btn.id === 'themeToggle') {
+                        btn.textContent = isLight ? '☀️' : '🌙';
+                    }
+                });
+            };
+
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', updateUI);
+            } else {
+                updateUI();
+            }
+
+            window.toggleTheme = function () {
+                const current = document.documentElement.getAttribute('data-theme') || 'dark';
+                const next = current === 'dark' ? 'light' : 'dark';
+                document.documentElement.setAttribute('data-theme', next);
+                localStorage.setItem('theme', next);
+                updateUI();
+            };
+        })();
+
+        /* ===== Modal Management ===== */
+        function openModal(id) {
+            const modal = document.getElementById(id);
+            if (modal) {
+                modal.classList.add('active');
+                document.body.style.overflow = 'hidden';
+            }
+        }
+
+        function closeModal(id) {
+            const modal = document.getElementById(id);
+            if (modal) {
+                modal.classList.remove('active');
+                document.body.style.overflow = '';
+            }
+        }
+
+        /* Close modal on backdrop click */
+        document.addEventListener('click', (e) => {
+            if (e.target.classList.contains('modal-backdrop') && e.target.classList.contains('active')) {
+                e.target.classList.remove('active');
+                document.body.style.overflow = '';
+            }
+        });
+
+        /* Close modal on Escape */
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                document.querySelectorAll('.modal-backdrop.active').forEach(m => {
+                    m.classList.remove('active');
+                });
+                document.body.style.overflow = '';
+            }
+        });
+
+        function refreshCaptcha() {
+            const img = document.getElementById('captchaImage');
+            if (img) {
+                img.src = '/api/auth/captcha?' + new Date().getTime();
+            }
+        }
+
+        async function doLogin(e) {
+            e.preventDefault();
+            const btn = document.getElementById('loginBtn');
+            const text = document.getElementById('loginBtnText');
+            const spinner = document.getElementById('loginSpinner');
+            const errEl = document.getElementById('loginError');
+
+            btn.disabled = true;
+            text.textContent = _('logging_in');
+            spinner.classList.remove('hidden');
+            errEl.classList.remove('visible');
+
+            try {
+                const res = await fetch('/api/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        username: document.getElementById('username').value,
+                        password: document.getElementById('password').value,
+                        captcha: document.getElementById('captcha') ? document.getElementById('captcha').value : null,
+                    }),
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    throw new Error(data.error || _('login_error'));
+                }
+                window.location.href = '/';
+            } catch (err) {
+                errEl.textContent = err.message;
+                errEl.classList.add('visible');
+                refreshCaptcha();
+                if (document.getElementById('captcha')) {
+                    document.getElementById('captcha').value = '';
+                }
+            } finally {
+                btn.disabled = false;
+                text.textContent = _('login');
+                spinner.classList.add('hidden');
+            }
+        }
+    </script>
+</body>
+
+</html>

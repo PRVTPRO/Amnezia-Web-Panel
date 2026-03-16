@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+
+{% block title_extra %} — {{ _('my_connections_title') }}{% endblock %}
+
+{% block content %}
+<section>
+    <h1 class="section-title">
+        <span class="icon">🔗</span>
+        {{ _('my_connections_title') }}
+    </h1>
+
+    {% if connections %}
+    <div class="clients-list" id="myConnectionsList">
+        {% for c in connections %}
+        <div class="client-item">
+            <div class="client-info">
+                <div class="client-avatar">🔗</div>
+                <div>
+                    <div class="client-name">{{ c.name or 'VPN Connection' }}</div>
+                    <div class="client-meta">
+                        <span>🖥 {{ c.server_name }}</span>
+                        <span class="badge badge-info" style="font-size:0.65rem;">
+                            {{ 'AmneziaWG' if c.protocol == 'awg' else ('AWG Legacy' if c.protocol == 'awg_legacy' else
+                            ('Xray' if c.protocol == 'xray' else c.protocol | upper)) }}
+                        </span>
+                        {% if c.created_at %}
+                        <span>📅 {{ c.created_at[:10] }}</span>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+            <div class="client-actions">
+                <button class="btn btn-primary btn-sm"
+                    onclick="showMyConfig('{{ c.id }}', '{{ c.name or 'Connection' }}')">
+                    {{ _('show_config') }}
+                </button>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state">
+        <div class="empty-icon">🔗</div>
+        <div class="empty-title">{{ _('no_connections') }}</div>
+        <div class="empty-desc">{{ _('no_connections_user_desc') }}</div>
+    </div>
+    {% endif %}
+</section>
+
+<!-- ===== Config Modal ===== -->
+<div class="modal-backdrop" id="configModal">
+    <div class="modal" style="max-width: 600px;">
+        <div class="modal-header">
+            <h2 class="modal-title" id="configModalTitle">{{ _('config') }}</h2>
+            <button class="modal-close" onclick="closeModal('configModal')">×</button>
+        </div>
+
+        <div class="config-tabs">
+            <button class="config-tab active" onclick="switchConfigTab('conf')">{{ _('config_tab') }}</button>
+            <button class="config-tab" onclick="switchConfigTab('vpn')">{{ _('vpn_key_tab') }}</button>
+            <button class="config-tab" onclick="switchConfigTab('qr')">{{ _('qr_code_tab') }}</button>
+        </div>
+
+        <div class="config-panel active" id="panel-conf">
+            <div class="config-display">
+                <div class="config-text" id="configText"></div>
+                <div class="config-actions">
+                    <button class="btn btn-secondary btn-sm" onclick="copyToClipboard(currentConfig)" style="flex:1">
+                        {{ _('copy_config') }}
+                    </button>
+                    <button class="btn btn-primary btn-sm"
+                        onclick="downloadFile(currentConfig, currentConfigName + '.conf')" style="flex:1">
+                        {{ _('download_conf') }}
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div class="config-panel" id="panel-vpn">
+            <div class="vpn-link-box" id="vpnLinkText"></div>
+            <div class="config-actions" style="margin-top: var(--space-sm);">
+                <button class="btn btn-secondary btn-sm" onclick="copyToClipboard(currentVpnLink)" style="flex:1">
+                    {{ _('copy_key') }}
+                </button>
+            </div>
+            <div class="form-hint" style="margin-top: var(--space-sm);">
+                {{ _('vpn_link_hint') }}
+            </div>
+        </div>
+
+        <div class="config-panel" id="panel-qr">
+            <div class="qr-container">
+                <div id="qrCode"></div>
+                <div class="qr-hint">{{ _('qr_hint') }}</div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    let currentConfig = '';
+    let currentVpnLink = '';
+    let currentConfigName = 'connection';
+
+    async function showMyConfig(connectionId, name) {
+        try {
+            showToast(_('loading_connections'), 'info');
+            const result = await apiCall(`/api/my/connections/${connectionId}/config`, 'POST');
+
+            if (result.config) {
+                currentConfig = result.config;
+                currentVpnLink = result.vpn_link || '';
+                currentConfigName = name.replace(/\s+/g, '_');
+                document.getElementById('configModalTitle').textContent = `${_('config')} — ${name}`;
+                document.getElementById('configText').textContent = result.config;
+                document.getElementById('vpnLinkText').textContent = currentVpnLink;
+
+                switchConfigTab('conf');
+                openModal('configModal');
+                generateQR(result.config);
+            }
+        } catch (err) {
+            showToast(`${_('error')}: ` + err.message, 'error');
+        }
+    }
+
+    function switchConfigTab(tab) {
+        document.querySelectorAll('.config-tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.config-panel').forEach(p => p.classList.remove('active'));
+        const tabs = document.querySelectorAll('.config-tab');
+        const panels = { conf: 'panel-conf', vpn: 'panel-vpn', qr: 'panel-qr' };
+        const tabIdx = { conf: 0, vpn: 1, qr: 2 };
+        tabs[tabIdx[tab]].classList.add('active');
+        document.getElementById(panels[tab]).classList.add('active');
+    }
+
+    function generateQR(text) {
+        const container = document.getElementById('qrCode');
+        container.innerHTML = '';
+        try {
+            new QRCode(container, {
+                text: text, width: 280, height: 280,
+                colorDark: '#000000', colorLight: '#ffffff',
+                correctLevel: QRCode.CorrectLevel.L
+            });
+        } catch (e) {
+            container.innerHTML = `<div style="color:var(--text-muted);font-size:0.85rem;">${_('qr_error')}</div>`;
+        }
+    }
+</script>
+{% endblock %}

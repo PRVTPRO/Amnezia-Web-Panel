@@ -1,0 +1,194 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section>
+    <div class="flex items-center justify-between" style="margin-bottom: var(--space-lg);">
+        <h1 class="section-title" style="margin-bottom:0;">
+            <span class="icon">🖥</span>
+            {{ _('nav_servers') }}
+        </h1>
+        <button class="btn btn-primary" onclick="openModal('addServerModal')">
+            <span>＋</span> {{ _('add_server') }}
+        </button>
+    </div>
+
+    {% if servers %}
+    <div class="server-grid" id="serverGrid">
+        {% for server in servers %}
+        <div class="card card-hover server-card" id="server-{{ loop.index0 }}">
+            <div class="server-meta">
+                <div class="server-icon">🖥</div>
+                <div>
+                    <div class="server-name">{{ server.name }}</div>
+                    <div class="server-host">{{ server.host }}:{{ server.ssh_port }}</div>
+                </div>
+            </div>
+
+            <div class="server-protocols" id="server-protocols-{{ loop.index0 }}">
+                {% if server.protocols %}
+                {% for proto_key, proto_val in server.protocols.items() %}
+                {% if proto_val.get('installed') %}
+                <span class="badge badge-success">
+                    <span class="badge-dot"></span>
+                    {{ 'AWG' if proto_key == 'awg' else ('AWG-Legacy' if proto_key == 'awg_legacy' else ('Xray' if
+                    proto_key == 'xray' else proto_key | upper)) }}
+                </span>
+                {% endif %}
+                {% endfor %}
+                {% else %}
+                <span class="badge badge-warn">
+                    <span class="badge-dot"></span>
+                    {{ _('no_protocols') }}
+                </span>
+                {% endif %}
+            </div>
+
+            <div class="server-actions">
+                <a href="/server/{{ loop.index0 }}" class="btn btn-secondary btn-sm" style="flex:1">
+                    {{ _('manage') }}
+                </a>
+                <button class="btn btn-danger btn-sm btn-icon" onclick="deleteServer({{ loop.index0 }})"
+                    title="{{ _('delete') }}">
+                    🗑
+                </button>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state">
+        <div class="empty-icon">🛡</div>
+        <div class="empty-title">{{ _('no_servers') }}</div>
+        <div class="empty-desc">
+            {{ _('add_server_desc') }}
+        </div>
+        <button class="btn btn-primary" onclick="openModal('addServerModal')">
+            <span>＋</span> {{ _('add_server') }}
+        </button>
+    </div>
+    {% endif %}
+</section>
+
+<!-- ===== Add Server Modal ===== -->
+<div class="modal-backdrop" id="addServerModal">
+    <div class="modal">
+        <div class="modal-header">
+            <h2 class="modal-title">{{ _('add_server') }}</h2>
+            <button class="modal-close" onclick="closeModal('addServerModal')">×</button>
+        </div>
+
+        <form id="addServerForm" onsubmit="return addServer(event)">
+            <div class="form-group">
+                <label class="form-label">{{ _('name') }}</label>
+                <input class="form-input" type="text" id="serverName" placeholder="My VPN Server">
+            </div>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label class="form-label">{{ _('ssh_host') }}</label>
+                    <input class="form-input" type="text" id="serverHost" placeholder="192.168.1.1" required>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">{{ _('ssh_port') }}</label>
+                    <input class="form-input" type="number" id="serverPort" value="22" min="1" max="65535">
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">{{ _('ssh_user') }}</label>
+                <input class="form-input" type="text" id="serverUser" placeholder="root" required>
+            </div>
+
+            <!-- Tabs for auth method -->
+            <div class="tabs" style="margin-top: var(--space-md)">
+                <button type="button" class="tab active" onclick="switchAuthTab('password', this)">{{ _('ssh_password')
+                    }}</button>
+                <button type="button" class="tab" onclick="switchAuthTab('key', this)">{{ _('ssh_key') }}</button>
+            </div>
+
+            <div id="authPassword">
+                <div class="form-group">
+                    <label class="form-label">{{ _('ssh_password') }}</label>
+                    <input class="form-input" type="password" id="serverPassword" placeholder="••••••••">
+                </div>
+            </div>
+
+            <div id="authKey" class="hidden">
+                <div class="form-group">
+                    <label class="form-label">{{ _('ssh_key') }}</label>
+                    <textarea class="form-textarea" id="serverKey"
+                        placeholder="{{ _('ssh_key_placeholder') }}"></textarea>
+                    <div class="form-hint">{{ _('ssh_key_hint') }}</div>
+                </div>
+            </div>
+
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="closeModal('addServerModal')">{{ _('cancel')
+                    }}</button>
+                <button type="submit" class="btn btn-primary" id="addServerBtn">
+                    <span id="addServerBtnText">{{ _('connect') }}</span>
+                    <div class="spinner hidden" id="addServerSpinner"></div>
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    function switchAuthTab(tab, btn) {
+        document.querySelectorAll('.tabs .tab').forEach(t => t.classList.remove('active'));
+        btn.classList.add('active');
+
+        document.getElementById('authPassword').classList.toggle('hidden', tab !== 'password');
+        document.getElementById('authKey').classList.toggle('hidden', tab !== 'key');
+    }
+
+    async function addServer(e) {
+        e.preventDefault();
+
+        const btn = document.getElementById('addServerBtn');
+        const btnText = document.getElementById('addServerBtnText');
+        const spinner = document.getElementById('addServerSpinner');
+
+        btn.disabled = true;
+        btnText.textContent = _('connecting');
+        spinner.classList.remove('hidden');
+
+        try {
+            const data = {
+                name: document.getElementById('serverName').value,
+                host: document.getElementById('serverHost').value,
+                ssh_port: parseInt(document.getElementById('serverPort').value) || 22,
+                username: document.getElementById('serverUser').value,
+                password: document.getElementById('serverPassword').value,
+                private_key: document.getElementById('serverKey').value,
+            };
+
+            const result = await apiCall('/api/servers/add', 'POST', data);
+            showToast(_('server_added'), 'success');
+            setTimeout(() => window.location.reload(), 800);
+
+        } catch (err) {
+            showToast(err.message, 'error');
+        } finally {
+            btn.disabled = false;
+            btnText.textContent = 'Подключить';
+            spinner.classList.add('hidden');
+        }
+    }
+
+    async function deleteServer(serverId) {
+        if (!confirm(_('delete_confirm'))) return;
+
+        try {
+            await apiCall(`/api/servers/${serverId}/delete`, 'POST');
+            showToast(_('server_deleted'), 'success');
+            setTimeout(() => window.location.reload(), 500);
+        } catch (err) {
+            showToast(err.message, 'error');
+        }
+    }
+</script>
+{% endblock %}

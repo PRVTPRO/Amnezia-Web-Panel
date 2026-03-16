@@ -1,0 +1,249 @@
+{% extends "base.html" %}
+
+{% block title_extra %} — {{ _('share_title') }}{% endblock %}
+
+{% block content %}
+<div class="card" style="max-width: 600px; margin: 2rem auto;">
+    <div class="card-header"
+        style="justify-content: center; text-align: center; flex-direction: column; gap: var(--space-xs);">
+        <h2 class="card-title">{{ _('vpn_access') }}</h2>
+        <p style="color: var(--text-muted); font-size: 0.9rem;">{{ _('user_label_share') }}: <strong>{{
+                share_user.username }}</strong>
+        </p>
+    </div>
+
+    {% if need_password %}
+    <div style="padding: var(--space-lg); text-align: center;">
+        <div class="logo-icon" style="font-size: 3rem; margin-bottom: var(--space-md);">🔐</div>
+        <p style="margin-bottom: var(--space-md);">{{ _('share_protected_desc') }}
+        </p>
+
+        <form id="authForm" onsubmit="authShare(event)"
+            style="display: flex; flex-direction: column; gap: var(--space-md); max-width: 300px; margin: 0 auto;">
+            <div class="form-group">
+                <input type="password" id="sharePassword" class="form-input" placeholder="{{ _('password') }}" required
+                    autofocus>
+            </div>
+            <button type="submit" class="btn btn-primary" id="authBtn">
+                <span id="authBtnText">{{ _('login') }}</span>
+                <div class="spinner hidden" id="authSpinner"></div>
+            </button>
+        </form>
+    </div>
+    {% else %}
+    <div id="connectionsList" style="padding: var(--space-md);">
+        <div style="text-align: center; padding: 2rem;" id="loadingState">
+            <div class="spinner" style="width: 40px; height: 40px; margin: 0 auto;"></div>
+            <p style="margin-top: 1rem; color: var(--text-muted);">{{ _('loading_share_conns') }}</p>
+        </div>
+        <div id="connectionsGrid" class="hidden" style="display: grid; gap: var(--space-md);">
+            <!-- Connections will be here -->
+        </div>
+        <div id="emptyState" class="hidden" style="text-align: center; padding: 2rem;">
+            <p style="color: var(--text-muted);">{{ _('no_active_conns') }}</p>
+        </div>
+    </div>
+    {% endif %}
+</div>
+
+<!-- Modal for Config -->
+<div class="modal-backdrop" id="configModal">
+    <div class="modal" style="max-width: 600px;">
+        <div class="modal-header">
+            <h2 class="modal-title" id="configModalTitle">{{ _('config') }}</h2>
+            <button class="modal-close" onclick="closeModal('configModal')">×</button>
+        </div>
+
+        <div class="config-tabs">
+            <button class="config-tab active" onclick="switchConfigTab('conf')">{{ _('config_tab') }}</button>
+            <button class="config-tab" onclick="switchConfigTab('vpn')">{{ _('vpn_key_tab') }}</button>
+            <button class="config-tab" onclick="switchConfigTab('qr')">{{ _('qr_code_tab') }}</button>
+        </div>
+
+        <div class="config-panel active" id="panel-conf">
+            <div class="config-display">
+                <textarea class="config-text" id="configText" readonly rows="12"
+                    style="width:100%; border:none; background:transparent; color:inherit; font-family:monospace; resize:none; outline:none;"></textarea>
+                <div class="config-actions">
+                    <button class="btn btn-secondary btn-sm" onclick="copyConfig()" style="flex:1">{{ _('copy_config')
+                        }}</button>
+                    <a id="downloadBtn" class="btn btn-primary btn-sm"
+                        style="flex:1; text-decoration:none; display:flex; align-items:center; justify-content:center;">
+                        {{ _('download_conf') }}
+                    </a>
+                </div>
+            </div>
+        </div>
+
+        <div class="config-panel" id="panel-vpn">
+            <div class="vpn-link-box" id="vpnLinkText" style="min-height: 100px;"></div>
+            <div class="config-actions" style="margin-top:var(--space-sm);">
+                <button class="btn btn-secondary btn-sm" onclick="copyVpnLink()" style="flex:1">{{ _('copy_key')
+                    }}</button>
+            </div>
+        </div>
+
+        <div class="config-panel" id="panel-qr">
+            <div class="qr-container">
+                <div id="qrcode"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    const TOKEN = "{{ token }}";
+
+    async function authShare(e) {
+        e.preventDefault();
+        const password = document.getElementById('sharePassword').value;
+        const btn = document.getElementById('authBtn');
+        const text = document.getElementById('authBtnText');
+        const spinner = document.getElementById('authSpinner');
+
+        btn.disabled = true;
+        text.classList.add('hidden');
+        spinner.classList.remove('hidden');
+
+        try {
+            const res = await fetch(`/api/share/${TOKEN}/auth`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ password })
+            });
+            const data = await res.json();
+            if (data.status === 'success') {
+                window.location.reload();
+            } else {
+                alert(data.error || _('login_error'));
+            }
+        } catch (err) {
+            alert(`${_('error')}: ` + err.message);
+        } finally {
+            btn.disabled = false;
+            text.classList.remove('hidden');
+            spinner.classList.add('hidden');
+        }
+    }
+
+    async function loadConnections() {
+        if (document.getElementById('loadingState') === null) return;
+
+        try {
+            const res = await fetch(`/api/share/${TOKEN}/connections`);
+            if (res.status === 401) return; // Wait for auth
+
+            const data = await res.json();
+            document.getElementById('loadingState').classList.add('hidden');
+
+            if (!data.connections || data.connections.length === 0) {
+                document.getElementById('emptyState').classList.remove('hidden');
+                return;
+            }
+
+            const grid = document.getElementById('connectionsGrid');
+            grid.classList.remove('hidden');
+            grid.innerHTML = data.connections.map(c => `
+            <div class="card" style="padding: var(--space-md); border: 1px solid var(--border-color);">
+                <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: var(--space-sm);">
+                    <div style="text-align: initial;">
+                        <div style="font-weight: 600; font-size: 1.1rem;">${c.name}</div>
+                        <div style="font-size: 0.8rem; color: var(--text-muted);">${c.protocol.toUpperCase()} • ${c.server_name}</div>
+                    </div>
+                    <span class="badge badge-success">${_('active')}</span>
+                </div>
+                <button class="btn btn-secondary btn-sm w-full" onclick="showConfig('${c.id}', '${c.name}')">
+                    ${_('show_settings_btn')}
+                </button>
+            </div>
+        `).join('');
+        } catch (err) {
+            console.error(err);
+        }
+    }
+
+    function switchConfigTab(tab) {
+        document.querySelectorAll('.config-tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.config-panel').forEach(p => p.classList.remove('active'));
+
+        const tabs = document.querySelectorAll('.config-tab');
+        const panels = { conf: 'panel-conf', vpn: 'panel-vpn', qr: 'panel-qr' };
+        const tabIdx = { conf: 0, vpn: 1, qr: 2 };
+
+        tabs[tabIdx[tab]].classList.add('active');
+        document.getElementById(panels[tab]).classList.add('active');
+    }
+
+    let currentConfig = '';
+    let currentVpnLink = '';
+
+    async function showConfig(connId, name) {
+        try {
+            const res = await fetch(`/api/share/${TOKEN}/config/${connId}`, { method: 'POST' });
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+
+            currentConfig = data.config;
+            currentVpnLink = data.vpn_link || '';
+
+            document.getElementById('configText').value = data.config;
+            document.getElementById('vpnLinkText').textContent = currentVpnLink;
+            document.getElementById('configModalTitle').textContent = name;
+
+            const dl = document.getElementById('downloadBtn');
+            dl.onclick = () => downloadFile(data.config, `${name}.conf`);
+
+            const qrContainer = document.getElementById('qrcode');
+            qrContainer.innerHTML = '';
+            new QRCode(qrContainer, {
+                text: data.config,
+                width: 256,
+                height: 256,
+                colorDark: "#000000",
+                colorLight: "#ffffff",
+                correctLevel: QRCode.CorrectLevel.L
+            });
+
+            switchConfigTab('conf');
+            openModal('configModal');
+        } catch (err) {
+            alert(`${_('error')}: ` + err.message);
+        }
+    }
+
+    function copyConfig() {
+        copyToClipboard(currentConfig);
+    }
+
+    function copyVpnLink() {
+        copyToClipboard(currentVpnLink);
+    }
+
+    document.addEventListener('DOMContentLoaded', loadConnections);
+</script>
+
+<style>
+    .w-full {
+        width: 100%;
+    }
+
+    .spinner {
+        border: 3px solid rgba(255, 255, 255, 0.1);
+        border-top: 3px solid var(--accent-color);
+        border-radius: 50%;
+        width: 20px;
+        height: 20px;
+        animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+        0% {
+            transform: rotate(0deg);
+        }
+
+        100% {
+            transform: rotate(360deg);
+        }
+    }
+</style>
+{% endblock %}

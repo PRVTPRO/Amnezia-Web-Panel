@@ -1,0 +1,816 @@
+{% extends "base.html" %}
+
+{% block title_extra %} — {{ server.name }}{% endblock %}
+
+{% block content %}
+<a href="/" class="back-link">{{ _('back_to_servers') }}</a>
+
+<!-- Server Info Header -->
+<div class="card" style="margin-bottom: var(--space-xl);">
+    <div class="flex items-center justify-between" style="flex-wrap: wrap; gap: var(--space-md);">
+        <div class="flex items-center gap-md">
+            <div class="server-icon" style="width:56px; height:56px; font-size:1.6rem;">🖥</div>
+            <div>
+                <h1 style="font-size:1.4rem; font-weight:700;">{{ server.name }}</h1>
+                <div class="font-mono text-muted text-sm">{{ server.host }}:{{ server.ssh_port }} • {{ server.username
+                    }}</div>
+            </div>
+        </div>
+        <div class="flex gap-sm items-center">
+            <div class="flex gap-sm items-center" id="serverStats" style="display:none;"></div>
+            <button class="btn btn-secondary btn-sm" onclick="checkServer()" id="checkBtn">
+                <span id="checkBtnText">{{ _('server_check') }}</span>
+                <div class="spinner hidden" id="checkSpinner"></div>
+            </button>
+        </div>
+    </div>
+    <div id="serverStatus" class="mt-md hidden">
+        <div class="divider"></div>
+        <div class="flex gap-md" style="flex-wrap:wrap" id="statusBadges"></div>
+    </div>
+</div>
+
+<!-- Protocol Installation Section -->
+<h2 class="section-title">
+    <span class="icon">🔐</span>
+    {{ _('protocols') }}
+</h2>
+
+<div class="protocol-cards">
+    <!-- AWG Card -->
+    <div class="card card-hover protocol-card protocol-awg" id="proto-awg">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:var(--space-sm);">
+            <div class="protocol-icon">🔮</div>
+            <div class="flex gap-sm" id="awg-ctrl" style="display:none!important;"></div>
+        </div>
+        <div class="protocol-name">AmneziaWG</div>
+        <div class="protocol-desc">
+            {{ _('awg_desc') }}
+        </div>
+        <div class="protocol-status" id="awg-status">
+            <span class="badge badge-warn"><span class="badge-dot"></span> {{ _('not_checked') }}</span>
+        </div>
+        <div id="awg-info" class="hidden">
+            <div class="protocol-info" id="awg-info-grid"></div>
+        </div>
+        <div class="flex gap-sm" id="awg-actions">
+            <button class="btn btn-primary btn-sm" onclick="openInstallModal('awg')" id="awg-install-btn"
+                style="flex:1">
+                {{ _('install') }}
+            </button>
+        </div>
+    </div>
+
+    <!-- AWG Legacy Card -->
+    <div class="card card-hover protocol-card protocol-legacy" id="proto-awg-legacy">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:var(--space-sm);">
+            <div class="protocol-icon">📡</div>
+            <div class="flex gap-sm" id="awg-legacy-ctrl" style="display:none!important;"></div>
+        </div>
+        <div class="protocol-name">AmneziaWG Legacy</div>
+        <div class="protocol-desc">
+            {{ _('awg_legacy_desc') }}
+        </div>
+        <div class="protocol-status" id="awg-legacy-status">
+            <span class="badge badge-warn"><span class="badge-dot"></span> {{ _('not_checked') }}</span>
+        </div>
+        <div id="awg-legacy-info" class="hidden">
+            <div class="protocol-info" id="awg-legacy-info-grid"></div>
+        </div>
+        <div class="flex gap-sm" id="awg-legacy-actions">
+            <button class="btn btn-primary btn-sm" onclick="openInstallModal('awg_legacy')" id="awg-legacy-install-btn"
+                style="flex:1">
+                {{ _('install') }}
+            </button>
+        </div>
+    </div>
+
+    <!-- Xray Card -->
+    <div class="card card-hover protocol-card protocol-xray" id="proto-xray">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:var(--space-sm);">
+            <div class="protocol-icon">⚡</div>
+            <div class="flex gap-sm" id="xray-ctrl" style="display:none!important;"></div>
+        </div>
+        <div class="protocol-name">Xray (VLESS-Reality)</div>
+        <div class="protocol-desc">
+            {{ _('xray_desc') }}
+        </div>
+        <div class="protocol-status" id="xray-status">
+            <span class="badge badge-warn"><span class="badge-dot"></span> {{ _('not_checked') }}</span>
+        </div>
+        <div id="xray-info" class="hidden">
+            <div class="protocol-info" id="xray-info-grid"></div>
+        </div>
+        <div class="flex gap-sm" id="xray-actions">
+            <button class="btn btn-primary btn-sm" onclick="openInstallModal('xray')" id="xray-install-btn"
+                style="flex:1">
+                {{ _('install') }}
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- Connections Section (renamed from Clients) -->
+<div class="clients-section" id="connectionsSection" style="display:none;">
+    <div class="clients-header">
+        <h2 class="section-title" style="margin-bottom:0;">
+            <span class="icon">🔗</span>
+            {{ _('connections') }}
+        </h2>
+        <div class="flex gap-sm items-center">
+            <select class="form-select" id="connProtoSelect" onchange="loadConnections()"
+                style="width:auto; min-width:160px;">
+                <option value="awg">AmneziaWG</option>
+                <option value="awg_legacy">AWG Legacy</option>
+                <option value="xray">Xray</option>
+            </select>
+            <button class="btn btn-primary btn-sm" onclick="openModal('addConnectionModal')">
+                <span>＋</span> {{ _('add') }}
+            </button>
+        </div>
+    </div>
+
+    <div id="connectionsList">
+        <div class="loading-overlay" id="connectionsLoading" style="display:none;">
+            <div class="loading-spinner"></div>
+            <span>{{ _('loading_connections') }}</span>
+        </div>
+        <div id="connectionsEmpty" class="empty-state hidden" style="padding: var(--space-xl) 0;">
+            <div class="empty-icon">🔗</div>
+            <div class="empty-title">{{ _('no_connections') }}</div>
+            <div class="empty-desc">{{ _('no_connections_desc') }}</div>
+        </div>
+        <div class="clients-list" id="connectionsListInner"></div>
+    </div>
+</div>
+
+<!-- ===== Install Protocol Modal ===== -->
+<div class="modal-backdrop" id="installModal">
+    <div class="modal">
+        <div class="modal-header">
+            <h2 class="modal-title" id="installModalTitle">{{ _('install_protocol') }}</h2>
+            <button class="modal-close" onclick="closeModal('installModal')">×</button>
+        </div>
+
+        <div id="installForm">
+            <div class="form-group">
+                <label class="form-label" id="installPortLabel">{{ _('port') }}</label>
+                <input class="form-input" type="number" id="installPort" value="55424" min="1" max="65535">
+                <div class="form-hint" id="installPortHint">{{ _('port_default_hint') }}</div>
+            </div>
+
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('installModal')">{{ _('cancel') }}</button>
+                <button class="btn btn-primary" onclick="installProtocol()" id="installBtn">
+                    <span id="installBtnText">{{ _('install') }}</span>
+                    <div class="spinner hidden" id="installSpinner"></div>
+                </button>
+            </div>
+        </div>
+
+        <div id="installProgress" class="hidden">
+            <div class="progress-bar">
+                <div class="progress-fill" id="installProgressFill" style="width: 0%"></div>
+            </div>
+            <div class="log-output" id="installLog"></div>
+            <div class="mt-md" id="installDone" style="display:none;">
+                <button class="btn btn-primary" onclick="closeModal('installModal'); window.location.reload();"
+                    style="width:100%">
+                    {{ _('done') }}
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ===== Add Connection Modal ===== -->
+<div class="modal-backdrop" id="addConnectionModal">
+    <div class="modal">
+        <div class="modal-header">
+            <h2 class="modal-title">{{ _('add_connection') }}</h2>
+            <button class="modal-close" onclick="closeModal('addConnectionModal')">×</button>
+        </div>
+
+        <div class="form-group">
+            <label class="form-label">{{ _('connection_name') }}</label>
+            <input class="form-input" type="text" id="connectionName"
+                placeholder="{{ _('connection_name_placeholder') }}">
+        </div>
+
+        <div class="form-group">
+            <label class="form-label">{{ _('assign_to_user') }}</label>
+            <select class="form-select" id="connectionUserId">
+                <option value="">{{ _('no_assign') }}</option>
+                {% for u in users %}
+                <option value="{{ u.id }}">{{ u.username }} ({{ u.role }})</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="closeModal('addConnectionModal')">{{ _('cancel') }}</button>
+            <button class="btn btn-primary" onclick="addConnection()" id="addConnBtn">
+                <span id="addConnBtnText">{{ _('create') }}</span>
+                <div class="spinner hidden" id="addConnSpinner"></div>
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- ===== Connection Config Modal (with Tabs) ===== -->
+<div class="modal-backdrop" id="configModal">
+    <div class="modal" style="max-width: 600px;">
+        <div class="modal-header">
+            <h2 class="modal-title" id="configModalTitle">{{ _('config') }}</h2>
+            <button class="modal-close" onclick="closeModal('configModal')">×</button>
+        </div>
+
+        <!-- Tabs -->
+        <div class="config-tabs">
+            <button class="config-tab active" onclick="switchConfigTab('conf')">{{ _('config_tab') }}</button>
+            <button class="config-tab" onclick="switchConfigTab('vpn')">{{ _('vpn_key_tab') }}</button>
+            <button class="config-tab" onclick="switchConfigTab('qr')">{{ _('qr_code_tab') }}</button>
+        </div>
+
+        <!-- Config Panel -->
+        <div class="config-panel active" id="panel-conf">
+            <div class="config-display">
+                <div class="config-text" id="configText"></div>
+                <div class="config-actions">
+                    <button class="btn btn-secondary btn-sm" onclick="copyToClipboard(currentConfig)" style="flex:1">
+                        {{ _('copy') }}
+                    </button>
+                    <button class="btn btn-primary btn-sm"
+                        onclick="downloadFile(currentConfig, currentConfigName + '.conf')" style="flex:1">
+                        {{ _('download_conf') }}
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- VPN Key Panel -->
+        <div class="config-panel" id="panel-vpn">
+            <div class="vpn-link-box" id="vpnLinkText"></div>
+            <div class="config-actions" style="margin-top: var(--space-sm);">
+                <button class="btn btn-secondary btn-sm" onclick="copyToClipboard(currentVpnLink)" style="flex:1">
+                    {{ _('copy_key') }}
+                </button>
+            </div>
+            <div class="form-hint" style="margin-top: var(--space-sm);">
+                {{ _('vpn_link_hint') }}
+            </div>
+        </div>
+
+        <!-- QR Code Panel -->
+        <div class="config-panel" id="panel-qr">
+            <div class="qr-container">
+                <div id="qrCode"></div>
+                <div class="qr-hint">{{ _('qr_hint') }}</div>
+            </div>
+        </div>
+    </div>
+</div>
+<!-- ===== Server Config Modal ===== -->
+<div class="modal-backdrop" id="serverConfigModal">
+    <div class="modal" style="max-width:680px;">
+        <div class="modal-header">
+            <h2 class="modal-title" id="serverConfigModalTitle">{{ _('server_config') }}</h2>
+            <button class="modal-close" onclick="closeModal('serverConfigModal')">×</button>
+        </div>
+        <div class="config-display" style="margin-top:var(--space-md);">
+            <div class="config-text" id="serverConfigText" style="max-height:60vh; overflow-y:auto;"></div>
+            <div class="config-actions" style="margin-top:var(--space-sm);">
+                <button class="btn btn-secondary btn-sm"
+                    onclick="copyToClipboard(document.getElementById('serverConfigText').textContent)" style="flex:1">
+                    {{ _('copy') }}
+                </button>
+                <button class="btn btn-primary btn-sm"
+                    onclick="downloadFile(document.getElementById('serverConfigText').textContent, serverConfigFilename)"
+                    style="flex:1">
+                    {{ _('download') }}
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    const SERVER_ID = {{ server_id }};
+    let currentInstallProto = 'awg';
+    let currentConfig = '';
+    let currentVpnLink = '';
+    let currentConfigName = 'connection';
+    let installedProtocols = {};
+
+    function getProtoTitle(p) {
+        if (p === 'awg') return 'AmneziaWG';
+        if (p === 'awg_legacy') return 'AWG Legacy';
+        if (p === 'xray') return 'Xray';
+        return p.toUpperCase();
+    }
+
+    // ========== Server Stats ==========
+    async function loadServerStats() {
+        try {
+            const stats = await apiCall(`/api/servers/${SERVER_ID}/stats`, 'POST');
+            const el = document.getElementById('serverStats');
+            el.style.display = '';
+            el.innerHTML = `
+                <span class="stat-pill" title="CPU">⚡ ${stats.cpu || 0}%</span>
+                <span class="stat-pill" title="RAM: ${formatBytes(stats.ram_used)} / ${formatBytes(stats.ram_total)}">🧠 ${stats.ram_percent || 0}%</span>
+                <span class="stat-pill" title="Disk: ${formatBytes(stats.disk_used)} / ${formatBytes(stats.disk_total)}">💾 ${stats.disk_percent || 0}%</span>
+                <span class="stat-pill" title="Network">🌐 ↓${formatBytes(stats.net_rx)} ↑${formatBytes(stats.net_tx)}</span>
+            `;
+        } catch (err) {
+            console.warn('Stats load failed:', err);
+        }
+    }
+
+    // ========== Server Check ==========
+    async function checkServer() {
+        const btn = document.getElementById('checkBtn');
+        const text = document.getElementById('checkBtnText');
+        const spinner = document.getElementById('checkSpinner');
+        btn.disabled = true;
+        text.textContent = _('server_checking');
+        spinner.classList.remove('remove');
+        try {
+            const data = await apiCall(`/api/servers/${SERVER_ID}/check`, 'POST');
+            const statusDiv = document.getElementById('serverStatus');
+            const badges = document.getElementById('statusBadges');
+            statusDiv.classList.remove('hidden');
+            let html = '';
+            if (data.connection === 'ok') {
+                html += `<span class="badge badge-success"><span class="badge-dot"></span> ${_('ssh_ok')}</span>`;
+            }
+            if (data.docker_installed) {
+                html += `<span class="badge badge-success"><span class="badge-dot"></span> ${_('docker_ok')}</span>`;
+            } else {
+                html += `<span class="badge badge-warn"><span class="badge-dot"></span> ${_('docker_not_installed')}</span>`;
+            }
+            badges.innerHTML = html;
+            if (data.protocols) {
+                const protoSelect = document.getElementById('connProtoSelect');
+                const currentVal = protoSelect.value;
+                protoSelect.innerHTML = '';
+                let firstVal = null;
+
+                for (const [proto, info] of Object.entries(data.protocols)) {
+                    updateProtocolCard(proto, info);
+                    if (info.container_running) {
+                        const opt = document.createElement('option');
+                        opt.value = proto;
+                        opt.textContent = getProtoTitle(proto);
+                        protoSelect.appendChild(opt);
+                        if (!firstVal) firstVal = proto;
+                    }
+                }
+
+                if (protoSelect.innerHTML === '') {
+                    const opt = document.createElement('option');
+                    opt.textContent = 'Нет протоколов';
+                    opt.disabled = true;
+                    protoSelect.appendChild(opt);
+                    document.getElementById('connectionsSection').style.display = 'none';
+                } else {
+                    protoSelect.value = Array.from(protoSelect.options).some(o => o.value === currentVal) ? currentVal : firstVal;
+                    document.getElementById('connectionsSection').style.display = '';
+                    loadConnections();
+                }
+            }
+            showToast('Проверка завершена', 'success');
+        } catch (err) {
+            showToast('Ошибка: ' + err.message, 'error');
+            const statusDiv = document.getElementById('serverStatus');
+            const badges = document.getElementById('statusBadges');
+            statusDiv.classList.remove('hidden');
+            badges.innerHTML = `<span class="badge badge-danger"><span class="badge-dot"></span> Ошибка подключения</span>`;
+        } finally {
+            btn.disabled = false;
+            text.textContent = _('server_check');
+            spinner.classList.add('hidden');
+        }
+    }
+
+    let serverConfigFilename = 'server.conf';
+
+    function updateProtocolCard(proto, info) {
+        const protoKey = proto.replace('_', '-');
+        const statusEl = document.getElementById(`${protoKey}-status`);
+        const infoEl = document.getElementById(`${protoKey}-info`);
+        const infoGrid = document.getElementById(`${protoKey}-info-grid`);
+        const actionsEl = document.getElementById(`${protoKey}-actions`);
+        const ctrlEl = document.getElementById(`${protoKey}-ctrl`);
+
+        if (info.container_running) {
+            installedProtocols[proto] = true;
+            statusEl.innerHTML = `<span class="badge badge-success"><span class="badge-dot"></span> ${_('run')}</span>`;
+            if (info.port || info.clients_count !== undefined) {
+                infoEl.classList.remove('hidden');
+                let grid = '';
+                if (info.port) grid += `<div class="protocol-info-item"><span class="protocol-info-label">${_('port')}</span><span class="protocol-info-value">${info.port}/${proto === 'xray' ? 'TCP' : 'UDP'}</span></div>`;
+                if (info.clients_count !== undefined) grid += `<div class="protocol-info-item"><span class="protocol-info-label">${_('connections')}</span><span class="protocol-info-value">${info.clients_count}</span></div>`;
+                infoGrid.innerHTML = grid;
+            }
+            actionsEl.innerHTML = `
+                <button class="btn btn-secondary btn-sm" onclick="selectProtocolForConns('${proto}')" style="flex:1">${_('connections')}</button>
+                <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')">${_('uninstall')}</button>
+            `;
+            // Show control buttons (stop + config)
+            if (ctrlEl) {
+                ctrlEl.style.cssText = '';
+                ctrlEl.innerHTML = `
+                    <button class="btn btn-secondary btn-sm" onclick="showServerConfig('${proto}')" title="${_('server_config')}">${_('config_btn')}</button>
+                    <button class="btn btn-danger btn-sm" onclick="toggleContainer('${proto}', true)" title="${_('stop_container_confirm').replace('{}', '')}">${_('stop_btn')}</button>
+                `;
+            }
+            showConnectionsSection();
+        } else if (info.container_exists) {
+            installedProtocols[proto] = false;
+            statusEl.innerHTML = `<span class="badge badge-danger"><span class="badge-dot"></span> ${_('stop')}</span>`;
+            actionsEl.innerHTML = `
+                <button class="btn btn-primary btn-sm" onclick="openInstallModal('${proto}')" style="flex:1">${_('reinstall')}</button>
+                <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')">${_('uninstall')}</button>
+            `;
+            // Show control buttons (start + config)
+            if (ctrlEl) {
+                ctrlEl.style.cssText = '';
+                ctrlEl.innerHTML = `
+                    <button class="btn btn-secondary btn-sm" onclick="showServerConfig('${proto}')" title="${_('server_config')}">${_('config_btn')}</button>
+                    <button class="btn btn-primary btn-sm" onclick="toggleContainer('${proto}', false)" title="${_('start_container_confirm').replace('{}', '')}">${_('start_btn')}</button>
+                `;
+            }
+        } else {
+            installedProtocols[proto] = false;
+            statusEl.innerHTML = `<span class="badge badge-warn"><span class="badge-dot"></span> ${_('not_installed')}</span>`;
+            actionsEl.innerHTML = `
+                <button class="btn btn-primary btn-sm" onclick="openInstallModal('${proto}')" style="flex:1">${_('install')}</button>
+            `;
+            if (ctrlEl) {
+                ctrlEl.style.cssText = 'display:none!important;';
+                ctrlEl.innerHTML = '';
+            }
+        }
+    }
+
+    // Toggle Docker container start/stop
+    async function toggleContainer(proto, isRunning) {
+        const name = getProtoTitle(proto);
+        const action = isRunning ? _('stopping') : _('starting');
+        if (!confirm(`${isRunning ? _('stop_container_confirm') : _('start_container_confirm')}`.replace('{}', name))) return;
+        try {
+            showToast(`${action} ${name}...`, 'info');
+            const res = await apiCall(`/api/servers/${SERVER_ID}/container/toggle`, 'POST', { protocol: proto });
+            showToast(`${name} ${res.action === 'stopped' ? _('stopped') : _('started')}`, 'success');
+            // Recheck after a short delay
+            setTimeout(() => checkServer(), 1500);
+        } catch (err) {
+            showToast('Ошибка: ' + err.message, 'error');
+        }
+    }
+
+    // View server-side WireGuard/Xray config
+    async function showServerConfig(proto) {
+        const name = getProtoTitle(proto);
+        try {
+            showToast(_('loading'), 'info');
+            const res = await apiCall(`/api/servers/${SERVER_ID}/server_config`, 'POST', { protocol: proto });
+            document.getElementById('serverConfigModalTitle').textContent = `${_('server_config')} — ${name}`;
+            document.getElementById('serverConfigText').textContent = res.config || '(empty)';
+            serverConfigFilename = `server_${proto}.conf`;
+            openModal('serverConfigModal');
+        } catch (err) {
+            showToast('Ошибка: ' + err.message, 'error');
+        }
+    }
+
+
+    function showConnectionsSection() {
+        const section = document.getElementById('connectionsSection');
+        section.style.display = '';
+        const select = document.getElementById('connProtoSelect');
+        const options = select.querySelectorAll('option');
+        options.forEach(opt => { opt.disabled = !installedProtocols[opt.value]; });
+        for (const opt of options) {
+            if (installedProtocols[opt.value]) { select.value = opt.value; break; }
+        }
+    }
+
+    // ========== Protocol Installation ==========
+    function openInstallModal(proto) {
+        currentInstallProto = proto;
+        const name = getProtoTitle(proto);
+        document.getElementById('installModalTitle').textContent = `Установить ${name}`;
+
+        const portInput = document.getElementById('installPort');
+        const portLabel = document.getElementById('installPortLabel');
+        const portHint = document.getElementById('installPortHint');
+
+        if (proto === 'xray') {
+            portLabel.textContent = _('port') + ' (TCP)';
+            portInput.value = '443';
+            portHint.textContent = _('port_xray_hint');
+        } else {
+            portLabel.textContent = _('port') + ' (UDP)';
+            portInput.value = '55424';
+            portHint.textContent = _('port_default_hint');
+        }
+
+        document.getElementById('installForm').classList.remove('hidden');
+        document.getElementById('installProgress').classList.add('hidden');
+        document.getElementById('installDone').style.display = 'none';
+        openModal('installModal');
+    }
+
+    async function installProtocol() {
+        const port = document.getElementById('installPort').value;
+        const btn = document.getElementById('installBtn');
+        const text = document.getElementById('installBtnText');
+        const spinner = document.getElementById('installSpinner');
+        btn.disabled = true;
+        text.textContent = _('installing');
+        spinner.classList.remove('hidden');
+        document.getElementById('installForm').classList.add('hidden');
+        const progressDiv = document.getElementById('installProgress');
+        progressDiv.classList.remove('hidden');
+        const logEl = document.getElementById('installLog');
+        const fillEl = document.getElementById('installProgressFill');
+        logEl.innerHTML = '<div class="log-line info">Начинаем установку...</div>';
+        fillEl.style.width = '10%';
+        fillEl.style.background = '';
+        try {
+            const progressSteps = [
+                { pct: 20, msg: _('check_docker') },
+                { pct: 40, msg: _('prepare_host') },
+                { pct: 50, msg: _('build_container') },
+            ];
+            let stepIdx = 0;
+            const progressInterval = setInterval(() => {
+                if (stepIdx < progressSteps.length) {
+                    fillEl.style.width = progressSteps[stepIdx].pct + '%';
+                    logEl.innerHTML += `<div class="log-line info">${progressSteps[stepIdx].msg}</div>`;
+                    logEl.scrollTop = logEl.scrollHeight;
+                    stepIdx++;
+                }
+            }, 2000);
+            const result = await apiCall(`/api/servers/${SERVER_ID}/install`, 'POST', {
+                protocol: currentInstallProto, port: port,
+            });
+            clearInterval(progressInterval);
+            fillEl.style.width = '100%';
+            if (result.log) {
+                result.log.forEach(line => {
+                    logEl.innerHTML += `<div class="log-line success">✓ ${line}</div>`;
+                });
+            }
+            logEl.scrollTop = logEl.scrollHeight;
+            showToast(_('install_success'), 'success');
+            document.getElementById('installDone').style.display = '';
+        } catch (err) {
+            fillEl.style.width = '100%';
+            fillEl.style.background = 'linear-gradient(135deg, #ef4444, #dc2626)';
+            logEl.innerHTML += `<div class="log-line error">✕ ${_('error')}: ${err.message}</div>`;
+            logEl.scrollTop = logEl.scrollHeight;
+            showToast(_('install_error') + err.message, 'error');
+            document.getElementById('installDone').style.display = '';
+        }
+    }
+
+    async function uninstallProtocol(proto) {
+        const name = getProtoTitle(proto);
+        if (!confirm(_('uninstall_confirm').replace('{}', name))) return;
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/uninstall`, 'POST', { protocol: proto });
+            showToast(`${name} ${_('stopped')}`, 'success');
+            setTimeout(() => window.location.reload(), 800);
+        } catch (err) {
+            showToast('Ошибка: ' + err.message, 'error');
+        }
+    }
+
+    // ========== Connection Management ==========
+    function selectProtocolForConns(proto) {
+        document.getElementById('connectionsSection').style.display = '';
+        document.getElementById('connProtoSelect').value = proto;
+        loadConnections();
+        document.getElementById('connectionsSection').scrollIntoView({ behavior: 'smooth' });
+    }
+
+    async function loadConnections() {
+        const proto = document.getElementById('connProtoSelect').value;
+        const loading = document.getElementById('connectionsLoading');
+        const emptyEl = document.getElementById('connectionsEmpty');
+        const listEl = document.getElementById('connectionsListInner');
+
+        if (!proto) {
+            loading.style.display = 'none';
+            return;
+        }
+
+        loading.style.display = '';
+        emptyEl.classList.add('hidden');
+        listEl.innerHTML = '';
+        try {
+            const data = await apiCall(`/api/servers/${SERVER_ID}/connections?protocol=${proto}`);
+            loading.style.display = 'none';
+            if (!data.clients || data.clients.length === 0) {
+                emptyEl.classList.remove('hidden');
+                return;
+            }
+            data.clients.forEach((client, idx) => {
+                const userData = client.userData || {};
+                const name = userData.clientName || `Connection ${idx}`;
+                const created = userData.creationDate || '';
+                const handshake = userData.latestHandshake || '';
+                const received = userData.dataReceived || '';
+                const sent = userData.dataSent || '';
+                const initial = name.charAt(0).toUpperCase();
+                const enabled = userData.enabled !== false;
+                const hasPrivKey = !!userData.clientPrivateKey || proto === 'xray';
+                const assignedUser = client.assigned_user || '';
+
+                let metaHtml = '';
+                if (assignedUser) metaHtml += `<span class="badge badge-info" style="font-size:0.65rem;">👤 ${escapeHtml(assignedUser)}</span>`;
+                if (created) metaHtml += `<span>📅 ${formatDate(created)}</span>`;
+                if (handshake) metaHtml += `<span>🤝 ${handshake}</span>`;
+                if (received) metaHtml += `<span class="traffic-badge traffic-down">↓ ${received}</span>`;
+                if (sent) metaHtml += `<span class="traffic-badge traffic-up">↑ ${sent}</span>`;
+                if (!enabled) metaHtml += `<span class="badge badge-danger" style="font-size:0.65rem">${_('stop')}</span>`;
+
+                const disabledStyle = enabled ? '' : 'opacity:0.5;';
+                const toggleIcon = enabled ? '🔵' : '⚫';
+                const toggleTitle = enabled ? _('stop') : _('starting');
+
+                listEl.innerHTML += `
+                    <div class="client-item" style="${disabledStyle}">
+                        <div class="client-info">
+                            <div class="client-avatar">${initial}</div>
+                            <div>
+                                <div class="client-name">${escapeHtml(name)}</div>
+                                <div class="client-meta">${metaHtml || `<span class="text-muted">${_('no_data')}</span>`}</div>
+                            </div>
+                        </div>
+                        <div class="client-actions">
+                            ${hasPrivKey ? `<button class="btn btn-secondary btn-sm btn-icon" onclick="showConnectionConfig('${escapeJs(client.clientId)}', '${escapeJs(name)}')" title="${_('config')}">📄</button>` : ''}
+                            <button class="btn btn-secondary btn-sm btn-icon" onclick="toggleConnection('${escapeJs(client.clientId)}', ${!enabled})" title="${toggleTitle}">${toggleIcon}</button>
+                            <button class="btn btn-danger btn-sm btn-icon" onclick="removeConnection('${escapeJs(client.clientId)}')" title="${_('delete')}">🗑</button>
+                        </div>
+                    </div>
+                `;
+            });
+        } catch (err) {
+            loading.style.display = 'none';
+            showToast('Ошибка загрузки подключений: ' + err.message, 'error');
+        }
+    }
+
+    async function addConnection() {
+        const proto = document.getElementById('connProtoSelect').value;
+        const connName = document.getElementById('connectionName').value.trim() || 'Connection';
+        const userId = document.getElementById('connectionUserId').value || null;
+        const btn = document.getElementById('addConnBtn');
+        const text = document.getElementById('addConnBtnText');
+        const spinner = document.getElementById('addConnSpinner');
+        btn.disabled = true;
+        text.textContent = _('creating');
+        spinner.classList.remove('hidden');
+        try {
+            const result = await apiCall(`/api/servers/${SERVER_ID}/connections/add`, 'POST', {
+                protocol: proto, name: connName, user_id: userId,
+            });
+            showToast(_('connection_created').replace('{}', connName), 'success');
+            closeModal('addConnectionModal');
+            document.getElementById('connectionName').value = '';
+            if (result.config) {
+                currentConfig = result.config;
+                currentVpnLink = result.vpn_link || '';
+                currentConfigName = connName.replace(/\s+/g, '_');
+                document.getElementById('configModalTitle').textContent = `Конфигурация — ${connName}`;
+                document.getElementById('configText').textContent = result.config;
+                document.getElementById('vpnLinkText').textContent = currentVpnLink;
+                switchConfigTab('conf');
+                openModal('configModal');
+                generateQR(result.config);
+            }
+            loadConnections();
+        } catch (err) {
+            showToast('Ошибка: ' + err.message, 'error');
+        } finally {
+            btn.disabled = false;
+            text.textContent = 'Создать';
+            spinner.classList.add('hidden');
+        }
+    }
+
+    async function removeConnection(clientId) {
+        if (!confirm(_('delete_connection_confirm'))) return;
+        const proto = document.getElementById('connProtoSelect').value;
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/connections/remove`, 'POST', {
+                protocol: proto, client_id: clientId,
+            });
+            showToast(_('connection_deleted'), 'success');
+            loadConnections();
+        } catch (err) {
+            showToast('Ошибка: ' + err.message, 'error');
+        }
+    }
+
+    async function showConnectionConfig(clientId, connName) {
+        const proto = document.getElementById('connProtoSelect').value;
+        try {
+            showToast(_('loading'), 'info');
+            const result = await apiCall(`/api/servers/${SERVER_ID}/connections/config`, 'POST', {
+                protocol: proto, client_id: clientId,
+            });
+            if (result.config) {
+                currentConfig = result.config;
+                currentVpnLink = result.vpn_link || '';
+                currentConfigName = connName.replace(/\s+/g, '_');
+                document.getElementById('configModalTitle').textContent = `${_('config')} — ${connName}`;
+                document.getElementById('configText').textContent = result.config;
+                document.getElementById('vpnLinkText').textContent = currentVpnLink;
+                switchConfigTab('conf');
+                openModal('configModal');
+                generateQR(result.config);
+            }
+        } catch (err) {
+            showToast('Ошибка: ' + err.message, 'error');
+        }
+    }
+
+    async function toggleConnection(clientId, enable) {
+        const proto = document.getElementById('connProtoSelect').value;
+        const action = enable ? 'Включить' : 'Отключить';
+        try {
+            showToast(`${action} подключение...`, 'info');
+            await apiCall(`/api/servers/${SERVER_ID}/connections/toggle`, 'POST', {
+                protocol: proto, client_id: clientId, enable: enable,
+            });
+            showToast(`Подключение ${enable ? 'включено' : 'отключено'}`, 'success');
+            loadConnections();
+        } catch (err) {
+            showToast('Ошибка: ' + err.message, 'error');
+        }
+    }
+
+    // ========== Config Tabs ==========
+    function switchConfigTab(tab) {
+        document.querySelectorAll('.config-tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.config-panel').forEach(p => p.classList.remove('active'));
+        const tabs = document.querySelectorAll('.config-tab');
+        const panels = { conf: 'panel-conf', vpn: 'panel-vpn', qr: 'panel-qr' };
+        const tabIdx = { conf: 0, vpn: 1, qr: 2 };
+        tabs[tabIdx[tab]].classList.add('active');
+        document.getElementById(panels[tab]).classList.add('active');
+    }
+
+    function generateQR(text) {
+        const container = document.getElementById('qrCode');
+        container.innerHTML = '';
+        try {
+            new QRCode(container, {
+                text: text, width: 280, height: 280,
+                colorDark: '#000000', colorLight: '#ffffff',
+                correctLevel: QRCode.CorrectLevel.L
+            });
+        } catch (e) {
+            console.error('QR lib error:', e);
+            container.innerHTML = `<div style="color:var(--text-muted);font-size:0.85rem;">${_('qr_error')}</div>`;
+        }
+    }
+
+    // ========== Utilities ==========
+    function formatDate(dateStr) {
+        try {
+            const d = new Date(dateStr);
+            if (isNaN(d)) return dateStr;
+            return d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' });
+        } catch { return dateStr; }
+    }
+
+    function formatBytes(bytes) {
+        if (!bytes || bytes === 0) return '0 B';
+        const k = 1024;
+        const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+    }
+
+    function escapeHtml(str) {
+        const div = document.createElement('div');
+        div.textContent = str;
+        return div.innerHTML;
+    }
+
+    function escapeJs(str) {
+        return str.replace(/'/g, "\\'").replace(/"/g, '\\"');
+    }
+
+    // ========== Init ==========
+    checkServer();
+    loadServerStats();
+</script>
+{% endblock %}

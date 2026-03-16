@@ -1,0 +1,454 @@
+{% extends "base.html" %}
+
+{% block title_extra %} — {{ _('nav_settings') }}{% endblock %}
+
+{% block content %}
+<div class="section-title">
+    <span class="icon">⚙️</span>
+    {{ _('settings_title') }}
+</div>
+
+<div class="grid"
+    style="display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: var(--space-lg); align-items: start;">
+    <!-- LEFT COLUMN -->
+    <div style="display: flex; flex-direction: column; gap: var(--space-lg);">
+        <!-- BLOCK 1: Appearance -->
+        <div class="card">
+            <h3 class="card-title" style="margin-bottom: var(--space-lg);">{{ _('appearance') }}</h3>
+            <form id="appearanceForm">
+                <div class="form-group">
+                    <label class="form-label">{{ _('title_label') }}</label>
+                    <input type="text" class="form-input" name="title" value="{{ settings.appearance.title }}" required>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">{{ _('logo_label') }}</label>
+                    <input type="text" class="form-input" name="logo" value="{{ settings.appearance.logo }}" required>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">{{ _('subtitle_label') }}</label>
+                    <input type="text" class="form-input" name="subtitle" value="{{ settings.appearance.subtitle }}"
+                        required>
+                </div>
+            </form>
+        </div>
+
+        <!-- BLOCK Captcha -->
+        <div class="card">
+            <h3 class="card-title" style="margin-bottom: var(--space-lg);">{{ _('captcha_title') }}</h3>
+            <form id="captchaForm">
+                <div class="form-group">
+                    <label class="form-label">
+                        <input type="checkbox" id="captcha_enabled" {% if captcha_settings.enabled %}checked{% endif %}>
+                        {{ _('enable_captcha') }}
+                    </label>
+                </div>
+            </form>
+        </div>
+
+        <!-- BLOCK Telegram Bot -->
+        <div class="card">
+            <h3 class="card-title" style="margin-bottom: var(--space-lg);">{{ _('telegram_bot_title') }}</h3>
+            <form id="telegramForm">
+                <div class="form-group">
+                    <label class="form-label">{{ _('bot_token_label') }}</label>
+                    <input type="text" class="form-input" id="tg_token" value="{{ telegram_settings.token or '' }}"
+                        placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11">
+                </div>
+                <div style="display: flex; align-items: center; gap: var(--space-md); margin-top: var(--space-md);">
+                    <div style="display: flex; align-items: center; gap: var(--space-sm);">
+                        <span style="font-size: 0.85rem; color: var(--text-muted);">{{ _('bot_status') }}:</span>
+                        {% if bot_running %}
+                        <span class="badge badge-success" id="botStatusBadge">{{ _('bot_running') }}</span>
+                        {% else %}
+                        <span class="badge badge-secondary" id="botStatusBadge">{{ _('bot_stopped') }}</span>
+                        {% endif %}
+                    </div>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="toggleBot()" id="toggleBotBtn">
+                        <span id="toggleBotBtnText">{% if bot_running %}{{ _('bot_stop_btn') }}{% else %}{{
+                            _('bot_start_btn') }}{% endif %}</span>
+                        <div class="spinner hidden" id="toggleBotSpinner" style="width:14px;height:14px;"></div>
+                    </button>
+                </div>
+                <p class="form-hint" style="margin-top: var(--space-sm);">
+                    {{ _('bot_hint') }}
+                </p>
+            </form>
+        </div>
+
+        <!-- BLOCK 4: API Docs -->
+        <div class="card">
+            <h3 class="card-title" style="margin-bottom: var(--space-lg);">{{ _('api_docs_title') }}</h3>
+            <div style="display: flex; flex-direction: column; gap: var(--space-md);">
+                <a href="/docs" target="_blank" class="btn btn-secondary"
+                    style="justify-content: flex-start; text-decoration: none;">
+                    <span style="font-size: 1.2rem; margin-right: 10px;">📖</span>
+                    <div style="text-align: left;">
+                        <div style="font-weight: 600;">Swagger UI</div>
+                        <div style="font-size: 0.75rem; opacity: 0.7;">{{ _('api_docs_hint') }}</div>
+                    </div>
+                </a>
+                <a href="/redoc" target="_blank" class="btn btn-secondary"
+                    style="justify-content: flex-start; text-decoration: none;">
+                    <span style="font-size: 1.2rem; margin-right: 10px;">📑</span>
+                    <div style="text-align: left;">
+                        <div style="font-weight: 600;">ReDoc</div>
+                        <div style="font-size: 0.75rem; opacity: 0.7;">{{ _('api_docs_hint') }}</div>
+                    </div>
+                </a>
+            </div>
+            <p class="form-hint" style="margin-top: var(--space-md);">{{ _('api_docs_hint') }}</p>
+        </div>
+    </div>
+
+    <!-- RIGHT COLUMN -->
+    <div style="display: flex; flex-direction: column; gap: var(--space-lg);">
+        <!-- BLOCK 3: Import Users -->
+        <div class="card">
+            <h3 class="card-title" style="margin-bottom: var(--space-lg);">{{ _('import_users_title') }}</h3>
+            <form id="syncForm">
+                <div class="form-group" style="margin-bottom: var(--space-lg);">
+                    <label class="form-label">{{ _('import_source_label') }}</label>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-sm);">
+                        <label style="display: flex; align-items: center; gap: var(--space-sm); cursor: pointer;">
+                            <input type="checkbox" name="remnawave_sync" {% if settings.sync.remnawave_sync %}checked{%
+                                endif %}> Remnawave
+                        </label>
+                        <label
+                            style="display: flex; align-items: center; gap: var(--space-sm); cursor: not-allowed; color: var(--text-muted);">
+                            <input type="checkbox" disabled> Marzban
+                        </label>
+                        <label
+                            style="display: flex; align-items: center; gap: var(--space-sm); cursor: not-allowed; color: var(--text-muted);">
+                            <input type="checkbox" disabled> 3x-ui
+                        </label>
+                        <label
+                            style="display: flex; align-items: center; gap: var(--space-sm); cursor: not-allowed; color: var(--text-muted);">
+                            <input type="checkbox" disabled> Hiddify
+                        </label>
+                        <label
+                            style="display: flex; align-items: center; gap: var(--space-sm); cursor: not-allowed; color: var(--text-muted);">
+                            <input type="checkbox" disabled> LDAP
+                        </label>
+                    </div>
+                </div>
+
+                <div id="remnawaveFields"
+                    style="{% if not settings.sync.remnawave_sync %}display:none;{% endif %} border-top: 1px solid var(--border-color); padding-top: var(--space-md);">
+                    <div class="form-group">
+                        <label class="form-label">{{ _('remnawave_url_label') }}</label>
+                        <input type="url" class="form-input" name="remnawave_url"
+                            value="{{ settings.sync.remnawave_url }}" placeholder="https://vpn.example.com">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">{{ _('api_key_label') }}</label>
+                        <input type="password" class="form-input" name="remnawave_api_key"
+                            value="{{ settings.sync.remnawave_api_key }}" placeholder="Your secret key">
+                    </div>
+
+                    <div class="form-group">
+                        <label
+                            style="display: flex; align-items: center; gap: var(--space-sm); cursor: pointer; margin-bottom: var(--space-xs);">
+                            <input type="checkbox" name="remnawave_sync_users" {% if settings.sync.remnawave_sync_users
+                                %}checked{% endif %}>
+                            {{ _('enable_sync') }}
+                        </label>
+                        <div class="form-hint"
+                            style="margin-left: var(--space-lg); line-height: 1.4; margin-bottom: var(--space-sm);">
+                            {{ _('sync_hint') }}
+                        </div>
+                        <div style="display: flex; gap: var(--space-sm); margin-left: var(--space-lg);">
+                            <button type="button" class="btn btn-secondary btn-sm" onclick="syncRemnawaveNow()"
+                                id="syncNowBtn">
+                                <span id="syncNowBtnText">🔄 {{ _('sync_now_btn') }}</span>
+                                <div class="spinner hidden" id="syncNowSpinner" style="width:14px; height:14px;"></div>
+                            </button>
+                            <button type="button" class="btn btn-danger btn-sm" onclick="deleteSyncRemnawave()"
+                                id="syncDelBtn">
+                                <span id="syncDelBtnText">🗑 {{ _('delete_sync_btn') }}</span>
+                                <div class="spinner hidden" id="syncDelSpinner" style="width:14px; height:14px;"></div>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label style="display: flex; align-items: center; gap: var(--space-sm); cursor: pointer;">
+                            <input type="checkbox" name="remnawave_create_conns" id="syncCreateConns" {% if
+                                settings.sync.remnawave_create_conns %}checked{% endif %}>
+                            {{ _('auto_create_conns') }}
+                        </label>
+                    </div>
+
+                    <div id="autoConnFields"
+                        style="{% if not settings.sync.remnawave_create_conns %}display:none;{% endif %} background: var(--bg-primary); padding: var(--space-md); border-radius: var(--radius-md); margin-top: var(--space-sm);">
+                        <div class="form-group">
+                            <label class="form-label">{{ _('sync_server_label') }}</label>
+                            <select class="form-select" name="remnawave_server_id" onchange="updateProtocolsForSync()">
+                                {% for s in servers %}
+                                <option value="{{ loop.index0 }}" {% if settings.sync.remnawave_server_id==loop.index0
+                                    %}selected{% endif %}>{{ s.name or s.host }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">{{ _('protocol_label') }}</label>
+                            <select class="form-select" name="remnawave_protocol" id="syncProtocolSelect">
+                                <option value="awg" {% if settings.sync.remnawave_protocol=='awg' %}selected{% endif %}>
+                                    AmneziaWG</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            </form>
+        </div>
+
+        <!-- BLOCK: Simple Backup -->
+        <div class="card" style="margin-top: var(--space-lg);">
+            <h3 class="card-title" style="margin-bottom: var(--space-lg);">📤 {{ _('backup_title') }}</h3>
+            <div style="display: flex; flex-direction: column; gap: var(--space-md);">
+                <div style="display: flex; gap: var(--space-sm);">
+                    <a href="/api/settings/backup/download" class="btn btn-secondary"
+                        style="flex:1; text-decoration:none; display:flex; align-items:center; justify-content:center; gap:var(--space-sm);">
+                        <span>⬇️</span> {{ _('download_backup') }}
+                    </a>
+                </div>
+                <div style="border-top: 1px solid var(--border-color); padding-top: var(--space-md);">
+                    <div style="display: flex; flex-direction: column; gap: var(--space-sm);">
+                        <input type="file" id="backupFile" accept=".json" style="display: none;"
+                            onchange="handleRestore(event)">
+                        <button type="button" class="btn btn-secondary"
+                            onclick="document.getElementById('backupFile').click()" id="restoreBtn"
+                            style="gap:var(--space-sm);">
+                            <span>⬆️</span> {{ _('restore_backup') }}
+                        </button>
+                    </div>
+                </div>
+            </div>
+            <p class="form-hint" style="margin-top: var(--space-sm);">
+                {{ _('restore_confirm') }}
+            </p>
+        </div>
+    </div>
+</div>
+
+<div style="margin-top: var(--space-xl); text-align: right;">
+    <button class="btn btn-primary btn-lg" onclick="saveSettings()" id="saveBtn">
+        <span>{{ _('save_changes') }}</span>
+        <div class="spinner hidden" id="saveSpinner"></div>
+    </button>
+</div>
+
+<script>
+    const serversData = {{ servers | tojson }};
+    const botCurrentlyRunning = {{ 'true' if bot_running else 'false' }};
+
+    function updateProtocolsForSync() {
+        const serverIdx = document.querySelector('[name="remnawave_server_id"]').value;
+        const protoSelect = document.getElementById('syncProtocolSelect');
+        protoSelect.innerHTML = '';
+
+        if (serverIdx === '' || !serversData[serverIdx]) return;
+
+        const protocols = serversData[serverIdx].protocols || {};
+        let count = 0;
+
+        for (const [key, info] of Object.entries(protocols)) {
+            if (info.installed) {
+                const opt = document.createElement('option');
+                opt.value = key;
+                opt.textContent = key === 'awg' ? 'AmneziaWG' : (key === 'awg_legacy' ? 'AWG Legacy' : (key === 'xray' ? 'Xray' : key.toUpperCase()));
+                if (key === "{{ settings.sync.remnawave_protocol }}") opt.selected = true;
+                protoSelect.appendChild(opt);
+                count++;
+            }
+        }
+
+        if (count === 0) {
+            const opt = document.createElement('option');
+            opt.textContent = _('no_protocols');
+            opt.disabled = true;
+            protoSelect.appendChild(opt);
+        }
+    }
+
+    document.querySelector('[name="remnawave_sync"]').addEventListener('change', (e) => {
+        document.getElementById('remnawaveFields').style.display = e.target.checked ? 'block' : 'none';
+    });
+
+    document.getElementById('syncCreateConns').addEventListener('change', (e) => {
+        document.getElementById('autoConnFields').style.display = e.target.checked ? 'block' : 'none';
+        if (e.target.checked) updateProtocolsForSync();
+    });
+
+    async function syncRemnawaveNow() {
+        const btn = document.getElementById('syncNowBtn');
+        const text = document.getElementById('syncNowBtnText');
+        const spinner = document.getElementById('syncNowSpinner');
+
+        btn.disabled = true;
+        text.textContent = _('sync_running');
+        spinner.classList.remove('hidden');
+
+        try {
+            const res = await fetch('/api/settings/sync_now', { method: 'POST' });
+            const data = await res.json();
+            if (data.status === 'success') {
+                showToast(_('sync_success').replace('{}', data.count), 'success');
+                setTimeout(() => window.location.reload(), 1500);
+            } else {
+                throw new Error(data.message || 'Error occurred');
+            }
+        } catch (err) {
+            showToast(`${_('error')}: ` + err.message, 'error');
+        } finally {
+            btn.disabled = false;
+            text.textContent = `🔄 ${_('sync_now_btn')}`;
+            spinner.classList.add('hidden');
+        }
+    }
+
+    async function deleteSyncRemnawave() {
+        if (!confirm(_('delete_sync_confirm'))) return;
+
+        const btn = document.getElementById('syncDelBtn');
+        const text = document.getElementById('syncDelBtnText');
+        const spinner = document.getElementById('syncDelSpinner');
+
+        btn.disabled = true;
+        text.textContent = _('deleting');
+        spinner.classList.remove('hidden');
+
+        try {
+            const res = await fetch('/api/settings/sync_delete', { method: 'POST' });
+            const data = await res.json();
+            if (data.status === 'success') {
+                showToast(_('sync_deleted').replace('{}', data.count), 'success');
+                setTimeout(() => window.location.reload(), 1500);
+            }
+        } catch (err) {
+            showToast(`${_('error')}: ` + err.message, 'error');
+        } finally {
+            btn.disabled = false;
+            text.textContent = `🗑 ${_('delete_sync_btn')}`;
+            spinner.classList.add('hidden');
+        }
+    }
+
+    async function saveSettings() {
+        const btn = document.getElementById('saveBtn');
+        const spinner = document.getElementById('saveSpinner');
+        btn.disabled = true;
+        spinner.classList.remove('hidden');
+
+        const appForm = document.getElementById('appearanceForm');
+        const syncForm = document.getElementById('syncForm');
+
+        const appearance = {
+            title: appForm.title.value,
+            logo: appForm.logo.value,
+            subtitle: appForm.subtitle.value
+        };
+
+        const sync = {
+            remnawave_url: syncForm.remnawave_url.value,
+            remnawave_api_key: syncForm.remnawave_api_key.value,
+            remnawave_sync: syncForm.remnawave_sync.checked,
+            remnawave_sync_users: syncForm.remnawave_sync_users.checked,
+            remnawave_create_conns: syncForm.remnawave_create_conns.checked,
+            remnawave_server_id: parseInt(syncForm.remnawave_server_id.value),
+            remnawave_protocol: syncForm.remnawave_protocol.value
+        };
+
+
+        const captcha = {
+            enabled: document.getElementById('captcha_enabled').checked
+        };
+
+        const telegram = {
+            token: document.getElementById('tg_token').value.trim(),
+            enabled: botCurrentlyRunning
+        };
+
+        try {
+            const res = await fetch('/api/settings/save', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ appearance, sync, captcha, telegram })
+            });
+            if (!res.ok) throw new Error(_('error'));
+            showToast(_('settings_saved'), 'success');
+            setTimeout(() => window.location.reload(), 1000);
+        } catch (err) {
+            showToast(err.message, 'error');
+        } finally {
+            btn.disabled = false;
+            spinner.classList.add('hidden');
+        }
+    }
+
+    async function toggleBot() {
+        const btn = document.getElementById('toggleBotBtn');
+        const text = document.getElementById('toggleBotBtnText');
+        const spinner = document.getElementById('toggleBotSpinner');
+        btn.disabled = true;
+        spinner.classList.remove('hidden');
+        try {
+            const res = await fetch('/api/settings/telegram/toggle', { method: 'POST' });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || _('error'));
+            const running = data.bot_running;
+            document.getElementById('botStatusBadge').className = running ? 'badge badge-success' : 'badge badge-secondary';
+            document.getElementById('botStatusBadge').textContent = running ? _('bot_running') : _('bot_stopped');
+            text.textContent = running ? _('bot_stop_btn') : _('bot_start_btn');
+            showToast(running ? _('bot_started') : _('bot_stopped_msg'), 'success');
+        } catch (err) {
+            showToast(`${_('error')}: ` + err.message, 'error');
+        } finally {
+            btn.disabled = false;
+            spinner.classList.add('hidden');
+        }
+    }
+
+    async function handleRestore(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        if (!confirm(_('restore_confirm'))) {
+            e.target.value = '';
+            return;
+        }
+
+        const btn = document.getElementById('restoreBtn');
+        btn.disabled = true;
+        const originalText = btn.innerHTML;
+        btn.innerHTML = `<div class="spinner" style="width:14px; height:14px;"></div> ${_('loading')}`;
+
+        const formData = new FormData();
+        formData.append('file', file);
+
+        try {
+            const res = await fetch('/api/settings/backup/restore', {
+                method: 'POST',
+                body: formData
+            });
+            const data = await res.json();
+            if (data.status === 'success') {
+                showToast(_('restore_success'), 'success');
+                setTimeout(() => window.location.reload(), 2000);
+            } else {
+                showToast(data.error || _('invalid_backup_file'), 'error');
+            }
+        } catch (err) {
+            showToast(`${_('error')}: ` + err.message, 'error');
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = originalText;
+            e.target.value = '';
+        }
+    }
+
+    // Init protocols on load
+    if (document.getElementById('syncCreateConns').checked) {
+        updateProtocolsForSync();
+    }
+</script>
+{% endblock %}

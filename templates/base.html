@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="{{ lang }}" {% if lang=='fa' %}dir="rtl" {% endif %}>
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="{{ _('site_description') }}">
+    <title>{{ site_settings.title or 'Amnezia Panel' }} {% block title_extra %}{% endblock %}</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <link rel="stylesheet" href="/static/css/style.css">
+    <script>!function () { var t = localStorage.getItem('theme') || 'dark'; document.documentElement.setAttribute('data-theme', t) }()</script>
+    <script src="/static/js/qrcode.min.js"></script>
+    {% block head_extra %}{% endblock %}
+    <style>
+        .lang-check {
+            color: var(--success);
+            font-weight: 700;
+        }
+
+        [dir="rtl"] .lang-check {
+            margin-right: auto;
+        }
+
+        [dir="ltr"] .lang-check {
+            margin-left: auto;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="toast-container" id="toastContainer"></div>
+
+    <div class="app-container">
+        <header class="app-header">
+            <a href="/" class="app-logo" style="text-decoration:none">
+                <div class="logo-icon">{{ site_settings.logo }}</div>
+                <div>
+                    <div class="logo-text">{{ site_settings.title }}</div>
+                    <div class="logo-subtitle">{{ site_settings.subtitle }}</div>
+                </div>
+            </a>
+
+            {% if current_user %}
+            <nav class="header-nav">
+                <a href="/" class="nav-link">{{ _('nav_servers') }}</a>
+                <a href="/users" class="nav-link">{{ _('nav_users') }}</a>
+                {% if current_user.role == 'admin' %}
+                <a href="/settings" class="nav-link">{{ _('nav_settings') }}</a>
+                {% endif %}
+                <a href="/my" class="nav-link">{{ _('nav_connections') }}</a>
+            </nav>
+
+            <div class="nav-user">
+                <button class="theme-toggle" onclick="openModal('langModal')" title="{{ _('select_lang') }}"
+                    style="margin-right: var(--space-sm);">
+                    {% if lang == 'ru' %}🇷🇺{% elif lang == 'fr' %}🇫🇷{% elif lang == 'zh' %}🇨🇳{% elif lang == 'fa'
+                    %}🇮🇷{% else %}🇺🇸{% endif %}
+                </button>
+                <button class="theme-toggle" onclick="toggleTheme()" title="{{ _('toggle_theme') }}"
+                    id="themeToggle">🌙</button>
+                <span class="nav-username">{{ current_user.username }}</span>
+                <span
+                    class="badge badge-{{ 'success' if current_user.role == 'admin' else ('info' if current_user.role == 'support' else 'warn') }}"
+                    style="font-size:0.65rem;">
+                    {{ current_user.role | upper }}
+                </span>
+                <a href="/logout" class="btn btn-secondary btn-sm">{{ _('nav_logout') }}</a>
+            </div>
+            {% else %}
+            <div class="nav-user">
+                <button class="theme-toggle" onclick="openModal('langModal')" title="{{ _('select_lang') }}"
+                    style="margin-right: var(--space-sm);">
+                    {% if lang == 'ru' %}🇷🇺{% elif lang == 'fr' %}🇫🇷{% elif lang == 'zh' %}🇨🇳{% elif lang == 'fa'
+                    %}🇮🇷{% else %}🇺🇸{% endif %}
+                </button>
+                <button class="theme-toggle" onclick="toggleTheme()" title="{{ _('toggle_theme') }}"
+                    id="themeToggle">🌙</button>
+            </div>
+            {% endif %}
+        </header>
+
+        <main>
+            {% block content %}{% endblock %}
+        </main>
+    </div>
+
+    <!-- ===== Language Modal ===== -->
+    <div class="modal-backdrop" id="langModal">
+        <div class="modal" style="max-width: 320px;">
+            <div class="modal-header">
+                <h2 class="modal-title">{{ _('select_lang') }}</h2>
+                <button class="modal-close" onclick="closeModal('langModal')">×</button>
+            </div>
+            <div style="display: flex; flex-direction: column; gap: var(--space-sm);">
+                {% set langs = [
+                ('en', '🇺🇸', 'lang_en'),
+                ('ru', '🇷🇺', 'lang_ru'),
+                ('fr', '🇫🇷', 'lang_fr'),
+                ('zh', '🇨🇳', 'lang_zh'),
+                ('fa', '🇮🇷', 'lang_fa')
+                ] %}
+                {% for l_code, l_flag, l_key in langs %}
+                <a href="/set_lang/{{ l_code }}" class="btn btn-secondary"
+                    style="justify-content: flex-start; gap: var(--space-md); padding: var(--space-md);">
+                    <span style="font-size: 1.4rem;">{{ l_flag }}</span>
+                    <span style="font-weight: 500;">{{ _(l_key) }}</span>
+                    {% if lang == l_code %}
+                    <span class="lang-check">✓</span>
+                    {% endif %}
+                </a>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+
+    <script>
+        window.I18N = {{ translations_json | safe }};
+        window._ = function (key) { return window.I18N[key] || key; };
+
+        /* ===== Theme Toggle ===== */
+        (function () {
+            const saved = localStorage.getItem('theme') || 'dark';
+            document.documentElement.setAttribute('data-theme', saved);
+
+            const updateUI = () => {
+                const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+                document.querySelectorAll('.theme-toggle').forEach(btn => {
+                    const isLang = btn.getAttribute('onclick').includes('langModal');
+                    if (!isLang) {
+                        btn.textContent = isLight ? '☀️' : '🌙';
+                    }
+                });
+            };
+
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', updateUI);
+            } else {
+                updateUI();
+            }
+
+            window.toggleTheme = function () {
+                const current = document.documentElement.getAttribute('data-theme') || 'dark';
+                const next = current === 'dark' ? 'light' : 'dark';
+                document.documentElement.setAttribute('data-theme', next);
+                localStorage.setItem('theme', next);
+                updateUI();
+            };
+        })();
+
+        /* ===== Active Nav Link ===== */
+        (function () {
+            const path = window.location.pathname;
+            document.querySelectorAll('.nav-link').forEach(link => {
+                const href = link.getAttribute('href');
+                if (href === '/' && path === '/') link.classList.add('active');
+                else if (href !== '/' && path.startsWith(href)) link.classList.add('active');
+            });
+        })();
+
+        /* ===== Toast Notifications ===== */
+        function showToast(message, type = 'info') {
+            const container = document.getElementById('toastContainer');
+            const toast = document.createElement('div');
+            toast.className = `toast toast-${type}`;
+
+            const icons = { success: '✓', error: '✕', info: 'ℹ' };
+            toast.innerHTML = `<span>${icons[type] || 'ℹ'}</span> <span>${message}</span>`;
+
+            container.appendChild(toast);
+            setTimeout(() => {
+                toast.style.opacity = '0';
+                toast.style.transform = 'translateX(100%)';
+                toast.style.transition = 'all 0.3s ease';
+                setTimeout(() => toast.remove(), 300);
+            }, 4000);
+        }
+
+        /* ===== Modal Management ===== */
+        function openModal(id) {
+            const modal = document.getElementById(id);
+            if (modal) {
+                modal.classList.add('active');
+                document.body.style.overflow = 'hidden';
+            }
+        }
+
+        function closeModal(id) {
+            const modal = document.getElementById(id);
+            if (modal) {
+                modal.classList.remove('active');
+                document.body.style.overflow = '';
+            }
+        }
+
+        /* Close modal on backdrop click */
+        document.addEventListener('click', (e) => {
+            if (e.target.classList.contains('modal-backdrop') && e.target.classList.contains('active')) {
+                e.target.classList.remove('active');
+                document.body.style.overflow = '';
+            }
+        });
+
+        /* Close modal on Escape */
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                document.querySelectorAll('.modal-backdrop.active').forEach(m => {
+                    m.classList.remove('active');
+                });
+                document.body.style.overflow = '';
+            }
+        });
+
+        /* ===== API Helper ===== */
+        async function apiCall(url, method = 'GET', body = null) {
+            const opts = {
+                method,
+                headers: { 'Content-Type': 'application/json' },
+            };
+            if (body) opts.body = JSON.stringify(body);
+
+            const res = await fetch(url, opts);
+
+            if (res.status === 401 || res.status === 403) {
+                window.location.href = '/login';
+                throw new Error('Session expired');
+            }
+
+            const data = await res.json();
+
+            if (!res.ok) {
+                throw new Error(data.error || 'Unknown error');
+            }
+            return data;
+        }
+
+        /* ===== Copy to clipboard ===== */
+        async function copyToClipboard(text) {
+            try {
+                await navigator.clipboard.writeText(text);
+                showToast(_('copied_to_clipboard'), 'success');
+            } catch {
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                ta.remove();
+                showToast(_('copied_to_clipboard'), 'success');
+            }
+        }
+
+        /* ===== Download file ===== */
+        function downloadFile(content, filename) {
+            const blob = new Blob([content], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+    </script>
+
+    {% block scripts %}{% endblock %}
+</body>
+
+</html>

@@ -1,0 +1,887 @@
+{% extends "base.html" %}
+
+{% block title_extra %} — {{ _('users_title') }}{% endblock %}
+
+{% block content %}
+<section>
+    <div class="flex items-center justify-between"
+        style="margin-bottom: var(--space-lg); gap: var(--space-md); flex-wrap: wrap;">
+        <h1 class="section-title" style="margin-bottom:0; flex-shrink: 0;">
+            <span class="icon">👥</span>
+            {{ _('users_title') }}
+        </h1>
+
+        <div style="flex: 1; min-width: 250px; max-width: 500px; position: relative;">
+            <input type="text" class="form-input" id="userSearch" placeholder="{{ _('search_placeholder') }}"
+                oninput="handleSearch(this.value)" style="padding-left: 40px;">
+            <span style="position: absolute; left: 14px; top: 50%; transform: translateY(-50%); opacity: 0.5;">🔍</span>
+        </div>
+
+        {% if current_user.role == 'admin' %}
+        <button class="btn btn-primary" onclick="openModal('addUserModal')" style="flex-shrink: 0;">
+            <span>＋</span> {{ _('add_user') }}
+        </button>
+        {% endif %}
+    </div>
+
+    <div id="usersContainer" class="hidden">
+        <div class="clients-list" id="usersGrid"
+            style="display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-md);">
+            <!-- Users will be loaded here via JS -->
+        </div>
+
+        <div id="pagination"
+            style="display: flex; justify-content: center; align-items: center; gap: var(--space-md); margin-top: var(--space-xl);">
+            <button class="btn btn-secondary btn-sm" id="prevPage" onclick="changePage(-1)">{{ _('prev_page')
+                }}</button>
+            <span id="pageInfo" style="font-weight: 600; font-size: 0.9rem;"></span>
+            <button class="btn btn-secondary btn-sm" id="nextPage" onclick="changePage(1)">{{ _('next_page') }}</button>
+        </div>
+    </div>
+
+    <div id="usersLoading" style="text-align: center; padding: 4rem;">
+        <div class="spinner" style="width: 40px; height: 40px; margin: 0 auto;"></div>
+        <p style="margin-top: 1rem; color: var(--text-muted);">{{ _('loading_users') }}</p>
+    </div>
+
+    <div id="usersEmpty" class="empty-state hidden">
+        <div class="empty-icon">👤</div>
+        <div class="empty-title">{{ _('nothing_found') }}</div>
+        <div class="empty-desc">{{ _('search_empty_desc') }}</div>
+    </div>
+</section>
+
+<!-- ===== Add User Modal ===== -->
+<div class="modal-backdrop" id="addUserModal">
+    <div class="modal">
+        <div class="modal-header">
+            <h2 class="modal-title">{{ _('add_user') }}</h2>
+            <button class="modal-close" onclick="closeModal('addUserModal')">×</button>
+        </div>
+
+        <form id="addUserForm" onsubmit="return addUser(event)">
+            <div class="form-group">
+                <label class="form-label">{{ _('username_label') }}</label>
+                <input class="form-input" type="text" id="newUsername" placeholder="username" required>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">{{ _('password_label') }}</label>
+                <input class="form-input" type="password" id="newPassword" placeholder="••••••••" required>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">{{ _('role_label') }}</label>
+                <select class="form-select" id="newRole">
+                    <option value="user">{{ _('role_user_desc') }}</option>
+                    <option value="support">{{ _('role_support_desc') }}</option>
+                    <option value="admin">{{ _('role_admin_desc') }}</option>
+                </select>
+            </div>
+
+            <div class="grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-md);">
+                <div class="form-group">
+                    <label class="form-label">{{ _('tg_id_label') }}</label>
+                    <input class="form-input" type="text" id="newTelegramId" placeholder="@username or ID">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">{{ _('email_label') }}</label>
+                    <input class="form-input" type="email" id="newEmail" placeholder="user@example.com">
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">{{ _('traffic_limit_label') }}</label>
+                <input class="form-input" type="number" step="0.01" min="0" id="newTrafficLimit" placeholder="0">
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">{{ _('description_label') }}</label>
+                <textarea class="form-input" id="newDescription" rows="2"
+                    placeholder="{{ _('description_label') }}"></textarea>
+            </div>
+
+            <div class="divider"></div>
+            <div style="color:var(--text-muted); font-size:0.85rem; margin-bottom:var(--space-md);">
+                {{ _('auto_conn_title') }}
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">{{ _('server_label') }}</label>
+                <select class="form-select" id="newUserServer">
+                    <option value="">{{ _('no_create_conn') }}</option>
+                    {% for s in servers %}
+                    <option value="{{ loop.index0 }}">{{ s.name }} ({{ s.host }})</option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="form-group" id="newUserProtoGroup" style="display:none;">
+                <label class="form-label">{{ _('protocol_label') }}</label>
+                <select class="form-select" id="newUserProtocol">
+                    <!-- Dynamic -->
+                </select>
+            </div>
+
+            <div class="form-group" id="newUserConnNameGroup" style="display:none;">
+                <label class="form-label">{{ _('connection_name') }}</label>
+                <input class="form-input" type="text" id="newUserConnName"
+                    placeholder="{{ _('connection_name_placeholder') }}">
+            </div>
+
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="closeModal('addUserModal')">{{ _('cancel')
+                    }}</button>
+                <button type="submit" class="btn btn-primary" id="addUserBtn">
+                    <span id="addUserBtnText">{{ _('create') }}</span>
+                    <div class="spinner hidden" id="addUserSpinner"></div>
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- ===== Edit User Modal ===== -->
+<div class="modal-backdrop" id="editUserModal">
+    <div class="modal">
+        <div class="modal-header">
+            <h2 class="modal-title">{{ _('edit_user_title').replace('{}', '<span id="editUserTitle"></span>') | safe }}
+            </h2>
+            <button class="modal-close" onclick="closeModal('editUserModal')">&times;</button>
+        </div>
+        <form id="editUserForm" onsubmit="event.preventDefault(); saveEditUser();">
+            <input type="hidden" id="editUserId">
+            <div class="form-group">
+                <label class="form-label">{{ _('edit_user_tg') }}</label>
+                <input type="text" class="form-input" id="editUserTG" placeholder="@username or ID">
+            </div>
+            <div class="form-group">
+                <label class="form-label">{{ _('edit_user_email') }}</label>
+                <input type="email" class="form-input" id="editUserEmail" placeholder="user@example.com">
+            </div>
+            <div class="form-group">
+                <label class="form-label">{{ _('edit_user_limit') }}</label>
+                <input type="number" step="0.01" min="0" class="form-input" id="editUserLimit" placeholder="0">
+            </div>
+            <div class="form-group">
+                <label class="form-label">{{ _('description_label') }}</label>
+                <textarea class="form-input" id="editUserDesc" rows="2"
+                    placeholder="{{ _('description_label') }}"></textarea>
+            </div>
+            <div class="form-group">
+                <label class="form-label">{{ _('new_password_hint') }}</label>
+                <input type="password" class="form-input" id="editUserPass" placeholder="••••••••">
+            </div>
+            <div class="flex justify-end" style="margin-top: var(--space-lg);">
+                <button type="button" class="btn btn-secondary" onclick="closeModal('editUserModal')"
+                    style="margin-right: var(--space-sm);">{{ _('cancel') }}</button>
+                <button type="submit" class="btn btn-primary" id="saveEditBtn">
+                    <div id="saveEditSpinner" class="spinner hidden"
+                        style="width: 14px; height: 14px; border-width: 2px;"></div>
+                    <span id="saveEditBtnText">{{ _('save') }}</span>
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- ===== Add Connection for User Modal ===== -->
+<div class="modal-backdrop" id="addUserConnModal">
+    <div class="modal">
+        <div class="modal-header">
+            <h2 class="modal-title" id="addUserConnTitle">{{ _('add_connection') }}</h2>
+            <button class="modal-close" onclick="closeModal('addUserConnModal')">×</button>
+        </div>
+
+        <div class="form-group">
+            <label class="form-label">{{ _('op_type_label') }}</label>
+            <select class="form-select" id="ucMode" onchange="toggleUCMode()">
+                <option value="new">{{ _('create_new_conn') }}</option>
+                <option value="existing">{{ _('link_existing_conn') }}</option>
+            </select>
+        </div>
+
+        <div class="form-group" id="ucServerGroup">
+            <label class="form-label">{{ _('server_label') }}</label>
+            <select class="form-select" id="ucServer">
+                {% for s in servers %}
+                <option value="{{ loop.index0 }}">{{ s.name }} ({{ s.host }})</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="form-group" id="ucProtoGroup">
+            <label class="form-label">{{ _('protocol_label') }}</label>
+            <select class="form-select" id="ucProtocol">
+                <!-- Dynamic -->
+            </select>
+        </div>
+
+        <div class="form-group" id="ucExistingClientGroup" style="display:none;">
+            <label class="form-label">{{ _('select_existing_conn') }}</label>
+            <select class="form-select" id="ucExistingClient">
+                <option value="">{{ _('loading') }}</option>
+            </select>
+            <div class="form-hint">{{ _('existing_conn_hint') }}</div>
+        </div>
+
+        <div class="form-group" id="ucNameGroup">
+            <label class="form-label">{{ _('conn_name_panel') }}</label>
+            <input class="form-input" type="text" id="ucName" placeholder="{{ _('connection_name_placeholder') }}">
+        </div>
+
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="closeModal('addUserConnModal')">{{ _('cancel') }}</button>
+            <button class="btn btn-primary" onclick="doAddUserConnection()" id="ucAddBtn">
+                <span id="ucAddBtnText">{{ _('add') }}</span>
+                <div class="spinner hidden" id="ucAddSpinner"></div>
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- ===== User Connections Modal ===== -->
+<div class="modal-backdrop" id="userConnsModal">
+    <div class="modal" style="max-width:600px;">
+        <div class="modal-header">
+            <h2 class="modal-title" id="userConnsTitle">{{ _('user_conns_title') }}</h2>
+            <button class="modal-close" onclick="closeModal('userConnsModal')">×</button>
+        </div>
+        <div id="userConnsList" style="max-height:400px; overflow-y:auto;"></div>
+    </div>
+</div>
+
+<!-- ===== Config Modal ===== -->
+<div class="modal-backdrop" id="configModal">
+    <div class="modal" style="max-width: 600px;">
+        <div class="modal-header">
+            <h2 class="modal-title" id="configModalTitle">{{ _('config') }}</h2>
+            <button class="modal-close" onclick="closeModal('configModal')">×</button>
+        </div>
+        <div class="config-tabs">
+            <button class="config-tab active" onclick="switchConfigTab('conf')">{{ _('config_tab') }}</button>
+            <button class="config-tab" onclick="switchConfigTab('vpn')">{{ _('vpn_key_tab') }}</button>
+            <button class="config-tab" onclick="switchConfigTab('qr')">{{ _('qr_code_tab') }}</button>
+        </div>
+        <div class="config-panel active" id="panel-conf">
+            <div class="config-display">
+                <div class="config-text" id="configText"></div>
+                <div class="config-actions">
+                    <button class="btn btn-secondary btn-sm" onclick="copyToClipboard(currentConfig)" style="flex:1">{{
+                        _('copy_config') }}</button>
+                    <button class="btn btn-primary btn-sm"
+                        onclick="downloadFile(currentConfig, currentConfigName+'.conf')" style="flex:1">{{
+                        _('download_conf') }}</button>
+                </div>
+            </div>
+        </div>
+        <div class="config-panel" id="panel-vpn">
+            <div class="vpn-link-box" id="vpnLinkText"></div>
+            <div class="config-actions" style="margin-top:var(--space-sm);">
+                <button class="btn btn-secondary btn-sm" onclick="copyToClipboard(currentVpnLink)" style="flex:1">{{
+                    _('copy_key') }}</button>
+            </div>
+        </div>
+        <div class="config-panel" id="panel-qr">
+            <div class="qr-container">
+                <div id="qrCode"></div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    let currentUserId = '';
+    let currentConfig = '';
+    let currentVpnLink = '';
+    let currentConfigName = 'connection';
+
+    let currentPage = 1;
+    let pageSize = 10;
+    let searchQuery = '';
+    let searchTimeout = null;
+
+    const serversData = {{ servers | tojson }};
+
+    function handleSearch(val) {
+        clearTimeout(searchTimeout);
+        searchTimeout = setTimeout(() => {
+            searchQuery = val;
+            currentPage = 1;
+            refreshUsersList();
+        }, 300);
+    }
+
+    function changePage(delta) {
+        currentPage += delta;
+        refreshUsersList();
+    }
+
+    async function refreshUsersList() {
+        const loading = document.getElementById('usersLoading');
+        const container = document.getElementById('usersContainer');
+        const empty = document.getElementById('usersEmpty');
+        const grid = document.getElementById('usersGrid');
+
+        loading.classList.remove('hidden');
+        container.classList.add('hidden');
+        empty.classList.add('hidden');
+
+        try {
+            const data = await apiCall(`/api/users?search=${encodeURIComponent(searchQuery)}&page=${currentPage}&size=${pageSize}`);
+
+            if (data.users.length === 0) {
+                loading.classList.add('hidden');
+                empty.classList.remove('hidden');
+                return;
+            }
+
+            grid.innerHTML = data.users.map(u => `
+                <div class="client-item" id="user-${u.id}" style="${u.enabled ? '' : 'opacity:0.5;'}">
+                    <div class="client-info">
+                        <div class="client-avatar">${u.username[0].toUpperCase()}</div>
+                        <div>
+                            <div class="client-name">
+                                ${u.username}
+                                <span class="badge badge-${u.role === 'admin' ? 'success' : (u.role === 'support' ? 'info' : 'warn')}" 
+                                      style="font-size:0.65rem; margin-left: var(--space-xs);">
+                                    ${u.role.toUpperCase()}
+                                </span>
+                                <span class="badge badge-secondary" style="font-size:0.65rem; opacity: 0.7;">
+                                    ${u.source}
+                                </span>
+                                ${u.enabled ? '' : `<span class="badge badge-danger" style="font-size:0.65rem;">${_('disabled')}</span>`}
+                            </div>
+                            <div class="client-meta">
+                                <span style="cursor:pointer; color:var(--primary); text-decoration: underline;" onclick="viewUserConnections('${u.id}', '${u.username.replace(/'/g, "\\'")}')">🔗 ${u.connections_count} ${_('connections')}</span>
+                                ${u.created_at ? `<span>📅 ${u.created_at.substring(0, 10)}</span>` : ''}
+                                ${u.telegramId ? `<span>💬 ${u.telegramId}</span>` : ''}
+                                ${u.email ? `<span>📧 ${u.email}</span>` : ''}
+                            </div>
+                            ${u.description ? `<div class="client-meta" style="font-size: 0.75rem; opacity: 0.8; margin-top: 2px;">📝 ${u.description}</div>` : ''}
+                            ${(() => {
+                    let limitHtml = '';
+                    if (u.traffic_limit && u.traffic_limit > 0) {
+                        let pct = (u.traffic_used / u.traffic_limit) * 100;
+                        if (pct > 100) pct = 100;
+                        let colorClass = pct > 90 ? '#ef4444' : (pct > 70 ? '#f59e0b' : '#3b82f6');
+                        limitHtml = `
+                                         <div style="margin-top: 8px; font-size: 0.75rem;">
+                                            <div style="display:flex; justify-content:space-between; color:var(--text-muted); margin-bottom: 2px;">
+                                                <span>${_('traffic')}: ${(u.traffic_used / Math.pow(1024, 3)).toFixed(2)} ГБ</span>
+                                                <span>${_('out_of')} ${(u.traffic_limit / Math.pow(1024, 3)).toFixed(2)} ГБ</span>
+                                            </div>
+                                            <div style="width: 100%; height: 4px; background: var(--bg-tertiary); border-radius: 2px; overflow: hidden;">
+                                                <div style="background-color: ${colorClass}; height: 100%; width: ${pct}%; transition: width 0.3s ease;"></div>
+                                            </div>
+                                        </div>
+                                    `;
+                    } else if (u.traffic_used > 0) {
+                        limitHtml = `
+                                        <div style="margin-top: 8px; font-size: 0.75rem; color:var(--text-muted);">
+                                            <span>${_('traffic')}: ${(u.traffic_used / Math.pow(1024, 3)).toFixed(2)} ГБ</span>
+                                        </div>
+                                    `;
+                    }
+                    return limitHtml;
+                })()}
+                        </div>
+                    </div>
+                    <div class="client-actions" style="flex-wrap: wrap; justify-content: flex-end; max-width: 140px;">
+                        {% if current_user.role == 'admin' %}
+                        <button class="btn btn-secondary btn-sm btn-icon" 
+                                onclick="openAddConnectionForUser('${u.id}', '${u.username}')" 
+                                title="${_('add_connection')}">🔗</button>
+                        <button class="btn btn-secondary btn-sm btn-icon" 
+                                onclick='openEditUser({"id": "${u.id}", "username": "${u.username}", "tg": "${u.telegramId || ""}", "email": "${u.email || ""}", "desc": "${u.description || ""}", "limit": "${u.traffic_limit ? (u.traffic_limit / Math.pow(1024, 3)).toFixed(2) : 0}"})'
+                                title="${_('edit')}">✏️</button>
+                        <button class="btn btn-secondary btn-sm btn-icon" onclick="openShareModal(this.dataset)"
+                                data-id="${u.id}" data-username="${u.username}" data-token="${u.share_token || ''}"
+                                data-enabled="${u.share_enabled ? 'true' : 'false'}"
+                                data-haspassword="${u.has_share_password ? 'true' : 'false'}"
+                                title="${_('share_access')}">📤</button>
+                        ${u.id !== "{{ current_user.id }}" ? `
+                            <button class="btn btn-secondary btn-sm btn-icon" onclick="toggleUser(this.dataset)"
+                                    data-id="${u.id}" data-enable="${u.enabled ? 'false' : 'true'}"
+                                    title="${u.enabled ? _('stop_btn') : _('start_btn')}">
+                                ${u.enabled ? '🔵' : '⚫'}
+                            </button>
+                            <button class="btn btn-danger btn-sm btn-icon" onclick="deleteUser('${u.id}')" title="${_('delete')}">🗑</button>
+                        ` : ''}
+                        {% endif %}
+                    </div>
+                </div>
+            `).join('');
+
+            // Pagination UI
+            document.getElementById('pageInfo').textContent = _('page_info').replace('{}', data.page).replace('{}', data.pages || 1);
+            document.getElementById('prevPage').disabled = (data.page <= 1);
+            document.getElementById('nextPage').disabled = (data.page >= data.pages);
+
+            loading.classList.add('hidden');
+            container.classList.remove('hidden');
+        } catch (err) {
+            showToast(`${_('error')}: ` + err.message, 'error');
+        }
+    }
+
+    // Call on load
+    document.addEventListener('DOMContentLoaded', refreshUsersList);
+
+    function updateProtocols(serverId, selectId, groupId = null) {
+        const select = document.getElementById(selectId);
+        const group = groupId ? document.getElementById(groupId) : null;
+        select.innerHTML = '';
+
+        if (serverId === '') {
+            if (group) group.style.display = 'none';
+            return;
+        }
+
+        const server = serversData[serverId];
+        const protocols = server.protocols || {};
+        let count = 0;
+
+        for (const [key, info] of Object.entries(protocols)) {
+            if (info.installed) {
+                const opt = document.createElement('option');
+                opt.value = key;
+                opt.textContent = key === 'awg' ? 'AmneziaWG' : (key === 'awg_legacy' ? 'AWG Legacy' : (key === 'xray' ? 'Xray' : key.toUpperCase()));
+                select.appendChild(opt);
+                count++;
+            }
+        }
+
+        if (count > 0) {
+            if (group) group.style.display = '';
+        } else {
+            const opt = document.createElement('option');
+            opt.textContent = _('no_protocols');
+            opt.disabled = true;
+            select.appendChild(opt);
+            if (group) group.style.display = '';
+        }
+    }
+
+    // Show/hide connection fields
+    document.getElementById('newUserServer').addEventListener('change', (e) => {
+        const show = e.target.value !== '';
+        updateProtocols(e.target.value, 'newUserProtocol', 'newUserProtoGroup');
+        document.getElementById('newUserConnNameGroup').style.display = show ? '' : 'none';
+    });
+
+    document.getElementById('ucServer').addEventListener('change', (e) => {
+        updateProtocols(e.target.value, 'ucProtocol');
+        if (document.getElementById('ucMode').value === 'existing') {
+            fetchExistingClients();
+        }
+    });
+
+    document.getElementById('ucProtocol').addEventListener('change', (e) => {
+        if (document.getElementById('ucMode').value === 'existing') {
+            fetchExistingClients();
+        }
+    });
+
+    async function addUser(e) {
+        e.preventDefault();
+        const btn = document.getElementById('addUserBtn');
+        const text = document.getElementById('addUserBtnText');
+        const spinner = document.getElementById('addUserSpinner');
+        btn.disabled = true;
+        text.textContent = _('creating');
+        spinner.classList.remove('hidden');
+        try {
+            const body = {
+                username: document.getElementById('newUsername').value,
+                password: document.getElementById('newPassword').value,
+                role: document.getElementById('newRole').value,
+                telegramId: document.getElementById('newTelegramId').value || null,
+                email: document.getElementById('newEmail').value || null,
+                description: document.getElementById('newDescription').value || null,
+                traffic_limit: parseFloat(document.getElementById('newTrafficLimit').value || '0'),
+            };
+            const serverId = document.getElementById('newUserServer').value;
+            if (serverId !== '') {
+                body.server_id = parseInt(serverId);
+                body.protocol = document.getElementById('newUserProtocol').value;
+                body.connection_name = document.getElementById('newUserConnName').value || null;
+            }
+            const result = await apiCall('/api/users/add', 'POST', body);
+            showToast(_('success'), 'success');
+
+            if (result.config) {
+                currentConfig = result.config;
+                currentVpnLink = result.vpn_link || '';
+                currentConfigName = body.username;
+                document.getElementById('configModalTitle').textContent = `${_('config')} — ${body.username}`;
+                document.getElementById('configText').textContent = result.config;
+                document.getElementById('vpnLinkText').textContent = currentVpnLink;
+                switchConfigTab('conf');
+                closeModal('addUserModal');
+                openModal('configModal');
+                generateQR(result.config);
+            } else {
+                setTimeout(() => window.location.reload(), 500);
+            }
+        } catch (err) {
+            showToast(`${_('error')}: ` + err.message, 'error');
+        } finally {
+            btn.disabled = false;
+            text.textContent = _('create');
+            spinner.classList.add('hidden');
+        }
+    }
+
+    async function deleteUser(userId) {
+        if (!confirm(_('delete_user_confirm'))) return;
+        try {
+            await apiCall(`/api/users/${userId}/delete`, 'POST');
+            showToast(_('success'), 'success');
+            setTimeout(() => window.location.reload(), 500);
+        } catch (err) {
+            showToast(`${_('error')}: ` + err.message, 'error');
+        }
+    }
+
+    async function toggleUser(dataset) {
+        try {
+            const userId = dataset.id;
+            const enable = dataset.enable === 'true';
+            const action = enable ? _('enabling') : _('disabling');
+            showToast(`${action}...`, 'info');
+            await apiCall(`/api/users/${userId}/toggle`, 'POST', { enabled: enable });
+            showToast(enable ? _('user_enabled') : _('user_disabled'), 'success');
+            setTimeout(() => window.location.reload(), 500);
+        } catch (err) {
+            showToast(`${_('error')}: ` + err.message, 'error');
+        }
+    }
+
+    function openAddConnectionForUser(userId, username) {
+        currentUserId = userId;
+        document.getElementById('addUserConnTitle').textContent = `${_('add_connection')} — ${username}`;
+        document.getElementById('ucName').value = `${username}_vpn`;
+        document.getElementById('ucMode').value = 'new';
+        toggleUCMode();
+        updateProtocols(document.getElementById('ucServer').value, 'ucProtocol');
+        openModal('addUserConnModal');
+    }
+
+    function toggleUCMode() {
+        const mode = document.getElementById('ucMode').value;
+        const existingGroup = document.getElementById('ucExistingClientGroup');
+        const ucAddBtnText = document.getElementById('ucAddBtnText');
+
+        if (mode === 'existing') {
+            existingGroup.style.display = 'block';
+            ucAddBtnText.textContent = _('linking');
+            fetchExistingClients();
+        } else {
+            existingGroup.style.display = 'none';
+            ucAddBtnText.textContent = _('add');
+        }
+    }
+
+    async function fetchExistingClients() {
+        const serverId = document.getElementById('ucServer').value;
+        const protocol = document.getElementById('ucProtocol').value;
+        const select = document.getElementById('ucExistingClient');
+        select.innerHTML = `<option value="">${_('loading')}</option>`;
+
+        try {
+            const data = await apiCall(`/api/servers/${serverId}/${protocol}/clients`);
+            if (!data.clients || data.clients.length === 0) {
+                select.innerHTML = `<option value="">${_('no_free_conns')}</option>`;
+                return;
+            }
+            select.innerHTML = '';
+            data.clients.forEach(c => {
+                select.innerHTML += `<option value="${c.id}">${c.name || 'Unnamed'} (${c.id.substring(0, 8)}...)</option>`;
+            });
+        } catch (err) {
+            select.innerHTML = `<option value="">${_('error')}: ${err.message}</option>`;
+        }
+    }
+
+
+    async function doAddUserConnection() {
+        const btn = document.getElementById('ucAddBtn');
+        const text = document.getElementById('ucAddBtnText');
+        const spinner = document.getElementById('ucAddSpinner');
+        btn.disabled = true;
+
+        const mode = document.getElementById('ucMode').value;
+        text.textContent = mode === 'existing' ? _('linking') : _('creating');
+        spinner.classList.remove('hidden');
+
+        try {
+            const body = {
+                server_id: parseInt(document.getElementById('ucServer').value),
+                protocol: document.getElementById('ucProtocol').value,
+                name: document.getElementById('ucName').value || 'VPN Connection',
+            };
+
+            if (mode === 'existing') {
+                const clientId = document.getElementById('ucExistingClient').value;
+                if (!clientId) throw new Error(_('select_connection'));
+                body.client_id = clientId;
+            }
+
+            const result = await apiCall(`/api/users/${currentUserId}/connections/add`, 'POST', body);
+            showToast(mode === 'existing' ? _('conn_linked') : _('connection_created').replace('{}', body.name), 'success');
+            closeModal('addUserConnModal');
+
+            if (result.config) {
+                currentConfig = result.config;
+                currentVpnLink = result.vpn_link || '';
+                currentConfigName = document.getElementById('ucName').value.replace(/\s+/g, '_');
+                document.getElementById('configModalTitle').textContent = _('config');
+                document.getElementById('configText').textContent = result.config;
+                document.getElementById('vpnLinkText').textContent = currentVpnLink;
+                switchConfigTab('conf');
+                openModal('configModal');
+                generateQR(result.config);
+            }
+            setTimeout(() => window.location.reload(), 1000);
+        } catch (err) {
+            showToast(`${_('error')}: ` + err.message, 'error');
+        } finally {
+            btn.disabled = false;
+            text.textContent = _('create');
+            spinner.classList.add('hidden');
+        }
+    }
+
+    async function viewUserConnections(userId, username) {
+        document.getElementById('userConnsTitle').textContent = `${_('connections')} — ${username}`;
+        const listEl = document.getElementById('userConnsList');
+        listEl.innerHTML = `<div style="text-align:center;padding:var(--space-lg);color:var(--text-muted);">${_('loading')}</div>`;
+        openModal('userConnsModal');
+        try {
+            const data = await apiCall(`/api/users/${userId}/connections`);
+            if (!data.connections || data.connections.length === 0) {
+                listEl.innerHTML = `<div style="text-align:center;padding:var(--space-lg);color:var(--text-muted);">${_('no_connections')}</div>`;
+                return;
+            }
+            listEl.innerHTML = '';
+            data.connections.forEach(c => {
+                listEl.innerHTML += `
+                    <div class="client-item">
+                        <div class="client-info">
+                            <div class="client-avatar">🔗</div>
+                            <div>
+                                <div class="client-name">${c.name || 'Connection'}</div>
+                                <div class="client-meta">
+                                    <span>🖥 ${c.server_name || ''}</span>
+                                    <span>${c.protocol === 'awg' ? 'AmneziaWG' : (c.protocol === 'awg_legacy' ? 'AWG Legacy' : (c.protocol === 'xray' ? 'Xray' : c.protocol.toUpperCase()))}</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="client-actions">
+                            <button class="btn btn-secondary btn-sm btn-icon" onclick="showUserConnectionConfig(${c.server_id}, '${c.client_id}', '${c.protocol}', '${(c.name || 'VPN').replace(/'/g, "\\'")}')" title="${_('config')}">📄</button>
+                        </div>
+                    </div>
+                `;
+            });
+        } catch (err) {
+            listEl.innerHTML = `<div style="color:#ef4444;padding:var(--space-md);">${_('error')}: ${err.message}</div>`;
+        }
+    }
+
+    // Config tabs
+    function switchConfigTab(tab) {
+        document.querySelectorAll('.config-tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.config-panel').forEach(p => p.classList.remove('active'));
+        const tabs = document.querySelectorAll('.config-tab');
+        const panels = { conf: 'panel-conf', vpn: 'panel-vpn', qr: 'panel-qr' };
+        const tabIdx = { conf: 0, vpn: 1, qr: 2 };
+        tabs[tabIdx[tab]].classList.add('active');
+        document.getElementById(panels[tab]).classList.add('active');
+    }
+
+    function generateQR(text) {
+        const container = document.getElementById('qrCode');
+        container.innerHTML = '';
+        try {
+            new QRCode(container, { text, width: 280, height: 280, colorDark: '#000000', colorLight: '#ffffff', correctLevel: QRCode.CorrectLevel.L });
+        } catch (e) {
+            container.innerHTML = `<div style="color:var(--text-muted);">${_('qr_error')}</div>`;
+        }
+    }
+    async function showUserConnectionConfig(serverId, clientId, protocol, connName) {
+        try {
+            showToast(_('loading'), 'info');
+            const result = await apiCall(`/api/servers/${serverId}/connections/config`, 'POST', {
+                protocol: protocol, client_id: clientId,
+            });
+            if (result.config) {
+                currentConfig = result.config;
+                currentVpnLink = result.vpn_link || '';
+                currentConfigName = connName.replace(/\s+/g, '_');
+                document.getElementById('configModalTitle').textContent = `${_('config')} — ${connName}`;
+                document.getElementById('configText').textContent = result.config;
+                document.getElementById('vpnLinkText').textContent = currentVpnLink;
+                switchConfigTab('conf');
+                openModal('configModal');
+                generateQR(result.config);
+            }
+        } catch (err) {
+            showToast(`${_('error')}: ` + err.message, 'error');
+        }
+    }
+</script>
+
+<!-- ===== Share User Modal ===== -->
+<div class="modal-backdrop" id="shareUserModal">
+    <div class="modal" style="max-width: 500px;">
+        <div class="modal-header">
+            <h2 class="modal-title" id="shareModalTitle">{{ _('share_access') }}</h2>
+            <button class="modal-close" onclick="closeModal('shareUserModal')">×</button>
+        </div>
+
+        <div class="form-group">
+            <label style="display: flex; align-items: center; gap: var(--space-sm); cursor: pointer;">
+                <input type="checkbox" id="shareEnabled" onchange="updateShareSetup()"> {{ _('enable_public_access') }}
+            </label>
+        </div>
+
+        <div id="shareSetupFields" style="display:none;">
+            <div class="form-group">
+                <label class="form-label">{{ _('share_password_label') }}</label>
+                <input class="form-input" type="password" id="sharePassword" placeholder="{{ _('new_password_hint') }}">
+                <div class="form-hint">{{ _('share_password_hint') }}</div>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">{{ _('public_link_label') }}</label>
+                <div class="flex gap-sm">
+                    <input class="form-input" type="text" id="shareLink" readonly
+                        style="background: var(--bg-primary);">
+                    <button class="btn btn-secondary" onclick="copyShareLink()">📋</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="divider"></div>
+        <div style="display: flex; gap: var(--space-md); justify-content: flex-end;">
+            <button class="btn btn-secondary" onclick="closeModal('shareUserModal')">{{ _('cancel') }}</button>
+            <button class="btn btn-primary" onclick="saveShareSetup()" id="saveShareBtn">
+                <span id="saveShareBtnText">{{ _('save') }}</span>
+                <div class="spinner hidden" id="saveShareSpinner"></div>
+            </button>
+        </div>
+    </div>
+</div>
+
+<script>
+    let currentSharedUser = null;
+
+    function openEditUser(data) {
+        document.getElementById('editUserId').value = data.id;
+        document.getElementById('editUserTitle').textContent = data.username;
+        document.getElementById('editUserTG').value = data.tg || '';
+        document.getElementById('editUserEmail').value = data.email || '';
+        document.getElementById('editUserDesc').value = data.desc || '';
+        document.getElementById('editUserLimit').value = data.limit || '0';
+        document.getElementById('editUserPass').value = '';
+        openModal('editUserModal');
+    }
+
+    async function saveEditUser() {
+        const uid = document.getElementById('editUserId').value;
+        const btn = document.getElementById('saveEditBtn');
+        const text = document.getElementById('saveEditBtnText');
+        const spinner = document.getElementById('saveEditSpinner');
+
+        const payload = {
+            telegramId: document.getElementById('editUserTG').value,
+            email: document.getElementById('editUserEmail').value,
+            description: document.getElementById('editUserDesc').value,
+            traffic_limit: parseFloat(document.getElementById('editUserLimit').value || '0'),
+        };
+        const pass = document.getElementById('editUserPass').value;
+        if (pass) payload.password = pass;
+
+        btn.disabled = true;
+        text.textContent = _('saving');
+        spinner.classList.remove('hidden');
+
+        try {
+            await apiCall(`/api/users/${uid}/update`, 'POST', payload);
+            showToast(_('success'), 'success');
+            closeModal('editUserModal');
+            refreshUsersList();
+        } catch (err) {
+            showToast(`${_('error')}: ` + err.message, 'error');
+        } finally {
+            btn.disabled = false;
+            text.textContent = _('save');
+            spinner.classList.add('hidden');
+        }
+    }
+
+    function openShareModal(dataset) {
+        currentSharedUser = dataset.id;
+        document.getElementById('shareModalTitle').textContent = `${_('share_access')} — ${dataset.username}`;
+        document.getElementById('shareEnabled').checked = dataset.enabled === 'true';
+        document.getElementById('sharePassword').value = '';
+
+        let token = dataset.token;
+        if (!token || token === '') {
+            token = Math.random().toString(36).substring(2, 15);
+        }
+        const link = window.location.origin + '/share/' + token;
+        document.getElementById('shareLink').value = link;
+
+        updateShareSetup();
+        openModal('shareUserModal');
+    }
+
+    function updateShareSetup() {
+        const enabled = document.getElementById('shareEnabled').checked;
+        document.getElementById('shareSetupFields').style.display = enabled ? '' : 'none';
+    }
+
+    async function saveShareSetup() {
+        const btn = document.getElementById('saveShareBtn');
+        const text = document.getElementById('saveShareBtnText');
+        const spinner = document.getElementById('saveShareSpinner');
+
+        btn.disabled = true;
+        text.textContent = _('saving');
+        spinner.classList.remove('hidden');
+
+        try {
+            const body = {
+                enabled: document.getElementById('shareEnabled').checked,
+                password: document.getElementById('sharePassword').value
+            };
+            const result = await apiCall(`/api/users/${currentSharedUser}/share/setup`, 'POST', body);
+            if (result.share_token) {
+                const link = window.location.origin + '/share/' + result.share_token;
+                document.getElementById('shareLink').value = link;
+            }
+            showToast(_('success'), 'success');
+            setTimeout(() => window.location.reload(), 1000);
+        } catch (err) {
+            showToast(err.message, 'error');
+        } finally {
+            btn.disabled = false;
+            text.textContent = _('save');
+            spinner.classList.add('hidden');
+        }
+    }
+
+    function copyShareLink() {
+        const input = document.getElementById('shareLink');
+        if (!input.value) return;
+        input.select();
+        document.execCommand('copy');
+        showToast(_('copied'), 'success');
+    }
+</script>
+
+{% endblock %}
