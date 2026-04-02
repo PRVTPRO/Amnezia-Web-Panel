@@ -773,14 +773,6 @@ async def login_page(request: Request):
     return tpl(request, 'login.html')
 
 
-@app.get("/")
-async def index(request: Request):
-    if not get_current_user(request):
-        return RedirectResponse(url="/login")
-    data = load_data()
-    return tpl(request, "index.html", servers=data['servers'])
-
-
 @app.get("/set_lang/{lang}")
 async def set_lang(lang: str, request: Request):
     ref = request.headers.get("referer", "/")
@@ -1902,8 +1894,9 @@ async def api_share_config(token: str, connection_id: str, request: Request):
         port = proto_info.get('port', '55424')
         ssh = get_ssh(server)
         ssh.connect()
-        awg = AWGManager(ssh)
-        config = awg.get_client_config(conn['protocol'], conn['client_id'], server['host'], port)
+        # Use appropriate manager for the protocol
+        manager = get_protocol_manager(ssh, conn['protocol'])
+        config = manager.get_client_config(conn['protocol'], conn['client_id'], server['host'], port)
         ssh.disconnect()
         vpn_link = generate_vpn_link(config) if config else ''
         return {'config': config, 'vpn_link': vpn_link}
@@ -1933,8 +1926,9 @@ async def api_my_connection_config(request: Request, connection_id: str):
         port = proto_info.get('port', '55424')
         ssh = get_ssh(server)
         ssh.connect()
-        awg = AWGManager(ssh)
-        config = awg.get_client_config(conn['protocol'], conn['client_id'], server['host'], port)
+        # Use appropriate manager for the protocol (fixes Telemt/Xray not working for users)
+        manager = get_protocol_manager(ssh, conn['protocol'])
+        config = manager.get_client_config(conn['protocol'], conn['client_id'], server['host'], port)
         ssh.disconnect()
         vpn_link = generate_vpn_link(config) if config else ''
         return {'config': config, 'vpn_link': vpn_link}

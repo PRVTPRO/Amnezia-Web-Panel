@@ -42,8 +42,10 @@
 
             {% if current_user %}
             <nav class="header-nav">
+                {% if current_user.role in ['admin', 'support'] %}
                 <a href="/" class="nav-link">{{ _('nav_servers') }}</a>
                 <a href="/users" class="nav-link">{{ _('nav_users') }}</a>
+                {% endif %}
                 {% if current_user.role == 'admin' %}
                 <a href="/settings" class="nav-link">{{ _('nav_settings') }}</a>
                 {% endif %}

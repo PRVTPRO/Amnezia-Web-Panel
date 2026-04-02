@@ -31,7 +31,7 @@
             </div>
             <div class="client-actions">
                 <button class="btn btn-primary btn-sm"
-                    onclick="showMyConfig('{{ c.id }}', '{{ c.name or 'Connection' }}')">
+                    onclick="showMyConfig('{{ c.id }}', '{{ c.name or 'Connection' }}', '{{ c.protocol }}')">
                     {{ _('show_config') }}
                 </button>
             </div>
@@ -104,7 +104,7 @@
     let currentVpnLink = '';
     let currentConfigName = 'connection';
 
-    async function showMyConfig(connectionId, name) {
+    async function showMyConfig(connectionId, name, proto) {
         try {
             showToast(_('loading_connections'), 'info');
             const result = await apiCall(`/api/my/connections/${connectionId}/config`, 'POST');
@@ -116,6 +116,15 @@
                 document.getElementById('configModalTitle').textContent = `${_('config')} — ${name}`;
                 document.getElementById('configText').textContent = result.config;
                 document.getElementById('vpnLinkText').textContent = currentVpnLink;
+
+                // Telemt (MTProxy) doesn't have a "VPN Link" (vpn://) format in Amnezia
+                const vpnTab = document.querySelectorAll('.config-tab')[1];
+                const vpnPanel = document.getElementById('panel-vpn');
+                if (proto === 'telemt') {
+                    vpnTab.style.display = 'none';
+                } else {
+                    vpnTab.style.display = '';
+                }
 
                 switchConfigTab('conf');
                 openModal('configModal');

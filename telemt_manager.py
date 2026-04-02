@@ -143,7 +143,9 @@ class TelemtManager:
 
     def save_server_config(self, protocol_type, config_content):
         self.ssh.upload_file_sudo(config_content.replace('\r\n', '\n'), "/opt/amnezia/telemt/config.toml")
-        self.ssh.run_sudo_command(f"docker restart {self.CONTAINER_NAME}")
+        # Use SIGHUP (HUP) to reload MTProxy config without restarting the process/container.
+        # This keeps the traffic statistics (octets) in memory.
+        self.ssh.run_sudo_command(f"docker kill -s HUP {self.CONTAINER_NAME} || docker restart {self.CONTAINER_NAME}")
 
     def _parse_telemt_params(self, config_text):
         params = {}
