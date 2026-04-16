@@ -47,7 +47,7 @@ else:
     application_path = os.path.dirname(__file__)
 
 DATA_FILE = os.path.join(application_path, 'data.json')
-CURRENT_VERSION = "v1.4.1"
+CURRENT_VERSION = "v1.4.2"
 
 
 # ======================== Translations ========================

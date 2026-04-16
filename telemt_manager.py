@@ -297,14 +297,14 @@ class TelemtManager:
         self.ssh.upload_file_sudo(config_text.replace('\r\n', '\n'), "/opt/amnezia/telemt/config.toml")
         
         # 2. Call API for immediate effect
-        resp = self._api_request("POST", "/v1/users", data=api_payload)
+        self._api_request("POST", "/v1/users", data=api_payload)
         
-        link = f"tg://proxy?server={host}&port={port}&secret={secret}"
-        # If API returned specialized links, use them
-        if resp and resp.get('ok') and resp.get('data', {}).get('links'):
-            links = resp['data']['links']
-            if links.get('tls'): link = links['tls'][0]
-            elif links.get('secure'): link = links['secure'][0]
+        # Fetch the official link from API (it includes TLS emulation padding like 'ee...' if enabled)
+        link = self.get_client_config(protocol_type, username, host, port)
+        
+        # Extreme fallback if API is slow or 404
+        if link == "Not found":
+            link = f"tg://proxy?server={host}&port={port}&secret={secret}"
         
         return {
             "client_id": username,
