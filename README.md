@@ -17,6 +17,25 @@ A modern, high-performance web interface for simplified management of AmneziaWG 
 >
 > ⚡ **After verification, you can manage the server directly from the panel!**
 
+## ⚠️ Legal Notice
+
+> **This project is created solely for educational and research purposes.**
+>
+> **This project has never been intended for use in jurisdictions where the technologies employed are prohibited.** The author bears no responsibility for any unlawful use of this software.
+
+**This project merely adds an abstraction layer for managing publicly available applications.** All applications belong to their respective owners. This project does not claim ownership over, nor does it modify, any third-party applications.
+
+The use of traffic obfuscation tools may violate the laws of your country. Only use this software for lawful purposes, such as:
+
+- **Penetration testing and security research**
+- **CTF (Capture The Flag) competitions**
+- **Academic and scientific research**
+- **Testing and securing your own networks**
+- **Improving defensive security measures**
+- **Educational training in cybersecurity**
+
+> **Nothing in this project constitutes an incitement to violate any applicable laws.**
+
 ![Servers Dashboard](https://github.com/PRVTPRO/Amnezia-Web-Panel/blob/main/screen/panel1.png)
 
 
