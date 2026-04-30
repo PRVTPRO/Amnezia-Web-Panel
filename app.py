@@ -1653,6 +1653,7 @@ async def api_list_users(request: Request, search: str = '', page: int = 1, size
             'traffic_limit': u.get('traffic_limit', 0),
             'traffic_reset_strategy': u.get('traffic_reset_strategy', 'never'),
             'last_reset_at': u.get('last_reset_at'),
+            "expiration_date": u.get("expiration_date"),
             'share_enabled': u.get('share_enabled', False),
             'share_token': u.get('share_token'),
             'has_share_password': bool(u.get('share_password_hash')),
