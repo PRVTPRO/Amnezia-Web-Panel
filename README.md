@@ -35,8 +35,7 @@ The use of traffic obfuscation tools may violate the laws of your country. Only 
 - **Educational training in cybersecurity**
 
 > **Nothing in this project constitutes an incitement to violate any applicable laws.**
-
-![Servers Dashboard](https://github.com/PRVTPRO/Amnezia-Web-Panel/blob/main/screen/panel1.png)
+![Servers Dashboard](https://raw.githubusercontent.com/PRVTPRO/Amnezia-Web-Panel/refs/heads/main/screen/panel1.png)
 
 
 ### Additional Sections
