@@ -2,16 +2,15 @@ version: '3.8'
 
 services:
   amnezia_panel:
-    image: prvtpro/amnezia-panel:1.4.0
+    image: prvtpro/amnezia-panel:1.4.3
     container_name: amnezia_panel
-    # To connect the (Traefik) balancer, assign one network to both containers and uncomment the labels by replacing the domain with your own.
-    # labels:
-    #   - traefik.enable=true
-    #   - traefik.http.routers.amnezia_panel.entrypoints=web,websecure
-    #   - traefik.http.routers.amnezia_panel.rule=Host(`amnezia.domain`)
-    #   - traefik.http.services.amnezia_panel.loadbalancer.server.port=5000
+
     ports:
       - "${APP_PORT:-5000}:5000"
+
+    volumes:
+      - amnezia_data:/app/data   # путь внутри контейнера
+
     restart: unless-stopped
 
     healthcheck:
@@ -20,3 +19,6 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+
+volumes:
+  amnezia_data:
