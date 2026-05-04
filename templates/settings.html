@@ -281,6 +281,22 @@
             </p>
         </div>
 
+        <!-- BLOCK: API Tokens -->
+        <div class="card" style="margin-top: var(--space-lg);">
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom: var(--space-md);">
+                <h3 class="card-title" style="margin:0;">🔑 {{ _('api_tokens_title') }}</h3>
+                <button type="button" class="btn btn-primary btn-sm" onclick="openCreateTokenModal()">
+                    <span>＋</span> {{ _('api_tokens_create') }}
+                </button>
+            </div>
+            <p class="form-hint" style="margin-bottom: var(--space-md);">
+                {{ _('api_tokens_hint') }}
+            </p>
+            <div id="tokensList">
+                <div class="form-hint" id="tokensEmptyState">{{ _('api_tokens_empty') }}</div>
+            </div>
+        </div>
+
         <!-- BLOCK: About & Updates -->
         <div class="card" style="margin-top: var(--space-lg);">
             <h3 class="card-title" style="margin-bottom: var(--space-lg);">ℹ️ {{ _('about_title') }}</h3>
@@ -313,6 +329,59 @@
         <span>{{ _('save_changes') }}</span>
         <div class="spinner hidden" id="saveSpinner"></div>
     </button>
+</div>
+
+<!-- ===== Create API Token Modal ===== -->
+<div class="modal-backdrop" id="createTokenModal">
+    <div class="modal" style="max-width: 460px;">
+        <div class="modal-header">
+            <h2 class="modal-title">{{ _('api_tokens_create_title') }}</h2>
+            <button class="modal-close" onclick="closeModal('createTokenModal')">×</button>
+        </div>
+        <div class="form-group">
+            <label class="form-label">{{ _('api_tokens_name_label') }}</label>
+            <input class="form-input" type="text" id="createTokenName"
+                placeholder="{{ _('api_tokens_name_placeholder') }}" maxlength="100">
+            <div class="form-hint">{{ _('api_tokens_name_hint') }}</div>
+        </div>
+        <div id="createTokenError" style="color: var(--danger, #ef4444); font-size: 0.85rem; margin-bottom: var(--space-sm);"></div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="closeModal('createTokenModal')">{{ _('cancel') }}</button>
+            <button class="btn btn-primary" onclick="submitCreateToken()" id="createTokenBtn">
+                {{ _('api_tokens_create') }}
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- ===== Newly-Created Token Modal (one-time display) ===== -->
+<div class="modal-backdrop" id="newTokenModal">
+    <div class="modal" style="max-width: 560px;">
+        <div class="modal-header">
+            <h2 class="modal-title">{{ _('api_tokens_created_title') }}</h2>
+            <button class="modal-close" onclick="closeModal('newTokenModal')">×</button>
+        </div>
+        <div class="form-group">
+            <label class="form-label">{{ _('api_tokens_name_label') }}</label>
+            <div id="newTokenName" style="font-weight: 600;"></div>
+        </div>
+        <div class="form-group">
+            <label class="form-label">{{ _('api_tokens_value_label') }}</label>
+            <input class="form-input" type="text" id="newTokenValue" readonly
+                style="font-family: 'SF Mono', monospace; font-size: 0.85rem;">
+        </div>
+        <div style="background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.4); border-radius: var(--radius-md); padding: var(--space-md); margin-bottom: var(--space-md);">
+            ⚠️ <strong>{{ _('api_tokens_warning_title') }}</strong>
+            <div class="form-hint" style="margin-top: 4px;">{{ _('api_tokens_warning_body') }}</div>
+        </div>
+        <div class="form-hint" style="margin-bottom: var(--space-sm); font-family: 'SF Mono', monospace; font-size: 0.78rem; padding: var(--space-sm); background: var(--bg-primary); border-radius: var(--radius-sm);">
+            curl -H "Authorization: Bearer &lt;your_token&gt;" {{ request.url.scheme }}://{{ request.url.netloc }}/api/users
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="copyNewToken()">📋 {{ _('copy') }}</button>
+            <button class="btn btn-primary" onclick="closeModal('newTokenModal')">{{ _('done') }}</button>
+        </div>
+    </div>
 </div>
 
 <script>
@@ -583,5 +652,104 @@
             spinner.classList.add('hidden');
         }
     }
+
+    /* ========== API Tokens ========== */
+
+    function fmtTokenDate(iso) {
+        if (!iso) return _('api_tokens_never');
+        const d = new Date(iso);
+        return isNaN(d) ? iso : d.toLocaleString();
+    }
+
+    async function loadTokens() {
+        try {
+            const data = await apiCall('/api/settings/tokens');
+            renderTokens(data.tokens || []);
+        } catch (err) {
+            showToast(err.message, 'error');
+        }
+    }
+
+    function renderTokens(tokens) {
+        const container = document.getElementById('tokensList');
+        if (!container) return;
+        if (!tokens.length) {
+            container.innerHTML = `<div class="form-hint" id="tokensEmptyState">${_('api_tokens_empty')}</div>`;
+            return;
+        }
+        container.innerHTML = tokens.map(t => `
+            <div class="token-row" style="display:flex; align-items:center; justify-content:space-between; gap:var(--space-md); padding:var(--space-sm) 0; border-bottom:1px solid var(--border-color);">
+                <div style="min-width:0; flex:1;">
+                    <div style="font-weight:600;">${escapeHTML(t.name)}</div>
+                    <div class="text-muted" style="font-size:0.78rem; font-family: 'SF Mono', monospace;">
+                        <span>${escapeHTML(t.token_prefix || '')}…</span>
+                        <span style="margin-left:var(--space-md);">${_('api_tokens_created')}: ${fmtTokenDate(t.created_at)}</span>
+                        <span style="margin-left:var(--space-md);">${_('api_tokens_last_used')}: ${fmtTokenDate(t.last_used_at)}</span>
+                        ${t.owner ? `<span style="margin-left:var(--space-md);">${_('api_tokens_owner')}: ${escapeHTML(t.owner)}</span>` : ''}
+                    </div>
+                </div>
+                <button class="btn btn-danger btn-sm" onclick="revokeToken('${t.id}', '${escapeHTML(t.name)}')">
+                    ${_('api_tokens_revoke')}
+                </button>
+            </div>
+        `).join('');
+    }
+
+    function escapeHTML(s) {
+        return String(s ?? '').replace(/[&<>"']/g, c => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+        }[c]));
+    }
+
+    function openCreateTokenModal() {
+        document.getElementById('createTokenName').value = '';
+        document.getElementById('createTokenError').textContent = '';
+        openModal('createTokenModal');
+        setTimeout(() => document.getElementById('createTokenName').focus(), 50);
+    }
+
+    async function submitCreateToken() {
+        const name = document.getElementById('createTokenName').value.trim();
+        const errEl = document.getElementById('createTokenError');
+        if (!name) {
+            errEl.textContent = _('api_tokens_name_required');
+            return;
+        }
+        const btn = document.getElementById('createTokenBtn');
+        btn.disabled = true;
+        try {
+            const res = await apiCall('/api/settings/tokens', 'POST', { name });
+            closeModal('createTokenModal');
+            // Show the raw token exactly once. The user must copy it now —
+            // we cannot retrieve it after this point.
+            document.getElementById('newTokenValue').value = res.token || '';
+            document.getElementById('newTokenName').textContent = res.name || '';
+            openModal('newTokenModal');
+            loadTokens();
+        } catch (err) {
+            errEl.textContent = err.message;
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    function copyNewToken() {
+        const input = document.getElementById('newTokenValue');
+        input.select();
+        copyToClipboard(input.value);
+    }
+
+    async function revokeToken(id, name) {
+        if (!confirm(_('api_tokens_revoke_confirm').replace('{}', name))) return;
+        try {
+            await apiCall(`/api/settings/tokens/${id}`, 'DELETE');
+            showToast(_('api_tokens_revoked'), 'success');
+            loadTokens();
+        } catch (err) {
+            showToast(err.message, 'error');
+        }
+    }
+
+    document.addEventListener('DOMContentLoaded', loadTokens);
 </script>
 {% endblock %}

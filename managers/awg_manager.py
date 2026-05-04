@@ -888,6 +888,12 @@ AllowedIPs = {client_ip}/32
 
         dns1 = AWG_DEFAULTS['dns1']
         dns2 = AWG_DEFAULTS['dns2']
+        
+        # Check if AmneziaDNS is installed
+        out, _, _ = self.ssh.run_sudo_command("docker ps -a --filter name=^amnezia-dns$ --format '{{.Names}}'")
+        if 'amnezia-dns' in out:
+            dns1 = '172.29.172.254'
+            
         mtu = AWG_DEFAULTS['mtu']
 
         # Standard fields
@@ -974,6 +980,12 @@ PersistentKeepalive = 25
 
         dns1 = AWG_DEFAULTS['dns1']
         dns2 = AWG_DEFAULTS['dns2']
+        
+        # Check if AmneziaDNS is installed
+        out, _, _ = self.ssh.run_sudo_command("docker ps -a --filter name=^amnezia-dns$ --format '{{.Names}}'")
+        if 'amnezia-dns' in out:
+            dns1 = '172.29.172.254'
+            
         mtu = AWG_DEFAULTS['mtu']
 
         # Standard fields

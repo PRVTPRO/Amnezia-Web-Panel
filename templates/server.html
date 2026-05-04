@@ -53,7 +53,7 @@
     <button class="nav-tab" id="tab-services" onclick="switchCategory('services')"
         style="background: none; border: none; padding: 10px 16px; font-size: 1rem; color: var(--text-muted); cursor: pointer; border-bottom: 2px solid transparent;">
         <span class="icon">🛠</span> {{ _('services') }} <span id="services-count"
-            style="font-size: 0.8rem; opacity: 0.6; margin-left: 4px;">0/1</span>
+            style="font-size: 0.8rem; opacity: 0.6; margin-left: 4px;">0/3</span>
     </button>
     <button class="nav-tab" id="tab-management" onclick="switchCategory('management')"
         style="background: none; border: none; padding: 10px 16px; font-size: 1rem; color: var(--text-muted); cursor: pointer; border-bottom: 2px solid transparent;">
@@ -207,6 +207,26 @@
             </button>
         </div>
     </div>
+
+    <!-- ===== AIVPN teaser (locked, full grid width) ===== -->
+    <div class="promo-block promo-aivpn" aria-disabled="true" role="article">
+        <div class="promo-orbs" aria-hidden="true">
+            <span class="promo-orb"></span>
+            <span class="promo-orb"></span>
+            <span class="promo-orb"></span>
+        </div>
+        <span class="promo-lock-badge">🔒 {{ _('coming_soon') }}</span>
+        <div class="promo-content">
+            <div class="promo-icon" aria-hidden="true">🧠</div>
+            <div class="promo-text">
+                <div class="promo-title">AIVPN</div>
+                <div class="promo-subtitle">{{ _('aivpn_subtitle') }}</div>
+            </div>
+            <a class="promo-cta" href="https://github.com/PRVTPRO/Amnezia-Web-Panel" target="_blank" rel="noopener">
+                ⭐ <span>{{ _('promo_star_cta') }}</span>
+            </a>
+        </div>
+    </div>
 </div>
 
 <div class="protocol-cards hidden" id="services-grid">
@@ -231,6 +251,75 @@
                 style="flex:1">
                 {{ _('install') }}
             </button>
+        </div>
+    </div>
+
+    <!-- AdGuard Home Card -->
+    <div class="card card-hover protocol-card protocol-adguard" id="proto-adguard">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:var(--space-sm);">
+            <div class="protocol-icon">🛡️</div>
+            <div class="flex gap-sm" id="adguard-ctrl" style="display:none!important;"></div>
+        </div>
+        <div class="protocol-name">AdGuard Home</div>
+        <div class="protocol-desc">
+            {{ _('adguard_desc') }}
+        </div>
+        <div class="protocol-status" id="adguard-status">
+            <span class="badge badge-warn"><span class="badge-dot"></span> {{ _('not_checked') }}</span>
+        </div>
+        <div id="adguard-info" class="hidden">
+            <div class="protocol-info" id="adguard-info-grid"></div>
+        </div>
+        <div class="flex gap-sm" id="adguard-actions">
+            <button class="btn btn-primary btn-sm" onclick="openInstallModal('adguard')" id="adguard-install-btn"
+                style="flex:1">
+                {{ _('install') }}
+            </button>
+        </div>
+    </div>
+
+    <!-- SOCKS5 Card -->
+    <div class="card card-hover protocol-card protocol-socks5" id="proto-socks5">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:var(--space-sm);">
+            <div class="protocol-icon">🧦</div>
+            <div class="flex gap-sm" id="socks5-ctrl" style="display:none!important;"></div>
+        </div>
+        <div class="protocol-name">SOCKS5 Proxy</div>
+        <div class="protocol-desc">
+            {{ _('socks5_desc') }}
+        </div>
+        <div class="protocol-status" id="socks5-status">
+            <span class="badge badge-warn"><span class="badge-dot"></span> {{ _('not_checked') }}</span>
+        </div>
+        <div id="socks5-info" class="hidden">
+            <div class="protocol-info" id="socks5-info-grid"></div>
+        </div>
+        <div class="flex gap-sm" id="socks5-actions">
+            <button class="btn btn-primary btn-sm" onclick="openInstallModal('socks5')" id="socks5-install-btn"
+                style="flex:1">
+                {{ _('install') }}
+            </button>
+        </div>
+    </div>
+
+    <!-- ===== Reverse Proxy teaser (locked, full grid width) ===== -->
+    <div class="promo-block promo-revproxy" aria-disabled="true" role="article">
+        <div class="promo-grid-bg" aria-hidden="true"></div>
+        <div class="promo-orbs" aria-hidden="true">
+            <span class="promo-orb"></span>
+            <span class="promo-orb"></span>
+            <span class="promo-orb"></span>
+        </div>
+        <span class="promo-lock-badge">🔒 {{ _('coming_soon') }}</span>
+        <div class="promo-content">
+            <div class="promo-icon" aria-hidden="true">🛡️</div>
+            <div class="promo-text">
+                <div class="promo-title">{{ _('revproxy_title') }}</div>
+                <div class="promo-subtitle">{{ _('revproxy_subtitle') }}</div>
+            </div>
+            <a class="promo-cta" href="https://github.com/PRVTPRO/Amnezia-Web-Panel" target="_blank" rel="noopener">
+                ⭐ <span>{{ _('promo_star_cta') }}</span>
+            </a>
         </div>
     </div>
 </div>
@@ -333,6 +422,67 @@
                 </div>
             </div>
 
+            <div id="socks5Options"
+                style="display:none; padding: var(--space-md); background: rgba(0,0,0,0.03); border-radius: var(--radius-md); margin-bottom: var(--space-md);">
+                <div class="form-group">
+                    <label class="form-label">{{ _('socks5_username') }}</label>
+                    <input class="form-input" type="text" id="installSocks5User" value="proxy_user">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">{{ _('socks5_password') }}</label>
+                    <input class="form-input" type="text" id="installSocks5Pass" placeholder="{{ _('socks5_password_placeholder') }}">
+                    <div class="form-hint">{{ _('socks5_password_hint') }}</div>
+                </div>
+            </div>
+
+            <div id="adguardOptions"
+                style="display:none; padding: var(--space-md); background: rgba(0,0,0,0.03); border-radius: var(--radius-md); margin-bottom: var(--space-md);">
+                <div class="form-group">
+                    <label class="form-label">{{ _('adguard_mode') }}</label>
+                    <div style="display:flex; flex-direction:column; gap:var(--space-xs);">
+                        <label style="display:flex; align-items:center; gap:var(--space-xs); cursor:pointer;">
+                            <input type="radio" name="adguardMode" value="sidebyside" checked>
+                            <span><strong>{{ _('adguard_mode_sidebyside') }}</strong> — {{ _('adguard_mode_sidebyside_hint') }}</span>
+                        </label>
+                        <label style="display:flex; align-items:center; gap:var(--space-xs); cursor:pointer;">
+                            <input type="radio" name="adguardMode" value="replace">
+                            <span><strong>{{ _('adguard_mode_replace') }}</strong> — {{ _('adguard_mode_replace_hint') }}</span>
+                        </label>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">{{ _('adguard_web_port') }}</label>
+                        <input class="form-input" type="number" id="installAdguardWebPort" value="3000" min="1" max="65535">
+                    </div>
+                    <div class="form-group" style="display:flex; align-items:flex-end; padding-bottom:8px;">
+                        <label style="display:flex; align-items:center; gap:var(--space-xs); cursor:pointer;">
+                            <input type="checkbox" id="installAdguardExposeWeb">
+                            <span>{{ _('adguard_expose_web') }}</span>
+                        </label>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">{{ _('adguard_dot_port') }}</label>
+                        <input class="form-input" type="number" id="installAdguardDotPort" value="853" min="1" max="65535">
+                        <label style="display:flex; align-items:center; gap:var(--space-xs); cursor:pointer; margin-top:4px;">
+                            <input type="checkbox" id="installAdguardExposeDot">
+                            <span>{{ _('adguard_expose') }}</span>
+                        </label>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">{{ _('adguard_doh_port') }}</label>
+                        <input class="form-input" type="number" id="installAdguardDohPort" value="443" min="1" max="65535">
+                        <label style="display:flex; align-items:center; gap:var(--space-xs); cursor:pointer; margin-top:4px;">
+                            <input type="checkbox" id="installAdguardExposeDoh">
+                            <span>{{ _('adguard_expose') }}</span>
+                        </label>
+                    </div>
+                </div>
+                <div class="form-hint">{{ _('adguard_install_hint') }}</div>
+            </div>
+
             <div class="modal-footer">
                 <button class="btn btn-secondary" onclick="closeModal('installModal')">{{ _('cancel') }}</button>
                 <button class="btn btn-primary" onclick="installProtocol()" id="installBtn">
@@ -353,6 +503,36 @@
                     {{ _('done') }}
                 </button>
             </div>
+        </div>
+    </div>
+</div>
+
+<!-- ===== SOCKS5 Settings Modal ===== -->
+<div class="modal-backdrop" id="socks5SettingsModal">
+    <div class="modal">
+        <div class="modal-header">
+            <h2 class="modal-title">{{ _('socks5_settings_title') }}</h2>
+            <button class="modal-close" onclick="closeModal('socks5SettingsModal')">×</button>
+        </div>
+        <div class="form-group">
+            <label class="form-label">{{ _('port') }}</label>
+            <input class="form-input" type="number" id="socks5SetPort" min="1" max="65535">
+            <div class="form-hint">{{ _('socks5_port_change_hint') }}</div>
+        </div>
+        <div class="form-group">
+            <label class="form-label">{{ _('socks5_username') }}</label>
+            <input class="form-input" type="text" id="socks5SetUser">
+        </div>
+        <div class="form-group">
+            <label class="form-label">{{ _('socks5_password') }}</label>
+            <input class="form-input" type="text" id="socks5SetPass">
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="closeModal('socks5SettingsModal')">{{ _('cancel') }}</button>
+            <button class="btn btn-primary" onclick="saveSocks5Settings()" id="socks5SaveBtn">
+                <span id="socks5SaveBtnText">{{ _('save') }}</span>
+                <div class="spinner hidden" id="socks5SaveSpinner"></div>
+            </button>
         </div>
     </div>
 </div>
@@ -508,6 +688,7 @@
 {% block scripts %}
 <script>
     const SERVER_ID = {{ server_id }};
+    const SERVER_HOST = "{{ server.host }}";
     let currentInstallProto = 'awg';
     let currentConfig = '';
     let currentVpnLink = '';
@@ -552,6 +733,8 @@
             case 'telemt': return 'Telemt';
             case 'wireguard': return 'WireGuard';
             case 'dns': return 'AmneziaDNS';
+            case 'socks5': return 'SOCKS5 Proxy';
+            case 'adguard': return 'AdGuard Home';
             default: return proto;
         }
     }
@@ -646,7 +829,7 @@
 
     function updateStatusCounts(protocols) {
         const protos = ['awg', 'awg2', 'awg_legacy', 'xray', 'telemt', 'wireguard'];
-        const servs = ['dns'];
+        const servs = ['dns', 'adguard', 'socks5'];
 
         let pRunning = 0, pTotal = protos.length;
         let sRunning = 0, sTotal = servs.length;
@@ -664,6 +847,38 @@
 
     let serverConfigFilename = 'server.conf';
 
+    // Services that don't have per-user "connections" — they expose a single
+    // shared endpoint (DNS/proxy/admin UI) rather than per-client configs.
+    const SERVICE_PROTOS = ['dns', 'socks5', 'adguard'];
+
+    function buildServiceInfoGrid(proto, info) {
+        // Custom info-grid markup for non-VPN services. Returns HTML for the grid body.
+        if (proto === 'dns') {
+            return `<div class="protocol-info-item"><span class="protocol-info-label">${_('port')}</span><span class="protocol-info-value">172.29.172.254:53 (Internal)</span></div>`;
+        }
+        if (proto === 'socks5') {
+            const user = info.username ? info.username : '—';
+            return `
+                <div class="protocol-info-item"><span class="protocol-info-label">${_('port')}</span><span class="protocol-info-value">${info.port}/TCP</span></div>
+                <div class="protocol-info-item"><span class="protocol-info-label">${_('socks5_username')}</span><span class="protocol-info-value">${user}</span></div>
+            `;
+        }
+        if (proto === 'adguard') {
+            const mode = info.mode === 'replace' ? _('adguard_mode_replace') : _('adguard_mode_sidebyside');
+            const ip = info.internal_ip || '—';
+            const webPort = info.web_port || 3000;
+            const url = info.web_exposed
+                ? `http://${SERVER_HOST}:${webPort}`
+                : `http://${ip}:${webPort}`;
+            return `
+                <div class="protocol-info-item"><span class="protocol-info-label">${_('adguard_mode')}</span><span class="protocol-info-value">${mode}</span></div>
+                <div class="protocol-info-item"><span class="protocol-info-label">${_('adguard_internal_ip')}</span><span class="protocol-info-value">${ip}</span></div>
+                <div class="protocol-info-item"><span class="protocol-info-label">${_('adguard_web_ui')}</span><span class="protocol-info-value"><a href="${url}" target="_blank" rel="noopener">${url}</a></span></div>
+            `;
+        }
+        return '';
+    }
+
     function updateProtocolCard(proto, info) {
         const protoKey = proto.replace('_', '-');
         const statusEl = document.getElementById(`${protoKey}-status`);
@@ -672,23 +887,44 @@
         const actionsEl = document.getElementById(`${protoKey}-actions`);
         const ctrlEl = document.getElementById(`${protoKey}-ctrl`);
 
+        // Some service cards may not exist in the template (e.g. on older builds);
+        // skip quietly rather than throwing so a partial UI still renders.
+        if (!statusEl || !actionsEl) return;
+
+        const isService = SERVICE_PROTOS.includes(proto);
+
         if (info.container_running) {
             installedProtocols[proto] = true;
             statusEl.innerHTML = `<span class="badge badge-success"><span class="badge-dot"></span> ${_('run')}</span>`;
-            if (info.port || info.clients_count !== undefined) {
+            if (info.port || info.clients_count !== undefined || isService) {
                 infoEl.classList.remove('hidden');
                 let grid = '';
-                if (info.port) {
-                    if (proto === 'dns') {
-                        grid += `<div class="protocol-info-item"><span class="protocol-info-label">${_('port')}</span><span class="protocol-info-value">172.29.172.254:53 (Internal)</span></div>`;
-                    } else {
-                        grid += `<div class="protocol-info-item"><span class="protocol-info-label">${_('port')}</span><span class="protocol-info-value">${info.port}/${(proto === 'xray' || proto === 'telemt') ? 'TCP' : 'UDP'}</span></div>`;
-                    }
+                if (isService) {
+                    grid = buildServiceInfoGrid(proto, info);
+                } else if (info.port) {
+                    grid += `<div class="protocol-info-item"><span class="protocol-info-label">${_('port')}</span><span class="protocol-info-value">${info.port}/${(proto === 'xray' || proto === 'telemt') ? 'TCP' : 'UDP'}</span></div>`;
                 }
-                if (info.clients_count !== undefined) grid += `<div class="protocol-info-item"><span class="protocol-info-label">${_('connections')}</span><span class="protocol-info-value">${info.clients_count}</span></div>`;
+                if (!isService && info.clients_count !== undefined) {
+                    grid += `<div class="protocol-info-item"><span class="protocol-info-label">${_('connections')}</span><span class="protocol-info-value">${info.clients_count}</span></div>`;
+                }
                 infoGrid.innerHTML = grid;
             }
-            if (proto === 'dns') {
+            if (proto === 'socks5') {
+                actionsEl.innerHTML = `
+                    <button class="btn btn-secondary btn-sm" onclick="openSocks5Settings()" style="flex:1">${_('socks5_change_settings')}</button>
+                    <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')">${_('uninstall')}</button>
+                `;
+            } else if (proto === 'adguard') {
+                const webPort = info.web_port || 3000;
+                const ip = info.internal_ip || '172.29.172.253';
+                const url = info.web_exposed
+                    ? `http://${SERVER_HOST}:${webPort}`
+                    : `http://${ip}:${webPort}`;
+                actionsEl.innerHTML = `
+                    <a class="btn btn-secondary btn-sm" href="${url}" target="_blank" rel="noopener" style="flex:1">${_('adguard_open_ui')}</a>
+                    <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')">${_('uninstall')}</button>
+                `;
+            } else if (proto === 'dns') {
                 actionsEl.innerHTML = `
                     <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')" style="flex:1">${_('uninstall')}</button>
                 `;
@@ -699,10 +935,12 @@
                 `;
                 showConnectionsSection();
             }
-            // Show control buttons (stop + config)
+            // Show control buttons (stop + optional config). Services use the
+            // container's own config UI (AdGuard web wizard / our SOCKS5 modal /
+            // unbound's static config), so we don't expose a raw editor for them.
             if (ctrlEl) {
                 ctrlEl.style.cssText = '';
-                if (proto === 'dns') {
+                if (isService) {
                     ctrlEl.innerHTML = `
                         <button class="btn btn-danger btn-sm" onclick="toggleContainer('${proto}', true)" title="${_('stop_container_confirm').replace('{}', '')}">${_('stop_btn')}</button>
                     `;
@@ -716,9 +954,10 @@
         } else if (info.container_exists) {
             installedProtocols[proto] = false;
             statusEl.innerHTML = `<span class="badge badge-danger"><span class="badge-dot"></span> ${_('stop')}</span>`;
-            if (proto === 'dns') {
+            if (isService) {
                 actionsEl.innerHTML = `
-                    <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')" style="flex:1">${_('uninstall')}</button>
+                    <button class="btn btn-primary btn-sm" onclick="openInstallModal('${proto}')" style="flex:1">${_('reinstall')}</button>
+                    <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')">${_('uninstall')}</button>
                 `;
             } else {
                 actionsEl.innerHTML = `
@@ -726,10 +965,9 @@
                     <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')">${_('uninstall')}</button>
                 `;
             }
-            // Show control buttons (start + config)
             if (ctrlEl) {
                 ctrlEl.style.cssText = '';
-                if (proto === 'dns') {
+                if (isService) {
                     ctrlEl.innerHTML = `
                         <button class="btn btn-primary btn-sm" onclick="toggleContainer('${proto}', false)" title="${_('start_container_confirm').replace('{}', '')}">${_('start_btn')}</button>
                     `;
@@ -832,20 +1070,24 @@
     function openInstallModal(proto) {
         currentInstallProto = proto;
         const name = getProtoTitle(proto);
-        document.getElementById('installModalTitle').textContent = `Установить ${name}`;
+        document.getElementById('installModalTitle').textContent = `${_('install')} ${name}`;
 
         const portInput = document.getElementById('installPort');
         const portLabel = document.getElementById('installPortLabel');
         const portHint = document.getElementById('installPortHint');
         const telemtOpts = document.getElementById('telemtOptions');
+        const socks5Opts = document.getElementById('socks5Options');
+        const adguardOpts = document.getElementById('adguardOptions');
 
         telemtOpts.style.display = 'none';
+        socks5Opts.style.display = 'none';
+        adguardOpts.style.display = 'none';
 
         if (proto === 'dns') {
             portLabel.textContent = _('port') + ' (Internal)';
             portInput.value = '53';
             portInput.disabled = true;
-            portHint.textContent = 'Сервис будет запущен во внутренней сети (172.29.172.254) без привязки к портам хоста.';
+            portHint.textContent = _('dns_internal_hint');
         } else if (proto === 'xray') {
             portLabel.textContent = _('port') + ' (TCP)';
             portInput.disabled = false;
@@ -854,8 +1096,21 @@
         } else if (proto === 'telemt') {
             portLabel.textContent = _('port') + ' (TCP)';
             portInput.value = '443';
-            portHint.textContent = 'Порт для Telegram-прокси (обычно 443)';
+            portInput.disabled = false;
+            portHint.textContent = _('telemt_port_hint');
             telemtOpts.style.display = 'block';
+        } else if (proto === 'socks5') {
+            portLabel.textContent = _('port') + ' (TCP)';
+            portInput.value = '38080';
+            portInput.disabled = false;
+            portHint.textContent = _('socks5_port_hint');
+            socks5Opts.style.display = 'block';
+        } else if (proto === 'adguard') {
+            portLabel.textContent = _('adguard_dns_port');
+            portInput.value = '53';
+            portInput.disabled = false;
+            portHint.textContent = _('adguard_dns_port_hint');
+            adguardOpts.style.display = 'block';
         } else {
             portLabel.textContent = _('port') + ' (UDP)';
             portInput.value = '55424';
@@ -907,6 +1162,18 @@
                 params.tls_emulation = document.getElementById('installTelemtTls').checked;
                 params.tls_domain = document.getElementById('installTelemtDomain').value;
                 params.max_connections = parseInt(document.getElementById('installTelemtMaxConns').value) || 0;
+            } else if (currentInstallProto === 'socks5') {
+                params.socks5_username = document.getElementById('installSocks5User').value || 'proxy_user';
+                params.socks5_password = document.getElementById('installSocks5Pass').value || '';
+            } else if (currentInstallProto === 'adguard') {
+                const modeRadio = document.querySelector('input[name="adguardMode"]:checked');
+                params.adguard_mode = modeRadio ? modeRadio.value : 'sidebyside';
+                params.adguard_web_port = parseInt(document.getElementById('installAdguardWebPort').value) || 3000;
+                params.adguard_expose_web = document.getElementById('installAdguardExposeWeb').checked;
+                params.adguard_dot_port = parseInt(document.getElementById('installAdguardDotPort').value) || 853;
+                params.adguard_doh_port = parseInt(document.getElementById('installAdguardDohPort').value) || 443;
+                params.adguard_expose_dot = document.getElementById('installAdguardExposeDot').checked;
+                params.adguard_expose_doh = document.getElementById('installAdguardExposeDoh').checked;
             }
             const result = await apiCall(`/api/servers/${SERVER_ID}/install`, 'POST', params);
             clearInterval(progressInterval);
@@ -938,6 +1205,49 @@
             setTimeout(() => window.location.reload(), 800);
         } catch (err) {
             showToast('Ошибка: ' + err.message, 'error');
+        }
+    }
+
+    // ========== SOCKS5 Settings ==========
+    async function openSocks5Settings() {
+        try {
+            const data = await apiCall(`/api/servers/${SERVER_ID}/socks5/credentials`);
+            document.getElementById('socks5SetPort').value = data.port || 38080;
+            document.getElementById('socks5SetUser').value = data.username || 'proxy_user';
+            document.getElementById('socks5SetPass').value = data.password || '';
+            openModal('socks5SettingsModal');
+        } catch (err) {
+            showToast(_('error') + ': ' + err.message, 'error');
+        }
+    }
+
+    async function saveSocks5Settings() {
+        const btn = document.getElementById('socks5SaveBtn');
+        const text = document.getElementById('socks5SaveBtnText');
+        const spinner = document.getElementById('socks5SaveSpinner');
+        const port = parseInt(document.getElementById('socks5SetPort').value) || 38080;
+        const username = document.getElementById('socks5SetUser').value.trim();
+        const password = document.getElementById('socks5SetPass').value.trim();
+        btn.disabled = true;
+        text.textContent = _('saving') || 'Saving...';
+        spinner.classList.remove('hidden');
+        try {
+            const res = await apiCall(`/api/servers/${SERVER_ID}/socks5/credentials`, 'POST', {
+                port, username, password
+            });
+            if (res.status === 'success') {
+                showToast(_('socks5_settings_saved'), 'success');
+                closeModal('socks5SettingsModal');
+                setTimeout(() => checkServer(), 500);
+            } else {
+                throw new Error(res.message || res.error || 'Unknown error');
+            }
+        } catch (err) {
+            showToast(_('error') + ': ' + err.message, 'error');
+        } finally {
+            btn.disabled = false;
+            text.textContent = _('save');
+            spinner.classList.add('hidden');
         }
     }
 

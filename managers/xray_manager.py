@@ -23,9 +23,83 @@ class XrayManager:
 
     def _config_path(self):
         return f'{self._config_dir()}/server.json'
-        
+
+    def _list_xray_files(self):
+        """List filenames in the on-disk Xray config directory."""
+        out, _, code = self.ssh.run_sudo_command(f"ls -1 {self._config_dir()} 2>/dev/null")
+        if code != 0:
+            return []
+        return [f for f in out.strip().split('\n') if f]
+
+    def _detect_layout(self):
+        """Pick which on-disk layout this installation uses.
+
+        'native' — official Amnezia client layout: xray_private.key,
+        xray_public.key, xray_short_id.key, xray_uuid.key plus a clientsTable
+        file without an extension.
+        'panel'  — legacy web-panel layout: meta.json + clientsTable.json.
+
+        On a fresh node with no Xray files yet, defaults to 'native' so new
+        installs produce the same artifacts as the official client.
+        """
+        if hasattr(self, '_cached_layout'):
+            return self._cached_layout
+        files = set(self._list_xray_files())
+        if {'xray_private.key', 'xray_public.key'} & files:
+            layout = 'native'
+        elif 'meta.json' in files:
+            layout = 'panel'
+        else:
+            layout = 'native'
+        self._cached_layout = layout
+        return layout
+
+    def _clients_table_filename(self):
+        return 'clientsTable' if self._detect_layout() == 'native' else 'clientsTable.json'
+
     def _clients_table_path(self):
-        return f'{self._config_dir()}/clientsTable.json'
+        return f'{self._config_dir()}/{self._clients_table_filename()}'
+
+    def _read_remote_file(self, path):
+        """Read a remote text file, preferring the running container's view."""
+        out, _, code = self.ssh.run_sudo_command(
+            f"docker exec {self.CONTAINER_NAME} cat {path} 2>/dev/null"
+        )
+        if code != 0 or not out:
+            out, _, code = self.ssh.run_sudo_command(f"cat {path} 2>/dev/null")
+        if code != 0 or not out.strip():
+            return None
+        return out
+
+    def _derive_pubkey_from_priv(self, priv_key):
+        """Derive the Reality public key from a private key via the xray binary.
+        Used as a fallback when xray_public.key is missing or unreadable.
+        """
+        if not priv_key:
+            return ''
+        out, _, code = self.ssh.run_sudo_command(
+            f"docker exec {self.CONTAINER_NAME} /usr/bin/xray x25519 -i {priv_key}"
+        )
+        if code != 0 or not out.strip():
+            out, _, code = self.ssh.run_sudo_command(
+                f"docker run --rm --entrypoint=\"\" {self.IMAGE_NAME} /usr/bin/xray x25519 -i {priv_key}"
+            )
+        if code != 0 or not out:
+            return ''
+        for line in out.split('\n'):
+            if 'Public' in line and ':' in line:
+                return line.split(':', 1)[1].strip()
+        return ''
+
+    def _get_default_xray_uuid(self):
+        """UUID of the install-time default client (xray_uuid.key) — meaningful only
+        for native-layout installs. Imports skip this UUID, mirroring the official
+        Amnezia client behaviour (see usersController.cpp::getXrayClients).
+        """
+        if self._detect_layout() != 'native':
+            return ''
+        out = self._read_remote_file(f"{self._config_dir()}/xray_uuid.key")
+        return (out or '').strip()
 
     # ===================== INSTALLATION =====================
 
@@ -78,7 +152,7 @@ class XrayManager:
 RUN apk add --no-cache curl unzip bash openssl netcat-openbsd dumb-init rng-tools xz iptables ip6tables
 RUN apk --update upgrade --no-cache
 RUN mkdir -p /opt/amnezia/xray
-RUN curl -L -H "Cache-Control: no-cache" -o /root/xray.zip "https://github.com/XTLS/Xray-core/releases/download/v1.8.4/Xray-linux-64.zip" && \\
+RUN curl -L -H "Cache-Control: no-cache" -o /root/xray.zip "https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip" && \\
     unzip /root/xray.zip -d /usr/bin/ && \\
     chmod a+x /usr/bin/xray && \\
     rm /root/xray.zip
@@ -197,19 +271,17 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
             }
         }
         
-        # Save keys for our reference
-        meta_json = {
-            "site_name": site_name,
-            "public_key": pub_key,
-            "private_key": priv_key,
-            "short_id": short_id,
-            "port": int(port)
-        }
-
         self.ssh.run_sudo_command("mkdir -p /opt/amnezia/xray")
         self.ssh.upload_file_sudo(json.dumps(server_json, indent=2), "/opt/amnezia/xray/server.json")
-        self.ssh.upload_file_sudo(json.dumps(meta_json, indent=2), "/opt/amnezia/xray/meta.json")
-        self.ssh.upload_file_sudo("[]", "/opt/amnezia/xray/clientsTable.json")
+        # Native layout — separate key files matching the official Amnezia client install.
+        # See client/server_scripts/xray/configure_container.sh for the canonical layout.
+        self.ssh.upload_file_sudo(priv_key + '\n', "/opt/amnezia/xray/xray_private.key")
+        self.ssh.upload_file_sudo(pub_key + '\n', "/opt/amnezia/xray/xray_public.key")
+        self.ssh.upload_file_sudo(short_id + '\n', "/opt/amnezia/xray/xray_short_id.key")
+        # xray_uuid.key marks the install-time "default" client whose ID gets skipped on
+        # auto-import. Panel installs do not reserve such a client, so we leave it empty.
+        self.ssh.upload_file_sudo('\n', "/opt/amnezia/xray/xray_uuid.key")
+        self.ssh.upload_file_sudo("[]", "/opt/amnezia/xray/clientsTable")
 
         results.append("Starting container...")
         run_cmd = f"""docker run -d \\
@@ -240,27 +312,121 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
     # ===================== CLIENT MANAGEMENT =====================
 
     def _get_server_json(self):
-        out, _, code = self.ssh.run_sudo_command(f"cat {self._config_path()}")
-        if code != 0: return None
+        """Read server.json — tries inside container first, falls back to host path."""
+        out, _, code = self.ssh.run_sudo_command(
+            f"docker exec {self.CONTAINER_NAME} cat {self._config_path()}"
+        )
+        if code != 0:
+            out, _, code = self.ssh.run_sudo_command(f"cat {self._config_path()}")
+        if code != 0 or not out.strip():
+            return None
         return json.loads(out)
 
     def _save_server_json(self, data):
-        self.ssh.upload_file_sudo(json.dumps(data, indent=2), self._config_path())
+        """Write server.json into container via docker cp AND sync to host path."""
+        tmp_file = "/tmp/_xray_server.json"
+        self.ssh.upload_file_sudo(json.dumps(data, indent=2), tmp_file)
+        self.ssh.run_sudo_command(
+            f"docker cp {tmp_file} {self.CONTAINER_NAME}:{self._config_path()}"
+        )
+        # Also keep host copy in sync (handles both volume-mount and no-mount installs)
+        self.ssh.run_sudo_command(
+            f"cp {tmp_file} {self._config_path()} 2>/dev/null || true"
+        )
         self.ssh.run_sudo_command(f"docker restart {self.CONTAINER_NAME}")
 
     def _get_meta_json(self):
-        out, _, code = self.ssh.run_sudo_command(f"cat /opt/amnezia/xray/meta.json")
-        if code != 0: return {}
-        return json.loads(out)
+        """Read protocol metadata. Supports both layouts.
+
+        Native layout pulls keys from xray_*.key files. Panel layout reads
+        meta.json. Either way, port and site_name come from server.json since
+        that is the authoritative runtime config — meta.json may go stale if
+        the user edits server.json directly via the panel.
+        """
+        config = self._get_server_json() or {}
+
+        port = None
+        site_name = None
+        rs = {}
+        try:
+            ib = next(b for b in config.get('inbounds', []) if b.get('protocol') == 'vless')
+            port = ib.get('port')
+            rs = ib.get('streamSettings', {}).get('realitySettings', {}) or {}
+            names = rs.get('serverNames') or []
+            if names:
+                site_name = names[0]
+        except StopIteration:
+            pass
+
+        if self._detect_layout() == 'native':
+            priv = (self._read_remote_file(f"{self._config_dir()}/xray_private.key") or '').strip()
+            pub = (self._read_remote_file(f"{self._config_dir()}/xray_public.key") or '').strip()
+            sid = (self._read_remote_file(f"{self._config_dir()}/xray_short_id.key") or '').strip()
+            if not priv:
+                priv = rs.get('privateKey', '')
+            if not sid:
+                sids = rs.get('shortIds') or []
+                sid = sids[0] if sids else ''
+            if not pub:
+                pub = self._derive_pubkey_from_priv(priv)
+            return {
+                'private_key': priv,
+                'public_key': pub,
+                'short_id': sid,
+                'port': port,
+                'site_name': site_name or 'yahoo.com',
+            }
+
+        # Panel (legacy) layout
+        out = self._read_remote_file(f"{self._config_dir()}/meta.json")
+        meta = {}
+        if out:
+            try:
+                meta = json.loads(out)
+            except Exception:
+                meta = {}
+        if port is not None:
+            meta['port'] = port
+        if site_name:
+            meta['site_name'] = site_name
+        if not meta.get('private_key'):
+            meta['private_key'] = rs.get('privateKey', '')
+        if not meta.get('short_id'):
+            sids = rs.get('shortIds') or []
+            if sids:
+                meta['short_id'] = sids[0]
+        if not meta.get('public_key') and meta.get('private_key'):
+            meta['public_key'] = self._derive_pubkey_from_priv(meta['private_key'])
+        return meta
 
     def _get_clients_table(self):
-        out, _, code = self.ssh.run_sudo_command(f"cat {self._clients_table_path()}")
-        if code != 0 or not out.strip(): return []
-        try: return json.loads(out)
-        except: return []
+        """Read clientsTable, trying both layout filenames."""
+        layout = self._detect_layout()
+        primary = 'clientsTable' if layout == 'native' else 'clientsTable.json'
+        fallback = 'clientsTable.json' if layout == 'native' else 'clientsTable'
+        for fname in (primary, fallback):
+            out = self._read_remote_file(f"{self._config_dir()}/{fname}")
+            if not out or not out.strip():
+                continue
+            try:
+                return json.loads(out)
+            except Exception:
+                continue
+        return []
 
     def _save_clients_table(self, data):
-        self.ssh.upload_file_sudo(json.dumps(data, indent=2), self._clients_table_path())
+        """Write clientsTable to the file matching the current layout, in both
+        the container and the host bind-mount.
+        """
+        path = self._clients_table_path()
+        tmp_file = "/tmp/_xray_clients.json"
+        self.ssh.upload_file_sudo(json.dumps(data, indent=2), tmp_file)
+        self.ssh.run_sudo_command(
+            f"docker cp {tmp_file} {self.CONTAINER_NAME}:{path}"
+        )
+        self.ssh.run_sudo_command(
+            f"cp {tmp_file} {path} 2>/dev/null || true"
+        )
 
     def _upgrade_config_for_stats(self, config):
         """Injects API and Stats blocks into older Xray configs transparently."""
@@ -350,10 +516,45 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
 
     def get_clients(self, protocol=None):
         config = self._get_server_json()
-        if config:
-            self._upgrade_config_for_stats(config)
+        if not config:
+            return []
+
+        self._upgrade_config_for_stats(config)
+
+        # Collect all client IDs currently registered in the Xray server config
+        xray_clients = []
+        for ib in config.get('inbounds', []):
+            if ib.get('protocol') == 'vless':
+                xray_clients.extend(ib.get('settings', {}).get('clients', []))
 
         clients_table = self._get_clients_table()
+        table_ids = {c['clientId'] for c in clients_table}
+
+        # Auto-import clients present in server.json but missing from clientsTable
+        # (e.g. added via the native Amnezia phone/desktop app). Skip the install-time
+        # default UUID for native-layout installs — the official client treats it as
+        # the device of the user who installed the server, not a manageable client.
+        default_uuid = self._get_default_xray_uuid()
+        updated = False
+        for xc in xray_clients:
+            uid = xc.get('id')
+            if not uid or uid in table_ids or uid == default_uuid:
+                continue
+            clients_table.append({
+                'clientId': uid,
+                'userData': {
+                    'clientName': f'Imported_{uid[:8]}',
+                    'creationDate': datetime.now().isoformat(),
+                    'enabled': True
+                }
+            })
+            table_ids.add(uid)
+            updated = True
+            logger.info(f"Auto-imported Xray client {uid[:8]} from server.json")
+
+        if updated:
+            self._save_clients_table(clients_table)
+
         stats = self._query_xray_stats()
 
         for c in clients_table:
@@ -362,8 +563,6 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
                 user_data = c.setdefault('userData', {})
                 rx = stats[uid]['rx']
                 tx = stats[uid]['tx']
-                # Xray doesn't natively expose latest handshake easily in this format,
-                # but we can map the traffic accurately
                 if rx > 0 or tx > 0:
                     user_data['dataReceived'] = self._format_bytes(rx)
                     user_data['dataSent'] = self._format_bytes(tx)

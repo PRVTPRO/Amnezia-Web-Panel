@@ -24,17 +24,53 @@ try:
 except ImportError:
     CaptchaGenerator = None
 
-from ssh_manager import SSHManager
-from awg_manager import AWGManager
-from xray_manager import XrayManager
-from wireguard_manager import WireGuardManager
+from managers.ssh_manager import SSHManager
+from managers.awg_manager import AWGManager
+from managers.xray_manager import XrayManager
+from managers.wireguard_manager import WireGuardManager
 import telegram_bot as tg_bot
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Amnezia Web Panel")
+# Ordered list of OpenAPI tag groups — the order here drives the section order in /docs and /redoc.
+OPENAPI_TAGS = [
+    {"name": "System Templates", "description": "HTML pages served to browsers. These return Jinja-rendered templates rather than a JSON contract — they are not part of the public API and are listed here only for completeness."},
+    {"name": "Authentication", "description": "Login, captcha, and session lifecycle."},
+    {"name": "Servers", "description": "Server inventory, lifecycle and host-level operations (add, edit, delete, ping, reorder, reboot, clear, stats, status check)."},
+    {"name": "Protocols", "description": "Install, uninstall, container start/stop and raw config editing for the protocols/services on a server (AWG, Xray, WireGuard, Telemt, AmneziaDNS, AdGuard Home, SOCKS5)."},
+    {"name": "Connections", "description": "Per-protocol VPN client connections on a server (CRUD plus enable/disable and config retrieval)."},
+    {"name": "Users", "description": "Panel user accounts and the connections assigned to them."},
+    {"name": "Self-service", "description": "Endpoints called by a regular user for their own data (the /my surface)."},
+    {"name": "Sharing", "description": "Public, token-protected configuration sharing for end users — no panel session required."},
+    {"name": "Settings", "description": "Panel-wide settings, Telegram bot, Remnawave sync, JSON backup/restore."},
+    {"name": "API Tokens", "description": "Bearer tokens for external integrations. Send the token in `Authorization: Bearer <token>`; tokens have admin-equivalent rights and are tied to the admin user that created them."},
+]
+
+app = FastAPI(
+    title="Amnezia Web Panel",
+    openapi_tags=OPENAPI_TAGS,
+    # FastAPI's stock /redoc loads the JS bundle from `redoc@next` on jsdelivr —
+    # an unstable rolling tag that breaks unpredictably. Disable the default and
+    # serve our own /redoc just below, pinned to the stable v2 bundle.
+    redoc_url=None,
+)
+
+
+@app.get("/redoc", include_in_schema=False)
+async def custom_redoc():
+    """Self-curated ReDoc page. Differs from FastAPI's default in two ways:
+    pinned bundle (`redoc@2` instead of `@next`) and Google Fonts disabled
+    (the Montserrat/Roboto stylesheet is blocked on a lot of networks and made
+    the page hang for some users)."""
+    from fastapi.openapi.docs import get_redoc_html
+    return get_redoc_html(
+        openapi_url=app.openapi_url or "/openapi.json",
+        title=f"{app.title} — ReDoc",
+        redoc_js_url="https://cdn.jsdelivr.net/npm/redoc@2/bundles/redoc.standalone.js",
+        with_google_fonts=False,
+    )
 app.add_middleware(SessionMiddleware, secret_key=os.environ.get('SECRET_KEY', secrets.token_hex(32)))
 
 # Mount static files & templates
@@ -47,7 +83,7 @@ else:
     application_path = os.path.dirname(__file__)
 
 DATA_FILE = os.path.join(application_path, 'data.json')
-CURRENT_VERSION = "v1.4.2"
+CURRENT_VERSION = "v1.4.3"
 
 
 # ======================== Translations ========================
@@ -89,6 +125,7 @@ def load_data():
     data.setdefault('servers', [])
     data.setdefault('users', [])
     data.setdefault('user_connections', [])
+    data.setdefault('api_tokens', [])
     data.setdefault('settings', {
         'appearance': {
             'title': 'Amnezia',
@@ -131,18 +168,24 @@ def get_ssh(server):
 
 def get_protocol_manager(ssh, protocol: str):
     if protocol == 'xray':
-        from xray_manager import XrayManager
+        from managers.xray_manager import XrayManager
         return XrayManager(ssh)
     elif protocol == 'telemt':
-        from telemt_manager import TelemtManager
+        from managers.telemt_manager import TelemtManager
         return TelemtManager(ssh)
     elif protocol == 'dns':
-        from dns_manager import DNSManager
+        from managers.dns_manager import DNSManager
         return DNSManager(ssh)
     elif protocol == 'wireguard':
-        from wireguard_manager import WireGuardManager
+        from managers.wireguard_manager import WireGuardManager
         return WireGuardManager(ssh)
-    from awg_manager import AWGManager
+    elif protocol == 'socks5':
+        from managers.socks5_manager import Socks5Manager
+        return Socks5Manager(ssh)
+    elif protocol == 'adguard':
+        from managers.adguard_manager import AdguardManager
+        return AdguardManager(ssh)
+    from managers.awg_manager import AWGManager
     return AWGManager(ssh)
 
 
@@ -157,6 +200,65 @@ def _manager_call(manager, method, protocol, *args, **kwargs):
 def generate_vpn_link(config_text):
     b64 = base64.b64encode(config_text.strip().encode('utf-8')).decode('utf-8')
     return f"vpn://{b64}"
+
+
+# ===================== API tokens =====================
+
+API_TOKEN_PREFIX = 'awp_'  # "Amnezia Web Panel" — makes tokens visually distinct in logs / configs
+API_TOKEN_TOUCH_INTERVAL = 300  # don't re-write data.json more than once per 5 min per token
+
+
+def _hash_api_token(raw: str) -> str:
+    """One-way hash of a raw token. We never store the original token — only the
+    SHA-256 digest, plus a short prefix for the UI to identify rotations."""
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+
+def _generate_api_token() -> str:
+    """Generate a fresh bearer token. ~256 bits of entropy with a recognizable
+    'awp_' prefix so leaked tokens are obvious in source control / pastes."""
+    return f"{API_TOKEN_PREFIX}{secrets.token_urlsafe(32)}"
+
+
+def _resolve_api_token(data: dict, raw_token: str):
+    """Match a raw bearer token against stored hashes. Returns the user record
+    that owns the token, or None if the token is unknown / its owner is gone /
+    its owner is no longer admin-or-support."""
+    if not raw_token:
+        return None
+    token_hash = _hash_api_token(raw_token)
+    entry = next(
+        (t for t in data.get('api_tokens', []) if t.get('token_hash') == token_hash),
+        None,
+    )
+    if not entry:
+        return None
+    user = next((u for u in data.get('users', []) if u['id'] == entry.get('user_id')), None)
+    if not user:
+        return None
+    # Disabled or downgraded admins should not have a working token any more.
+    if not user.get('enabled', True):
+        return None
+    if user.get('role') not in ('admin', 'support'):
+        return None
+    return (entry, user)
+
+
+def _touch_api_token(token_entry: dict) -> bool:
+    """Update last_used_at on a token entry, but only if enough time has passed
+    since the previous touch — avoids hot-write loops under load. Returns True
+    if the entry was updated and the caller should persist data."""
+    now = datetime.now()
+    last = token_entry.get('last_used_at')
+    if last:
+        try:
+            prev = datetime.fromisoformat(last)
+            if (now - prev).total_seconds() < API_TOKEN_TOUCH_INTERVAL:
+                return False
+        except Exception:
+            pass
+    token_entry['last_used_at'] = now.isoformat()
+    return True
 
 
 def hash_password(password: str) -> str:
@@ -196,6 +298,31 @@ async def perform_delete_user(data: dict, user_id: str):
     data['users'] = [u for u in data['users'] if u['id'] != user_id]
     return True
 
+
+async def perform_toggle_user(data: dict, user_id: str, enable: bool) -> bool:
+    """Enable or disable a user and propagate the change to all their VPN connections."""
+    user = next((u for u in data['users'] if u['id'] == user_id), None)
+    if not user:
+        return False
+
+    user['enabled'] = enable
+
+    user_conns = [c for c in data.get('user_connections', []) if c['user_id'] == user_id]
+    for uc in user_conns:
+        try:
+            sid = uc['server_id']
+            if sid >= len(data['servers']):
+                continue
+            server = data['servers'][sid]
+            ssh = get_ssh(server)
+            await asyncio.to_thread(ssh.connect)
+            manager = get_protocol_manager(ssh, uc['protocol'])
+            await asyncio.to_thread(
+                _manager_call, manager, 'toggle_client', uc['protocol'], uc['client_id'], enable
+            )
+            await asyncio.to_thread(ssh.disconnect)
+        except Exception as e:
+            logger.warning(f"Failed to toggle connection {uc['client_id']} during user toggle: {e}")
 
     return True
 
@@ -486,12 +613,47 @@ class AddServerRequest(BaseModel):
     name: str = ''
 
 
+class EditServerRequest(BaseModel):
+    name: str = ''
+    host: str = ''
+    ssh_port: int = 22
+    username: str = ''
+    # Optional[str] = None lets the client distinguish "leave field as is"
+    # (omit / null) from "explicitly clear" (empty string). Both credential
+    # fields can be omitted to keep current auth unchanged.
+    password: Optional[str] = None
+    private_key: Optional[str] = None
+
+
+class ReorderServersRequest(BaseModel):
+    # `order[i]` is the *old* server index now at position `i` in the new layout.
+    order: List[int]
+
+
 class InstallProtocolRequest(BaseModel):
     protocol: str = 'awg'
     port: str = '55424'
     tls_emulation: Optional[bool] = None
     tls_domain: Optional[str] = None
     max_connections: Optional[int] = None
+    # SOCKS5
+    socks5_username: Optional[str] = None
+    socks5_password: Optional[str] = None
+    # AdGuard Home
+    adguard_mode: Optional[str] = None  # 'replace' or 'sidebyside'
+    adguard_web_port: Optional[int] = None
+    adguard_expose_web: Optional[bool] = None
+    adguard_dot_port: Optional[int] = None
+    adguard_doh_port: Optional[int] = None
+    adguard_expose_dns: Optional[bool] = None
+    adguard_expose_dot: Optional[bool] = None
+    adguard_expose_doh: Optional[bool] = None
+
+
+class Socks5SettingsRequest(BaseModel):
+    port: Optional[int] = None
+    username: Optional[str] = None
+    password: Optional[str] = None
 
 
 class ProtocolRequest(BaseModel):
@@ -630,6 +792,10 @@ class AddUserConnectionRequest(BaseModel):
     telemt_max_conns: Optional[int] = None
 
 
+class CreateApiTokenRequest(BaseModel):
+    name: str
+
+
 class ShareSetupRequest(BaseModel):
     enabled: bool
     password: Optional[str] = None
@@ -688,6 +854,12 @@ async def startup():
             changed = True
             logger.info(f"Migrated user {u['username']} to new traffic/sharing fields")
     
+    # API tokens collection — initialise lazily on first run.
+    if 'api_tokens' not in data:
+        data['api_tokens'] = []
+        changed = True
+        logger.info("Initialised empty api_tokens collection")
+
     # SSL settings migration
     if 'ssl' not in data.get('settings', {}):
         if 'settings' not in data: data['settings'] = {}
@@ -852,14 +1024,14 @@ async def periodic_background_tasks():
 
 # ======================== PAGE ROUTES ========================
 
-@app.get('/login', response_class=HTMLResponse)
+@app.get('/login', response_class=HTMLResponse, tags=["System Templates"])
 async def login_page(request: Request):
     if get_current_user(request):
         return RedirectResponse(url='/', status_code=302)
     return tpl(request, 'login.html')
 
 
-@app.get("/set_lang/{lang}")
+@app.get("/set_lang/{lang}", tags=["System Templates"])
 async def set_lang(lang: str, request: Request):
     ref = request.headers.get("referer", "/")
     response = RedirectResponse(url=ref)
@@ -867,13 +1039,13 @@ async def set_lang(lang: str, request: Request):
     return response
 
 
-@app.get('/logout')
+@app.get('/logout', tags=["System Templates"])
 async def logout(request: Request):
     request.session.clear()
     return RedirectResponse(url='/login', status_code=302)
 
 
-@app.get('/', response_class=HTMLResponse)
+@app.get('/', response_class=HTMLResponse, tags=["System Templates"])
 async def index(request: Request):
     user = get_current_user(request)
     if not user:
@@ -884,7 +1056,7 @@ async def index(request: Request):
     return tpl(request, 'index.html', servers=data['servers'])
 
 
-@app.get('/server/{server_id}', response_class=HTMLResponse)
+@app.get('/server/{server_id}', response_class=HTMLResponse, tags=["System Templates"])
 async def server_detail(request: Request, server_id: int):
     user = get_current_user(request)
     if not user:
@@ -899,7 +1071,7 @@ async def server_detail(request: Request, server_id: int):
     return tpl(request, 'server.html', server=server, server_id=server_id, users=users_list)
 
 
-@app.get('/users', response_class=HTMLResponse)
+@app.get('/users', response_class=HTMLResponse, tags=["System Templates"])
 async def users_page(request: Request):
     user = get_current_user(request)
     if not user:
@@ -916,7 +1088,7 @@ async def users_page(request: Request):
     return tpl(request, 'users.html', users=users_list, servers=servers)
 
 
-@app.get('/my', response_class=HTMLResponse)
+@app.get('/my', response_class=HTMLResponse, tags=["System Templates"])
 async def my_connections_page(request: Request):
     user = get_current_user(request)
     if not user:
@@ -935,7 +1107,7 @@ async def my_connections_page(request: Request):
 
 # ======================== AUTH API ========================
 
-@app.get('/api/auth/captcha')
+@app.get('/api/auth/captcha', tags=["Authentication"])
 async def api_captcha(request: Request):
     if not CaptchaGenerator:
         return JSONResponse({"error": "multicolorcaptcha is not installed"}, status_code=500)
@@ -952,7 +1124,7 @@ async def api_captcha(request: Request):
     return StreamingResponse(img_bytes, media_type="image/png")
 
 
-@app.post('/api/auth/login')
+@app.post('/api/auth/login', tags=["Authentication"])
 async def api_login(request: Request, req: LoginRequest):
     data = load_data()
     captcha_settings = data.get('settings', {}).get('captcha', {})
@@ -978,13 +1150,35 @@ async def api_login(request: Request, req: LoginRequest):
 # ======================== SERVER API (admin/support) ========================
 
 def _check_admin(request):
+    """Authorize an admin/support action via session cookie OR Bearer token.
+
+    Tokens are admin-equivalent and inherit the role of the user who created
+    them — if that user is later disabled or demoted, the token stops working.
+    """
     user = get_current_user(request)
-    if not user or user['role'] not in ('admin', 'support'):
-        return None
-    return user
+    if user and user['role'] in ('admin', 'support'):
+        return user
+
+    auth_header = request.headers.get('Authorization', '')
+    if auth_header.lower().startswith('bearer '):
+        raw_token = auth_header[7:].strip()
+        data = load_data()
+        resolved = _resolve_api_token(data, raw_token)
+        if resolved:
+            entry, token_user = resolved
+            # Best-effort last-used tracking; swallow write errors so a flaky
+            # disk never blocks an API call from succeeding.
+            try:
+                if _touch_api_token(entry):
+                    save_data(data)
+            except Exception as e:
+                logger.warning(f"Failed to touch API token last_used_at: {e}")
+            return token_user
+
+    return None
 
 
-@app.post('/api/servers/add')
+@app.post('/api/servers/add', tags=["Servers"])
 async def api_add_server(request: Request, req: AddServerRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -1020,7 +1214,128 @@ async def api_add_server(request: Request, req: AddServerRequest):
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
-@app.post('/api/servers/{server_id}/delete')
+@app.post('/api/servers/{server_id}/edit', tags=["Servers"])
+async def api_edit_server(request: Request, server_id: int, req: EditServerRequest):
+    """Update connection details for an existing server entry. Verifies the new
+    credentials by SSH-connecting before persisting, so a typo can't lock us out.
+    """
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+
+        new_host = (req.host or '').strip() or server['host']
+        new_user = (req.username or '').strip() or server['username']
+        new_port = int(req.ssh_port or server.get('ssh_port', 22))
+        new_name = (req.name or '').strip() or server.get('name') or new_host
+
+        # Credential resolution: a non-empty value in either field switches to
+        # that auth method (and clears the other). Both omitted => keep current.
+        if req.private_key:
+            new_pass, new_key = '', req.private_key
+        elif req.password:
+            new_pass, new_key = req.password, ''
+        else:
+            new_pass = server.get('password', '')
+            new_key = server.get('private_key', '')
+
+        if not new_pass and not new_key:
+            return JSONResponse({'error': 'Password or SSH key is required'}, status_code=400)
+
+        # Verify the new connection details before committing the change.
+        ssh = SSHManager(new_host, new_port, new_user, new_pass, new_key)
+        try:
+            ssh.connect()
+            server_info = ssh.test_connection()
+            ssh.disconnect()
+        except Exception as e:
+            return JSONResponse({'error': f'Connection failed: {e}'}, status_code=400)
+
+        server['name'] = new_name
+        server['host'] = new_host
+        server['ssh_port'] = new_port
+        server['username'] = new_user
+        server['password'] = new_pass
+        server['private_key'] = new_key
+        server['server_info'] = server_info
+        save_data(data)
+        return {'status': 'success', 'server_info': server_info}
+    except Exception as e:
+        logger.exception("Error editing server")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.get('/api/servers/{server_id}/ping', tags=["Servers"])
+async def api_server_ping(request: Request, server_id: int):
+    """Cheap reachability check: opens a TCP connection to the SSH port,
+    measures RTT, immediately closes. Runs on the asyncio loop so the page
+    can issue many pings in parallel without blocking each other.
+    """
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    data = load_data()
+    if server_id >= len(data['servers']):
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    server = data['servers'][server_id]
+    host = server['host']
+    port = int(server.get('ssh_port', 22))
+
+    import time as _time
+    t0 = _time.perf_counter()
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port), timeout=2.0
+        )
+        ms = round((_time.perf_counter() - t0) * 1000)
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+        return {'alive': True, 'ms': ms}
+    except asyncio.TimeoutError:
+        return {'alive': False, 'error': 'timeout', 'ms': None}
+    except Exception as e:
+        return {'alive': False, 'error': str(e), 'ms': None}
+
+
+@app.post('/api/servers/reorder', tags=["Servers"])
+async def api_reorder_servers(request: Request, req: ReorderServersRequest):
+    """Persist a user-defined ordering of servers. Also remaps `server_id`
+    references in user_connections so existing assignments survive the move.
+    """
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    async with DATA_LOCK:
+        data = load_data()
+        n = len(data['servers'])
+        order = req.order or []
+        if len(order) != n or sorted(order) != list(range(n)):
+            return JSONResponse(
+                {'error': f'Order must be a permutation of indices 0..{n - 1}'},
+                status_code=400,
+            )
+        new_servers = [data['servers'][i] for i in order]
+        # Map old index -> new index for user_connections remap
+        remap = {old: new for new, old in enumerate(order)}
+        for c in data.get('user_connections', []):
+            old_id = c.get('server_id')
+            if isinstance(old_id, int) and old_id in remap:
+                c['server_id'] = remap[old_id]
+        # Sync settings.sync.remnawave_server_id if it points at a moved server
+        sync_cfg = data.get('settings', {}).get('sync', {})
+        rsid = sync_cfg.get('remnawave_server_id')
+        if isinstance(rsid, int) and rsid in remap:
+            sync_cfg['remnawave_server_id'] = remap[rsid]
+        data['servers'] = new_servers
+        save_data(data)
+    return {'status': 'success'}
+
+
+@app.post('/api/servers/{server_id}/delete', tags=["Servers"])
 async def api_delete_server(request: Request, server_id: int):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -1041,7 +1356,7 @@ async def api_delete_server(request: Request, server_id: int):
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
-@app.post('/api/servers/{server_id}/reboot')
+@app.post('/api/servers/{server_id}/reboot', tags=["Servers"])
 async def api_reboot_server(request: Request, server_id: int):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -1066,7 +1381,7 @@ async def api_reboot_server(request: Request, server_id: int):
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
-@app.post('/api/servers/{server_id}/clear')
+@app.post('/api/servers/{server_id}/clear', tags=["Servers"])
 async def api_clear_server(request: Request, server_id: int):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -1077,13 +1392,26 @@ async def api_clear_server(request: Request, server_id: int):
         server = data['servers'][server_id]
         ssh = get_ssh(server)
         ssh.connect()
-        containers = ['amnezia-awg', 'amnezia-awg2', 'amnezia-awg-legacy', 'amnezia-xray', 'telemt', 'amnezia-dns']
-        for c in containers:
-            ssh.run_sudo_command(f"docker stop {c} || true")
-            ssh.run_sudo_command(f"docker rm {c} || true")
-        ssh.run_sudo_command("docker network rm amnezia-dns-net || true")
-        ssh.run_sudo_command("rm -rf /opt/amnezia")
-        
+        # Match every Amnezia container by name prefix (catches awg/awg2/awg-legacy,
+        # wireguard, xray/ssxray, openvpn, dns, and any future amnezia-* protocol)
+        # plus the telemt container which doesn't share that prefix.
+        # Using a single script avoids one SSH round-trip per command.
+        cleanup_script = r"""
+for c in $(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E '^(amnezia-|telemt$)'); do
+    docker stop "$c" >/dev/null 2>&1 || true
+    docker rm -fv "$c" >/dev/null 2>&1 || true
+done
+
+# Drop locally-built and pulled Amnezia images so reinstall starts from a clean slate
+for img in $(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E '^(amnezia-|amneziavpn/|telemt:)'); do
+    docker rmi -f "$img" >/dev/null 2>&1 || true
+done
+
+docker network rm amnezia-dns-net >/dev/null 2>&1 || true
+rm -rf /opt/amnezia
+"""
+        ssh.run_sudo_script(cleanup_script, timeout=120)
+
         server['protocols'] = {}
         save_data(data)
         ssh.disconnect()
@@ -1093,7 +1421,7 @@ async def api_clear_server(request: Request, server_id: int):
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
-@app.post('/api/servers/{server_id}/stats')
+@app.post('/api/servers/{server_id}/stats', tags=["Servers"])
 async def api_server_stats(request: Request, server_id: int):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -1146,7 +1474,7 @@ async def api_server_stats(request: Request, server_id: int):
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
-@app.post('/api/servers/{server_id}/check')
+@app.post('/api/servers/{server_id}/check', tags=["Servers"])
 async def api_check_server(request: Request, server_id: int):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -1178,8 +1506,8 @@ async def api_check_server(request: Request, server_id: int):
             except Exception as e:
                 return proto, None, str(e)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=7) as executor:
-            futures = [executor.submit(check_proto, p) for p in ['awg', 'awg2', 'awg_legacy', 'xray', 'telemt', 'dns', 'wireguard']]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=9) as executor:
+            futures = [executor.submit(check_proto, p) for p in ['awg', 'awg2', 'awg_legacy', 'xray', 'telemt', 'dns', 'wireguard', 'socks5', 'adguard']]
             for future in concurrent.futures.as_completed(futures):
                 proto, result, err = future.result()
                 if err:
@@ -1209,7 +1537,7 @@ async def api_check_server(request: Request, server_id: int):
         return JSONResponse({'error': str(e), 'connection': 'failed'}, status_code=500)
 
 
-@app.post('/api/servers/{server_id}/install')
+@app.post('/api/servers/{server_id}/install', tags=["Protocols"])
 async def api_install_protocol(request: Request, server_id: int, req: InstallProtocolRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -1217,18 +1545,18 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
         data = load_data()
         if server_id >= len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
-        if req.protocol not in ['awg', 'awg2', 'awg_legacy', 'xray', 'telemt', 'dns', 'wireguard']:
+        if req.protocol not in ['awg', 'awg2', 'awg_legacy', 'xray', 'telemt', 'dns', 'wireguard', 'socks5', 'adguard']:
             return JSONResponse({'error': 'Invalid protocol type'}, status_code=400)
-        
+
         server = data['servers'][server_id]
         ssh = get_ssh(server)
         ssh.connect()
         manager = get_protocol_manager(ssh, req.protocol)
-        
+
         # Pass parameters to installer
         if req.protocol == 'telemt':
             result = manager.install_protocol(
-                protocol_type=req.protocol, 
+                protocol_type=req.protocol,
                 port=req.port,
                 tls_emulation=req.tls_emulation if req.tls_emulation is not None else True,
                 tls_domain=req.tls_domain,
@@ -1238,13 +1566,40 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
             result = manager.install_protocol(port=req.port)
         elif req.protocol == 'wireguard':
             result = manager.install_protocol(port=req.port)
+        elif req.protocol == 'socks5':
+            result = manager.install_protocol(
+                protocol_type='socks5',
+                port=req.port,
+                username=req.socks5_username,
+                password=req.socks5_password,
+            )
+        elif req.protocol == 'adguard':
+            result = manager.install_protocol(
+                protocol_type='adguard',
+                mode=req.adguard_mode or 'sidebyside',
+                web_port=req.adguard_web_port,
+                expose_web=bool(req.adguard_expose_web),
+                dns_port=req.port,
+                dot_port=req.adguard_dot_port,
+                doh_port=req.adguard_doh_port,
+                expose_dns=bool(req.adguard_expose_dns),
+                expose_dot=bool(req.adguard_expose_dot),
+                expose_doh=bool(req.adguard_expose_doh),
+            )
         else:
             result = manager.install_protocol(req.protocol, port=req.port)
-        
-        server['protocols'][req.protocol] = {
-            'installed': True, 'port': req.port,
+
+        proto_record = {
+            'installed': True,
+            'port': req.port,
             'awg_params': result.get('awg_params', {}),
         }
+        if req.protocol == 'adguard':
+            proto_record['mode'] = result.get('mode')
+            proto_record['internal_ip'] = result.get('internal_ip')
+            proto_record['web_port'] = result.get('web_port')
+            proto_record['expose_web'] = result.get('expose_web')
+        server['protocols'][req.protocol] = proto_record
         save_data(data)
         ssh.disconnect()
         return result
@@ -1253,7 +1608,59 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
-@app.post('/api/servers/{server_id}/uninstall')
+@app.get('/api/servers/{server_id}/socks5/credentials', tags=["Protocols"])
+async def api_socks5_get_credentials(request: Request, server_id: int):
+    """Return the current SOCKS5 port/username/password for the panel UI."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        ssh = get_ssh(server)
+        ssh.connect()
+        manager = get_protocol_manager(ssh, 'socks5')
+        creds = manager.get_credentials()
+        ssh.disconnect()
+        return {'status': 'success', **creds}
+    except Exception as e:
+        logger.exception("Error reading SOCKS5 credentials")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/socks5/credentials', tags=["Protocols"])
+async def api_socks5_update_credentials(request: Request, server_id: int, req: Socks5SettingsRequest):
+    """Apply new SOCKS5 connection settings — regenerates the 3proxy config and
+    reconciles the container (recreating it if the listening port changed)."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        ssh = get_ssh(server)
+        ssh.connect()
+        manager = get_protocol_manager(ssh, 'socks5')
+        result = manager.update_credentials(
+            port=req.port, username=req.username, password=req.password
+        )
+        ssh.disconnect()
+        # Persist the new port in the saved server record so the dashboard
+        # shows the right value on next check without an SSH round-trip.
+        if result.get('status') == 'success' and result.get('port'):
+            srv_proto = server.setdefault('protocols', {}).setdefault('socks5', {})
+            srv_proto['port'] = str(result['port'])
+            srv_proto['installed'] = True
+            save_data(data)
+        return result
+    except Exception as e:
+        logger.exception("Error updating SOCKS5 credentials")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/uninstall', tags=["Protocols"])
 async def api_uninstall_protocol(request: Request, server_id: int, req: ProtocolRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -1287,10 +1694,12 @@ CONTAINER_NAMES = {
     'telemt': 'telemt',
     'dns': 'amnezia-dns',
     'wireguard': 'amnezia-wireguard',
+    'socks5': 'amnezia-socks5proxy',
+    'adguard': 'amnezia-adguard',
 }
 
 
-@app.post('/api/servers/{server_id}/container/toggle')
+@app.post('/api/servers/{server_id}/container/toggle', tags=["Protocols"])
 async def api_container_toggle(request: Request, server_id: int, req: ProtocolRequest):
     """Start or stop a protocol Docker container."""
     if not _check_admin(request):
@@ -1323,7 +1732,7 @@ async def api_container_toggle(request: Request, server_id: int, req: ProtocolRe
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
-@app.post('/api/servers/{server_id}/server_config')
+@app.post('/api/servers/{server_id}/server_config', tags=["Protocols"])
 async def api_server_config(request: Request, server_id: int, req: ProtocolRequest):
     """Get the raw server-side WireGuard/Xray configuration."""
     if not _check_admin(request):
@@ -1336,17 +1745,17 @@ async def api_server_config(request: Request, server_id: int, req: ProtocolReque
         ssh = get_ssh(server)
         ssh.connect()
         if req.protocol == 'xray':
-            from xray_manager import XrayManager
+            from managers.xray_manager import XrayManager
             mgr = XrayManager(ssh)
             data_json = mgr._get_server_json()
             import json as _json
             config = _json.dumps(data_json, indent=2, ensure_ascii=False) if data_json else ''
         elif req.protocol == 'telemt':
-            from telemt_manager import TelemtManager
+            from managers.telemt_manager import TelemtManager
             mgr = TelemtManager(ssh)
             config = mgr._get_server_config()
         elif req.protocol == 'wireguard':
-            from wireguard_manager import WireGuardManager
+            from managers.wireguard_manager import WireGuardManager
             mgr = WireGuardManager(ssh)
             config = mgr._get_server_config()
         else:
@@ -1359,7 +1768,7 @@ async def api_server_config(request: Request, server_id: int, req: ProtocolReque
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
-@app.post('/api/servers/{server_id}/server_config/save')
+@app.post('/api/servers/{server_id}/server_config/save', tags=["Protocols"])
 async def api_server_config_save(request: Request, server_id: int, req: ServerConfigSaveRequest):
     """Save the raw server-side WireGuard/Xray configuration and apply changes."""
     if not _check_admin(request):
@@ -1372,7 +1781,7 @@ async def api_server_config_save(request: Request, server_id: int, req: ServerCo
         ssh = get_ssh(server)
         ssh.connect()
         if req.protocol == 'xray':
-            from xray_manager import XrayManager
+            from managers.xray_manager import XrayManager
             mgr = XrayManager(ssh)
             import json as _json
             try:
@@ -1382,11 +1791,11 @@ async def api_server_config_save(request: Request, server_id: int, req: ServerCo
                 return JSONResponse({'error': f'Invalid JSON format: {str(e)}'}, status_code=400)
             mgr._save_server_json(data_json)
         elif req.protocol == 'telemt':
-            from telemt_manager import TelemtManager
+            from managers.telemt_manager import TelemtManager
             mgr = TelemtManager(ssh)
             mgr.save_server_config(req.protocol, req.config)
         elif req.protocol == 'wireguard':
-            from wireguard_manager import WireGuardManager
+            from managers.wireguard_manager import WireGuardManager
             mgr = WireGuardManager(ssh)
             mgr.save_server_config(req.config)
         else:
@@ -1401,7 +1810,7 @@ async def api_server_config_save(request: Request, server_id: int, req: ServerCo
 
 
 
-@app.get('/api/servers/{server_id}/connections')
+@app.get('/api/servers/{server_id}/connections', tags=["Connections"])
 async def api_get_connections(request: Request, server_id: int, protocol: str = Query(default='awg')):
     if not protocol:
         protocol = 'awg'
@@ -1438,7 +1847,7 @@ async def api_get_connections(request: Request, server_id: int, protocol: str = 
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
-@app.post('/api/servers/{server_id}/connections/add')
+@app.post('/api/servers/{server_id}/connections/add', tags=["Connections"])
 async def api_add_connection(request: Request, server_id: int, req: AddConnectionRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -1492,7 +1901,7 @@ async def api_add_connection(request: Request, server_id: int, req: AddConnectio
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
-@app.post('/api/servers/{server_id}/connections/remove')
+@app.post('/api/servers/{server_id}/connections/remove', tags=["Connections"])
 async def api_remove_connection(request: Request, server_id: int, req: ConnectionActionRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -1520,7 +1929,7 @@ async def api_remove_connection(request: Request, server_id: int, req: Connectio
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
-@app.post('/api/servers/{server_id}/connections/edit')
+@app.post('/api/servers/{server_id}/connections/edit', tags=["Connections"])
 async def api_edit_connection(request: Request, server_id: int, req: EditConnectionRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -1551,7 +1960,7 @@ async def api_edit_connection(request: Request, server_id: int, req: EditConnect
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
-@app.post('/api/servers/{server_id}/connections/config')
+@app.post('/api/servers/{server_id}/connections/config', tags=["Connections"])
 async def api_get_connection_config(request: Request, server_id: int, req: ConnectionActionRequest):
     user = get_current_user(request)
     if not user:
@@ -1588,7 +1997,7 @@ async def api_get_connection_config(request: Request, server_id: int, req: Conne
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
-@app.post('/api/servers/{server_id}/connections/toggle')
+@app.post('/api/servers/{server_id}/connections/toggle', tags=["Connections"])
 async def api_toggle_connection(request: Request, server_id: int, req: ToggleConnectionRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -1613,7 +2022,7 @@ async def api_toggle_connection(request: Request, server_id: int, req: ToggleCon
 
 # ======================== USER API (admin only) ========================
 
-@app.get('/api/users')
+@app.get('/api/users', tags=["Users"])
 async def api_list_users(request: Request, search: str = '', page: int = 1, size: int = 10):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -1667,7 +2076,7 @@ async def api_list_users(request: Request, search: str = '', page: int = 1, size
     }
 
 
-@app.post('/api/users/add')
+@app.post('/api/users/add', tags=["Users"])
 async def api_add_user(request: Request, req: AddUserRequest):
     cur = get_current_user(request)
     if not cur or cur['role'] != 'admin':
@@ -1753,7 +2162,7 @@ async def api_add_user(request: Request, req: AddUserRequest):
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
-@app.post('/api/users/{user_id}/update')
+@app.post('/api/users/{user_id}/update', tags=["Users"])
 async def api_update_user(request: Request, user_id: str, req: UpdateUserRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -1794,7 +2203,7 @@ async def api_update_user(request: Request, user_id: str, req: UpdateUserRequest
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
-@app.post('/api/users/{user_id}/delete')
+@app.post('/api/users/{user_id}/delete', tags=["Users"])
 async def api_delete_user(request: Request, user_id: str):
     cur = get_current_user(request)
     if not cur or cur['role'] != 'admin':
@@ -1814,7 +2223,7 @@ async def api_delete_user(request: Request, user_id: str):
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
-@app.post('/api/users/{user_id}/toggle')
+@app.post('/api/users/{user_id}/toggle', tags=["Users"])
 async def api_toggle_user(request: Request, user_id: str, req: ToggleUserRequest):
     cur = get_current_user(request)
     if not cur or cur['role'] != 'admin':
@@ -1831,7 +2240,7 @@ async def api_toggle_user(request: Request, user_id: str, req: ToggleUserRequest
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
-@app.post('/api/users/{user_id}/connections/add')
+@app.post('/api/users/{user_id}/connections/add', tags=["Users"])
 async def api_add_user_connection(request: Request, user_id: str, req: AddUserConnectionRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -1896,7 +2305,7 @@ async def api_add_user_connection(request: Request, user_id: str, req: AddUserCo
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
-@app.get('/api/users/{user_id}/connections')
+@app.get('/api/users/{user_id}/connections', tags=["Users"])
 async def api_get_user_connections(request: Request, user_id: str):
     user = get_current_user(request)
     if not user:
@@ -1915,7 +2324,7 @@ async def api_get_user_connections(request: Request, user_id: str):
 
 # ======================== MY CONNECTIONS API (for user role) ========================
 
-@app.get('/api/my/connections')
+@app.get('/api/my/connections', tags=["Self-service"])
 async def api_my_connections(request: Request):
     user = get_current_user(request)
     if not user:
@@ -1931,7 +2340,7 @@ async def api_my_connections(request: Request):
     return {'connections': conns}
 
 
-@app.post('/api/users/{user_id}/share/setup')
+@app.post('/api/users/{user_id}/share/setup', tags=["Users"])
 async def api_user_share_setup(user_id: str, req: ShareSetupRequest, request: Request):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -1952,7 +2361,7 @@ async def api_user_share_setup(user_id: str, req: ShareSetupRequest, request: Re
     return {'status': 'success', 'share_token': user.get('share_token')}
 
 
-@app.get('/share/{token}', response_class=HTMLResponse)
+@app.get('/share/{token}', response_class=HTMLResponse, tags=["System Templates"])
 async def share_page(token: str, request: Request):
     data = load_data()
     user = next((u for u in data['users'] if u.get('share_token') == token), None)
@@ -1969,7 +2378,7 @@ async def share_page(token: str, request: Request):
                token=token)
 
 
-@app.post('/api/share/{token}/auth')
+@app.post('/api/share/{token}/auth', tags=["Sharing"])
 async def api_share_auth(token: str, req: ShareAuthRequest, request: Request):
     data = load_data()
     user = next((u for u in data['users'] if u.get('share_token') == token), None)
@@ -1984,7 +2393,7 @@ async def api_share_auth(token: str, req: ShareAuthRequest, request: Request):
         return JSONResponse({'error': _t('wrong_share_password', lang)}, status_code=401)
 
 
-@app.get('/api/share/{token}/connections')
+@app.get('/api/share/{token}/connections', tags=["Sharing"])
 async def api_share_connections(token: str, request: Request):
     data = load_data()
     user = next((u for u in data['users'] if u.get('share_token') == token), None)
@@ -2006,7 +2415,7 @@ async def api_share_connections(token: str, request: Request):
     return {'connections': conns, 'username': user['username']}
 
 
-@app.post('/api/share/{token}/config/{connection_id}')
+@app.post('/api/share/{token}/config/{connection_id}', tags=["Sharing"])
 async def api_share_config(token: str, connection_id: str, request: Request):
     data = load_data()
     user = next((u for u in data['users'] if u.get('share_token') == token), None)
@@ -2039,7 +2448,7 @@ async def api_share_config(token: str, connection_id: str, request: Request):
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
-@app.post('/api/my/connections/{connection_id}/config')
+@app.post('/api/my/connections/{connection_id}/config', tags=["Self-service"])
 async def api_my_connection_config(request: Request, connection_id: str):
     user = get_current_user(request)
     if not user:
@@ -2071,7 +2480,7 @@ async def api_my_connection_config(request: Request, connection_id: str):
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
-@app.get('/settings')
+@app.get('/settings', tags=["System Templates"])
 async def settings_page(request: Request):
     user = _check_admin(request)
     if not user:
@@ -2080,7 +2489,7 @@ async def settings_page(request: Request):
     return tpl(request, 'settings.html', settings=data.get('settings', {}), servers=data.get('servers', []), current_version=CURRENT_VERSION)
 
 
-@app.get('/api/settings')
+@app.get('/api/settings', tags=["Settings"])
 async def api_get_settings(request: Request):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -2102,7 +2511,7 @@ async def api_get_settings(request: Request):
         
 #     return {'status': 'success'}
 
-@app.post('/api/settings/save')
+@app.post('/api/settings/save', tags=["Settings"])
 async def save_settings(request: Request, payload: SaveSettingsRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -2129,7 +2538,7 @@ async def save_settings(request: Request, payload: SaveSettingsRequest):
     return {"status": "success", "bot_running": tg_bot.is_running()}
 
 
-@app.post('/api/settings/telegram/toggle')
+@app.post('/api/settings/telegram/toggle', tags=["Settings"])
 async def api_telegram_toggle(request: Request):
     """Quick enable/disable of the bot without a full settings save."""
     if not _check_admin(request):
@@ -2153,7 +2562,7 @@ async def api_telegram_toggle(request: Request):
         save_data(data)
         return {'status': 'started', 'bot_running': True}
 
-@app.post('/api/settings/sync_now')
+@app.post('/api/settings/sync_now', tags=["Settings"])
 async def api_sync_now(request: Request):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -2162,7 +2571,7 @@ async def api_sync_now(request: Request):
     return {'status': 'success', 'count': count, 'message': msg}
 
 
-@app.post('/api/settings/sync_delete')
+@app.post('/api/settings/sync_delete', tags=["Settings"])
 async def api_sync_delete(request: Request):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -2173,7 +2582,7 @@ async def api_sync_delete(request: Request):
     return {'status': 'success', 'count': len(to_delete_ids)}
 
 
-@app.get('/api/servers/{server_id}/{protocol}/clients')
+@app.get('/api/servers/{server_id}/{protocol}/clients', tags=["Connections"])
 async def api_get_server_clients(request: Request, server_id: int, protocol: str):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -2205,7 +2614,92 @@ async def api_get_server_clients(request: Request, server_id: int, protocol: str
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
-@app.get('/api/settings/backup/download')
+@app.get('/api/settings/tokens', tags=["API Tokens"])
+async def api_list_tokens(request: Request):
+    """List metadata for every API token. The raw token value is never
+    returned by this endpoint — only its prefix and timestamps are visible
+    after creation, by design."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    data = load_data()
+    users_by_id = {u['id']: u for u in data.get('users', [])}
+    tokens = []
+    for t in data.get('api_tokens', []):
+        owner = users_by_id.get(t.get('user_id'))
+        tokens.append({
+            'id': t.get('id'),
+            'name': t.get('name', ''),
+            'token_prefix': t.get('token_prefix', ''),
+            'created_at': t.get('created_at'),
+            'last_used_at': t.get('last_used_at'),
+            'owner': owner['username'] if owner else None,
+            'owner_id': t.get('user_id'),
+        })
+    return {'tokens': tokens}
+
+
+@app.post('/api/settings/tokens', tags=["API Tokens"])
+async def api_create_token(request: Request, req: CreateApiTokenRequest):
+    """Issue a new bearer token. The full token value is returned **once** in
+    the response and never persisted in plaintext — only its SHA-256 hash is
+    stored, so a leaked data.json file alone cannot be used to authenticate.
+    Save the value at creation time; if it's lost the token must be recreated.
+    """
+    cur = _check_admin(request)
+    if not cur:
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    name = (req.name or '').strip()
+    if not name:
+        return JSONResponse({'error': 'Token name is required'}, status_code=400)
+
+    raw = _generate_api_token()
+    token_id = str(uuid.uuid4())
+    # Show enough of the token in the UI to identify it later, but not enough
+    # to reconstruct it: the prefix + first 4 chars of the secret part.
+    token_prefix = raw[:len(API_TOKEN_PREFIX) + 4]
+
+    entry = {
+        'id': token_id,
+        'name': name,
+        'token_hash': _hash_api_token(raw),
+        'token_prefix': token_prefix,
+        'user_id': cur['id'],
+        'created_at': datetime.now().isoformat(),
+        'last_used_at': None,
+    }
+    async with DATA_LOCK:
+        data = load_data()
+        data.setdefault('api_tokens', []).append(entry)
+        save_data(data)
+
+    # `token` is returned only here — subsequent reads will not see it.
+    return {
+        'status': 'success',
+        'id': token_id,
+        'name': name,
+        'token': raw,
+        'token_prefix': token_prefix,
+        'created_at': entry['created_at'],
+    }
+
+
+@app.delete('/api/settings/tokens/{token_id}', tags=["API Tokens"])
+async def api_revoke_token(request: Request, token_id: str):
+    """Permanently revoke a token. The associated bearer value can never be
+    used again, even if the same name is reissued — every token has its own hash."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    async with DATA_LOCK:
+        data = load_data()
+        before = len(data.get('api_tokens', []))
+        data['api_tokens'] = [t for t in data.get('api_tokens', []) if t.get('id') != token_id]
+        if len(data['api_tokens']) == before:
+            return JSONResponse({'error': 'Token not found'}, status_code=404)
+        save_data(data)
+    return {'status': 'success'}
+
+
+@app.get('/api/settings/backup/download', tags=["Settings"])
 async def api_backup_download(request: Request):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -2214,7 +2708,7 @@ async def api_backup_download(request: Request):
     return FileResponse(DATA_FILE, media_type='application/json', filename='data.json')
 
 
-@app.post('/api/settings/backup/restore')
+@app.post('/api/settings/backup/restore', tags=["Settings"])
 async def api_backup_restore(request: Request, file: UploadFile = File(...)):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)

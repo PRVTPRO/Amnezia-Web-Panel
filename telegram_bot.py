@@ -234,9 +234,9 @@ async def _handle_get_config(
     try:
         import sys, os
         sys.path.insert(0, os.path.dirname(__file__))
-        from ssh_manager import SSHManager
-        from awg_manager import AWGManager
-        from xray_manager import XrayManager
+        from managers.ssh_manager import SSHManager
+        from managers.awg_manager import AWGManager
+        from managers.xray_manager import XrayManager
 
         ssh = SSHManager(
             server["host"],
@@ -251,11 +251,22 @@ async def _handle_get_config(
 
         def _get_cfg():
             ssh.connect()
+            from managers.wireguard_manager import WireGuardManager
+            from managers.telemt_manager import TelemtManager
+
             if proto == "xray":
                 mgr = XrayManager(ssh)
+                cfg = mgr.get_client_config(proto, conn["client_id"], server["host"], port)
+            elif proto == "wireguard":
+                mgr = WireGuardManager(ssh)
+                cfg = mgr.get_client_config(conn["client_id"], server["host"])
+            elif proto == "telemt":
+                mgr = TelemtManager(ssh)
+                cfg = mgr.get_client_config(proto, conn["client_id"], server["host"], port)
             else:
+                # awg, awg2, awg_legacy
                 mgr = AWGManager(ssh)
-            cfg = mgr.get_client_config(proto, conn["client_id"], server["host"], port)
+                cfg = mgr.get_client_config(proto, conn["client_id"], server["host"], port)
             ssh.disconnect()
             return cfg
 
@@ -281,30 +292,42 @@ async def _handle_get_config(
             f"🔌 Protocol: <b>{proto.upper()}</b>",
         )
 
-        # ------- 2. Config as code (split by 4096 chars if huge) -------
-        MAX_LEN = 4000
-        if len(config) <= MAX_LEN:
-            await api.send_message(chat_id, f"<b>📄 Configuration:</b>\n<pre>{config}</pre>")
-        else:
-            chunks = [config[i:i+MAX_LEN] for i in range(0, len(config), MAX_LEN)]
-            for i, chunk in enumerate(chunks, 1):
-                await api.send_message(chat_id, f"<b>📄 Configuration (part {i}/{len(chunks)}):</b>\n<pre>{chunk}</pre>")
+        # ------- 2. Send config (format depends on protocol) -------
+        # Protocols that return a link/URI rather than an INI-style config file
+        is_link_proto = proto in ("xray", "telemt")
 
-        # ------- 3. VPN link (if available) -------
-        if vpn_link:
+        if is_link_proto:
+            # Show as a tappable link — no .conf file needed
             await api.send_message(
                 chat_id,
-                f"🔗 <b>VPN Link</b> (tap to copy):\n<code>{vpn_link}</code>",
+                f"🔗 <b>Connection link</b> (tap to copy):\n<code>{config}</code>",
             )
+        else:
+            # AWG / WireGuard — INI config text
+            MAX_LEN = 4000
+            if len(config) <= MAX_LEN:
+                await api.send_message(chat_id, f"<b>📄 Configuration:</b>\n<pre>{config}</pre>")
+            else:
+                chunks = [config[i:i+MAX_LEN] for i in range(0, len(config), MAX_LEN)]
+                for i, chunk in enumerate(chunks, 1):
+                    await api.send_message(chat_id, f"<b>📄 Configuration (part {i}/{len(chunks)}):</b>\n<pre>{chunk}</pre>")
 
-        # ------- 4. Config as .conf file -------
-        filename = f"{conn_name.replace(' ', '_')}.conf"
-        await api.send_document(
-            chat_id,
-            filename=filename,
-            content=config.encode("utf-8"),
-            caption=f"📁 Config file: {conn_name}",
-        )
+            # VPN deep-link (vpn:// base64 URI for the Amnezia app)
+            vpn_link = generate_vpn_link_fn(config)
+            if vpn_link:
+                await api.send_message(
+                    chat_id,
+                    f"🔗 <b>VPN Link</b> (tap to copy):\n<code>{vpn_link}</code>",
+                )
+
+            # .conf file attachment
+            filename = f"{conn_name.replace(' ', '_')}.conf"
+            await api.send_document(
+                chat_id,
+                filename=filename,
+                content=config.encode("utf-8"),
+                caption=f"📁 Config file: {conn_name}",
+            )
 
     except Exception as e:
         logger.exception("Bot: error getting config")

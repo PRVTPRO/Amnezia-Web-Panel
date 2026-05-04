@@ -464,6 +464,63 @@ a:hover {
 
 .server-card {
     position: relative;
+    cursor: grab;
+}
+
+.server-card:active {
+    cursor: grabbing;
+}
+
+/* While being dragged: dim the card so the user sees their selection. */
+.server-card.dragging {
+    opacity: 0.45;
+    cursor: grabbing;
+}
+
+/* Drop target hint: highlighted border + slight lift. */
+.server-card.drag-over {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent), 0 8px 20px rgba(139, 92, 246, 0.25);
+    transform: translateY(-2px);
+}
+
+/* Ping indicator dot to the left of the server name. */
+.ping-dot {
+    display: inline-block;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    margin-right: 6px;
+    vertical-align: middle;
+    background: #888;
+    transition: background-color 0.25s ease, box-shadow 0.25s ease;
+    flex-shrink: 0;
+}
+
+.ping-dot.ping-pending {
+    background: #94a3b8;
+    animation: ping-pulse 1.2s ease-in-out infinite;
+}
+
+.ping-dot.ping-ok {
+    background: var(--success);
+    box-shadow: 0 0 6px rgba(34, 197, 94, 0.55);
+}
+
+.ping-dot.ping-fail {
+    background: var(--danger, #ef4444);
+}
+
+.ping-ms {
+    font-size: 0.72rem;
+    margin-left: 6px;
+    color: var(--text-muted);
+    font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+@keyframes ping-pulse {
+    0%, 100% { opacity: 0.35; }
+    50% { opacity: 1; }
 }
 
 .server-icon {
@@ -774,6 +831,256 @@ a:hover {
 .protocol-wireguard .protocol-icon {
     background: linear-gradient(135deg, rgba(16, 185, 129, 0.2), rgba(52, 211, 153, 0.1));
     color: #10b981;
+}
+
+.protocol-adguard .protocol-icon {
+    background: linear-gradient(135deg, rgba(34, 197, 94, 0.2), rgba(132, 204, 22, 0.1));
+    color: #65a30d;
+}
+
+.protocol-socks5 .protocol-icon {
+    background: linear-gradient(135deg, rgba(168, 85, 247, 0.2), rgba(217, 70, 239, 0.1));
+    color: #c084fc;
+}
+
+/* ============================================================
+   Promo blocks — locked teasers for not-yet-shipped features.
+   They live inside .protocol-cards (a CSS grid) and span every
+   column via `grid-column: 1 / -1`, so they always stretch the
+   full width without hard-coding the column count.
+   ============================================================ */
+.promo-block {
+    grid-column: 1 / -1;
+    position: relative;
+    overflow: hidden;
+    padding: 22px 28px;
+    border-radius: var(--radius-lg);
+    color: #fff;
+    cursor: not-allowed;
+    isolation: isolate; /* keep blend modes / blurred orbs from leaking out */
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    transition: transform 0.35s ease, box-shadow 0.35s ease;
+    user-select: none;
+}
+
+.promo-block:hover {
+    transform: translateY(-2px);
+}
+
+/* Slow shimmer that sweeps diagonally across the block — pure CSS, no JS. */
+.promo-block::after {
+    content: "";
+    position: absolute;
+    inset: -50% -10%;
+    background: linear-gradient(115deg, transparent 35%, rgba(255, 255, 255, 0.18) 50%, transparent 65%);
+    transform: translateX(-100%);
+    animation: promo-shimmer 6s ease-in-out infinite;
+    pointer-events: none;
+    z-index: 1;
+}
+
+@keyframes promo-shimmer {
+    0%, 20%   { transform: translateX(-100%); }
+    50%, 70%  { transform: translateX(100%); }
+    100%      { transform: translateX(100%); }
+}
+
+/* Floating blurred orbs that drift in the background. */
+.promo-orbs {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+    overflow: hidden;
+}
+
+.promo-orb {
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(48px);
+    opacity: 0.55;
+    animation: promo-orb-drift 14s ease-in-out infinite;
+}
+
+.promo-orb:nth-child(1) { top: -40px;   left: 8%;   width: 220px; height: 220px; animation-delay: 0s; }
+.promo-orb:nth-child(2) { bottom: -60px; left: 38%; width: 180px; height: 180px; animation-delay: -5s; }
+.promo-orb:nth-child(3) { top: 10%;     right: 8%;  width: 200px; height: 200px; animation-delay: -9s; }
+
+@keyframes promo-orb-drift {
+    0%, 100% { transform: translate(0, 0) scale(1); }
+    33%      { transform: translate(20px, -16px) scale(1.12); }
+    66%      { transform: translate(-12px, 14px) scale(0.92); }
+}
+
+.promo-lock-badge {
+    position: absolute;
+    top: 14px;
+    right: 16px;
+    z-index: 3;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    background: rgba(0, 0, 0, 0.35);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    color: #fff;
+}
+
+.promo-content {
+    position: relative;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    flex-wrap: wrap;
+}
+
+.promo-icon {
+    flex-shrink: 0;
+    width: 56px;
+    height: 56px;
+    border-radius: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.9rem;
+    background: rgba(255, 255, 255, 0.12);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18), 0 8px 24px rgba(0, 0, 0, 0.25);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    animation: promo-icon-float 4.5s ease-in-out infinite;
+}
+
+@keyframes promo-icon-float {
+    0%, 100% { transform: translateY(0) rotate(0); }
+    50%      { transform: translateY(-3px) rotate(2deg); }
+}
+
+.promo-text {
+    flex: 1;
+    min-width: 0;
+}
+
+.promo-title {
+    font-size: 1.35rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    margin-bottom: 2px;
+    text-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
+}
+
+.promo-subtitle {
+    font-size: 0.88rem;
+    color: rgba(255, 255, 255, 0.85);
+    line-height: 1.4;
+    max-width: 70ch;
+}
+
+.promo-cta {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 9px 16px;
+    border-radius: 999px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    text-decoration: none;
+    color: #fff;
+    background: rgba(255, 255, 255, 0.18);
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    transition: background 0.2s ease, transform 0.2s ease;
+    cursor: pointer;
+    pointer-events: auto; /* block-level cursor:not-allowed shouldn't kill the CTA link */
+}
+
+.promo-cta:hover {
+    background: rgba(255, 255, 255, 0.32);
+    transform: translateY(-1px);
+}
+
+/* ----- Theme: AIVPN (purple/cyan, neural feel) ----- */
+.promo-aivpn {
+    background:
+        radial-gradient(circle at 20% 0%, rgba(99, 102, 241, 0.6), transparent 60%),
+        radial-gradient(circle at 80% 100%, rgba(236, 72, 153, 0.5), transparent 55%),
+        linear-gradient(135deg, #312e81 0%, #6d28d9 50%, #be185d 100%);
+    box-shadow: 0 16px 40px -10px rgba(109, 40, 217, 0.5);
+}
+
+.promo-aivpn .promo-orb:nth-child(1) { background: #06b6d4; }
+.promo-aivpn .promo-orb:nth-child(2) { background: #d946ef; }
+.promo-aivpn .promo-orb:nth-child(3) { background: #6366f1; }
+
+.promo-aivpn .promo-icon {
+    background: linear-gradient(135deg, rgba(99, 102, 241, 0.5), rgba(236, 72, 153, 0.4));
+    text-shadow: 0 0 16px rgba(168, 85, 247, 0.6);
+}
+
+/* ----- Theme: Reverse Proxy (amber/red, shield/firewall feel) ----- */
+.promo-revproxy {
+    background:
+        radial-gradient(circle at 100% 0%, rgba(251, 146, 60, 0.55), transparent 55%),
+        radial-gradient(circle at 0% 100%, rgba(244, 63, 94, 0.45), transparent 55%),
+        linear-gradient(135deg, #7c2d12 0%, #b91c1c 45%, #9d174d 100%);
+    box-shadow: 0 16px 40px -10px rgba(185, 28, 28, 0.5);
+}
+
+.promo-revproxy .promo-orb:nth-child(1) { background: #fb923c; }
+.promo-revproxy .promo-orb:nth-child(2) { background: #f43f5e; }
+.promo-revproxy .promo-orb:nth-child(3) { background: #f59e0b; }
+
+.promo-revproxy .promo-icon {
+    background: linear-gradient(135deg, rgba(251, 146, 60, 0.5), rgba(244, 63, 94, 0.4));
+    text-shadow: 0 0 16px rgba(251, 146, 60, 0.55);
+}
+
+/* Faint isometric grid overlay — gives the reverse-proxy block a "network" feel.
+   Uses a tiled SVG-less approach via repeating linear gradients to keep CSS-only. */
+.promo-grid-bg {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    opacity: 0.18;
+    background-image:
+        linear-gradient(rgba(255, 255, 255, 0.5) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.5) 1px, transparent 1px);
+    background-size: 28px 28px;
+    mask-image: radial-gradient(ellipse at center, #000 30%, transparent 75%);
+    -webkit-mask-image: radial-gradient(ellipse at center, #000 30%, transparent 75%);
+    animation: promo-grid-pan 20s linear infinite;
+}
+
+@keyframes promo-grid-pan {
+    from { background-position: 0 0; }
+    to   { background-position: 56px 56px; }
+}
+
+/* ----- Responsive: stack content on narrow screens ----- */
+@media (max-width: 720px) {
+    .promo-content { gap: 14px; }
+    .promo-cta { width: 100%; justify-content: center; margin-left: 0; }
+    .promo-subtitle { font-size: 0.82rem; }
+}
+
+/* Respect users who turn off motion. */
+@media (prefers-reduced-motion: reduce) {
+    .promo-block::after,
+    .promo-orb,
+    .promo-icon,
+    .promo-grid-bg {
+        animation: none !important;
+    }
 }
 
 .protocol-name {

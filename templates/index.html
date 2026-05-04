@@ -15,11 +15,19 @@
     {% if servers %}
     <div class="server-grid" id="serverGrid">
         {% for server in servers %}
-        <div class="card card-hover server-card" id="server-{{ loop.index0 }}">
+        <div class="card card-hover server-card" id="server-{{ loop.index0 }}" data-idx="{{ loop.index0 }}"
+            data-name="{{ server.name }}" data-host="{{ server.host }}" data-port="{{ server.ssh_port }}"
+            data-username="{{ server.username }}" data-auth="{{ 'key' if server.private_key else 'password' }}"
+            draggable="true">
             <div class="server-meta">
                 <div class="server-icon">🖥</div>
-                <div>
-                    <div class="server-name">{{ server.name }}</div>
+                <div style="min-width: 0; flex: 1;">
+                    <div class="server-name">
+                        <span class="ping-dot ping-pending" id="ping-{{ loop.index0 }}"
+                            title="{{ _('ping_checking') }}"></span>
+                        <span>{{ server.name }}</span>
+                        <span class="ping-ms text-muted" id="ping-ms-{{ loop.index0 }}"></span>
+                    </div>
                     <div class="server-host">{{ server.host }}:{{ server.ssh_port }}</div>
                 </div>
             </div>
@@ -47,6 +55,10 @@
                 <a href="/server/{{ loop.index0 }}" class="btn btn-secondary btn-sm" style="flex:1">
                     {{ _('manage') }}
                 </a>
+                <button class="btn btn-secondary btn-sm btn-icon" onclick="openEditServer(this)"
+                    title="{{ _('edit') }}">
+                    ✏️
+                </button>
                 <button class="btn btn-danger btn-sm btn-icon" onclick="deleteServer({{ loop.index0 }})"
                     title="{{ _('delete') }}">
                     🗑
@@ -68,6 +80,73 @@
     </div>
     {% endif %}
 </section>
+
+<!-- ===== Edit Server Modal ===== -->
+<div class="modal-backdrop" id="editServerModal">
+    <div class="modal">
+        <div class="modal-header">
+            <h2 class="modal-title">{{ _('edit_server_title') }}</h2>
+            <button class="modal-close" onclick="closeModal('editServerModal')">×</button>
+        </div>
+
+        <form id="editServerForm" onsubmit="return submitEditServer(event)">
+            <input type="hidden" id="editServerIdx">
+
+            <div class="form-group">
+                <label class="form-label">{{ _('name') }}</label>
+                <input class="form-input" type="text" id="editServerName">
+            </div>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label class="form-label">{{ _('ssh_host') }}</label>
+                    <input class="form-input" type="text" id="editServerHost" required>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">{{ _('ssh_port') }}</label>
+                    <input class="form-input" type="number" id="editServerPort" min="1" max="65535">
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">{{ _('ssh_user') }}</label>
+                <input class="form-input" type="text" id="editServerUser" required>
+            </div>
+
+            <div class="tabs" style="margin-top: var(--space-md)">
+                <button type="button" class="tab active" onclick="switchEditAuthTab('password', this)">{{ _('ssh_password') }}</button>
+                <button type="button" class="tab" onclick="switchEditAuthTab('key', this)">{{ _('ssh_key') }}</button>
+            </div>
+
+            <div id="editAuthPassword">
+                <div class="form-group">
+                    <label class="form-label">{{ _('ssh_password') }}</label>
+                    <input class="form-input" type="password" id="editServerPassword"
+                        placeholder="{{ _('edit_keep_credential') }}">
+                    <div class="form-hint">{{ _('edit_keep_credential') }}</div>
+                </div>
+            </div>
+
+            <div id="editAuthKey" class="hidden">
+                <div class="form-group">
+                    <label class="form-label">{{ _('ssh_key') }}</label>
+                    <textarea class="form-textarea" id="editServerKey"
+                        placeholder="{{ _('edit_keep_credential') }}"></textarea>
+                    <div class="form-hint">{{ _('edit_keep_credential') }}</div>
+                </div>
+            </div>
+
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="closeModal('editServerModal')">{{ _('cancel')
+                    }}</button>
+                <button type="submit" class="btn btn-primary" id="editServerBtn">
+                    <span id="editServerBtnText">{{ _('save') }}</span>
+                    <div class="spinner hidden" id="editServerSpinner"></div>
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
 
 <!-- ===== Add Server Modal ===== -->
 <div class="modal-backdrop" id="addServerModal">
@@ -190,5 +269,185 @@
             showToast(err.message, 'error');
         }
     }
+
+    /* ========== Edit server ========== */
+
+    function switchEditAuthTab(tab, btn) {
+        const tabs = btn.parentElement.querySelectorAll('.tab');
+        tabs.forEach(t => t.classList.remove('active'));
+        btn.classList.add('active');
+        document.getElementById('editAuthPassword').classList.toggle('hidden', tab !== 'password');
+        document.getElementById('editAuthKey').classList.toggle('hidden', tab !== 'key');
+    }
+
+    function openEditServer(btn) {
+        // Prefill from data-* on the parent server-card so we don't have to round-trip.
+        const card = btn.closest('.server-card');
+        if (!card) return;
+        document.getElementById('editServerIdx').value = card.dataset.idx;
+        document.getElementById('editServerName').value = card.dataset.name || '';
+        document.getElementById('editServerHost').value = card.dataset.host || '';
+        document.getElementById('editServerPort').value = card.dataset.port || '22';
+        document.getElementById('editServerUser').value = card.dataset.username || '';
+        document.getElementById('editServerPassword').value = '';
+        document.getElementById('editServerKey').value = '';
+
+        // Pre-select the tab matching the server's current auth method.
+        const authIsKey = card.dataset.auth === 'key';
+        const tabsEl = document.querySelector('#editServerForm .tabs');
+        const passTab = tabsEl.children[0];
+        const keyTab = tabsEl.children[1];
+        switchEditAuthTab(authIsKey ? 'key' : 'password', authIsKey ? keyTab : passTab);
+
+        openModal('editServerModal');
+    }
+
+    async function submitEditServer(e) {
+        e.preventDefault();
+        const idx = document.getElementById('editServerIdx').value;
+        const btn = document.getElementById('editServerBtn');
+        const btnText = document.getElementById('editServerBtnText');
+        const spinner = document.getElementById('editServerSpinner');
+        btn.disabled = true;
+        btnText.textContent = _('saving') || 'Saving...';
+        spinner.classList.remove('hidden');
+        try {
+            const body = {
+                name: document.getElementById('editServerName').value,
+                host: document.getElementById('editServerHost').value,
+                ssh_port: parseInt(document.getElementById('editServerPort').value) || 22,
+                username: document.getElementById('editServerUser').value,
+                // Empty -> null means "leave unchanged" on the backend.
+                password: document.getElementById('editServerPassword').value || null,
+                private_key: document.getElementById('editServerKey').value || null,
+            };
+            await apiCall(`/api/servers/${idx}/edit`, 'POST', body);
+            showToast(_('server_saved'), 'success');
+            setTimeout(() => window.location.reload(), 500);
+        } catch (err) {
+            showToast(err.message, 'error');
+        } finally {
+            btn.disabled = false;
+            btnText.textContent = _('save');
+            spinner.classList.add('hidden');
+        }
+        return false;
+    }
+
+    /* ========== Ping indicators ========== */
+
+    async function pingServer(idx) {
+        const dot = document.getElementById(`ping-${idx}`);
+        const ms = document.getElementById(`ping-ms-${idx}`);
+        if (!dot) return;
+        try {
+            const res = await fetch(`/api/servers/${idx}/ping`, { credentials: 'same-origin' });
+            const data = await res.json();
+            dot.classList.remove('ping-pending');
+            if (data.alive) {
+                dot.classList.add('ping-ok');
+                dot.title = `${data.ms} ms`;
+                if (ms) ms.textContent = `${data.ms} ms`;
+            } else {
+                dot.classList.add('ping-fail');
+                dot.title = data.error || _('offline');
+                if (ms) ms.textContent = _('offline');
+            }
+        } catch {
+            dot.classList.remove('ping-pending');
+            dot.classList.add('ping-fail');
+            if (ms) ms.textContent = _('offline');
+        }
+    }
+
+    function startAllPings() {
+        // Browsers will fan these out concurrently; the page never blocks waiting
+        // for results because each card updates independently.
+        document.querySelectorAll('.server-card').forEach(card => {
+            const idx = card.dataset.idx;
+            if (idx !== undefined) pingServer(idx);
+        });
+    }
+
+    /* ========== Drag-and-drop reorder ========== */
+
+    let draggedCard = null;
+
+    function setupDragAndDrop() {
+        const grid = document.getElementById('serverGrid');
+        if (!grid) return;
+
+        grid.addEventListener('dragstart', e => {
+            const card = e.target.closest('.server-card');
+            if (!card) return;
+            // Don't initiate drag from a button/link inside the card — those have
+            // their own click semantics (Edit/Delete/Manage).
+            if (e.target.closest('button, a')) {
+                e.preventDefault();
+                return;
+            }
+            draggedCard = card;
+            card.classList.add('dragging');
+            e.dataTransfer.effectAllowed = 'move';
+            // Some browsers require this for dragstart to fire with text payload.
+            try { e.dataTransfer.setData('text/plain', card.dataset.idx); } catch {}
+        });
+
+        grid.addEventListener('dragend', e => {
+            const card = e.target.closest('.server-card');
+            if (card) card.classList.remove('dragging');
+            grid.querySelectorAll('.server-card.drag-over').forEach(c => c.classList.remove('drag-over'));
+            draggedCard = null;
+        });
+
+        grid.addEventListener('dragover', e => {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+            const card = e.target.closest('.server-card');
+            if (!card || card === draggedCard) return;
+            grid.querySelectorAll('.server-card.drag-over').forEach(c => {
+                if (c !== card) c.classList.remove('drag-over');
+            });
+            card.classList.add('drag-over');
+        });
+
+        grid.addEventListener('dragleave', e => {
+            const card = e.target.closest('.server-card');
+            if (card && !card.contains(e.relatedTarget)) card.classList.remove('drag-over');
+        });
+
+        grid.addEventListener('drop', async e => {
+            e.preventDefault();
+            const target = e.target.closest('.server-card');
+            grid.querySelectorAll('.server-card.drag-over').forEach(c => c.classList.remove('drag-over'));
+            if (!target || !draggedCard || target === draggedCard) return;
+
+            // Insert before/after target depending on cursor position relative
+            // to the target's vertical centre, which feels natural in a grid.
+            const rect = target.getBoundingClientRect();
+            const insertAfter = (e.clientY - rect.top) > rect.height / 2;
+            grid.insertBefore(draggedCard, insertAfter ? target.nextSibling : target);
+
+            const newOrder = Array.from(grid.querySelectorAll('.server-card'))
+                .map(c => parseInt(c.dataset.idx, 10));
+
+            try {
+                await apiCall('/api/servers/reorder', 'POST', { order: newOrder });
+                showToast(_('servers_reordered'), 'success');
+                // Reload so onclick indices and per-card data-idx attrs realign with
+                // the new server array — simpler and safer than rewriting every handler.
+                setTimeout(() => window.location.reload(), 400);
+            } catch (err) {
+                showToast(err.message, 'error');
+                // Rollback the visual move — backend rejected.
+                window.location.reload();
+            }
+        });
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+        startAllPings();
+        setupDragAndDrop();
+    });
 </script>
 {% endblock %}
