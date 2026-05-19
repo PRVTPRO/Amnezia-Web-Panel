@@ -399,6 +399,18 @@
                 <div class="form-hint" id="installPortHint">{{ _('port_default_hint') }}</div>
             </div>
 
+            <div id="awgSubnetOptions"
+                style="display:none; padding: var(--space-md); background: rgba(0,0,0,0.03); border-radius: var(--radius-md); margin-bottom: var(--space-md);">
+                <div class="form-group">
+                    <label class="form-label">VPN Subnet</label>
+                    <input class="form-input" type="text" id="installSubnet" value="10.8.1.1/24"
+                        placeholder="10.8.2.1/24">
+                    <div class="form-hint">
+                        Example: 10.8.2.1/24
+                    </div>
+                </div>
+            </div>
+
             <div id="telemtOptions"
                 style="display:none; padding: var(--space-md); background: rgba(0,0,0,0.03); border-radius: var(--radius-md); margin-bottom: var(--space-md);">
                 <div class="form-group">
@@ -1078,10 +1090,12 @@
         const telemtOpts = document.getElementById('telemtOptions');
         const socks5Opts = document.getElementById('socks5Options');
         const adguardOpts = document.getElementById('adguardOptions');
+        const awgSubnetOpts = document.getElementById('awgSubnetOptions');
 
         telemtOpts.style.display = 'none';
         socks5Opts.style.display = 'none';
         adguardOpts.style.display = 'none';
+        awgSubnetOpts.style.display = 'none';
 
         if (proto === 'dns') {
             portLabel.textContent = _('port') + ' (Internal)';
@@ -1116,6 +1130,10 @@
             portInput.value = '55424';
             portInput.disabled = false;
             portHint.textContent = _('port_default_hint');
+
+            if (proto === 'awg' || proto === 'awg2' || proto === 'awg_legacy' || proto === 'wireguard') {
+                awgSubnetOpts.style.display = 'block';
+            }
         }
 
         document.getElementById('installForm').classList.remove('hidden');
@@ -1156,8 +1174,27 @@
                 }
             }, 2000);
             const params = {
-                protocol: currentInstallProto, port: port,
+                protocol: currentInstallProto,
+                port: port,
             };
+
+            if (
+                currentInstallProto === 'awg' ||
+                currentInstallProto === 'awg2' ||
+                currentInstallProto === 'awg_legacy' ||
+                currentInstallProto === 'wireguard'
+            ) {
+                const subnetValue = document.getElementById('installSubnet').value.trim();
+
+                if (subnetValue.includes('/')) {
+                    const parts = subnetValue.split('/');
+                    params.subnet_ip = parts[0];
+                    params.subnet_cidr = parts[1];
+                } else {
+                    params.subnet_ip = subnetValue;
+                    params.subnet_cidr = '24';
+                }
+            }
             if (currentInstallProto === 'telemt') {
                 params.tls_emulation = document.getElementById('installTelemtTls').checked;
                 params.tls_domain = document.getElementById('installTelemtDomain').value;

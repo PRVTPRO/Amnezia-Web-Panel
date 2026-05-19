@@ -633,6 +633,8 @@ class ReorderServersRequest(BaseModel):
 class InstallProtocolRequest(BaseModel):
     protocol: str = 'awg'
     port: str = '55424'
+    subnet_ip: Optional[str] = '10.8.1.1'
+    subnet_cidr: Optional[str] = '24'
     tls_emulation: Optional[bool] = None
     tls_domain: Optional[str] = None
     max_connections: Optional[int] = None
@@ -1587,7 +1589,12 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
                 expose_doh=bool(req.adguard_expose_doh),
             )
         else:
-            result = manager.install_protocol(req.protocol, port=req.port)
+            result = manager.install_protocol(
+    req.protocol,
+    port=req.port,
+    subnet_ip=req.subnet_ip,
+    subnet_cidr=req.subnet_cidr
+)
 
         proto_record = {
             'installed': True,

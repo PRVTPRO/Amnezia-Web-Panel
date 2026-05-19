@@ -15,6 +15,7 @@ import struct
 import hashlib
 import logging
 import re
+import ipaddress
 from base64 import b64encode, b64decode
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives import serialization
@@ -241,7 +242,14 @@ iptables -C FORWARD -j DOCKER-USER 2>/dev/null || iptables -A FORWARD -j DOCKER-
         self.ssh.run_sudo_script(script)
         return True
 
-    def install_protocol(self, protocol_type, port=None, awg_params=None):
+    def install_protocol(
+        self,
+        protocol_type,
+        port=None,
+        awg_params=None,
+        subnet_ip='10.8.1.1',
+        subnet_cidr='24'
+    ):
         """
         Full installation of AWG or AWG-Legacy protocol.
         Steps: install docker -> prepare host -> build container ->
@@ -339,12 +347,12 @@ iptables -C FORWARD -j DOCKER-USER 2>/dev/null || iptables -A FORWARD -j DOCKER-
 
         # Step 6: Configure container (generate server keys and config)
         results.append("Configuring AWG...")
-        self._configure_container(protocol_type, port, awg_params)
+        self._configure_container(protocol_type, port, awg_params, subnet_ip, subnet_cidr)
         results.append("AWG configured")
 
         # Step 7: Upload and run start script
         results.append("Starting AWG service...")
-        self._upload_start_script(protocol_type, port, awg_params)
+        self._upload_start_script(protocol_type, port, awg_params, subnet_ip, subnet_cidr)
         results.append("AWG service started")
 
         # Step 8: Setup firewall
@@ -385,14 +393,19 @@ iptables -C FORWARD -j DOCKER-USER 2>/dev/null || iptables -A FORWARD -j DOCKER-
             f"(status: {last_status}). Logs:\n{logs_out}"
         )
 
-    def _configure_container(self, protocol_type, port, awg_params):
+    def _configure_container(
+        self,
+        protocol_type,
+        port,
+        awg_params,
+        subnet_ip,
+        subnet_cidr
+    ):
         """Configure the AWG container (generate keys and server config)."""
         container_name = self._container_name(protocol_type)
         wg_bin = self._wg_binary(protocol_type)
         config_path = self._config_path(protocol_type)
 
-        subnet_ip = AWG_DEFAULTS['subnet_ip']
-        subnet_cidr = AWG_DEFAULTS['subnet_cidr']
 
         # Build the server config generation script
         if protocol_type in (self.AWG, self.AWG2):
@@ -470,13 +483,19 @@ EOF
         if code != 0:
             raise RuntimeError(f"Failed to configure container: {err}")
 
-    def _upload_start_script(self, protocol_type, port, awg_params):
+    def _upload_start_script(
+        self,
+        protocol_type,
+        port,
+        awg_params,
+        subnet_ip,
+        subnet_cidr
+    ):
+        subnet = str(ipaddress.ip_network(f'{subnet_ip}/{subnet_cidr}', strict=False))
         """Upload and execute the start script inside the container."""
         container_name = self._container_name(protocol_type)
         quick_bin = self._quick_binary(protocol_type)
         config_path = self._config_path(protocol_type)
-        subnet_ip = AWG_DEFAULTS['subnet_ip']
-        subnet_cidr = AWG_DEFAULTS['subnet_cidr']
 
         start_script = f"""#!/bin/bash
 echo "Container startup"
@@ -494,13 +513,13 @@ iptables -A FORWARD -i $IFACE -j ACCEPT
 iptables -A OUTPUT -o $IFACE -j ACCEPT
 
 # Allow forwarding traffic only from the VPN
-iptables -A FORWARD -i $IFACE -o eth0 -s {subnet_ip}/{subnet_cidr} -j ACCEPT
-iptables -A FORWARD -i $IFACE -o eth1 -s {subnet_ip}/{subnet_cidr} -j ACCEPT
+iptables -A FORWARD -i $IFACE -o eth0 -s {subnet} -j ACCEPT
+iptables -A FORWARD -i $IFACE -o eth1 -s {subnet} -j ACCEPT
 
 iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT
 
-iptables -t nat -A POSTROUTING -s {subnet_ip}/{subnet_cidr} -o eth0 -j MASQUERADE
-iptables -t nat -A POSTROUTING -s {subnet_ip}/{subnet_cidr} -o eth1 -j MASQUERADE
+iptables -t nat -A POSTROUTING -s {subnet} -o eth0 -j MASQUERADE
+iptables -t nat -A POSTROUTING -s {subnet} -o eth1 -j MASQUERADE
 
 tail -f /dev/null
 """
@@ -667,29 +686,42 @@ tail -f /dev/null
                     ips.append(match.group(1))
         return ips
 
+
+    def _get_network(self, subnet_ip, subnet_cidr):
+        """Get subnet object from IP/CIDR."""
+        interface = ipaddress.ip_interface(f"{subnet_ip}/{subnet_cidr}")
+        return interface.network
+
     def _get_next_ip(self, protocol_type):
         """Calculate the next available IP for a new client."""
+        config = self._get_server_config(protocol_type)
+
+        subnet_ip = AWG_DEFAULTS['subnet_ip']
+        subnet_cidr = AWG_DEFAULTS['subnet_cidr']
+
+        for line in config.split('\n'):
+            line = line.strip()
+            if line.startswith('Address'):
+                match = re.search(r'(\d+\.\d+\.\d+\.\d+)/(\d+)', line)
+                if match:
+                    subnet_ip = match.group(1)
+                    subnet_cidr = match.group(2)
+                    break
+
         used_ips = self._get_used_ips(protocol_type)
-        if not used_ips:
-            base = AWG_DEFAULTS['subnet_address']
-            parts = base.split('.')
-            parts[3] = '2'
-            return '.'.join(parts)
 
-        # Get the last used IP and increment
-        last_ip = used_ips[-1]
-        parts = last_ip.split('.')
-        last_octet = int(parts[3])
+        network = self._get_network(subnet_ip, subnet_cidr)
 
-        if last_octet == 254:
-            next_octet = last_octet + 3
-        elif last_octet == 255:
-            next_octet = last_octet + 2
-        else:
-            next_octet = last_octet + 1
+        for host in network.hosts():
+            ip = str(host)
 
-        parts[3] = str(next_octet)
-        return '.'.join(parts)
+            if ip == subnet_ip:
+                continue
+
+            if ip not in used_ips:
+                return ip
+
+        raise RuntimeError("No free IPs left")
 
     def _parse_peers_from_config(self, protocol_type):
         """Parse [Peer] sections from WireGuard server config and return dict of pubkey -> {allowedIps}."""
