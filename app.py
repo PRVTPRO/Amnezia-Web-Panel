@@ -7,6 +7,16 @@ import hashlib
 import secrets
 import uuid
 import asyncio
+import platform
+import re
+import shutil
+import subprocess
+import tarfile
+import threading
+import time
+import urllib.request
+import zipfile
+import signal
 from datetime import datetime
 import io
 from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse, StreamingResponse, FileResponse
@@ -83,7 +93,27 @@ else:
     application_path = os.path.dirname(__file__)
 
 DATA_FILE = os.path.join(application_path, 'data.json')
-CURRENT_VERSION = "v1.4.3"
+CURRENT_VERSION = "v1.4.4"
+BIN_DIR = os.environ.get('TUNNEL_BIN_DIR', os.path.join(application_path, 'bin'))
+TUNNEL_STATE_FILE = os.environ.get('TUNNEL_STATE_FILE', os.path.join(application_path, 'tunnels_state.json'))
+
+
+class TunnelRuntime:
+    def __init__(self):
+        self.process = None
+        self.pid = None
+        self.public_url = ''
+        self.last_error = ''
+        self.started_at = None
+        self.output = []
+
+
+TUNNEL_RUNTIMES = {
+    'cloudflare': TunnelRuntime(),
+    'ngrok': TunnelRuntime(),
+}
+TUNNEL_LOCK = threading.Lock()
+TUNNEL_URL_RE = re.compile(r'https://[^\s"\']+')
 
 
 # ======================== Translations ========================
@@ -164,6 +194,529 @@ def get_ssh(server):
         password=server.get('password'),
         private_key=server.get('private_key'),
     )
+
+
+def get_panel_local_url(request: Optional[Request] = None):
+    data = load_data()
+    ssl_conf = data.get('settings', {}).get('ssl', {})
+    scheme = 'https' if ssl_conf.get('enabled') else 'http'
+    host = '127.0.0.1'
+    port = ssl_conf.get('panel_port', 5000) or 5000
+    if request:
+        scheme = request.url.scheme or scheme
+        host = request.url.hostname or host
+        port = request.url.port or port
+    return f"{scheme}://{host}:{port}"
+
+
+def get_panel_tunnel_target_url():
+    data = load_data()
+    ssl_conf = data.get('settings', {}).get('ssl', {})
+    scheme = 'https' if ssl_conf.get('enabled') else 'http'
+    port = ssl_conf.get('panel_port', 5000) or 5000
+    return f"{scheme}://127.0.0.1:{port}"
+
+
+def get_tunnel_command_name(provider: str):
+    if provider == 'cloudflare':
+        return 'cloudflared.exe' if os.name == 'nt' else 'cloudflared'
+    if provider == 'ngrok':
+        return 'ngrok.exe' if os.name == 'nt' else 'ngrok'
+    raise ValueError('Unsupported tunnel provider')
+
+
+def get_tunnel_binary_path(provider: str):
+    return os.path.join(BIN_DIR, get_tunnel_command_name(provider))
+
+
+def find_tunnel_binary(provider: str):
+    bundled = get_tunnel_binary_path(provider)
+    if os.path.exists(bundled):
+        return bundled
+    return shutil.which(get_tunnel_command_name(provider))
+
+
+def is_tunnel_installed(provider: str):
+    return bool(find_tunnel_binary(provider))
+
+
+def load_tunnel_state():
+    if not os.path.exists(TUNNEL_STATE_FILE):
+        return {}
+    try:
+        with open(TUNNEL_STATE_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning(f"Failed to load tunnel state: {e}")
+        return {}
+
+
+def save_tunnel_state(state):
+    with open(TUNNEL_STATE_FILE, 'w', encoding='utf-8') as f:
+        json.dump(state, f, indent=2, ensure_ascii=False)
+
+
+def update_tunnel_state(provider: str, **updates):
+    state = load_tunnel_state()
+    provider_state = state.get(provider, {})
+    provider_state.update(updates)
+    state[provider] = provider_state
+    save_tunnel_state(state)
+
+
+def clear_tunnel_state(provider: str):
+    state = load_tunnel_state()
+    if provider in state:
+        state.pop(provider)
+        save_tunnel_state(state)
+
+
+def pid_is_running(pid):
+    if not pid:
+        return False
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except OSError:
+        return False
+    except Exception:
+        return False
+
+
+def kill_pid(pid):
+    if not pid:
+        return
+    if os.name == 'nt':
+        subprocess.run(['taskkill', '/PID', str(pid), '/T', '/F'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if not pid_is_running(pid):
+                return
+            time.sleep(0.2)
+    else:
+        try:
+            os.kill(int(pid), signal.SIGTERM)
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                if not pid_is_running(pid):
+                    return
+                time.sleep(0.2)
+            if pid_is_running(pid):
+                os.kill(int(pid), signal.SIGKILL)
+        except ProcessLookupError:
+            return
+
+
+def wait_for_path_release(path, seconds: int = 5):
+    if os.name != 'nt':
+        return
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            if not os.path.exists(path):
+                return
+            with open(path, 'ab'):
+                return
+        except PermissionError:
+            time.sleep(0.25)
+
+
+def find_running_tunnel_pids_in_proc(provider: str, binary_path: str = ''):
+    proc_dir = '/proc'
+    if os.name == 'nt' or not os.path.isdir(proc_dir):
+        return []
+    command_name = get_tunnel_command_name(provider).lower()
+    command_base = command_name.replace('.exe', '')
+    markers = ['tunnel', '--url'] if provider == 'cloudflare' else ['http']
+    expected_binary = os.path.abspath(binary_path).lower() if binary_path else ''
+    pids = []
+    try:
+        for entry in os.listdir(proc_dir):
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            if pid == os.getpid():
+                continue
+            cmdline_path = os.path.join(proc_dir, entry, 'cmdline')
+            try:
+                with open(cmdline_path, 'rb') as f:
+                    cmdline = f.read().replace(b'\x00', b' ').decode('utf-8', errors='replace').strip()
+            except Exception:
+                continue
+            lowered = cmdline.lower()
+            exe_path = ''
+            try:
+                exe_path = os.path.abspath(os.readlink(os.path.join(proc_dir, entry, 'exe'))).lower()
+            except Exception:
+                pass
+            path_matches = bool(expected_binary and exe_path == expected_binary)
+            command_matches = (command_name in lowered or command_base in lowered) and all(marker in lowered for marker in markers)
+            if path_matches or command_matches:
+                if pid_is_running(pid):
+                    pids.append(pid)
+    except Exception as e:
+        logger.debug(f"Failed to scan /proc for running {provider} tunnel process: {e}")
+    return pids
+
+
+def find_running_tunnel_pids(provider: str, binary_path: str = ''):
+    command_name = get_tunnel_command_name(provider).lower()
+    process_name = command_name[:-4] if command_name.endswith('.exe') else command_name
+    markers = ['tunnel', '--url'] if provider == 'cloudflare' else ['http']
+    expected_binary = os.path.normcase(os.path.abspath(binary_path or get_tunnel_binary_path(provider)))
+    pids = []
+    try:
+        if os.name == 'nt':
+            ps_script = f"Get-CimInstance Win32_Process -Filter \"name='{command_name}'\" | Select-Object ProcessId,CommandLine,ExecutablePath | ConvertTo-Json -Compress"
+            result = subprocess.run(['powershell', '-NoProfile', '-Command', ps_script], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5)
+            rows = []
+            if result.returncode == 0 and result.stdout.strip():
+                payload = json.loads(result.stdout)
+                if payload:
+                    rows = payload if isinstance(payload, list) else [payload]
+            if not rows:
+                ps_script = f"Get-Process -Name '{process_name}' -ErrorAction SilentlyContinue | Select-Object Id,Path | ConvertTo-Json -Compress"
+                result = subprocess.run(['powershell', '-NoProfile', '-Command', ps_script], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5)
+                if result.returncode == 0 and result.stdout.strip():
+                    payload = json.loads(result.stdout)
+                    proc_rows = payload if isinstance(payload, list) else ([payload] if payload else [])
+                    rows = [{'ProcessId': r.get('Id'), 'ExecutablePath': r.get('Path'), 'CommandLine': ''} for r in proc_rows]
+            for row in rows:
+                if not row:
+                    continue
+                pid = int(row.get('ProcessId') or 0)
+                command_line = str(row.get('CommandLine') or '').lower()
+                executable = os.path.normcase(os.path.abspath(str(row.get('ExecutablePath') or ''))) if row.get('ExecutablePath') else ''
+                path_matches = bool(expected_binary and executable == expected_binary)
+                command_matches = command_name in command_line and all(marker in command_line for marker in markers)
+                if pid and pid != os.getpid() and (path_matches or command_matches) and pid_is_running(pid):
+                    pids.append(pid)
+            if not pids and os.path.exists(expected_binary):
+                result = subprocess.run(['tasklist', '/FI', f'IMAGENAME eq {command_name}', '/FO', 'CSV', '/NH'], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5)
+                for line in result.stdout.splitlines():
+                    match = re.match(r'"[^"]+","(\d+)"', line.strip())
+                    if match:
+                        pid = int(match.group(1))
+                        if pid != os.getpid() and pid_is_running(pid):
+                            pids.append(pid)
+            return list(dict.fromkeys(pids))
+        else:
+            result = subprocess.run(
+                ['ps', '-eo', 'pid=,args='],
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=5,
+            )
+            lines = result.stdout.splitlines()
+
+        for line in lines:
+            text = line.strip()
+            lowered = text.lower()
+            if command_name not in lowered or not all(marker in lowered for marker in markers):
+                continue
+            pid_match = re.match(r'\s*(\d+)\s+', text)
+            if pid_match:
+                pid = int(pid_match.group(1))
+                if pid != os.getpid() and pid_is_running(pid):
+                    pids.append(pid)
+    except Exception as e:
+        logger.debug(f"Failed to scan running {provider} tunnel process: {e}")
+    pids.extend(find_running_tunnel_pids_in_proc(provider, expected_binary))
+    return list(dict.fromkeys(pids))
+
+
+def find_running_tunnel_pid(provider: str):
+    pids = find_running_tunnel_pids(provider)
+    return pids[0] if pids else None
+
+
+def kill_tunnel_processes(provider: str, binary_path: str = '', include_all_by_name: bool = False):
+    pids = find_running_tunnel_pids(provider, binary_path)
+    for pid in pids:
+        kill_pid(pid)
+    if os.name == 'nt' and include_all_by_name:
+        subprocess.run(['taskkill', '/IM', get_tunnel_command_name(provider), '/T', '/F'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+    return pids
+
+
+def get_tunnel_download(provider: str):
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+
+    if provider == 'cloudflare':
+        if system == 'windows':
+            arch = 'amd64' if machine in ('amd64', 'x86_64') else '386'
+            return f'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-{arch}.exe', 'exe'
+        if system == 'darwin':
+            arch = 'arm64' if 'arm' in machine else 'amd64'
+            return f'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-{arch}.tgz', 'tgz'
+        arch = 'arm64' if 'aarch64' in machine or 'arm64' in machine else 'amd64'
+        return f'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-{arch}', 'bin'
+
+    if provider == 'ngrok':
+        if system == 'windows':
+            os_part = 'windows'
+            ext = 'zip'
+        elif system == 'darwin':
+            os_part = 'darwin'
+            ext = 'zip'
+        else:
+            os_part = 'linux'
+            ext = 'tgz'
+        arch = 'arm64' if 'aarch64' in machine or 'arm64' in machine else 'amd64'
+        return f'https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-{os_part}-{arch}.{ext}', ext
+
+    raise ValueError('Unsupported tunnel provider')
+
+
+def install_tunnel_binary(provider: str):
+    if is_tunnel_installed(provider):
+        return find_tunnel_binary(provider)
+
+    os.makedirs(BIN_DIR, exist_ok=True)
+    url, archive_type = get_tunnel_download(provider)
+    target = get_tunnel_binary_path(provider)
+    tmp_path = os.path.join(BIN_DIR, f'{provider}.download')
+    logger.info(f"Downloading {provider} tunnel binary from {url}")
+    urllib.request.urlretrieve(url, tmp_path)
+
+    if archive_type in ('bin', 'exe'):
+        shutil.move(tmp_path, target)
+    elif archive_type == 'zip':
+        with zipfile.ZipFile(tmp_path) as zf:
+            member = next((m for m in zf.namelist() if os.path.basename(m).lower() == get_tunnel_command_name(provider).lower()), None)
+            if not member:
+                raise RuntimeError(f'{provider} binary not found in downloaded archive')
+            with zf.open(member) as src, open(target, 'wb') as dst:
+                shutil.copyfileobj(src, dst)
+        os.remove(tmp_path)
+    elif archive_type == 'tgz':
+        with tarfile.open(tmp_path, 'r:gz') as tf:
+            member = next((m for m in tf.getmembers() if os.path.basename(m.name).lower() == get_tunnel_command_name(provider).lower()), None)
+            if not member:
+                raise RuntimeError(f'{provider} binary not found in downloaded archive')
+            extracted = tf.extractfile(member)
+            if not extracted:
+                raise RuntimeError(f'Cannot extract {provider} binary')
+            with extracted as src, open(target, 'wb') as dst:
+                shutil.copyfileobj(src, dst)
+        os.remove(tmp_path)
+    else:
+        raise RuntimeError(f'Unsupported download format: {archive_type}')
+
+    if os.name != 'nt':
+        os.chmod(target, 0o755)
+    return target
+
+
+def get_tunnel_public_urls(provider: str, runtime: TunnelRuntime):
+    urls = []
+    if runtime.public_url:
+        urls.append(runtime.public_url)
+    state_url = load_tunnel_state().get(provider, {}).get('public_url')
+    if state_url:
+        urls.append(state_url)
+    if provider == 'ngrok' and runtime.process and runtime.process.poll() is None:
+        try:
+            with urllib.request.urlopen('http://127.0.0.1:4040/api/tunnels', timeout=1) as resp:
+                payload = json.loads(resp.read().decode('utf-8'))
+            for item in payload.get('tunnels', []):
+                public_url = item.get('public_url')
+                if public_url and public_url.startswith('https://'):
+                    urls.append(public_url)
+        except Exception:
+            pass
+    return list(dict.fromkeys(urls))
+
+
+def watch_tunnel_output(provider: str):
+    runtime = TUNNEL_RUNTIMES[provider]
+    process = runtime.process
+    if not process or not process.stdout:
+        return
+    try:
+        for line in iter(process.stdout.readline, ''):
+            if not line:
+                break
+            text = line.strip()
+            with TUNNEL_LOCK:
+                runtime.output.append(text)
+                runtime.output = runtime.output[-60:]
+                match = TUNNEL_URL_RE.search(text)
+                if match:
+                    runtime.public_url = match.group(0).rstrip('.,')
+                    update_tunnel_state(provider, public_url=runtime.public_url)
+    except Exception as e:
+        with TUNNEL_LOCK:
+            runtime.last_error = str(e)
+
+
+def build_tunnel_command(provider: str, binary: str, local_url: str, authtoken: str = ''):
+    if provider == 'cloudflare':
+        return [binary, 'tunnel', '--url', local_url, '--no-autoupdate']
+    if provider == 'ngrok':
+        cmd = [binary, 'http', local_url, '--log=stdout']
+        return cmd
+    raise ValueError('Unsupported tunnel provider')
+
+
+def start_tunnel(provider: str, local_url: str, authtoken: str = ''):
+    binary = find_tunnel_binary(provider)
+    if not binary:
+        raise RuntimeError(f'{provider} is not installed')
+
+    runtime = TUNNEL_RUNTIMES[provider]
+    with TUNNEL_LOCK:
+        if runtime.process and runtime.process.poll() is None:
+            return runtime
+        runtime.public_url = ''
+        runtime.last_error = ''
+        runtime.output = []
+        runtime.started_at = datetime.now().isoformat()
+
+        creationflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+        env = os.environ.copy()
+        if provider == 'ngrok' and authtoken:
+            env['NGROK_AUTHTOKEN'] = authtoken
+
+        runtime.process = subprocess.Popen(
+            build_tunnel_command(provider, binary, local_url, authtoken),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            cwd=application_path,
+            env=env,
+            creationflags=creationflags,
+        )
+        runtime.pid = runtime.process.pid
+        update_tunnel_state(
+            provider,
+            pid=runtime.pid,
+            public_url='',
+            started_at=runtime.started_at,
+            binary=os.path.abspath(binary),
+        )
+
+    threading.Thread(target=watch_tunnel_output, args=(provider,), daemon=True).start()
+    return runtime
+
+
+def stop_tunnel(provider: str):
+    runtime = TUNNEL_RUNTIMES[provider]
+    process = runtime.process
+    state = load_tunnel_state().get(provider, {})
+    pids_to_stop = []
+    if process and process.poll() is None:
+        pids_to_stop.append(process.pid)
+        try:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        except Exception as e:
+            with TUNNEL_LOCK:
+                runtime.last_error = str(e)
+            raise
+    if state.get('pid') and pid_is_running(state.get('pid')):
+        pids_to_stop.append(state.get('pid'))
+    pids_to_stop.extend(find_running_tunnel_pids(provider, state.get('binary') or get_tunnel_binary_path(provider)))
+    for pid in dict.fromkeys(pids_to_stop):
+        if pid_is_running(pid):
+            kill_pid(pid)
+
+    with TUNNEL_LOCK:
+        runtime.process = None
+        runtime.pid = None
+        runtime.public_url = ''
+        runtime.started_at = None
+        runtime.last_error = ''
+    clear_tunnel_state(provider)
+    return runtime
+
+
+def delete_tunnel_binary(provider: str):
+    stop_tunnel(provider)
+    bundled = get_tunnel_binary_path(provider)
+    if os.path.exists(bundled):
+        wait_for_path_release(bundled, seconds=8)
+        try:
+            os.remove(bundled)
+        except PermissionError:
+            killed = kill_tunnel_processes(provider, bundled, include_all_by_name=True)
+            if killed:
+                wait_for_path_release(bundled, seconds=8)
+            try:
+                os.remove(bundled)
+            except PermissionError:
+                raise RuntimeError('Cannot delete tunnel binary because Windows still keeps it locked. All detected cloudflared/ngrok processes were stopped; close any antivirus scan, terminal, or external process using the file and try again.')
+    elif shutil.which(get_tunnel_command_name(provider)):
+        raise RuntimeError('This tunnel binary is installed system-wide. Remove it from PATH manually or use the panel-managed installation.')
+
+    tmp_path = os.path.join(BIN_DIR, f'{provider}.download')
+    if os.path.exists(tmp_path):
+        os.remove(tmp_path)
+
+    runtime = TUNNEL_RUNTIMES[provider]
+    with TUNNEL_LOCK:
+        runtime.output = []
+    clear_tunnel_state(provider)
+    return runtime
+
+
+def get_tunnel_status(provider: str):
+    runtime = TUNNEL_RUNTIMES[provider]
+    state = load_tunnel_state().get(provider, {})
+    running = bool(runtime.process and runtime.process.poll() is None)
+    if not running and state.get('pid'):
+        running = pid_is_running(state.get('pid'))
+        if running:
+            runtime.pid = state.get('pid')
+            runtime.started_at = runtime.started_at or state.get('started_at')
+            runtime.public_url = runtime.public_url or state.get('public_url', '')
+        else:
+            clear_tunnel_state(provider)
+            state = {}
+    if not running and is_tunnel_installed(provider):
+        found_pid = find_running_tunnel_pid(provider)
+        if found_pid:
+            running = True
+            runtime.pid = found_pid
+            runtime.started_at = runtime.started_at or datetime.now().isoformat()
+            update_tunnel_state(
+                provider,
+                pid=found_pid,
+                public_url=runtime.public_url,
+                started_at=runtime.started_at,
+                binary=os.path.abspath(find_tunnel_binary(provider) or ''),
+            )
+            state = load_tunnel_state().get(provider, {})
+    if runtime.process and not running and not runtime.last_error and runtime.output:
+        runtime.last_error = runtime.output[-1]
+    urls = get_tunnel_public_urls(provider, runtime)
+    return {
+        'installed': is_tunnel_installed(provider),
+        'running': running,
+        'public_url': urls[0] if urls else '',
+        'public_urls': urls,
+        'last_error': runtime.last_error,
+        'started_at': runtime.started_at or state.get('started_at'),
+    }
+
+
+async def wait_for_tunnel_url(provider: str, seconds: int = 20):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        status = get_tunnel_status(provider)
+        if status.get('public_url') or not status.get('running'):
+            return status
+        await asyncio.sleep(0.5)
+    return get_tunnel_status(provider)
 
 
 def get_protocol_manager(ssh, protocol: str):
@@ -803,6 +1356,10 @@ class ShareSetupRequest(BaseModel):
 
 class ShareAuthRequest(BaseModel):
     password: str
+
+
+class TunnelStartRequest(BaseModel):
+    authtoken: Optional[str] = None
 
 
 # ======================== Startup ========================
@@ -1985,10 +2542,7 @@ async def api_get_connection_config(request: Request, server_id: int, req: Conne
         ssh = get_ssh(server)
         ssh.connect()
         manager = get_protocol_manager(ssh, req.protocol)
-        if req.protocol == 'wireguard':
-            config = manager.get_client_config(req.client_id, server['host'])
-        else:
-            config = manager.get_client_config(req.protocol, req.client_id, server['host'], port)
+        config = _manager_call(manager, 'get_client_config', req.protocol, req.client_id, server['host'], port)
         ssh.disconnect()
         vpn_link = generate_vpn_link(config) if config else ''
         return {'config': config, 'vpn_link': vpn_link}
@@ -2440,7 +2994,7 @@ async def api_share_config(token: str, connection_id: str, request: Request):
         ssh.connect()
         # Use appropriate manager for the protocol
         manager = get_protocol_manager(ssh, conn['protocol'])
-        config = manager.get_client_config(conn['protocol'], conn['client_id'], server['host'], port)
+        config = _manager_call(manager, 'get_client_config', conn['protocol'], conn['client_id'], server['host'], port)
         ssh.disconnect()
         vpn_link = generate_vpn_link(config) if config else ''
         return {'config': config, 'vpn_link': vpn_link}
@@ -2472,7 +3026,7 @@ async def api_my_connection_config(request: Request, connection_id: str):
         ssh.connect()
         # Use appropriate manager for the protocol (fixes Telemt/Xray not working for users)
         manager = get_protocol_manager(ssh, conn['protocol'])
-        config = manager.get_client_config(conn['protocol'], conn['client_id'], server['host'], port)
+        config = _manager_call(manager, 'get_client_config', conn['protocol'], conn['client_id'], server['host'], port)
         ssh.disconnect()
         vpn_link = generate_vpn_link(config) if config else ''
         return {'config': config, 'vpn_link': vpn_link}
@@ -2496,6 +3050,77 @@ async def api_get_settings(request: Request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     data = load_data()
     return data.get('settings', {})
+
+
+@app.get('/api/settings/tunnels/status', tags=["Settings"])
+async def api_tunnels_status(request: Request):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    return {
+        'local_server': get_panel_local_url(request),
+        'cloudflare': get_tunnel_status('cloudflare'),
+        'ngrok': get_tunnel_status('ngrok'),
+    }
+
+
+@app.post('/api/settings/tunnels/{provider}/install', tags=["Settings"])
+async def api_tunnel_install(request: Request, provider: str):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if provider not in TUNNEL_RUNTIMES:
+        return JSONResponse({'error': 'Unsupported tunnel provider'}, status_code=400)
+    try:
+        await asyncio.to_thread(install_tunnel_binary, provider)
+        return get_tunnel_status(provider)
+    except Exception as e:
+        logger.exception(f"Error installing {provider} tunnel")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/settings/tunnels/{provider}/start', tags=["Settings"])
+async def api_tunnel_start(request: Request, provider: str, payload: TunnelStartRequest = TunnelStartRequest()):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if provider not in TUNNEL_RUNTIMES:
+        return JSONResponse({'error': 'Unsupported tunnel provider'}, status_code=400)
+    try:
+        local_url = get_panel_tunnel_target_url()
+        await asyncio.to_thread(start_tunnel, provider, local_url, payload.authtoken or '')
+        status = await wait_for_tunnel_url(provider)
+        if not status.get('running'):
+            return JSONResponse({'error': status.get('last_error') or 'Tunnel process stopped'}, status_code=500)
+        return status
+    except Exception as e:
+        logger.exception(f"Error starting {provider} tunnel")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/settings/tunnels/{provider}/stop', tags=["Settings"])
+async def api_tunnel_stop(request: Request, provider: str):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if provider not in TUNNEL_RUNTIMES:
+        return JSONResponse({'error': 'Unsupported tunnel provider'}, status_code=400)
+    try:
+        await asyncio.to_thread(stop_tunnel, provider)
+        return get_tunnel_status(provider)
+    except Exception as e:
+        logger.exception(f"Error stopping {provider} tunnel")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.delete('/api/settings/tunnels/{provider}', tags=["Settings"])
+async def api_tunnel_delete(request: Request, provider: str):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if provider not in TUNNEL_RUNTIMES:
+        return JSONResponse({'error': 'Unsupported tunnel provider'}, status_code=400)
+    try:
+        await asyncio.to_thread(delete_tunnel_binary, provider)
+        return get_tunnel_status(provider)
+    except Exception as e:
+        logger.exception(f"Error deleting {provider} tunnel")
+        return JSONResponse({'error': str(e)}, status_code=500)
 
 
 # @app.post('/api/settings/save')

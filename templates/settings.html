@@ -99,6 +99,71 @@
             <p class="form-hint" style="margin-top: var(--space-md);">{{ _('api_docs_hint') }}</p>
         </div>
 
+        <!-- BLOCK Tunnels -->
+        <div class="card">
+            <h3 class="card-title" style="margin-bottom: var(--space-lg);">🌍 {{ _('tunnels_title') }}</h3>
+            <div style="display: flex; flex-direction: column; gap: var(--space-md);">
+                <div style="padding: var(--space-md); border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-primary);">
+                    <div style="display:flex; align-items:center; justify-content:space-between; gap:var(--space-md); margin-bottom: var(--space-sm);">
+                        <strong>{{ _('local_server') }}</strong>
+                        <span class="badge badge-info">{{ _('active') }}</span>
+                    </div>
+                    <div style="display:flex; gap:var(--space-sm); align-items:center;">
+                        <code id="localServerUrl" style="flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color: var(--text-secondary);">{{ request.url.scheme }}://{{ request.url.netloc }}</code>
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="copyElementText('localServerUrl')">{{ _('copy') }}</button>
+                    </div>
+                </div>
+
+                <div class="tunnel-row" data-provider="cloudflare" style="padding: var(--space-md); border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-primary);">
+                    <div style="display:flex; align-items:center; justify-content:space-between; gap:var(--space-md); margin-bottom: var(--space-sm);">
+                        <strong>Cloudflare Quick Tunnel</strong>
+                        <span class="badge badge-secondary" id="cloudflareInstallBadge">{{ _('not_installed') }}</span>
+                    </div>
+                    <div id="cloudflarePublicUrls" class="form-hint" style="margin-bottom: var(--space-sm);">{{ _('tunnel_no_public_url') }}</div>
+                    <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap: var(--space-sm);">
+                        <button type="button" class="btn btn-primary" id="cloudflareTunnelBtn" onclick="enableTunnel('cloudflare')">
+                            <span id="cloudflareTunnelBtnText">{{ _('tunnel_install_enable') }}</span>
+                            <div class="spinner hidden" id="cloudflareTunnelSpinner" style="width:14px; height:14px;"></div>
+                        </button>
+                        <button type="button" class="btn btn-secondary hidden" id="cloudflareStopBtn" onclick="stopTunnel('cloudflare')">
+                            <span id="cloudflareStopBtnText">{{ _('tunnel_stop') }}</span>
+                            <div class="spinner hidden" id="cloudflareStopSpinner" style="width:14px; height:14px;"></div>
+                        </button>
+                        <button type="button" class="btn btn-danger hidden" id="cloudflareDeleteBtn" onclick="deleteTunnel('cloudflare')">
+                            <span id="cloudflareDeleteBtnText">{{ _('tunnel_delete') }}</span>
+                            <div class="spinner hidden" id="cloudflareDeleteSpinner" style="width:14px; height:14px;"></div>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="tunnel-row" data-provider="ngrok" style="padding: var(--space-md); border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-primary);">
+                    <div style="display:flex; align-items:center; justify-content:space-between; gap:var(--space-md); margin-bottom: var(--space-sm);">
+                        <strong>ngrok Tunnel + Authtoken</strong>
+                        <span class="badge badge-secondary" id="ngrokInstallBadge">{{ _('not_installed') }}</span>
+                    </div>
+                    <div class="form-group" style="margin-bottom: var(--space-sm);">
+                        <input type="password" class="form-input" id="ngrokAuthtoken" placeholder="{{ _('ngrok_authtoken_placeholder') }}" autocomplete="off">
+                    </div>
+                    <div id="ngrokPublicUrls" class="form-hint" style="margin-bottom: var(--space-sm);">{{ _('tunnel_no_public_url') }}</div>
+                    <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap: var(--space-sm);">
+                        <button type="button" class="btn btn-primary" id="ngrokTunnelBtn" onclick="enableTunnel('ngrok')">
+                            <span id="ngrokTunnelBtnText">{{ _('tunnel_install_enable') }}</span>
+                            <div class="spinner hidden" id="ngrokTunnelSpinner" style="width:14px; height:14px;"></div>
+                        </button>
+                        <button type="button" class="btn btn-secondary hidden" id="ngrokStopBtn" onclick="stopTunnel('ngrok')">
+                            <span id="ngrokStopBtnText">{{ _('tunnel_stop') }}</span>
+                            <div class="spinner hidden" id="ngrokStopSpinner" style="width:14px; height:14px;"></div>
+                        </button>
+                        <button type="button" class="btn btn-danger hidden" id="ngrokDeleteBtn" onclick="deleteTunnel('ngrok')">
+                            <span id="ngrokDeleteBtnText">{{ _('tunnel_delete') }}</span>
+                            <div class="spinner hidden" id="ngrokDeleteSpinner" style="width:14px; height:14px;"></div>
+                        </button>
+                    </div>
+                </div>
+            </div>
+            <p class="form-hint" style="margin-top: var(--space-md);">{{ _('tunnels_hint') }}</p>
+        </div>
+
         <!-- BLOCK SSL/HTTPS -->
         <div class="card">
             <h3 class="card-title" style="margin-bottom: var(--space-lg);">🔒 {{ _('ssl_title') }}</h3>
@@ -430,6 +495,132 @@
         document.getElementById('sslFields').style.display = e.target.checked ? 'block' : 'none';
     });
 
+    let tunnelStatusTimer = null;
+
+    function copyElementText(id) {
+        const el = document.getElementById(id);
+        if (el) copyToClipboard(el.textContent.trim());
+    }
+
+    function renderTunnelUrls(provider, urls) {
+        const el = document.getElementById(`${provider}PublicUrls`);
+        if (!el) return;
+        if (!urls || !urls.length) {
+            el.textContent = _('tunnel_no_public_url');
+            return;
+        }
+        el.innerHTML = urls.map((url, idx) => `
+            <div style="display:flex; gap:var(--space-sm); align-items:center; margin-top:${idx ? 'var(--space-xs)' : '0'};">
+                <code id="${provider}PublicUrl${idx}" style="flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color: var(--text-secondary);">${escapeHTML(url)}</code>
+                <button type="button" class="btn btn-secondary btn-sm" onclick="copyElementText('${provider}PublicUrl${idx}')">${_('copy')}</button>
+            </div>
+        `).join('');
+    }
+
+    function updateTunnelProvider(provider, status) {
+        const badge = document.getElementById(`${provider}InstallBadge`);
+        const text = document.getElementById(`${provider}TunnelBtnText`);
+        const startBtn = document.getElementById(`${provider}TunnelBtn`);
+        const stopBtn = document.getElementById(`${provider}StopBtn`);
+        const deleteBtn = document.getElementById(`${provider}DeleteBtn`);
+        if (!badge || !text) return;
+
+        badge.className = status.installed ? 'badge badge-success' : 'badge badge-secondary';
+        badge.textContent = status.installed ? _('installed') : _('not_installed');
+        text.textContent = status.running ? _('tunnel_running') : (status.installed ? _('tunnel_enable') : _('tunnel_install_enable'));
+        if (startBtn) startBtn.disabled = !!status.running;
+        if (stopBtn) stopBtn.classList.toggle('hidden', !status.running);
+        if (deleteBtn) deleteBtn.classList.toggle('hidden', !status.installed);
+        renderTunnelUrls(provider, status.public_urls || (status.public_url ? [status.public_url] : []));
+    }
+
+    async function loadTunnelStatus() {
+        try {
+            const data = await apiCall('/api/settings/tunnels/status');
+            if (data.local_server) document.getElementById('localServerUrl').textContent = data.local_server;
+            updateTunnelProvider('cloudflare', data.cloudflare || {});
+            updateTunnelProvider('ngrok', data.ngrok || {});
+        } catch (err) {
+            showToast(`${_('error')}: ` + err.message, 'error');
+        }
+    }
+
+    async function enableTunnel(provider) {
+        const btn = document.getElementById(`${provider}TunnelBtn`);
+        const spinner = document.getElementById(`${provider}TunnelSpinner`);
+        const text = document.getElementById(`${provider}TunnelBtnText`);
+        btn.disabled = true;
+        spinner.classList.remove('hidden');
+        text.textContent = _('loading');
+
+        try {
+            const current = await apiCall('/api/settings/tunnels/status');
+            const providerStatus = current[provider] || {};
+            if (!providerStatus.installed) {
+                text.textContent = _('installing');
+                await apiCall(`/api/settings/tunnels/${provider}/install`, 'POST');
+            }
+
+            text.textContent = _('tunnel_starting');
+            const body = provider === 'ngrok' ? { authtoken: document.getElementById('ngrokAuthtoken').value.trim() } : {};
+            const status = await apiCall(`/api/settings/tunnels/${provider}/start`, 'POST', body);
+            updateTunnelProvider(provider, status);
+            showToast(status.public_url ? _('tunnel_started') : _('tunnel_waiting_url'), 'success');
+            if (!tunnelStatusTimer) tunnelStatusTimer = setInterval(loadTunnelStatus, 5000);
+        } catch (err) {
+            showToast(`${_('error')}: ` + err.message, 'error');
+            await loadTunnelStatus();
+        } finally {
+            btn.disabled = false;
+            spinner.classList.add('hidden');
+        }
+    }
+
+    async function stopTunnel(provider) {
+        const btn = document.getElementById(`${provider}StopBtn`);
+        const spinner = document.getElementById(`${provider}StopSpinner`);
+        const text = document.getElementById(`${provider}StopBtnText`);
+        btn.disabled = true;
+        spinner.classList.remove('hidden');
+        text.textContent = _('tunnel_stopping');
+
+        try {
+            const status = await apiCall(`/api/settings/tunnels/${provider}/stop`, 'POST');
+            updateTunnelProvider(provider, status);
+            showToast(_('tunnel_stopped'), 'success');
+        } catch (err) {
+            showToast(`${_('error')}: ` + err.message, 'error');
+            await loadTunnelStatus();
+        } finally {
+            btn.disabled = false;
+            text.textContent = _('tunnel_stop');
+            spinner.classList.add('hidden');
+        }
+    }
+
+    async function deleteTunnel(provider) {
+        if (!confirm(_('tunnel_delete_confirm'))) return;
+        const btn = document.getElementById(`${provider}DeleteBtn`);
+        const spinner = document.getElementById(`${provider}DeleteSpinner`);
+        const text = document.getElementById(`${provider}DeleteBtnText`);
+        btn.disabled = true;
+        spinner.classList.remove('hidden');
+        text.textContent = _('deleting');
+
+        try {
+            const status = await apiCall(`/api/settings/tunnels/${provider}`, 'DELETE');
+            updateTunnelProvider(provider, status);
+            showToast(_('tunnel_deleted'), 'success');
+        } catch (err) {
+            showToast(`${_('error')}: ` + err.message, 'error');
+            await loadTunnelStatus();
+        } finally {
+            btn.disabled = false;
+            text.textContent = _('tunnel_delete');
+            spinner.classList.add('hidden');
+        }
+    }
+
     async function syncRemnawaveNow() {
         const btn = document.getElementById('syncNowBtn');
         const text = document.getElementById('syncNowBtnText');
@@ -505,7 +696,7 @@
             remnawave_sync: syncForm.remnawave_sync.checked,
             remnawave_sync_users: syncForm.remnawave_sync_users.checked,
             remnawave_create_conns: syncForm.remnawave_create_conns.checked,
-            remnawave_server_id: parseInt(syncForm.remnawave_server_id.value),
+            remnawave_server_id: parseInt(syncForm.remnawave_server_id.value || '0'),
             remnawave_protocol: syncForm.remnawave_protocol.value
         };
 
@@ -750,6 +941,10 @@
         }
     }
 
-    document.addEventListener('DOMContentLoaded', loadTokens);
+    document.addEventListener('DOMContentLoaded', () => {
+        loadTokens();
+        loadTunnelStatus();
+        tunnelStatusTimer = setInterval(loadTunnelStatus, 10000);
+    });
 </script>
 {% endblock %}

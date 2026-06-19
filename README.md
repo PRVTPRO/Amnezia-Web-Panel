@@ -96,6 +96,12 @@ Configuration panel for system parameters and preferences:
     *   **Simple Backup**: Effortless JSON-based export and restore of all panel data.
 *   **🔗 Public Sharing**:
     *   Generate password-protected links for users to download their configurations without panel access.
+*   **🌍 One-click Public Tunnels** *(new)*:
+    *   Open the local panel to the internet from `/settings` using **Cloudflare Quick Tunnel** or **ngrok**.
+    *   Shows the local server URL, installation state, running state, and issued public HTTPS URLs directly in the UI.
+    *   Supports one-click install, enable, stop, and delete for panel-managed tunnel binaries.
+    *   Persists tunnel PID/public URL state across panel restarts and can detect already running tunnel processes.
+    *   Works on Windows, Linux, and Docker-friendly environments; `TUNNEL_BIN_DIR` and `TUNNEL_STATE_FILE` can override binary/state locations.
 *   **🔑 API Tokens for External Integrations** *(new)*:
     *   Issue bearer tokens from `/settings` for CI bots, monitoring, or any third-party service.
     *   Panel never stores the raw token — only its SHA-256 hash. The full value is shown **once** at creation; lose it and you must rotate.

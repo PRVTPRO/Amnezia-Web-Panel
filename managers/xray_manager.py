@@ -3,6 +3,7 @@ import os
 import uuid
 import logging
 import base64
+import shlex
 from datetime import datetime
 import urllib.parse
 
@@ -220,7 +221,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
             "log": {"loglevel": "error"},
             "stats": {},
             "api": {
-                "services": ["StatsService", "LoggerService"],
+                "services": ["StatsService", "LoggerService", "HandlerService"],
                 "tag": "api"
             },
             "policy": {
@@ -236,6 +237,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
                 {
                     "port": int(port),
                     "protocol": "vless",
+                    "tag": "proxy",
                     "settings": {
                         "clients": [],
                         "decryption": "none"
@@ -323,6 +325,9 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         return json.loads(out)
 
     def _save_server_json(self, data):
+        return self._write_server_json(data, restart=True)
+
+    def _write_server_json(self, data, restart=True):
         """Write server.json into container via docker cp AND sync to host path."""
         tmp_file = "/tmp/_xray_server.json"
         self.ssh.upload_file_sudo(json.dumps(data, indent=2), tmp_file)
@@ -333,7 +338,72 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         self.ssh.run_sudo_command(
             f"cp {tmp_file} {self._config_path()} 2>/dev/null || true"
         )
-        self.ssh.run_sudo_command(f"docker restart {self.CONTAINER_NAME}")
+        if restart:
+            self.ssh.run_sudo_command(f"docker restart {self.CONTAINER_NAME}")
+
+    def _get_vless_inbound(self, config):
+        for inbound in config.get('inbounds', []):
+            if inbound.get('protocol') == 'vless':
+                return inbound
+        return None
+
+    def _get_vless_inbound_tag(self, config):
+        inbound = self._get_vless_inbound(config)
+        return inbound.get('tag') if inbound else None
+
+    def _run_xray_api_json(self, subcommand, payload):
+        tmp_name = f"/tmp/_xray_api_{uuid.uuid4().hex}.json"
+        container_tmp = tmp_name
+        try:
+            self.ssh.upload_file_sudo(json.dumps(payload, indent=2), tmp_name)
+            _, err, code = self.ssh.run_sudo_command(
+                f"docker cp {tmp_name} {self.CONTAINER_NAME}:{container_tmp}"
+            )
+            if code != 0:
+                return False, err
+            out, err, code = self.ssh.run_sudo_command(
+                f"docker exec -i {self.CONTAINER_NAME} /usr/bin/xray api {subcommand} "
+                f"-server=127.0.0.1:10085 {container_tmp}"
+            )
+            return code == 0, err or out
+        finally:
+            self.ssh.run_sudo_command(f"rm -f {tmp_name}")
+            self.ssh.run_sudo_command(f"docker exec -i {self.CONTAINER_NAME} rm -f {container_tmp} 2>/dev/null || true")
+
+    def _xray_api_add_user(self, config, client):
+        tag = self._get_vless_inbound_tag(config)
+        if not tag:
+            return False
+        payload = {
+            "inbounds": [{
+                "tag": tag,
+                "protocol": "vless",
+                "settings": {
+                    "clients": [client],
+                    "decryption": "none",
+                }
+            }]
+        }
+        ok, message = self._run_xray_api_json('adu', payload)
+        if not ok:
+            logger.warning(f"Xray API add user failed: {message}")
+            return False
+        return True
+
+    def _xray_api_remove_user(self, config, client_id):
+        tag = self._get_vless_inbound_tag(config)
+        if not tag:
+            return False
+        cmd = (
+            f"docker exec -i {self.CONTAINER_NAME} /usr/bin/xray api rmu "
+            f"-server=127.0.0.1:10085 "
+            f"-tag={shlex.quote(tag)} {shlex.quote(client_id)}"
+        )
+        out, err, code = self.ssh.run_sudo_command(cmd)
+        if code != 0:
+            logger.warning(f"Xray API remove user failed: {err or out}")
+            return False
+        return True
 
     def _get_meta_json(self):
         """Read protocol metadata. Supports both layouts.
@@ -428,15 +498,20 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
             f"cp {tmp_file} {path} 2>/dev/null || true"
         )
 
-    def _upgrade_config_for_stats(self, config):
+    def _upgrade_config_for_stats(self, config, restart=True):
         """Injects API and Stats blocks into older Xray configs transparently."""
         dirty = False
         if 'stats' not in config:
             config['stats'] = {}
             dirty = True
         if 'api' not in config:
-            config['api'] = {"services": ["StatsService", "LoggerService"], "tag": "api"}
+            config['api'] = {"services": ["StatsService", "LoggerService", "HandlerService"], "tag": "api"}
             dirty = True
+        else:
+            services = config['api'].setdefault('services', [])
+            if 'HandlerService' not in services:
+                services.append('HandlerService')
+                dirty = True
         if 'policy' not in config:
             config['policy'] = {
                 "levels": {"0": {"statsUserUplink": True, "statsUserDownlink": True}},
@@ -460,13 +535,16 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
             
         for ib in config.get('inbounds', []):
             if ib.get('protocol') == 'vless':
+                if not ib.get('tag'):
+                    ib['tag'] = 'proxy'
+                    dirty = True
                 for c in ib.get('settings', {}).get('clients', []):
                     if 'email' not in c:
                         c['email'] = c['id']
                         dirty = True
             
         if dirty:
-            self._save_server_json(config)
+            self._write_server_json(config, restart=restart)
         return dirty
 
     def _query_xray_stats(self):
@@ -519,7 +597,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         if not config:
             return []
 
-        self._upgrade_config_for_stats(config)
+        self._upgrade_config_for_stats(config, restart=False)
 
         # Collect all client IDs currently registered in the Xray server config
         xray_clients = []
@@ -607,14 +685,27 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         config = self._get_server_json()
         if not config: raise RuntimeError("Xray server config not found.")
 
+        self._upgrade_config_for_stats(config, restart=False)
+
+        inbound = self._get_vless_inbound(config)
+        if not inbound:
+            raise RuntimeError("Xray VLESS inbound not found.")
+
         # Ensure clients structure exists
-        clients_node = config['inbounds'][0]['settings'].setdefault('clients', [])
-        clients_node.append({
+        clients_node = inbound.setdefault('settings', {}).setdefault('clients', [])
+        client = {
             "id": client_id,
             "flow": "xtls-rprx-vision",
             "email": client_id
-        })
-        self._save_server_json(config)
+        }
+        if not self._xray_api_add_user(config, client):
+            raise RuntimeError(
+                "Xray runtime API is not available for hot user updates. "
+                "The server config was upgraded, but the container must be restarted once to enable HandlerService. "
+                "Restart the Xray container manually and try again."
+            )
+        clients_node.append(client)
+        self._write_server_json(config, restart=False)
 
         # Update table
         clients_table = self._get_clients_table()
@@ -635,20 +726,29 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
 
     def toggle_client(self, protocol, client_id, enable):
         config = self._get_server_json()
-        clients_node = config['inbounds'][0]['settings'].get('clients', [])
-        
+        self._upgrade_config_for_stats(config, restart=False)
+        inbound = self._get_vless_inbound(config)
+        if not inbound:
+            raise RuntimeError("Xray VLESS inbound not found.")
+        clients_node = inbound.setdefault('settings', {}).setdefault('clients', [])
+
         # If toggling on and not present, we can re-add it from clientsTable
         if enable:
             if not any(c['id'] == client_id for c in clients_node):
-                clients_node.append({
+                client = {
                     "id": client_id,
                     "flow": "xtls-rprx-vision",
                     "email": client_id
-                })
+                }
+                if not self._xray_api_add_user(config, client):
+                    raise RuntimeError("Xray runtime API failed to enable the client without restarting the container.")
+                clients_node.append(client)
         else:
-            config['inbounds'][0]['settings']['clients'] = [c for c in clients_node if c['id'] != client_id]
+            if not self._xray_api_remove_user(config, client_id):
+                raise RuntimeError("Xray runtime API failed to disable the client without restarting the container.")
+            inbound['settings']['clients'] = [c for c in clients_node if c['id'] != client_id]
 
-        self._save_server_json(config)
+        self._write_server_json(config, restart=False)
 
         clients_table = self._get_clients_table()
         for c in clients_table:
@@ -658,9 +758,15 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
 
     def remove_client(self, protocol, client_id):
         config = self._get_server_json()
-        clients_node = config['inbounds'][0]['settings'].get('clients', [])
-        config['inbounds'][0]['settings']['clients'] = [c for c in clients_node if c['id'] != client_id]
-        self._save_server_json(config)
+        self._upgrade_config_for_stats(config, restart=False)
+        inbound = self._get_vless_inbound(config)
+        if not inbound:
+            raise RuntimeError("Xray VLESS inbound not found.")
+        clients_node = inbound.setdefault('settings', {}).setdefault('clients', [])
+        if not self._xray_api_remove_user(config, client_id):
+            raise RuntimeError("Xray runtime API failed to remove the client without restarting the container.")
+        inbound['settings']['clients'] = [c for c in clients_node if c['id'] != client_id]
+        self._write_server_json(config, restart=False)
 
         clients_table = self._get_clients_table()
         clients_table = [c for c in clients_table if c['clientId'] != client_id]

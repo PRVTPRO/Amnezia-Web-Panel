@@ -129,6 +129,30 @@ class AWGManager:
         # Both AWG and AWG2 use awg0.conf
         return '/opt/amnezia/awg/awg0.conf'
 
+    def _config_path_candidates(self, protocol_type):
+        """Return possible config paths, ordered by the expected path first."""
+        expected = self._config_path(protocol_type)
+        fallback = '/opt/amnezia/awg/awg0.conf' if protocol_type == self.AWG_LEGACY else '/opt/amnezia/awg/wg0.conf'
+        return [expected, fallback]
+
+    def _resolve_config_path(self, protocol_type):
+        """Resolve the real config path in existing containers.
+
+        AWG Legacy should use wg0.conf, but some older or manually modified
+        installations may have a different file name. Resolve the existing file
+        instead of requiring users to create symlinks inside the container.
+        """
+        container_name = self._container_name(protocol_type)
+        candidates = self._config_path_candidates(protocol_type)
+        paths = ' '.join(candidates)
+        script = f'for p in {paths}; do if [ -f "$p" ]; then echo "$p"; exit 0; fi; done; exit 1'
+        out, _, code = self.ssh.run_sudo_command(
+            f"docker exec -i {container_name} sh -c '{script}'"
+        )
+        if code == 0 and out.strip():
+            return out.strip().splitlines()[0]
+        return self._config_path(protocol_type)
+
     def _wg_binary(self, protocol_type):
         """Get the wireguard binary name."""
         if protocol_type == self.AWG_LEGACY:
@@ -145,8 +169,10 @@ class AWGManager:
         return 'awg-quick'
 
 
-    def _interface_name(self, protocol_type):
+    def _interface_name(self, protocol_type, config_path=None):
         """Get the interface name."""
+        if config_path:
+            return os.path.splitext(os.path.basename(config_path))[0]
         if protocol_type == self.AWG_LEGACY:
             return 'wg0'
         # AWG and AWG2 both use 'awg0' interface
@@ -571,7 +597,7 @@ tail -f /dev/null
     def _get_server_config(self, protocol_type):
         """Get the server WireGuard config."""
         container_name = self._container_name(protocol_type)
-        config_path = self._config_path(protocol_type)
+        config_path = self._resolve_config_path(protocol_type)
 
         out, err, code = self.ssh.run_sudo_command(
             f"docker exec -i {container_name} cat {config_path}"
@@ -583,7 +609,7 @@ tail -f /dev/null
     def save_server_config(self, protocol_type, config_content):
         """Save the server WireGuard config and restart container."""
         container_name = self._container_name(protocol_type)
-        config_path = self._config_path(protocol_type)
+        config_path = self._resolve_config_path(protocol_type)
 
         # Upload new config into container via SFTP + docker cp
         self.ssh.upload_file(config_content.replace('\r\n', '\n'), "/tmp/_amnz_edit_config.conf")
@@ -829,9 +855,9 @@ tail -f /dev/null
         Returns the client config as a string for the .conf file.
         """
         container_name = self._container_name(protocol_type)
-        config_path = self._config_path(protocol_type)
         wg_bin = self._wg_binary(protocol_type)
-        iface = self._interface_name(protocol_type)
+        config_path = self._resolve_config_path(protocol_type)
+        iface = self._interface_name(protocol_type, config_path)
 
         # Generate client keys
         client_priv_key, client_pub_key = generate_wg_keypair()
@@ -1039,9 +1065,9 @@ PersistentKeepalive = 25
     def toggle_client(self, protocol_type, client_id, enable):
         """Enable or disable a client by adding/removing their [Peer] from server config."""
         container_name = self._container_name(protocol_type)
-        config_path = self._config_path(protocol_type)
         wg_bin = self._wg_binary(protocol_type)
-        iface = self._interface_name(protocol_type)
+        config_path = self._resolve_config_path(protocol_type)
+        iface = self._interface_name(protocol_type, config_path)
 
         if enable:
             # Re-add peer to server config
@@ -1107,9 +1133,9 @@ AllowedIPs = {client_ip}/32
     def remove_client(self, protocol_type, client_id):
         """Remove a client from AWG config (mirrors revokeWireGuard)."""
         container_name = self._container_name(protocol_type)
-        config_path = self._config_path(protocol_type)
         wg_bin = self._wg_binary(protocol_type)
-        iface = self._interface_name(protocol_type)
+        config_path = self._resolve_config_path(protocol_type)
+        iface = self._interface_name(protocol_type, config_path)
 
         # Get current config
         config = self._get_server_config(protocol_type)
