@@ -66,8 +66,15 @@ def generate_psk():
 
 
 def generate_awg_params(use_ranges=False):
-    """Generate random AWG obfuscation parameters."""
+    """Generate random AWG obfuscation parameters.
+    
+    For AWG 2.0 (use_ranges=True): generates H1-H4 as non-overlapping
+    ranges (min-max) for dynamic packet signature. Each packet gets a
+    random value from its range, defeating static DPI signatures.
+    For legacy AWG (use_ranges=False): generates fixed single H values.
+    """
     import random
+
     jc = random.randint(1, 10)
     jmin = random.randint(5, 20)
     jmax = random.randint(jmin + 10, jmin + 50)
@@ -77,11 +84,22 @@ def generate_awg_params(use_ranges=False):
     s4 = random.randint(10, 50)
 
     if use_ranges:
-        # Standard AWG 2.0 headers. Use single large numbers.
-        h1 = str(random.randint(1000000000, 4294967295))
-        h2 = str(random.randint(1000000000, 4294967295))
-        h3 = str(random.randint(1000000000, 4294967295))
-        h4 = str(random.randint(1000000000, 4294967295))
+        # AWG 2.0: H1-H4 as non-overlapping ranges (min-max)
+        # Split [1B, 4.29B] into 4 equal zones, pick random sub-range in each
+        # Guarantees no intersections between H1-H4 per AWG 2.0 spec
+        def make_ranges(total_min=1000000000, total_max=4294967295):
+            zone_size = (total_max - total_min) // 4
+            result = []
+            for i in range(4):
+                z_start = total_min + i * zone_size
+                z_end = z_start + zone_size - 1
+                padding = min(100000, zone_size // 4)
+                a = random.randint(z_start + padding, z_end - padding)
+                b = random.randint(a + 1, z_end)
+                result.append(f"{a}-{b}")
+            return result
+        
+        h1, h2, h3, h4 = make_ranges()
     else:
         h1 = str(random.randint(100000000, 4294967295))
         h2 = str(random.randint(100000000, 4294967295))
