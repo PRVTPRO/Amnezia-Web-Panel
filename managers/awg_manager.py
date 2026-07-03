@@ -188,6 +188,43 @@ class AWGManager:
         """Path to the clients table file inside container."""
         return '/opt/amnezia/awg/clientsTable'
 
+    def _get_subnet_ip(self, protocol_type):
+        """Get the subnet IP (gateway) from server config, or fallback to default."""
+        try:
+            config = self._get_server_config(protocol_type)
+            for line in config.split('\n'):
+                if line.startswith('Address'):
+                    addr = line.split('=')[1].strip()
+                    ip = addr.split('/')[0]
+                    return ip
+        except Exception:
+            pass
+        return AWG_DEFAULTS['subnet_ip']
+
+    def _get_subnet_cidr(self, protocol_type):
+        """Get the subnet CIDR from server config, or fallback to default."""
+        try:
+            config = self._get_server_config(protocol_type)
+            for line in config.split('\n'):
+                if line.startswith('Address'):
+                    addr = line.split('=')[1].strip()
+                    if '/' in addr:
+                        return addr.split('/')[1]
+        except Exception:
+            pass
+        return AWG_DEFAULTS['subnet_cidr']
+
+    def _get_subnet_base(self, protocol_type):
+        """Get the subnet network address (e.g. 172.16.21.0) from server config."""
+        subnet_ip = self._get_subnet_ip(protocol_type)
+        cidr = int(self._get_subnet_cidr(protocol_type))
+        parts = list(map(int, subnet_ip.split('.')))
+        mask = (0xFFFFFFFF << (32 - cidr)) & 0xFFFFFFFF
+        network = struct.pack('!I', (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3])
+        net_int = struct.unpack('!I', network)[0] & mask
+        net_parts = [(net_int >> 24) & 0xFF, (net_int >> 16) & 0xFF, (net_int >> 8) & 0xFF, net_int & 0xFF]
+        return '.'.join(map(str, net_parts))
+
     # ===================== INSTALLATION =====================
 
     def check_docker_installed(self):
@@ -417,8 +454,8 @@ iptables -C FORWARD -j DOCKER-USER 2>/dev/null || iptables -A FORWARD -j DOCKER-
         wg_bin = self._wg_binary(protocol_type)
         config_path = self._config_path(protocol_type)
 
-        subnet_ip = AWG_DEFAULTS['subnet_ip']
-        subnet_cidr = AWG_DEFAULTS['subnet_cidr']
+        subnet_ip = self._get_subnet_ip(protocol_type)
+        subnet_cidr = self._get_subnet_cidr(protocol_type)
 
         # Build the server config generation script
         if protocol_type in (self.AWG, self.AWG2):
@@ -501,11 +538,15 @@ EOF
         container_name = self._container_name(protocol_type)
         quick_bin = self._quick_binary(protocol_type)
         config_path = self._config_path(protocol_type)
-        subnet_ip = AWG_DEFAULTS['subnet_ip']
-        subnet_cidr = AWG_DEFAULTS['subnet_cidr']
 
         start_script = f"""#!/bin/bash
 echo "Container startup"
+
+# Read subnet from server config dynamically
+SUBNET=$(grep '^Address' {config_path} | head -1 | cut -d'=' -f2 | tr -d ' ')
+if [ -z "$SUBNET" ]; then
+  SUBNET={AWG_DEFAULTS['subnet_ip']}/{AWG_DEFAULTS['subnet_cidr']}
+fi
 
 # kill daemons in case of restart
 {quick_bin} down {config_path} 2>/dev/null
@@ -520,13 +561,13 @@ iptables -A FORWARD -i $IFACE -j ACCEPT
 iptables -A OUTPUT -o $IFACE -j ACCEPT
 
 # Allow forwarding traffic only from the VPN
-iptables -A FORWARD -i $IFACE -o eth0 -s {subnet_ip}/{subnet_cidr} -j ACCEPT
-iptables -A FORWARD -i $IFACE -o eth1 -s {subnet_ip}/{subnet_cidr} -j ACCEPT
+iptables -A FORWARD -i $IFACE -o eth0 -s $SUBNET -j ACCEPT
+iptables -A FORWARD -i $IFACE -o eth1 -s $SUBNET -j ACCEPT
 
 iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT
 
-iptables -t nat -A POSTROUTING -s {subnet_ip}/{subnet_cidr} -o eth0 -j MASQUERADE
-iptables -t nat -A POSTROUTING -s {subnet_ip}/{subnet_cidr} -o eth1 -j MASQUERADE
+iptables -t nat -A POSTROUTING -s $SUBNET -o eth0 -j MASQUERADE
+iptables -t nat -A POSTROUTING -s $SUBNET -o eth1 -j MASQUERADE
 
 tail -f /dev/null
 """
@@ -616,6 +657,45 @@ tail -f /dev/null
         self.ssh.run_sudo_command(f"docker cp /tmp/_amnz_edit_config.conf {container_name}:{config_path}")
         self.ssh.run_command("rm -f /tmp/_amnz_edit_config.conf")
 
+        # Regenerate start script so iptables rules pick up the (possibly changed) subnet
+        quick_bin = self._quick_binary(protocol_type)
+        start_script = f"""#!/bin/bash
+echo "Container startup"
+
+# Read subnet from server config dynamically
+SUBNET=$(grep '^Address' {config_path} | head -1 | cut -d'=' -f2 | tr -d ' ')
+if [ -z "$SUBNET" ]; then
+  SUBNET={AWG_DEFAULTS['subnet_ip']}/{AWG_DEFAULTS['subnet_cidr']}
+fi
+
+# kill daemons in case of restart
+{quick_bin} down {config_path} 2>/dev/null
+
+# start daemons if configured
+if [ -f {config_path} ]; then {quick_bin} up {config_path}; fi
+
+# Allow traffic on the TUN interface
+IFACE=$(basename {config_path} .conf)
+iptables -A INPUT -i $IFACE -j ACCEPT
+iptables -A FORWARD -i $IFACE -j ACCEPT
+iptables -A OUTPUT -o $IFACE -j ACCEPT
+
+# Allow forwarding traffic only from the VPN
+iptables -A FORWARD -i $IFACE -o eth0 -s $SUBNET -j ACCEPT
+iptables -A FORWARD -i $IFACE -o eth1 -s $SUBNET -j ACCEPT
+
+iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT
+
+iptables -t nat -A POSTROUTING -s $SUBNET -o eth0 -j MASQUERADE
+iptables -t nat -A POSTROUTING -s $SUBNET -o eth1 -j MASQUERADE
+
+tail -f /dev/null
+"""
+        self.ssh.upload_file(start_script, "/tmp/_amnz_start.sh")
+        self.ssh.run_sudo_command(f"docker cp /tmp/_amnz_start.sh {container_name}:/opt/amnezia/start.sh")
+        self.ssh.run_sudo_command(f"docker exec {container_name} chmod +x /opt/amnezia/start.sh")
+        self.ssh.run_command("rm -f /tmp/_amnz_start.sh")
+
         # Restart container to apply all changes (including port and interface changes)
         self.ssh.run_sudo_command(f"docker restart {container_name}")
 
@@ -697,7 +777,7 @@ tail -f /dev/null
         """Calculate the next available IP for a new client."""
         used_ips = self._get_used_ips(protocol_type)
         if not used_ips:
-            base = AWG_DEFAULTS['subnet_address']
+            base = self._get_subnet_base(protocol_type)
             parts = base.split('.')
             parts[3] = '2'
             return '.'.join(parts)
