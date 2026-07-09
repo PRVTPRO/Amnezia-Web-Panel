@@ -108,7 +108,11 @@
 
             <div class="form-group">
                 <label class="form-label">{{ _('expiration_date_label') }}</label>
-                <input class="form-input" type="datetime-local" id="newExpirationDate">
+                <div class="grid" style="display: grid; grid-template-columns: 1fr 120px auto; gap: var(--space-sm); align-items: center;">
+                    <input class="form-input" type="date" id="newExpirationDate" aria-label="Expiration date">
+                    <select class="form-select" id="newExpirationTime" aria-label="Expiration time"></select>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="clearDateTimeFields('newExpirationDate', 'newExpirationTime')">Без срока</button>
+                </div>
             </div>
 
             <div class="form-group">
@@ -167,8 +171,8 @@
                     <input class="form-input" type="number" id="newUserTelemtMaxIps" placeholder="Optional" min="1">
                 </div>
                 <div class="form-group">
-                    <label class="form-label">Expiration Date (ISO 8601)</label>
-                    <input class="form-input" type="text" id="newUserTelemtExpiry" placeholder="e.g. 2026-12-31T23:59:59Z">
+                    <label class="form-label">{{ _('expiration_date_label') }}</label>
+                    <input class="form-input" type="datetime-local" id="newUserTelemtExpiry">
                 </div>
             </div>
 
@@ -219,7 +223,11 @@
             </div>
             <div class="form-group">
                 <label class="form-label">{{ _('expiration_date_label') }}</label>
-                <input class="form-input" type="datetime-local" id="editUserExpiration">
+                <div class="grid" style="display: grid; grid-template-columns: 1fr 120px auto; gap: var(--space-sm); align-items: center;">
+                    <input class="form-input" type="date" id="editUserExpiration" aria-label="Expiration date">
+                    <select class="form-select" id="editUserExpirationTime" aria-label="Expiration time"></select>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="clearDateTimeFields('editUserExpiration', 'editUserExpirationTime')">Без срока</button>
+                </div>
             </div>
             <div class="form-group">
                 <label class="form-label">{{ _('description_label') }}</label>
@@ -390,6 +398,54 @@
 
     const serversData = {{ servers | tojson }};
 
+    function populateTimeSelect(selectId) {
+        const select = document.getElementById(selectId);
+        if (!select || select.options.length) return;
+        for (let hour = 0; hour < 24; hour++) {
+            for (const minute of [0, 15, 30, 45]) {
+                const value = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+                select.add(new Option(value, value));
+            }
+        }
+        select.add(new Option('23:59', '23:59'));
+        select.value = '23:59';
+    }
+
+    function setupDateTimeFields() {
+        populateTimeSelect('newExpirationTime');
+        populateTimeSelect('editUserExpirationTime');
+    }
+
+    function clearDateTimeFields(dateId, timeId) {
+        const dateEl = document.getElementById(dateId);
+        const timeEl = document.getElementById(timeId);
+        if (dateEl) dateEl.value = '';
+        if (timeEl) timeEl.value = '23:59';
+    }
+
+    function getDateTimeValue(dateId, timeId) {
+        const date = document.getElementById(dateId).value;
+        if (!date) return null;
+        const time = document.getElementById(timeId).value || '23:59';
+        return `${date}T${time}`;
+    }
+
+    function setDateTimeValue(dateId, timeId, value) {
+        const dateEl = document.getElementById(dateId);
+        const timeEl = document.getElementById(timeId);
+        const localValue = toDateTimeLocalValue(value);
+        if (!localValue) {
+            clearDateTimeFields(dateId, timeId);
+            return;
+        }
+        dateEl.value = localValue.slice(0, 10);
+        const timeValue = localValue.slice(11, 16);
+        if (![...timeEl.options].some(option => option.value === timeValue)) {
+            timeEl.add(new Option(timeValue, timeValue));
+        }
+        timeEl.value = timeValue;
+    }
+
     function handleSearch(val) {
         clearTimeout(searchTimeout);
         searchTimeout = setTimeout(() => {
@@ -456,8 +512,8 @@
                         limitHtml = `
                                          <div style="margin-top: 8px; font-size: 0.75rem;">
                                             <div style="display:flex; justify-content:space-between; color:var(--text-muted); margin-bottom: 2px;">
-                                                <span>${_('traffic')}: ${(u.traffic_used / Math.pow(1024, 3)).toFixed(2)} ГБ</span>
-                                                <span>${_('out_of')} ${(u.traffic_limit / Math.pow(1024, 3)).toFixed(2)} ГБ</span>
+                                                <span>${_('traffic')}: ${(u.traffic_used / Math.pow(1024, 3)).toFixed(2)} ${_('gb')}</span>
+                                                <span>${_('out_of')} ${(u.traffic_limit / Math.pow(1024, 3)).toFixed(2)} ${_('gb')}</span>
                                             </div>
                                             <div style="width: 100%; height: 4px; background: var(--bg-tertiary); border-radius: 2px; overflow: hidden;">
                                                 <div style="background-color: ${colorClass}; height: 100%; width: ${pct}%; transition: width 0.3s ease;"></div>
@@ -467,7 +523,7 @@
                     } else if (u.traffic_used > 0) {
                         limitHtml = `
                                         <div style="margin-top: 8px; font-size: 0.75rem; color:var(--text-muted);">
-                                            <span>${_('traffic')}: ${(u.traffic_used / Math.pow(1024, 3)).toFixed(2)} ГБ</span>
+                                            <span>${_('traffic')}: ${(u.traffic_used / Math.pow(1024, 3)).toFixed(2)} ${_('gb')}</span>
                                         </div>
                                     `;
                     }
@@ -475,7 +531,7 @@
                 })()}
                             ${(() => {
                     if (u.traffic_total > 0) {
-                        return `<div class="client-meta" style="font-size: 0.7rem; opacity: 0.6; margin-top: 2px;">📈 ${_('traffic_used_total')}: ${(u.traffic_total / Math.pow(1024, 3)).toFixed(2)} ГБ</div>`;
+                        return `<div class="client-meta" style="font-size: 0.7rem; opacity: 0.6; margin-top: 2px;">📈 ${_('traffic_used_total')}: ${(u.traffic_total / Math.pow(1024, 3)).toFixed(2)} ${_('gb')}</div>`;
                     }
                     return '';
                 })()}
@@ -521,7 +577,10 @@
     }
 
     // Call on load
-    document.addEventListener('DOMContentLoaded', refreshUsersList);
+    document.addEventListener('DOMContentLoaded', () => {
+        setupDateTimeFields();
+        refreshUsersList();
+    });
 
     function updateProtocols(serverId, selectId, groupId = null) {
         const select = document.getElementById(selectId);
@@ -608,7 +667,7 @@
                 description: document.getElementById('newDescription').value || null,
                 traffic_limit: parseFloat(document.getElementById('newTrafficLimit').value || '0'),
                 traffic_reset_strategy: document.getElementById('newTrafficResetStrategy').value,
-                expiration_date: document.getElementById('newExpirationDate').value || null,
+                expiration_date: getDateTimeValue('newExpirationDate', 'newExpirationTime'),
             };
             const serverId = document.getElementById('newUserServer').value;
             if (serverId !== '') {
@@ -901,6 +960,18 @@
 <script>
     let currentSharedUser = null;
 
+    function toDateTimeLocalValue(value) {
+        if (!value) return '';
+        const raw = String(value).trim();
+        if (!raw) return '';
+        const match = raw.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})/);
+        if (match) return match[1];
+        const parsed = new Date(raw);
+        if (Number.isNaN(parsed.getTime())) return '';
+        const offsetMs = parsed.getTimezoneOffset() * 60000;
+        return new Date(parsed.getTime() - offsetMs).toISOString().slice(0, 16);
+    }
+
     function openEditUser(data) {
         document.getElementById('editUserId').value = data.id;
         document.getElementById('editUserTitle').textContent = data.username;
@@ -909,7 +980,7 @@
         document.getElementById('editUserDesc').value = data.desc || '';
         document.getElementById('editUserLimit').value = data.limit || '0';
         document.getElementById('editUserTrafficResetStrategy').value = data.strategy || 'never';
-        document.getElementById('editUserExpiration').value = data.expiration || '';
+        setDateTimeValue('editUserExpiration', 'editUserExpirationTime', data.expiration);
         document.getElementById('editUserPass').value = '';
         openModal('editUserModal');
     }
@@ -926,7 +997,7 @@
             description: document.getElementById('editUserDesc').value,
             traffic_limit: parseFloat(document.getElementById('editUserLimit').value || '0'),
             traffic_reset_strategy: document.getElementById('editUserTrafficResetStrategy').value,
-            expiration_date: document.getElementById('editUserExpiration').value || null,
+            expiration_date: getDateTimeValue('editUserExpiration', 'editUserExpirationTime'),
             password: document.getElementById('editUserPass').value || null
         };
 
@@ -1010,3 +1081,4 @@
 </script>
 
 {% endblock %}
+

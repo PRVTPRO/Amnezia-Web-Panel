@@ -1,0 +1,28 @@
+# Optional Docker Compose override for running Cloudflare WARP inside the panel container.
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.warp.yml up -d --build
+#
+# Why the extra privileges:
+#   WARP needs a TUN device and NET_ADMIN to create/manage its tunnel interface.
+
+services:
+  amnezia_panel:
+    build:
+      context: .
+      dockerfile: Dockerfile.warp
+    image: amnezia-panel:warp-local
+
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      net.ipv4.conf.all.src_valid_mark: "1"
+
+    volumes:
+      - amnezia_data:/app/data
+      - cloudflare_warp:/var/lib/cloudflare-warp
+
+volumes:
+  cloudflare_warp:

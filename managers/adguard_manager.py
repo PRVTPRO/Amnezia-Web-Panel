@@ -79,36 +79,71 @@ class AdguardManager:
             return 'sidebyside'
         return None
 
-    def _exposed_web_port(self):
+    def _container_web_port(self):
+        """Read the AdGuard HTTP address configured inside the container.
+        During the first-run wizard AdGuard writes web.listen_addresses to
+        AdGuardHome.yaml. If the wizard has not been completed yet, the
+        container is started with --web-addr 0.0.0.0:<port> and this method can
+        read that port from docker inspect."""
+        grep_cmd = "grep -E '^[[:space:]]*-?[[:space:]]*[0-9.]+:[0-9]+$' /opt/adguardhome/conf/AdGuardHome.yaml 2>/dev/null | head -n1"
+        out, _, _ = self.ssh.run_sudo_command(
+            f'docker exec {self.CONTAINER_NAME} sh -c "{grep_cmd}"'
+        )
+        line = out.strip().split('\n')[0].strip().lstrip('-').strip() if out.strip() else ''
+        if ':' in line:
+            try:
+                return int(line.rsplit(':', 1)[1])
+            except ValueError:
+                pass
+
+        out, _, _ = self.ssh.run_sudo_command(
+            f"docker inspect -f '{{{{json .Config.Cmd}}}}' {self.CONTAINER_NAME} 2>/dev/null"
+        )
+        marker = '--web-addr'
+        if marker in out:
+            parts = out.replace('[', ' ').replace(']', ' ').replace(',', ' ').replace('\"', ' ').split()
+            for i, part in enumerate(parts):
+                if part == marker and i + 1 < len(parts) and ':' in parts[i + 1]:
+                    try:
+                        return int(parts[i + 1].rsplit(':', 1)[1])
+                    except ValueError:
+                        pass
+        return None
+
+    def _exposed_web_port(self, container_port=None):
         """Reads back the host->container port mapping for the web UI port,
         so the panel can show the correct admin URL after install."""
-        out, _, _ = self.ssh.run_sudo_command(
-            f"docker port {self.CONTAINER_NAME} 3000/tcp 2>/dev/null"
-        )
-        if not out.strip():
-            return None
-        # output like "0.0.0.0:3000" — take the last colon-separated chunk
-        last = out.strip().split('\n')[0].split(':')[-1].strip()
-        try:
-            return int(last)
-        except ValueError:
-            return None
+        container_port = int(container_port or self.DEFAULT_WEB_PORT)
+        for port in (container_port, self.DEFAULT_WEB_PORT):
+            out, _, _ = self.ssh.run_sudo_command(
+                f"docker port {self.CONTAINER_NAME} {port}/tcp 2>/dev/null"
+            )
+            if not out.strip():
+                continue
+            # output like "0.0.0.0:3000" — take the last colon-separated chunk
+            last = out.strip().split('\n')[0].split(':')[-1].strip()
+            try:
+                return int(last)
+            except ValueError:
+                continue
+        return None
 
     def get_server_status(self, protocol_type='adguard'):
         exists = self.check_protocol_installed()
         running = self.check_container_running()
         mode = self._detect_mode() if running else None
         ip = self._container_ip() if running else ''
-        exposed_port = self._exposed_web_port() if running else None
+        container_web_port = self._container_web_port() if running else None
+        exposed_port = self._exposed_web_port(container_web_port) if running else None
         # When the web UI is not bound to the host the user still needs an
-        # admin URL (reachable via VPN) — fall back to the default :3000 the
-        # container listens on inside the docker network.
+        # admin URL (reachable via VPN) — use the actual container web port
+        # when known, otherwise fall back to AdGuard's default :3000.
         return {
             'container_exists': exists,
             'container_running': running,
             'mode': mode,
             'internal_ip': ip,
-            'web_port': exposed_port or self.DEFAULT_WEB_PORT,
+            'web_port': exposed_port or container_web_port or self.DEFAULT_WEB_PORT,
             'web_exposed': exposed_port is not None,
             'port': self.DEFAULT_DNS_PORT,
             'protocol': protocol_type,
@@ -173,7 +208,7 @@ class AdguardManager:
         # Optional `expose_*` flags add host port mappings for direct access.
         ports = []
         if expose_web:
-            ports.append(f"-p {web_port}:3000/tcp")
+            ports.append(f"-p {web_port}:{web_port}/tcp")
         if expose_dns:
             ports.append(f"-p {dns_port}:53/tcp")
             ports.append(f"-p {dns_port}:53/udp")
@@ -189,7 +224,7 @@ class AdguardManager:
             f"-v {self.HOST_DIR}/work:/opt/adguardhome/work "
             f"-v {self.HOST_DIR}/conf:/opt/adguardhome/conf "
             f"{ports_str} "
-            f"{self.IMAGE_NAME}"
+            f"{self.IMAGE_NAME} --web-addr 0.0.0.0:{web_port}"
         )
         _, err, code = self.ssh.run_sudo_command(run_cmd)
         if code != 0:

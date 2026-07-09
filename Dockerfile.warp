@@ -1,0 +1,38 @@
+# syntax=docker/dockerfile:1
+
+# Optional image variant with Cloudflare WARP installed inside the container.
+# Use with:
+#   docker compose -f docker-compose.yml -f docker-compose.warp.yml up -d --build
+
+FROM python:3.14-slim-bookworm
+
+WORKDIR /app
+
+ARG CLOUDFLARE_WARP_REPO_CODENAME=bookworm
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        gnupg \
+        iproute2 \
+        iputils-ping \
+        procps \
+    && mkdir -p /usr/share/keyrings \
+    && curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg \
+        | gpg --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ ${CLOUDFLARE_WARP_REPO_CODENAME} main" \
+        > /etc/apt/sources.list.d/cloudflare-client.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends cloudflare-warp \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt requirements.txt
+RUN pip3 install --no-cache-dir -r requirements.txt
+
+COPY . .
+COPY docker-entrypoint-warp.sh /usr/local/bin/docker-entrypoint-warp.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint-warp.sh
+
+ENTRYPOINT ["docker-entrypoint-warp.sh"]
+CMD ["python3", "app.py"]

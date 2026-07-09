@@ -16,11 +16,35 @@ class XrayManager:
     CONTAINER_NAME = 'amnezia-xray'
     IMAGE_NAME = 'amneziavpn/amnezia-xray' # or we can build it
     
-    def __init__(self, ssh_manager):
+    def __init__(self, ssh_manager, protocol='xray'):
         self.ssh = ssh_manager
+        self.protocol = protocol or self.PROTOCOL
+        self.base_protocol = str(self.protocol).split('__', 1)[0]
+        self.instance = self._instance_index(self.protocol)
+        self.container_name = self._container_name(self.protocol)
+        self.image_name = self._image_name(self.protocol)
+
+    def _instance_index(self, protocol):
+        parts = str(protocol or '').split('__', 1)
+        if len(parts) == 2:
+            try:
+                return max(1, int(parts[1]))
+            except ValueError:
+                return 1
+        return 1
+
+    def _container_name(self, protocol=None):
+        idx = self._instance_index(protocol or self.protocol)
+        base_name = self.CONTAINER_NAME
+        return base_name if idx <= 1 else f'{base_name}-{idx}'
+
+    def _image_name(self, protocol=None):
+        idx = self._instance_index(protocol or self.protocol)
+        base_name = self.IMAGE_NAME
+        return base_name if idx <= 1 else f'{base_name}-{idx}'
 
     def _config_dir(self):
-        return '/opt/amnezia/xray'
+        return '/opt/amnezia/xray' if self.instance <= 1 else f'/opt/amnezia/xray-{self.instance}'
 
     def _config_path(self):
         return f'{self._config_dir()}/server.json'
@@ -64,7 +88,7 @@ class XrayManager:
     def _read_remote_file(self, path):
         """Read a remote text file, preferring the running container's view."""
         out, _, code = self.ssh.run_sudo_command(
-            f"docker exec {self.CONTAINER_NAME} cat {path} 2>/dev/null"
+            f"docker exec {self.container_name} cat {path} 2>/dev/null"
         )
         if code != 0 or not out:
             out, _, code = self.ssh.run_sudo_command(f"cat {path} 2>/dev/null")
@@ -79,11 +103,11 @@ class XrayManager:
         if not priv_key:
             return ''
         out, _, code = self.ssh.run_sudo_command(
-            f"docker exec {self.CONTAINER_NAME} /usr/bin/xray x25519 -i {priv_key}"
+            f"docker exec {self.container_name} /usr/bin/xray x25519 -i {priv_key}"
         )
         if code != 0 or not out.strip():
             out, _, code = self.ssh.run_sudo_command(
-                f"docker run --rm --entrypoint=\"\" {self.IMAGE_NAME} /usr/bin/xray x25519 -i {priv_key}"
+                f"docker run --rm --entrypoint=\"\" {self.image_name} /usr/bin/xray x25519 -i {priv_key}"
             )
         if code != 0 or not out:
             return ''
@@ -112,15 +136,15 @@ class XrayManager:
 
     def check_container_running(self):
         out, _, _ = self.ssh.run_sudo_command(
-            f"docker ps --filter name=^{self.CONTAINER_NAME}$ --format '{{{{.Status}}}}'"
+            f"docker ps --filter name=^{self.container_name}$ --format '{{{{.Status}}}}'"
         )
         return 'Up' in out
 
     def check_protocol_installed(self):
         out, _, _ = self.ssh.run_sudo_command(
-            f"docker ps -a --filter name=^{self.CONTAINER_NAME}$ --format '{{{{.Names}}}}'"
+            f"docker ps -a --filter name=^{self.container_name}$ --format '{{{{.Names}}}}'"
         )
-        return self.CONTAINER_NAME in out.strip().split('\n')
+        return self.container_name in out.strip().split('\n')
 
     def get_server_status(self, protocol):
         exists = self.check_protocol_installed()
@@ -148,11 +172,12 @@ class XrayManager:
             self.remove_container()
 
         results.append("Building Docker image...")
-        dockerfile_folder = f"/opt/amnezia/{self.CONTAINER_NAME}"
-        dockerfile_content = """FROM alpine:3.15
+        config_dir = self._config_dir()
+        dockerfile_folder = f"/opt/amnezia/{self.container_name}"
+        dockerfile_content = f"""FROM alpine:3.15
 RUN apk add --no-cache curl unzip bash openssl netcat-openbsd dumb-init rng-tools xz iptables ip6tables
 RUN apk --update upgrade --no-cache
-RUN mkdir -p /opt/amnezia/xray
+RUN mkdir -p {config_dir}
 RUN curl -L -H "Cache-Control: no-cache" -o /root/xray.zip "https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip" && \\
     unzip /root/xray.zip -d /usr/bin/ && \\
     chmod a+x /usr/bin/xray && \\
@@ -185,7 +210,7 @@ RUN mkdir -p /etc/security && \\
 
 RUN echo '#!/bin/bash' > /opt/amnezia/start.sh && \\
     echo 'sysctl -p /etc/sysctl.conf 2>/dev/null' >> /opt/amnezia/start.sh && \\
-    echo '/usr/bin/xray -config /opt/amnezia/xray/server.json' >> /opt/amnezia/start.sh && \\
+    echo '/usr/bin/xray -config {config_dir}/server.json' >> /opt/amnezia/start.sh && \\
     chmod a+x /opt/amnezia/start.sh
 
 ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
@@ -194,7 +219,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         self.ssh.upload_file_sudo(dockerfile_content, f"{dockerfile_folder}/Dockerfile")
         
         _, err, code = self.ssh.run_sudo_command(
-            f"docker build --no-cache -t {self.IMAGE_NAME} {dockerfile_folder}", timeout=300
+            f"docker build --no-cache -t {self.image_name} {dockerfile_folder}", timeout=300
         )
         if code != 0: raise RuntimeError(f"Failed to build container: {err}")
 
@@ -202,7 +227,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         # We generate a base config using a temp container or directly if host has openssl
         
         # Xray keypair generation using a temporary run overriding the entrypoint
-        keypair_cmd = f"docker run --rm --entrypoint=\"\" {self.IMAGE_NAME} /usr/bin/xray x25519"
+        keypair_cmd = f"docker run --rm --entrypoint=\"\" {self.image_name} /usr/bin/xray x25519"
         out_kp, err_kp, code_kp = self.ssh.run_sudo_command(keypair_cmd)
         if code_kp != 0: raise RuntimeError(f"Failed to generate x25519 keys: {err_kp}")
         
@@ -212,7 +237,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
             if "Private" in line: priv_key = line.split(":", 1)[1].strip()
             if "Public" in line: pub_key = line.split(":", 1)[1].strip()
 
-        short_id_cmd = f"docker run --rm --entrypoint=\"\" {self.IMAGE_NAME} openssl rand -hex 8"
+        short_id_cmd = f"docker run --rm --entrypoint=\"\" {self.image_name} openssl rand -hex 8"
         out_sid, _, _ = self.ssh.run_sudo_command(short_id_cmd)
         short_id = out_sid.strip()
 
@@ -273,8 +298,8 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
             }
         }
         
-        self.ssh.run_sudo_command("mkdir -p /opt/amnezia/xray")
-        self.ssh.upload_file_sudo(json.dumps(server_json, indent=2), "/opt/amnezia/xray/server.json")
+        self.ssh.run_sudo_command(f"mkdir -p {config_dir}")
+        self.ssh.upload_file_sudo(json.dumps(server_json, indent=2), f"{config_dir}/server.json")
         # Native layout — separate key files matching the official Amnezia client install.
         # See client/server_scripts/xray/configure_container.sh for the canonical layout.
         self.ssh.upload_file_sudo(priv_key + '\n', "/opt/amnezia/xray/xray_private.key")
@@ -292,23 +317,24 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
 --cap-add=NET_ADMIN \\
 -p {port}:{port}/tcp \\
 -p {port}:{port}/udp \\
--v /opt/amnezia/xray:/opt/amnezia/xray \\
---name {self.CONTAINER_NAME} \\
-{self.IMAGE_NAME}"""
+-v {config_dir}:{config_dir} \\
+--name {self.container_name} \\
+{self.image_name}"""
 
         _, err, code = self.ssh.run_sudo_command(run_cmd)
         if code != 0: raise RuntimeError(f"Failed to run container: {err}")
 
         # Try to connect to network if needed
-        self.ssh.run_sudo_command(f"docker network connect amnezia-dns-net {self.CONTAINER_NAME} || true")
+        self.ssh.run_sudo_command(f"docker network connect amnezia-dns-net {self.container_name} || true")
 
         results.append("Xray configured and running")
-        return {'status': 'success', 'protocol': 'xray', 'port': port, 'log': results}
+        return {'status': 'success', 'protocol': self.protocol, 'port': port, 'log': results}
 
     def remove_container(self):
-        self.ssh.run_sudo_command(f"docker stop {self.CONTAINER_NAME}")
-        self.ssh.run_sudo_command(f"docker rm -fv {self.CONTAINER_NAME}")
-        self.ssh.run_sudo_command(f"docker rmi {self.IMAGE_NAME}")
+        self.ssh.run_sudo_command(f"docker stop {self.container_name}")
+        self.ssh.run_sudo_command(f"docker rm -fv {self.container_name}")
+        if self.instance <= 1:
+            self.ssh.run_sudo_command(f"docker rmi {self.image_name}")
         return True
 
     # ===================== CLIENT MANAGEMENT =====================
@@ -316,7 +342,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
     def _get_server_json(self):
         """Read server.json — tries inside container first, falls back to host path."""
         out, _, code = self.ssh.run_sudo_command(
-            f"docker exec {self.CONTAINER_NAME} cat {self._config_path()}"
+            f"docker exec {self.container_name} cat {self._config_path()}"
         )
         if code != 0:
             out, _, code = self.ssh.run_sudo_command(f"cat {self._config_path()}")
@@ -332,14 +358,14 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         tmp_file = "/tmp/_xray_server.json"
         self.ssh.upload_file_sudo(json.dumps(data, indent=2), tmp_file)
         self.ssh.run_sudo_command(
-            f"docker cp {tmp_file} {self.CONTAINER_NAME}:{self._config_path()}"
+            f"docker cp {tmp_file} {self.container_name}:{self._config_path()}"
         )
         # Also keep host copy in sync (handles both volume-mount and no-mount installs)
         self.ssh.run_sudo_command(
             f"cp {tmp_file} {self._config_path()} 2>/dev/null || true"
         )
         if restart:
-            self.ssh.run_sudo_command(f"docker restart {self.CONTAINER_NAME}")
+            self.ssh.run_sudo_command(f"docker restart {self.container_name}")
 
     def _get_vless_inbound(self, config):
         for inbound in config.get('inbounds', []):
@@ -357,18 +383,18 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         try:
             self.ssh.upload_file_sudo(json.dumps(payload, indent=2), tmp_name)
             _, err, code = self.ssh.run_sudo_command(
-                f"docker cp {tmp_name} {self.CONTAINER_NAME}:{container_tmp}"
+                f"docker cp {tmp_name} {self.container_name}:{container_tmp}"
             )
             if code != 0:
                 return False, err
             out, err, code = self.ssh.run_sudo_command(
-                f"docker exec -i {self.CONTAINER_NAME} /usr/bin/xray api {subcommand} "
+                f"docker exec -i {self.container_name} /usr/bin/xray api {subcommand} "
                 f"-server=127.0.0.1:10085 {container_tmp}"
             )
             return code == 0, err or out
         finally:
             self.ssh.run_sudo_command(f"rm -f {tmp_name}")
-            self.ssh.run_sudo_command(f"docker exec -i {self.CONTAINER_NAME} rm -f {container_tmp} 2>/dev/null || true")
+            self.ssh.run_sudo_command(f"docker exec -i {self.container_name} rm -f {container_tmp} 2>/dev/null || true")
 
     def _xray_api_add_user(self, config, client):
         tag = self._get_vless_inbound_tag(config)
@@ -395,7 +421,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         if not tag:
             return False
         cmd = (
-            f"docker exec -i {self.CONTAINER_NAME} /usr/bin/xray api rmu "
+            f"docker exec -i {self.container_name} /usr/bin/xray api rmu "
             f"-server=127.0.0.1:10085 "
             f"-tag={shlex.quote(tag)} {shlex.quote(client_id)}"
         )
@@ -492,7 +518,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         tmp_file = "/tmp/_xray_clients.json"
         self.ssh.upload_file_sudo(json.dumps(data, indent=2), tmp_file)
         self.ssh.run_sudo_command(
-            f"docker cp {tmp_file} {self.CONTAINER_NAME}:{path}"
+            f"docker cp {tmp_file} {self.container_name}:{path}"
         )
         self.ssh.run_sudo_command(
             f"cp {tmp_file} {path} 2>/dev/null || true"
@@ -550,7 +576,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
     def _query_xray_stats(self):
         """Query Xray API for traffic stats using xray api command."""
         out, _, code = self.ssh.run_sudo_command(
-            f"docker exec -i {self.CONTAINER_NAME} /usr/bin/xray api statsquery -server=127.0.0.1:10085"
+            f"docker exec -i {self.container_name} /usr/bin/xray api statsquery -server=127.0.0.1:10085"
         )
         if code != 0 or not out.strip():
             return {}

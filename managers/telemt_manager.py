@@ -13,12 +13,45 @@ class TelemtManager:
     CONTAINER_NAME = "telemt"
     API_URL = "http://127.0.0.1:9091"
     
-    def __init__(self, ssh_manager: SSHManager):
+    def __init__(self, ssh_manager: SSHManager, protocol='telemt'):
         self.ssh = ssh_manager
+        self.protocol = protocol or 'telemt'
+        self.instance = self._instance_index(self.protocol)
+        self.container_name = self._container_name(self.protocol)
+        self.remote_dir = self._remote_dir(self.protocol)
+
+    def _instance_index(self, protocol):
+        parts = str(protocol or '').split('__', 1)
+        if len(parts) == 2:
+            try:
+                return max(1, int(parts[1]))
+            except ValueError:
+                return 1
+        return 1
+
+    def _container_name(self, protocol=None):
+        idx = self._instance_index(protocol or self.protocol)
+        base_name = self.CONTAINER_NAME
+        return base_name if idx <= 1 else f'{base_name}-{idx}'
+
+    def _remote_dir(self, protocol=None):
+        idx = self._instance_index(protocol or self.protocol)
+        return '/opt/amnezia/telemt' if idx <= 1 else f'/opt/amnezia/telemt-{idx}'
+
+    def _config_path(self):
+        return f'{self.remote_dir}/config.toml'
+
+    def _api_host_ports(self):
+        # Host API mappings are only for diagnostics; panel talks via docker exec.
+        # Keep first instance backward-compatible, avoid 9090/9091 collisions later.
+        if self.instance <= 1:
+            return 9090, 9091
+        base = 9090 + (self.instance * 10)
+        return base, base + 1
 
     def _api_request(self, method, path, data=None):
         """Execute a curl request inside the docker container."""
-        cmd = f"docker exec {self.CONTAINER_NAME} curl -s -X {method} {self.API_URL}{path}"
+        cmd = f"docker exec {self.container_name} curl -s -X {method} {self.API_URL}{path}"
         if data:
             js_data = json.dumps(data).replace('"', '\\"')
             cmd += f" -H 'Content-Type: application/json' -d \"{js_data}\""
@@ -37,12 +70,12 @@ class TelemtManager:
         return bool(out.strip())
 
     def check_protocol_installed(self):
-        out, _, _ = self.ssh.run_command(f"docker ps -a --filter name=^{self.CONTAINER_NAME}$ --format '{{{{.Names}}}}'")
-        return out.strip() == self.CONTAINER_NAME
+        out, _, _ = self.ssh.run_command(f"docker ps -a --filter name=^{self.container_name}$ --format '{{{{.Names}}}}'")
+        return out.strip() == self.container_name
 
     def get_server_status(self, protocol_type):
         exists = self.check_protocol_installed()
-        out, _, _ = self.ssh.run_command(f"docker inspect -f '{{{{.State.Running}}}}' {self.CONTAINER_NAME} 2>/dev/null")
+        out, _, _ = self.ssh.run_command(f"docker inspect -f '{{{{.State.Running}}}}' {self.container_name} 2>/dev/null")
         is_running = out.strip().lower() == 'true'
         
         status = {
@@ -52,7 +85,7 @@ class TelemtManager:
         
         if is_running:
             # get external docker port mapping for 443
-            out, _, _ = self.ssh.run_command(f"docker port {self.CONTAINER_NAME} 443 2>/dev/null")
+            out, _, _ = self.ssh.run_command(f"docker port {self.container_name} 443 2>/dev/null")
             if out:
                 port = out.split(':')[-1].strip()
                 status['port'] = port
@@ -134,14 +167,14 @@ docker compose version
             self.ssh.run_sudo_command("curl -fsSL https://get.docker.com | sh", timeout=300)
 
         if self.check_protocol_installed():
-            self.ssh.run_sudo_command(f"docker rm -f {self.CONTAINER_NAME}")
+            self.ssh.run_sudo_command(f"docker rm -f {self.container_name}")
 
         results.append("Ensuring docker compose plugin...")
         self._ensure_docker_compose()
             
         results.append("Uploading Telemt files...")
         local_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'protocol_telemt')
-        remote_dir = "/opt/amnezia/telemt"
+        remote_dir = self.remote_dir
         self.ssh.run_sudo_command(f"mkdir -p {remote_dir}")
         self.ssh.run_sudo_command(f"chmod 755 {remote_dir}")
         
@@ -176,6 +209,11 @@ docker compose version
             compose_content = f.read()
             
         compose_content = re.sub(r'"443:443"', f'"{port}:443"', compose_content)
+        compose_content = re.sub(r'container_name:\s*telemt', f'container_name: {self.container_name}', compose_content)
+        if self.instance > 1:
+            api_port_9090, api_port_9091 = self._api_host_ports()
+            compose_content = re.sub(r'"127\.0\.0\.1:9090:9090"', f'"127.0.0.1:{api_port_9090}:9090"', compose_content)
+            compose_content = re.sub(r'"127\.0\.0\.1:9091:9091"', f'"127.0.0.1:{api_port_9091}:9091"', compose_content)
         self.ssh.upload_file_sudo(compose_content, f"{remote_dir}/docker-compose.yml")
         
         # Upload Dockerfile
@@ -190,21 +228,22 @@ docker compose version
                 
         return {
             "status": "success",
+            "protocol": self.protocol,
             "host": "",
             "port": port,
             "log": results
         }
 
     def _get_server_config(self):
-        out, _, code = self.ssh.run_sudo_command(f"cat /opt/amnezia/telemt/config.toml")
+        out, _, code = self.ssh.run_sudo_command(f"cat {self._config_path()}")
         if code != 0: return ""
         return out
 
     def save_server_config(self, protocol_type, config_content):
-        self.ssh.upload_file_sudo(config_content.replace('\r\n', '\n'), "/opt/amnezia/telemt/config.toml")
+        self.ssh.upload_file_sudo(config_content.replace('\r\n', '\n'), f"{self._config_path()}")
         # Use SIGHUP (HUP) to reload MTProxy config without restarting the process/container.
         # This keeps the traffic statistics (octets) in memory.
-        self.ssh.run_sudo_command(f"docker kill -s HUP {self.CONTAINER_NAME} || docker restart {self.CONTAINER_NAME}")
+        self.ssh.run_sudo_command(f"docker kill -s HUP {self.container_name} || docker restart {self.container_name}")
 
     def _parse_telemt_params(self, config_text):
         params = {}
@@ -220,8 +259,8 @@ docker compose version
         return params
 
     def remove_container(self, protocol_type=None):
-        self.ssh.run_sudo_command(f"docker rm -f {self.CONTAINER_NAME}")
-        self.ssh.run_sudo_command("rm -rf /opt/amnezia/telemt")
+        self.ssh.run_sudo_command(f"docker rm -f {self.container_name}")
+        self.ssh.run_sudo_command(f"rm -rf {self.remote_dir}")
 
     def get_clients(self, protocol_type):
         api_data = {}
@@ -278,7 +317,7 @@ docker compose version
             for c in clients:
                 if not c['enabled']:
                      self.toggle_client(protocol_type, c['clientId'], False, restart=False)
-            self.ssh.run_sudo_command(f"docker restart {self.CONTAINER_NAME}")
+            self.ssh.run_sudo_command(f"docker restart {self.container_name}")
 
         return clients
 
@@ -353,7 +392,7 @@ docker compose version
             api_payload['max_tcp_conns'] = val
 
         # Save config to host
-        self.ssh.upload_file_sudo(config_text.replace('\r\n', '\n'), "/opt/amnezia/telemt/config.toml")
+        self.ssh.upload_file_sudo(config_text.replace('\r\n', '\n'), f"{self._config_path()}")
         
         # 2. Call API for immediate effect
         self._api_request("POST", "/v1/users", data=api_payload)
@@ -410,7 +449,7 @@ docker compose version
             api_payload['max_tcp_conns'] = val
 
         # Save config to host
-        self.ssh.upload_file_sudo(config_text.replace('\r\n', '\n'), "/opt/amnezia/telemt/config.toml")
+        self.ssh.upload_file_sudo(config_text.replace('\r\n', '\n'), f"{self._config_path()}")
         
         # API call
         self._api_request("PATCH", f"/v1/users/{client_id}", data=api_payload)
@@ -477,7 +516,7 @@ docker compose version
             if stripped.startswith(f"{client_id} ") or stripped.startswith(f"{client_id}="):
                 continue
             new_lines.append(line)
-        self.ssh.upload_file_sudo('\n'.join(new_lines).replace('\r\n', '\n'), "/opt/amnezia/telemt/config.toml")
+        self.ssh.upload_file_sudo('\n'.join(new_lines).replace('\r\n', '\n'), f"{self._config_path()}")
 
     def toggle_client(self, protocol_type, client_id, enable, restart=True):
         # API doesn't have a direct "toggle", so we either set a huge quota or remove/re-add
@@ -499,7 +538,7 @@ docker compose version
                     line = base_line if enable else f"# {base_line}"
             new_lines.append(line)
         
-        self.ssh.upload_file_sudo('\n'.join(new_lines).replace('\r\n', '\n'), "/opt/amnezia/telemt/config.toml")
+        self.ssh.upload_file_sudo('\n'.join(new_lines).replace('\r\n', '\n'), f"{self._config_path()}")
         
         if enable:
             # If enabling, we re-add via API since it might have been deleted from memory
@@ -513,7 +552,7 @@ docker compose version
             self._api_request("DELETE", f"/v1/users/{client_id}")
 
         if restart:
-            self.ssh.run_sudo_command(f"docker kill -s HUP {self.CONTAINER_NAME} || docker restart {self.CONTAINER_NAME}")
+            self.ssh.run_sudo_command(f"docker kill -s HUP {self.container_name} || docker restart {self.container_name}")
 
     def get_client_config(self, protocol_type, client_id, host='', port=''):
         resp = self._api_request("GET", f"/v1/users/{client_id}")

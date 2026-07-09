@@ -3,6 +3,8 @@
 {% block title_extra %} — {{ server.name }}{% endblock %}
 
 {% block head_extra %}
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/material-darker.min.css">
 <style>
     .client-actions {
         display: flex !important;
@@ -10,6 +12,108 @@
         flex-wrap: nowrap !important;
         gap: var(--space-xs) !important;
         align-items: center;
+    }
+    .marketplace-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+        gap: var(--space-md);
+    }
+    .marketplace-category {
+        margin-bottom: var(--space-lg);
+    }
+    .marketplace-category-title {
+        font-weight: 700;
+        margin-bottom: var(--space-sm);
+        display: flex;
+        align-items: center;
+        gap: var(--space-xs);
+    }
+    .marketplace-app-card {
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-lg);
+        padding: var(--space-md);
+        background: var(--bg-secondary);
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-sm);
+    }
+    .marketplace-app-top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--space-sm);
+    }
+    .marketplace-app-title {
+        font-weight: 700;
+    }
+    .marketplace-app-desc {
+        color: var(--text-muted);
+        font-size: 0.88rem;
+        line-height: 1.35;
+        min-height: 2.4em;
+    }
+    .server-status-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--space-md);
+        flex-wrap: wrap;
+    }
+    .server-status-actions {
+        display: flex;
+        align-items: center;
+        gap: var(--space-sm);
+        margin-left: auto;
+    }
+    .installed-app-hidden,
+    .promo-block.installed-app-hidden,
+    .protocol-cards > .promo-block {
+        display: none !important;
+    }
+    .protocol-card.installed-app-visible {
+        display: block !important;
+    }
+    .apps-loading {
+        margin-bottom: var(--space-xl);
+        min-height: 140px;
+        border: 1px dashed var(--border-color);
+        border-radius: var(--radius-lg);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: var(--space-sm);
+        color: var(--text-muted);
+        background: var(--bg-secondary);
+    }
+    .config-editor-wrap {
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-lg);
+        overflow: hidden;
+        background: #111827;
+    }
+    .config-editor-wrap .CodeMirror {
+        height: 50vh;
+        min-height: 360px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        font-size: 13px;
+        line-height: 1.55;
+    }
+    .config-editor-wrap .CodeMirror-gutters {
+        border-right: 1px solid rgba(255,255,255,0.08);
+    }
+    .config-editor-fallback {
+        width: 100%;
+        height: 50vh;
+        min-height: 360px;
+        resize: vertical;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        white-space: pre;
+        padding: var(--space-sm);
+    }
+    .config-editor-hint {
+        margin-top: var(--space-xs);
+        color: var(--text-muted);
+        font-size: 0.78rem;
     }
 </style>
 {% endblock %}
@@ -38,26 +142,32 @@
     </div>
     <div id="serverStatus" class="mt-md hidden">
         <div class="divider"></div>
-        <div class="flex gap-md" style="flex-wrap:wrap" id="statusBadges"></div>
+        <div class="server-status-row">
+            <div class="flex gap-md" style="flex-wrap:wrap" id="statusBadges"></div>
+            <div class="server-status-actions">
+                <button class="btn btn-primary btn-sm" onclick="openMarketplaceModal()" id="marketplaceBtn">
+                    <span>🛒</span> {{ _('marketplace') }}
+                </button>
+                <button class="btn btn-secondary btn-sm" onclick="openManagementModal()" id="managementBtn">
+                    <span>⚙️</span> {{ _('management') }}
+                </button>
+            </div>
+        </div>
     </div>
 </div>
 
-<!-- Protocol Installation Section -->
-<div class="flex items-center gap-md"
-    style="margin-bottom: var(--space-xl); border-bottom: 1px solid var(--border-color); padding-bottom: 2px;">
-    <button class="nav-tab active" id="tab-protocols" onclick="switchCategory('protocols')"
-        style="background: none; border: none; padding: 10px 16px; font-size: 1rem; color: var(--text-primary); cursor: pointer; border-bottom: 2px solid var(--accent); font-weight: 600;">
-        <span class="icon">🔐</span> {{ _('protocols') }} <span id="protocols-count"
-            style="font-size: 0.8rem; opacity: 0.6; margin-left: 4px;">0/5</span>
-    </button>
-    <button class="nav-tab" id="tab-services" onclick="switchCategory('services')"
-        style="background: none; border: none; padding: 10px 16px; font-size: 1rem; color: var(--text-muted); cursor: pointer; border-bottom: 2px solid transparent;">
-        <span class="icon">🛠</span> {{ _('services') }} <span id="services-count"
-            style="font-size: 0.8rem; opacity: 0.6; margin-left: 4px;">0/3</span>
-    </button>
-    <button class="nav-tab" id="tab-management" onclick="switchCategory('management')"
-        style="background: none; border: none; padding: 10px 16px; font-size: 1rem; color: var(--text-muted); cursor: pointer; border-bottom: 2px solid transparent;">
-        <span class="icon">⚙️</span> {{ _('management') }}
+<!-- Installed Applications Section -->
+
+<div class="apps-loading" id="installedAppsLoading">
+    <div class="loading-spinner"></div>
+    <span>{{ _('checking_server') }}</span>
+</div>
+<div class="empty-state hidden" id="installedAppsEmpty" style="padding: var(--space-xl) 0; margin-bottom: var(--space-xl);">
+    <div class="empty-icon">🛒</div>
+    <div class="empty-title">{{ _('no_installed_apps') }}</div>
+    <div class="empty-desc">{{ _('no_installed_apps_desc') }}</div>
+    <button class="btn btn-primary btn-sm" onclick="openMarketplaceModal()" style="margin-top: var(--space-md);">
+        {{ _('open_marketplace') }}
     </button>
 </div>
 
@@ -227,9 +337,7 @@
             </a>
         </div>
     </div>
-</div>
 
-<div class="protocol-cards hidden" id="services-grid">
     <!-- DNS Card -->
     <div class="card card-hover protocol-card protocol-dns" id="proto-dns">
         <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:var(--space-sm);">
@@ -302,6 +410,31 @@
         </div>
     </div>
 
+
+    <!-- NGINX Card -->
+    <div class="card card-hover protocol-card protocol-nginx" id="proto-nginx">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:var(--space-sm);">
+            <div class="protocol-icon">🌐</div>
+            <div class="flex gap-sm" id="nginx-ctrl" style="display:none!important;"></div>
+        </div>
+        <div class="protocol-name">NGINX</div>
+        <div class="protocol-desc">
+            {{ _('nginx_desc') }}
+        </div>
+        <div class="protocol-status" id="nginx-status">
+            <span class="badge badge-warn"><span class="badge-dot"></span> {{ _('not_checked') }}</span>
+        </div>
+        <div id="nginx-info" class="hidden">
+            <div class="protocol-info" id="nginx-info-grid"></div>
+        </div>
+        <div class="flex gap-sm" id="nginx-actions">
+            <button class="btn btn-primary btn-sm" onclick="openInstallModal('nginx')" id="nginx-install-btn"
+                style="flex:1">
+                {{ _('install') }}
+            </button>
+        </div>
+    </div>
+
     <!-- ===== Reverse Proxy teaser (locked, full grid width) ===== -->
     <div class="promo-block promo-revproxy" aria-disabled="true" role="article">
         <div class="promo-grid-bg" aria-hidden="true"></div>
@@ -324,26 +457,22 @@
     </div>
 </div>
 
-<div class="protocol-cards hidden" id="management-grid" style="margin-bottom: var(--space-xl);">
-    <div class="card" style="margin-bottom: var(--space-md); width:100%; max-width:600px;">
-        <div class="card-title">{{ _('server_management') }}</div>
-        <div class="card-subtitle" style="margin-bottom: var(--space-md);">
-            {{ _('server_management_desc') }}
+<div class="promo-block promo-aivpn" aria-disabled="true" role="article">
+    <div class="promo-orbs" aria-hidden="true">
+        <span class="promo-orb"></span>
+        <span class="promo-orb"></span>
+        <span class="promo-orb"></span>
+    </div>
+    <span class="promo-lock-badge">🔒 Coming soon</span>
+    <div class="promo-content">
+        <div class="promo-icon" aria-hidden="true">🧠</div>
+        <div class="promo-text">
+            <div class="promo-title">AIVPN</div>
+            <div class="promo-subtitle">AI-driven protocol selection that picks the right tunnel for the moment. Land it sooner — drop a star.</div>
         </div>
-        <div class="flex" style="flex-direction: column; gap: var(--space-sm);">
-            <button class="btn btn-secondary" onclick="checkServer()" style="justify-content: flex-start; padding: 12px 20px;">
-                <span style="font-size: 1.2rem; margin-right: 8px;">🔄</span> {{ _('check_server_services') }}
-            </button>
-            <button class="btn btn-secondary" onclick="rebootServer()" style="justify-content: flex-start; padding: 12px 20px;">
-                <span style="font-size: 1.2rem; margin-right: 8px;">♻️</span> {{ _('reboot_server') }}
-            </button>
-            <button class="btn btn-danger" onclick="clearServer()" style="justify-content: flex-start; padding: 12px 20px; background: rgba(239, 68, 68, 0.05);">
-                <span style="font-size: 1.2rem; margin-right: 8px;">🗑️</span> {{ _('clear_server') }}
-            </button>
-            <button class="btn btn-danger" onclick="removeServer()" style="justify-content: flex-start; padding: 12px 20px;">
-                <span style="font-size: 1.2rem; margin-right: 8px;">❌</span> {{ _('remove_server') }}
-            </button>
-        </div>
+        <a class="promo-cta" href="https://github.com/PRVTPRO/Amnezia-Web-Panel" target="_blank" rel="noopener">
+            ⭐ <span>Star us on GitHub</span>
+        </a>
     </div>
 </div>
 
@@ -381,6 +510,34 @@
             <div class="empty-desc">{{ _('no_connections_desc') }}</div>
         </div>
         <div class="clients-list" id="connectionsListInner"></div>
+    </div>
+</div>
+
+<!-- ===== Marketplace Modal ===== -->
+<div class="modal-backdrop" id="marketplaceModal">
+    <div class="modal" style="max-width: 980px;">
+        <div class="modal-header">
+            <div>
+                <h2 class="modal-title">🛒 {{ _('marketplace') }}</h2>
+                <div class="text-muted text-sm">{{ _('marketplace_desc') }}</div>
+            </div>
+            <button class="modal-close" onclick="closeModal('marketplaceModal')">×</button>
+        </div>
+        <div id="marketplaceContent"></div>
+    </div>
+</div>
+
+<!-- ===== Management Modal ===== -->
+<div class="modal-backdrop" id="managementModal">
+    <div class="modal" style="max-width: 520px;">
+        <div class="modal-header">
+            <div>
+                <h2 class="modal-title">⚙️ {{ _('server_management') }}</h2>
+                <div class="text-muted text-sm">{{ _('server_management_desc') }}</div>
+            </div>
+            <button class="modal-close" onclick="closeModal('managementModal')">×</button>
+        </div>
+        <div id="managementContent"></div>
     </div>
 </div>
 
@@ -483,6 +640,21 @@
                 <div class="form-hint">{{ _('adguard_install_hint') }}</div>
             </div>
 
+
+            <div id="nginxOptions"
+                style="display:none; padding: var(--space-md); background: rgba(0,0,0,0.03); border-radius: var(--radius-md); margin-bottom: var(--space-md);">
+                <div class="form-group">
+                    <label class="form-label">{{ _('nginx_domain') }}</label>
+                    <input class="form-input" type="text" id="installNginxDomain" placeholder="example.com" oninput="updateNginxDnsHint()">
+                    <div class="form-hint" id="nginxDnsHint"></div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">{{ _('nginx_email') }}</label>
+                    <input class="form-input" type="email" id="installNginxEmail" placeholder="admin@example.com">
+                </div>
+                <div class="form-hint">{{ _('nginx_install_hint') }}</div>
+            </div>
+
             <div class="modal-footer">
                 <button class="btn btn-secondary" onclick="closeModal('installModal')">{{ _('cancel') }}</button>
                 <button class="btn btn-primary" onclick="installProtocol()" id="installBtn">
@@ -536,6 +708,64 @@
         </div>
     </div>
 </div>
+
+<!-- ===== NGINX Site Modal ===== -->
+<div class="modal-backdrop" id="siteConfigModal">
+    <div class="modal" style="max-width:680px;">
+        <div class="modal-header">
+            <h2 class="modal-title" id="siteConfigModalTitle">{{ _('site_editor') }}</h2>
+            <button class="modal-close" onclick="closeModal('siteConfigModal')">×</button>
+        </div>
+        <div class="config-display" style="margin-top:var(--space-md);">
+            <input type="hidden" id="siteConfigProto" value="nginx" />
+            <div class="config-editor-wrap">
+                <textarea class="form-input config-editor-fallback" id="siteConfigText"></textarea>
+            </div>
+            <div class="config-editor-hint">HTML editor • Ctrl+S / Cmd+S to save</div>
+            <div class="config-actions" style="margin-top:var(--space-sm);">
+                <button class="btn btn-secondary btn-sm"
+                    onclick="copyToClipboard(getEditorValue('siteConfigText'))" style="flex:1">
+                    {{ _('copy') }}
+                </button>
+                <button class="btn btn-secondary btn-sm"
+                    onclick="downloadFile(getEditorValue('siteConfigText'), 'index.html')"
+                    style="flex:1">
+                    {{ _('download') }}
+                </button>
+                <button class="btn btn-primary btn-sm" onclick="saveNginxSite()" style="flex:1"
+                    id="saveSiteConfigBtn">
+                    {{ _('save') }}
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ===== Protocol Backup Modal ===== -->
+<div class="modal-backdrop" id="backupModal">
+    <div class="modal" style="max-width:720px;">
+        <div class="modal-header">
+            <h2 class="modal-title" id="backupModalTitle">{{ _('backups') }}</h2>
+            <button class="modal-close" onclick="closeModal('backupModal')">×</button>
+        </div>
+        <input type="hidden" id="backupProto" value="" />
+        <div class="form-hint" style="margin-bottom:var(--space-md);">{{ _('backup_desc') }}</div>
+        <div class="config-actions" style="margin-bottom:var(--space-md);">
+            <button class="btn btn-primary btn-sm" onclick="createProtocolBackup()" id="createBackupBtn" style="flex:1">
+                {{ _('create_backup') }}
+            </button>
+            <button class="btn btn-secondary btn-sm" onclick="loadProtocolBackups()">{{ _('refresh') }}</button>
+        </div>
+        <div id="backupLoading" class="form-hint hidden">{{ _('loading') }}</div>
+        <div id="backupEmpty" class="empty-state hidden" style="padding:var(--space-xl);">
+            <div class="empty-icon">📦</div>
+            <div class="empty-title">{{ _('no_backups') }}</div>
+            <div class="empty-desc">{{ _('no_backups_desc') }}</div>
+        </div>
+        <div id="backupList" style="display:flex; flex-direction:column; gap:var(--space-sm);"></div>
+    </div>
+</div>
+
 
 <!-- ===== Add Connection Modal ===== -->
 <div class="modal-backdrop" id="addConnectionModal">
@@ -663,15 +893,17 @@
         <div class="config-display" style="margin-top:var(--space-md);">
             <!-- Hidden input to store current proto -->
             <input type="hidden" id="serverConfigProto" value="" />
-            <textarea class="form-input" id="serverConfigText"
-                style="width:100%; height:40vh; resize:vertical; font-family:monospace; white-space:pre; padding:var(--space-sm);"></textarea>
+            <div class="config-editor-wrap">
+                <textarea class="form-input config-editor-fallback" id="serverConfigText"></textarea>
+            </div>
+            <div class="config-editor-hint">Config editor • Ctrl+S / Cmd+S to save</div>
             <div class="config-actions" style="margin-top:var(--space-sm);">
                 <button class="btn btn-secondary btn-sm"
-                    onclick="copyToClipboard(document.getElementById('serverConfigText').value)" style="flex:1">
+                    onclick="copyToClipboard(getEditorValue('serverConfigText'))" style="flex:1">
                     {{ _('copy') }}
                 </button>
                 <button class="btn btn-secondary btn-sm"
-                    onclick="downloadFile(document.getElementById('serverConfigText').value, serverConfigFilename)"
+                    onclick="downloadFile(getEditorValue('serverConfigText'), serverConfigFilename)"
                     style="flex:1">
                     {{ _('download') }}
                 </button>
@@ -686,57 +918,270 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/nginx/nginx.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/xml/xml.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/javascript/javascript.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/css/css.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/properties/properties.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/htmlmixed/htmlmixed.min.js"></script>
 <script>
     const SERVER_ID = {{ server_id }};
     const SERVER_HOST = "{{ server.host }}";
+    const MARKETPLACE_APPS = [
+        { proto: 'awg2', category: 'protocols', icon: '✨', title: 'AmneziaWG 2.0', descKey: 'awg_desc', badge: 'NEW' },
+        { proto: 'awg', category: 'protocols', icon: '🔮', title: 'AmneziaWG', descKey: 'awg_desc' },
+        { proto: 'awg_legacy', category: 'protocols', icon: '📡', title: 'AmneziaWG Legacy', descKey: 'awg_legacy_desc' },
+        { proto: 'xray', category: 'protocols', icon: '⚡', title: 'Xray (VLESS-Reality)', descKey: 'xray_desc' },
+        { proto: 'telemt', category: 'protocols', icon: '✈', title: 'Telemt (Telegram Proxy)', descKey: 'telemt_desc' },
+        { proto: 'wireguard', category: 'protocols', icon: '🔒', title: 'WireGuard', descKey: 'wireguard_desc' },
+        { proto: 'dns', category: 'services', icon: '🔍', title: 'AmneziaDNS', descKey: 'dns_desc' },
+        { proto: 'adguard', category: 'services', icon: '🛡️', title: 'AdGuard Home', descKey: 'adguard_desc' },
+        { proto: 'socks5', category: 'services', icon: '🧦', title: 'SOCKS5 Proxy', descKey: 'socks5_desc' },
+        { proto: 'nginx', category: 'web_servers', icon: '🌐', title: 'NGINX', descKey: 'nginx_desc' },
+    ];
+    const MARKETPLACE_CATEGORIES = [
+        { id: 'protocols', icon: '🔐', titleKey: 'protocols' },
+        { id: 'services', icon: '🛠', titleKey: 'services' },
+        { id: 'web_servers', icon: '🌐', titleKey: 'web_servers' },
+    ];
     let currentInstallProto = 'awg';
+    let currentInstallAnother = false;
     let currentConfig = '';
     let currentVpnLink = '';
     let currentConfigName = 'connection';
     let installedProtocols = {};
+    let currentProtocolStatus = {};
+    let installedAppsLoading = true;
+    let currentSocks5Proto = 'socks5';
+
+    function protoBase(proto) {
+        return String(proto || 'awg').split('__')[0];
+    }
+
+    function protoInstance(proto) {
+        const parts = String(proto || '').split('__');
+        return parts.length > 1 ? (parseInt(parts[1], 10) || 1) : 1;
+    }
+
+    function protoDomKey(proto) {
+        return String(proto || '').replace(/_/g, '-');
+    }
+
+    function isMultiInstanceBase(proto) {
+        return ['awg', 'awg2', 'awg_legacy', 'xray', 'telemt', 'socks5'].includes(protoBase(proto));
+    }
+
+    function nextSuggestedPort(base, fallback) {
+        const used = new Set();
+        Object.entries(currentProtocolStatus || {}).forEach(([proto, info]) => {
+            if (protoBase(proto) === protoBase(base) && info && info.port) {
+                const p = parseInt(info.port, 10);
+                if (!Number.isNaN(p)) used.add(p);
+            }
+        });
+        let port = parseInt(fallback, 10) || 55424;
+        while (used.has(port)) port += 1;
+        return String(port);
+    }
+
+    function orderedProtocolEntries(protocols) {
+        const entries = Object.entries(protocols || {});
+        const order = new Map(MARKETPLACE_APPS.map((app, idx) => [app.proto, idx]));
+        entries.sort(([a], [b]) => {
+            const ao = order.has(protoBase(a)) ? order.get(protoBase(a)) : 999;
+            const bo = order.has(protoBase(b)) ? order.get(protoBase(b)) : 999;
+            if (ao !== bo) return ao - bo;
+            const ab = protoBase(a).localeCompare(protoBase(b));
+            if (ab !== 0) return ab;
+            return protoInstance(a) - protoInstance(b);
+        });
+        return entries;
+    }
+
+    function baseInstalled(proto) {
+        const base = protoBase(proto);
+        return Object.keys(installedProtocols).some(key => protoBase(key) === base && installedProtocols[key]);
+    }
 
     function switchCategory(cat) {
-        const grids = ['protocols-grid', 'services-grid', 'management-grid'];
-        const tabs = ['tab-protocols', 'tab-services', 'tab-management'];
-        
-        grids.forEach(g => {
-            if (document.getElementById(g)) document.getElementById(g).classList.add('hidden');
+        if (cat === 'management') {
+            openManagementModal();
+            return;
+        }
+        applyInstalledAppsVisibility();
+    }
+
+    function renderManagementModal() {
+        const el = document.getElementById('managementContent');
+        if (!el) return;
+        el.innerHTML = `
+            <div class="flex" style="flex-direction: column; gap: var(--space-sm);">
+                <button class="btn btn-secondary" onclick="closeModal('managementModal'); checkServer();" style="justify-content: flex-start; padding: 12px 20px;">
+                    <span style="font-size: 1.2rem; margin-right: 8px;">🔄</span> ${_('check_server_services')}
+                </button>
+                <button class="btn btn-warning" onclick="closeModal('managementModal'); rebootServer();" style="justify-content: flex-start; padding: 12px 20px;">
+                    <span style="font-size: 1.2rem; margin-right: 8px;">🔁</span> ${_('reboot_server')}
+                </button>
+                <button class="btn btn-danger" onclick="closeModal('managementModal'); clearServer();" style="justify-content: flex-start; padding: 12px 20px;">
+                    <span style="font-size: 1.2rem; margin-right: 8px;">🧹</span> ${_('clear_server')}
+                </button>
+                <button class="btn btn-danger" onclick="closeModal('managementModal'); deleteServer();" style="justify-content: flex-start; padding: 12px 20px;">
+                    <span style="font-size: 1.2rem; margin-right: 8px;">🗑️</span> ${_('remove_server')}
+                </button>
+            </div>
+        `;
+    }
+
+    function openManagementModal() {
+        renderManagementModal();
+        openModal('managementModal');
+    }
+
+    function isAppInstalled(info) {
+        return !!(info && (info.container_running || info.container_exists));
+    }
+
+    function marketplaceAppStatus(proto) {
+        const installed = baseInstalled(proto);
+        if (installed) {
+            return `<span class="badge badge-success"><span class="badge-dot"></span> ${_('installed')}</span>`;
+        }
+        return `<span class="badge badge-warn"><span class="badge-dot"></span> ${_('not_installed')}</span>`;
+    }
+
+    function renderMarketplace() {
+        const el = document.getElementById('marketplaceContent');
+        if (!el) return;
+        el.innerHTML = MARKETPLACE_CATEGORIES.map(cat => {
+            const apps = MARKETPLACE_APPS.filter(app => app.category === cat.id);
+            return `
+                <div class="marketplace-category">
+                    <div class="marketplace-category-title"><span>${cat.icon}</span> ${_(cat.titleKey)}</div>
+                    <div class="marketplace-grid">
+                        ${apps.map(app => {
+                            const installed = baseInstalled(app.proto);
+                            const canInstallAnother = installed && isMultiInstanceBase(app.proto);
+                            return `
+                                <div class="marketplace-app-card">
+                                    <div class="marketplace-app-top">
+                                        <div class="flex items-center gap-sm">
+                                            <div class="protocol-icon" style="width:38px;height:38px;font-size:1.2rem;">${app.icon}</div>
+                                            <div>
+                                                <div class="marketplace-app-title">${app.title} ${app.badge ? `<span class="badge badge-info" style="font-size:0.65rem;">${app.badge}</span>` : ''}</div>
+                                                ${marketplaceAppStatus(app.proto)}
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="marketplace-app-desc">${_(app.descKey)}</div>
+                                    <button class="btn ${installed && !canInstallAnother ? 'btn-secondary' : 'btn-primary'} btn-sm" ${installed && !canInstallAnother ? 'disabled' : `onclick="installFromMarketplace('${app.proto}', ${canInstallAnother ? 'true' : 'false'})"`}>
+                                        ${canInstallAnother ? _('install_another') : (installed ? _('installed') : _('install'))}
+                                    </button>
+                                </div>
+                            `;
+                        }).join('')}
+                    </div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    function openMarketplaceModal() {
+        renderMarketplace();
+        openModal('marketplaceModal');
+    }
+
+    function installFromMarketplace(proto, installAnother = false) {
+        closeModal('marketplaceModal');
+        openInstallModal(proto, installAnother);
+    }
+
+    function setInstalledAppsLoading(isLoading) {
+        installedAppsLoading = !!isLoading;
+        const loading = document.getElementById('installedAppsLoading');
+        const empty = document.getElementById('installedAppsEmpty');
+        if (loading) loading.classList.toggle('hidden', !installedAppsLoading);
+        if (empty && installedAppsLoading) empty.classList.add('hidden');
+    }
+
+    function applyInstalledAppsVisibility() {
+        let installedCount = 0;
+        const grid = document.getElementById('protocols-grid');
+        const order = new Map(MARKETPLACE_APPS.map((app, idx) => [app.proto, idx]));
+
+        Object.entries(currentProtocolStatus || {}).forEach(([proto, info]) => {
+            if (isAppInstalled(info)) installedCount++;
         });
-        tabs.forEach(t => {
-            const el = document.getElementById(t);
-            if (el) {
-                el.classList.remove('active');
-                el.style.borderBottomColor = 'transparent';
-                el.style.color = 'var(--text-muted)';
-                el.style.fontWeight = '400';
+
+        // Hide every static card first. This prevents stale service cards
+        // (SOCKS5/DNS/AdGuard/etc.) from staying visible when they are not
+        // reported as installed by the backend.
+        document.querySelectorAll('.protocol-card[id^="proto-"]').forEach(card => {
+            card.classList.add('installed-app-hidden');
+            card.classList.remove('installed-app-visible');
+        });
+
+        MARKETPLACE_APPS.forEach(app => {
+            const card = document.getElementById(`proto-${protoDomKey(app.proto)}`);
+            const installed = baseInstalled(app.proto);
+            if (card) {
+                card.classList.toggle('installed-app-hidden', !installed);
+                card.classList.toggle('installed-app-visible', installed);
             }
         });
 
-        const activeGrid = document.getElementById(cat + '-grid');
-        const activeTab = document.getElementById('tab-' + cat);
-        
-        if (activeGrid) activeGrid.classList.remove('hidden');
-        if (activeTab) {
-            activeTab.classList.add('active');
-            activeTab.style.borderBottomColor = 'var(--accent)';
-            activeTab.style.color = 'var(--text-primary)';
-            activeTab.style.fontWeight = '600';
+        orderedProtocolEntries(currentProtocolStatus || {}).forEach(([proto, info]) => {
+            if (protoInstance(proto) > 1) {
+                ensureProtocolCard(proto);
+                const card = document.getElementById(`proto-${protoDomKey(proto)}`);
+                const installed = isAppInstalled(info);
+                if (card) {
+                    card.classList.toggle('installed-app-hidden', !installed);
+                    card.classList.toggle('installed-app-visible', installed);
+                }
+            }
+        });
+
+        // Keep all installed cards in one compact ordered grid. Without this,
+        // services that were originally in another section (NGINX/SOCKS5/DNS/
+        // AdGuard) appear with a visual offset below VPN protocols.
+        if (grid) {
+            Array.from(document.querySelectorAll('.protocol-card.installed-app-visible[id^="proto-"]'))
+                .sort((a, b) => {
+                    const ap = (a.id || '').replace(/^proto-/, '').replace(/-/g, '_');
+                    const bp = (b.id || '').replace(/^proto-/, '').replace(/-/g, '_');
+                    const ao = order.has(protoBase(ap)) ? order.get(protoBase(ap)) : 999;
+                    const bo = order.has(protoBase(bp)) ? order.get(protoBase(bp)) : 999;
+                    if (ao !== bo) return ao - bo;
+                    return protoInstance(ap) - protoInstance(bp);
+                })
+                .forEach(card => grid.appendChild(card));
         }
+
+        const empty = document.getElementById('installedAppsEmpty');
+        if (empty) empty.classList.toggle('hidden', installedAppsLoading || installedCount > 0);
+        const loading = document.getElementById('installedAppsLoading');
+        if (loading) loading.classList.toggle('hidden', !installedAppsLoading);
     }
 
     function getProtoTitle(proto) {
-        switch (proto) {
-            case 'awg': return 'AmneziaWG';
-            case 'awg2': return 'AmneziaWG 2.0';
-            case 'awg_legacy': return 'AWG Legacy';
-            case 'xray': return 'Xray';
-            case 'telemt': return 'Telemt';
-            case 'wireguard': return 'WireGuard';
-            case 'dns': return 'AmneziaDNS';
-            case 'socks5': return 'SOCKS5 Proxy';
-            case 'adguard': return 'AdGuard Home';
-            default: return proto;
+        const base = protoBase(proto);
+        const idx = protoInstance(proto);
+        let title;
+        switch (base) {
+            case 'awg': title = 'AmneziaWG'; break;
+            case 'awg2': title = 'AmneziaWG 2.0'; break;
+            case 'awg_legacy': title = 'AmneziaWG Legacy'; break;
+            case 'xray': title = 'Xray'; break;
+            case 'telemt': title = 'Telemt'; break;
+            case 'wireguard': title = 'WireGuard'; break;
+            case 'dns': title = 'AmneziaDNS'; break;
+            case 'socks5': title = 'SOCKS5 Proxy'; break;
+            case 'adguard': title = 'AdGuard Home'; break;
+            case 'nginx': title = 'NGINX'; break;
+            default: title = proto;
         }
+        return idx > 1 ? `${title} #${idx}` : title;
     }
 
     // ========== Server Stats ==========
@@ -758,12 +1203,13 @@
 
     // ========== Server Check ==========
     async function checkServer() {
+        setInstalledAppsLoading(true);
         const btn = document.getElementById('checkBtn');
         const text = document.getElementById('checkBtnText');
         const spinner = document.getElementById('checkSpinner');
         btn.disabled = true;
         text.textContent = _('server_checking');
-        spinner.classList.remove('remove');
+        spinner.classList.remove('hidden');
         try {
             const data = await apiCall(`/api/servers/${SERVER_ID}/check`, 'POST');
             const statusDiv = document.getElementById('serverStatus');
@@ -785,9 +1231,9 @@
                 protoSelect.innerHTML = '';
                 let firstVal = null;
 
-                for (const [proto, info] of Object.entries(data.protocols)) {
+                for (const [proto, info] of orderedProtocolEntries(data.protocols)) {
                     updateProtocolCard(proto, info);
-                    const isVPN = ['awg', 'awg2', 'awg_legacy', 'xray', 'telemt', 'wireguard'].includes(proto);
+                    const isVPN = ['awg', 'awg2', 'awg_legacy', 'xray', 'telemt', 'wireguard'].includes(protoBase(proto));
                     if (info.container_running && isVPN) {
                         const opt = document.createElement('option');
                         opt.value = proto;
@@ -799,7 +1245,7 @@
 
                 if (protoSelect.innerHTML === '') {
                     const opt = document.createElement('option');
-                    opt.textContent = 'Нет протоколов';
+                    opt.textContent = _('no_protocols');
                     opt.disabled = true;
                     protoSelect.appendChild(opt);
                     hideConnectionsSection();
@@ -813,14 +1259,16 @@
                 }
             }
             updateStatusCounts(data.protocols || {});
-            showToast('Проверка завершена', 'success');
+            showToast(_('server_check_complete'), 'success');
         } catch (err) {
-            showToast('Ошибка: ' + err.message, 'error');
+            showToast(_('error') + ': ' + err.message, 'error');
             const statusDiv = document.getElementById('serverStatus');
             const badges = document.getElementById('statusBadges');
             statusDiv.classList.remove('hidden');
-            badges.innerHTML = `<span class="badge badge-danger"><span class="badge-dot"></span> Ошибка подключения</span>`;
+            badges.innerHTML = `<span class="badge badge-danger"><span class="badge-dot"></span> ${_('server_connection_error')}</span>`;
         } finally {
+            setInstalledAppsLoading(false);
+            applyInstalledAppsVisibility();
             btn.disabled = false;
             text.textContent = _('server_check');
             spinner.classList.add('hidden');
@@ -828,42 +1276,110 @@
     }
 
     function updateStatusCounts(protocols) {
-        const protos = ['awg', 'awg2', 'awg_legacy', 'xray', 'telemt', 'wireguard'];
-        const servs = ['dns', 'adguard', 'socks5'];
-
-        let pRunning = 0, pTotal = protos.length;
-        let sRunning = 0, sTotal = servs.length;
-
-        protos.forEach(p => {
-            if (protocols[p] && protocols[p].container_running) pRunning++;
+        currentProtocolStatus = protocols || {};
+        setInstalledAppsLoading(false);
+        installedProtocols = {};
+        MARKETPLACE_APPS.forEach(app => {
+            installedProtocols[app.proto] = isAppInstalled(currentProtocolStatus[app.proto]);
         });
-        servs.forEach(s => {
-            if (protocols[s] && protocols[s].container_running) sRunning++;
+        Object.entries(currentProtocolStatus || {}).forEach(([proto, info]) => {
+            installedProtocols[proto] = isAppInstalled(info);
+            const base = protoBase(proto);
+            if (isAppInstalled(info)) installedProtocols[base] = true;
         });
-
-        document.getElementById('protocols-count').textContent = `${pRunning}/${pTotal}`;
-        document.getElementById('services-count').textContent = `${sRunning}/${sTotal}`;
+        applyInstalledAppsVisibility();
+        renderMarketplace();
     }
 
     let serverConfigFilename = 'server.conf';
 
+    const configEditors = {};
+
+    function editorModeFor(kind, proto) {
+        if (kind === 'site') return 'htmlmixed';
+        const base = protoBase(proto);
+        if (base === 'nginx') return 'nginx';
+        if (base === 'xray') return { name: 'javascript', json: true };
+        return 'properties';
+    }
+
+    function ensureConfigEditor(textareaId, options = {}) {
+        const textarea = document.getElementById(textareaId);
+        if (!textarea) return null;
+        if (!window.CodeMirror) return null;
+        if (configEditors[textareaId]) return configEditors[textareaId];
+
+        const editor = CodeMirror.fromTextArea(textarea, {
+            mode: options.mode || 'nginx',
+            theme: 'material-darker',
+            lineNumbers: true,
+            lineWrapping: false,
+            indentUnit: 4,
+            tabSize: 4,
+            indentWithTabs: false,
+            smartIndent: true,
+            autofocus: false,
+            extraKeys: {
+                'Ctrl-S': function () {
+                    if (textareaId === 'siteConfigText') saveNginxSite();
+                    else saveServerConfig();
+                },
+                'Cmd-S': function () {
+                    if (textareaId === 'siteConfigText') saveNginxSite();
+                    else saveServerConfig();
+                },
+                'Tab': function (cm) {
+                    if (cm.somethingSelected()) cm.indentSelection('add');
+                    else cm.replaceSelection('    ', 'end');
+                }
+            }
+        });
+        configEditors[textareaId] = editor;
+        return editor;
+    }
+
+    function setEditorValue(textareaId, value, options = {}) {
+        const textarea = document.getElementById(textareaId);
+        if (!textarea) return;
+        textarea.value = value || '';
+        const editor = ensureConfigEditor(textareaId, options);
+        if (editor) {
+            if (options.mode) editor.setOption('mode', options.mode);
+            editor.setValue(value || '');
+            setTimeout(() => editor.refresh(), 80);
+        }
+    }
+
+    function getEditorValue(textareaId) {
+        const editor = configEditors[textareaId];
+        if (editor) return editor.getValue();
+        const textarea = document.getElementById(textareaId);
+        return textarea ? textarea.value : '';
+    }
+
+    function refreshConfigEditor(textareaId) {
+        const editor = configEditors[textareaId];
+        if (editor) setTimeout(() => editor.refresh(), 80);
+    }
+
     // Services that don't have per-user "connections" — they expose a single
     // shared endpoint (DNS/proxy/admin UI) rather than per-client configs.
-    const SERVICE_PROTOS = ['dns', 'socks5', 'adguard'];
+    const SERVICE_PROTOS = ['dns', 'socks5', 'adguard', 'nginx'];
 
     function buildServiceInfoGrid(proto, info) {
         // Custom info-grid markup for non-VPN services. Returns HTML for the grid body.
-        if (proto === 'dns') {
+        const base = protoBase(proto);
+        if (base === 'dns') {
             return `<div class="protocol-info-item"><span class="protocol-info-label">${_('port')}</span><span class="protocol-info-value">172.29.172.254:53 (Internal)</span></div>`;
         }
-        if (proto === 'socks5') {
+        if (base === 'socks5') {
             const user = info.username ? info.username : '—';
             return `
                 <div class="protocol-info-item"><span class="protocol-info-label">${_('port')}</span><span class="protocol-info-value">${info.port}/TCP</span></div>
                 <div class="protocol-info-item"><span class="protocol-info-label">${_('socks5_username')}</span><span class="protocol-info-value">${user}</span></div>
             `;
         }
-        if (proto === 'adguard') {
+        if (base === 'adguard') {
             const mode = info.mode === 'replace' ? _('adguard_mode_replace') : _('adguard_mode_sidebyside');
             const ip = info.internal_ip || '—';
             const webPort = info.web_port || 3000;
@@ -876,11 +1392,54 @@
                 <div class="protocol-info-item"><span class="protocol-info-label">${_('adguard_web_ui')}</span><span class="protocol-info-value"><a href="${url}" target="_blank" rel="noopener">${url}</a></span></div>
             `;
         }
+        if (base === 'nginx') {
+            const domain = info.domain || '—';
+            const port = info.port || 443;
+            const url = info.site_url || (domain !== '—' ? (port == 443 ? `https://${domain}` : `https://${domain}:${port}`) : '—');
+            return `
+                <div class="protocol-info-item"><span class="protocol-info-label">${_('nginx_domain')}</span><span class="protocol-info-value">${domain}</span></div>
+                <div class="protocol-info-item"><span class="protocol-info-label">${_('port')}</span><span class="protocol-info-value">${port}/TCP</span></div>
+                <div class="protocol-info-item"><span class="protocol-info-label">${_('site')}</span><span class="protocol-info-value">${url !== '—' ? `<a href="${url}" target="_blank" rel="noopener">${url}</a>` : '—'}</span></div>
+            `;
+        }
         return '';
     }
 
+    function replaceIdsRecursive(node, oldKey, newKey) {
+        if (node.id) node.id = node.id.replace(oldKey, newKey);
+        if (node.getAttribute && node.getAttribute('onclick')) {
+            node.setAttribute('onclick', node.getAttribute('onclick').replace(new RegExp(oldKey.replace(/-/g, '[-_]'), 'g'), newKey));
+        }
+        Array.from(node.children || []).forEach(child => replaceIdsRecursive(child, oldKey, newKey));
+    }
+
+    function ensureProtocolCard(proto) {
+        if (protoInstance(proto) <= 1) return;
+        const key = protoDomKey(proto);
+        if (document.getElementById(`proto-${key}`)) return;
+        const base = protoBase(proto);
+        const baseKey = protoDomKey(base);
+        const baseCard = document.getElementById(`proto-${baseKey}`);
+        if (!baseCard) return;
+        const clone = baseCard.cloneNode(true);
+        replaceIdsRecursive(clone, baseKey, key);
+        clone.id = `proto-${key}`;
+        const nameEl = clone.querySelector('.protocol-name');
+        if (nameEl) nameEl.textContent = getProtoTitle(proto);
+        const installBtn = clone.querySelector(`[id$="-install-btn"]`);
+        if (installBtn) installBtn.remove();
+        let insertAfter = baseCard;
+        const sameBaseCards = Array.from(document.querySelectorAll('.protocol-card')).filter(card => {
+            const cardProto = (card.id || '').replace(/^proto-/, '').replace(/-/g, '_').replace(/__(\d+)$/, '__$1');
+            return card.id && card.id.startsWith(`proto-${baseKey}`);
+        });
+        sameBaseCards.forEach(card => { insertAfter = card; });
+        insertAfter.insertAdjacentElement('afterend', clone);
+    }
+
     function updateProtocolCard(proto, info) {
-        const protoKey = proto.replace('_', '-');
+        ensureProtocolCard(proto);
+        const protoKey = protoDomKey(proto);
         const statusEl = document.getElementById(`${protoKey}-status`);
         const infoEl = document.getElementById(`${protoKey}-info`);
         const infoGrid = document.getElementById(`${protoKey}-info-grid`);
@@ -891,7 +1450,7 @@
         // skip quietly rather than throwing so a partial UI still renders.
         if (!statusEl || !actionsEl) return;
 
-        const isService = SERVICE_PROTOS.includes(proto);
+        const isService = SERVICE_PROTOS.includes(protoBase(proto));
 
         if (info.container_running) {
             installedProtocols[proto] = true;
@@ -902,19 +1461,20 @@
                 if (isService) {
                     grid = buildServiceInfoGrid(proto, info);
                 } else if (info.port) {
-                    grid += `<div class="protocol-info-item"><span class="protocol-info-label">${_('port')}</span><span class="protocol-info-value">${info.port}/${(proto === 'xray' || proto === 'telemt') ? 'TCP' : 'UDP'}</span></div>`;
+                    grid += `<div class="protocol-info-item"><span class="protocol-info-label">${_('port')}</span><span class="protocol-info-value">${info.port}/${(['xray', 'telemt'].includes(protoBase(proto))) ? 'TCP' : 'UDP'}</span></div>`;
                 }
                 if (!isService && info.clients_count !== undefined) {
                     grid += `<div class="protocol-info-item"><span class="protocol-info-label">${_('connections')}</span><span class="protocol-info-value">${info.clients_count}</span></div>`;
                 }
                 infoGrid.innerHTML = grid;
             }
-            if (proto === 'socks5') {
+            if (protoBase(proto) === 'socks5') {
                 actionsEl.innerHTML = `
-                    <button class="btn btn-secondary btn-sm" onclick="openSocks5Settings()" style="flex:1">${_('socks5_change_settings')}</button>
+                    <button class="btn btn-secondary btn-sm" onclick="openSocks5Settings('${proto}')" style="flex:1">${_('socks5_change_settings')}</button>
+                    <button class="btn btn-secondary btn-sm" onclick="showProtocolBackups('${proto}')">${_('backup')}</button>
                     <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')">${_('uninstall')}</button>
                 `;
-            } else if (proto === 'adguard') {
+            } else if (protoBase(proto) === 'adguard') {
                 const webPort = info.web_port || 3000;
                 const ip = info.internal_ip || '172.29.172.253';
                 const url = info.web_exposed
@@ -922,15 +1482,24 @@
                     : `http://${ip}:${webPort}`;
                 actionsEl.innerHTML = `
                     <a class="btn btn-secondary btn-sm" href="${url}" target="_blank" rel="noopener" style="flex:1">${_('adguard_open_ui')}</a>
+                    <button class="btn btn-secondary btn-sm" onclick="showProtocolBackups('${proto}')">${_('backup')}</button>
                     <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')">${_('uninstall')}</button>
                 `;
-            } else if (proto === 'dns') {
+            } else if (protoBase(proto) === 'nginx') {
                 actionsEl.innerHTML = `
-                    <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')" style="flex:1">${_('uninstall')}</button>
+                    <button class="btn btn-secondary btn-sm" onclick="showNginxSite('${proto}')" style="flex:1">${_('site')}</button>
+                    <button class="btn btn-secondary btn-sm" onclick="showProtocolBackups('${proto}')">${_('backup')}</button>
+                    <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')">${_('uninstall')}</button>
+                `;
+            } else if (protoBase(proto) === 'dns') {
+                actionsEl.innerHTML = `
+                    <button class="btn btn-secondary btn-sm" onclick="showProtocolBackups('${proto}')" style="flex:1">${_('backup')}</button>
+                    <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')">${_('uninstall')}</button>
                 `;
             } else {
                 actionsEl.innerHTML = `
                     <button class="btn btn-secondary btn-sm" onclick="selectProtocolForConns('${proto}')" style="flex:1">${_('connections')}</button>
+                    <button class="btn btn-secondary btn-sm" onclick="showProtocolBackups('${proto}')">${_('backup')}</button>
                     <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')">${_('uninstall')}</button>
                 `;
                 showConnectionsSection();
@@ -940,7 +1509,12 @@
             // unbound's static config), so we don't expose a raw editor for them.
             if (ctrlEl) {
                 ctrlEl.style.cssText = '';
-                if (isService) {
+                if (protoBase(proto) === 'nginx') {
+                    ctrlEl.innerHTML = `
+                        <button class="btn btn-secondary btn-sm" onclick="showServerConfig('${proto}')" title="${_('server_config')}">${_('config_btn')}</button>
+                        <button class="btn btn-danger btn-sm" onclick="toggleContainer('${proto}', true)" title="${_('stop_container_confirm').replace('{}', '')}">${_('stop_btn')}</button>
+                    `;
+                } else if (isService) {
                     ctrlEl.innerHTML = `
                         <button class="btn btn-danger btn-sm" onclick="toggleContainer('${proto}', true)" title="${_('stop_container_confirm').replace('{}', '')}">${_('stop_btn')}</button>
                     `;
@@ -952,22 +1526,29 @@
                 }
             }
         } else if (info.container_exists) {
-            installedProtocols[proto] = false;
+            installedProtocols[proto] = true;
             statusEl.innerHTML = `<span class="badge badge-danger"><span class="badge-dot"></span> ${_('stop')}</span>`;
             if (isService) {
                 actionsEl.innerHTML = `
                     <button class="btn btn-primary btn-sm" onclick="openInstallModal('${proto}')" style="flex:1">${_('reinstall')}</button>
+                    <button class="btn btn-secondary btn-sm" onclick="showProtocolBackups('${proto}')">${_('backup')}</button>
                     <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')">${_('uninstall')}</button>
                 `;
             } else {
                 actionsEl.innerHTML = `
                     <button class="btn btn-primary btn-sm" onclick="openInstallModal('${proto}')" style="flex:1">${_('reinstall')}</button>
+                    <button class="btn btn-secondary btn-sm" onclick="showProtocolBackups('${proto}')">${_('backup')}</button>
                     <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')">${_('uninstall')}</button>
                 `;
             }
             if (ctrlEl) {
                 ctrlEl.style.cssText = '';
-                if (isService) {
+                if (protoBase(proto) === 'nginx') {
+                    ctrlEl.innerHTML = `
+                        <button class="btn btn-secondary btn-sm" onclick="showServerConfig('${proto}')" title="${_('server_config')}">${_('config_btn')}</button>
+                        <button class="btn btn-primary btn-sm" onclick="toggleContainer('${proto}', false)" title="${_('start_container_confirm').replace('{}', '')}">${_('start_btn')}</button>
+                    `;
+                } else if (isService) {
                     ctrlEl.innerHTML = `
                         <button class="btn btn-primary btn-sm" onclick="toggleContainer('${proto}', false)" title="${_('start_container_confirm').replace('{}', '')}">${_('start_btn')}</button>
                     `;
@@ -1003,7 +1584,7 @@
             // Recheck after a short delay
             setTimeout(() => checkServer(), 1500);
         } catch (err) {
-            showToast('Ошибка: ' + err.message, 'error');
+            showToast(_('error') + ': ' + err.message, 'error');
         }
     }
 
@@ -1015,18 +1596,19 @@
             const res = await apiCall(`/api/servers/${SERVER_ID}/server_config`, 'POST', { protocol: proto });
             document.getElementById('serverConfigModalTitle').textContent = `${_('server_config')} — ${name}`;
             document.getElementById('serverConfigProto').value = proto;
-            document.getElementById('serverConfigText').value = res.config || '';
+            setEditorValue('serverConfigText', res.config || '', { mode: editorModeFor('server', proto) });
             serverConfigFilename = `server_${proto}.conf`;
             openModal('serverConfigModal');
+            refreshConfigEditor('serverConfigText');
         } catch (err) {
-            showToast('Ошибка: ' + err.message, 'error');
+            showToast(_('error') + ': ' + err.message, 'error');
         }
     }
 
     // Save server config changes
     async function saveServerConfig() {
         const proto = document.getElementById('serverConfigProto').value;
-        const newConfig = document.getElementById('serverConfigText').value;
+        const newConfig = getEditorValue('serverConfigText');
         const btn = document.getElementById('saveServerConfigBtn');
         const oldText = btn.textContent;
         btn.disabled = true;
@@ -1039,6 +1621,40 @@
             });
             showToast(_('success') || 'Saved successfully', 'success');
             closeModal('serverConfigModal');
+        } catch (err) {
+            showToast((_('error') || 'Error') + ': ' + err.message, 'error');
+        } finally {
+            btn.disabled = false;
+            btn.textContent = oldText;
+        }
+    }
+
+
+    async function showNginxSite(proto = 'nginx') {
+        try {
+            showToast(_('loading'), 'info');
+            const res = await apiCall(`/api/servers/${SERVER_ID}/nginx/site`, 'POST', { protocol: proto });
+            document.getElementById('siteConfigModalTitle').textContent = `${_('site_editor')} — ${getProtoTitle(proto)}`;
+            document.getElementById('siteConfigProto').value = proto;
+            setEditorValue('siteConfigText', res.html || '', { mode: editorModeFor('site', proto) });
+            openModal('siteConfigModal');
+            refreshConfigEditor('siteConfigText');
+        } catch (err) {
+            showToast(_('error') + ': ' + err.message, 'error');
+        }
+    }
+
+    async function saveNginxSite() {
+        const proto = document.getElementById('siteConfigProto').value || 'nginx';
+        const html = getEditorValue('siteConfigText');
+        const btn = document.getElementById('saveSiteConfigBtn');
+        const oldText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = _('saving') || 'Saving...';
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/nginx/site/save`, 'POST', { protocol: proto, html });
+            showToast(_('site_saved') || _('success'), 'success');
+            closeModal('siteConfigModal');
         } catch (err) {
             showToast((_('error') || 'Error') + ': ' + err.message, 'error');
         } finally {
@@ -1067,9 +1683,19 @@
     }
 
     // ========== Protocol Installation ==========
-    function openInstallModal(proto) {
-        currentInstallProto = proto;
-        const name = getProtoTitle(proto);
+    function updateNginxDnsHint() {
+        const input = document.getElementById('installNginxDomain');
+        const hint = document.getElementById('nginxDnsHint');
+        if (!input || !hint) return;
+        const domain = (input.value || '').trim() || 'example.com';
+        hint.innerHTML = `${_('nginx_dns_hint')} <code>A&nbsp;&nbsp;${domain}&nbsp;&nbsp;${SERVER_HOST}</code>`;
+    }
+
+    function openInstallModal(proto, installAnother = false) {
+        const base = protoBase(proto);
+        currentInstallProto = installAnother ? base : proto;
+        currentInstallAnother = !!installAnother;
+        const name = getProtoTitle(proto) + (currentInstallAnother ? ` #${_('new_instance')}` : '');
         document.getElementById('installModalTitle').textContent = `${_('install')} ${name}`;
 
         const portInput = document.getElementById('installPort');
@@ -1078,44 +1704,53 @@
         const telemtOpts = document.getElementById('telemtOptions');
         const socks5Opts = document.getElementById('socks5Options');
         const adguardOpts = document.getElementById('adguardOptions');
+        const nginxOpts = document.getElementById('nginxOptions');
 
         telemtOpts.style.display = 'none';
         socks5Opts.style.display = 'none';
         adguardOpts.style.display = 'none';
+        nginxOpts.style.display = 'none';
 
-        if (proto === 'dns') {
+        if (base === 'dns') {
             portLabel.textContent = _('port') + ' (Internal)';
             portInput.value = '53';
             portInput.disabled = true;
             portHint.textContent = _('dns_internal_hint');
-        } else if (proto === 'xray') {
+        } else if (base === 'xray') {
             portLabel.textContent = _('port') + ' (TCP)';
             portInput.disabled = false;
-            portInput.value = '443';
-            portHint.textContent = _('port_xray_hint');
-        } else if (proto === 'telemt') {
+            portInput.value = currentInstallAnother ? nextSuggestedPort(currentInstallProto, 443) : '443';
+            portHint.textContent = currentInstallAnother ? _('port_next_instance_hint') : _('port_xray_hint');
+        } else if (base === 'telemt') {
             portLabel.textContent = _('port') + ' (TCP)';
-            portInput.value = '443';
+            portInput.value = currentInstallAnother ? nextSuggestedPort(currentInstallProto, 443) : '443';
             portInput.disabled = false;
-            portHint.textContent = _('telemt_port_hint');
+            portHint.textContent = currentInstallAnother ? _('port_next_instance_hint') : _('telemt_port_hint');
             telemtOpts.style.display = 'block';
-        } else if (proto === 'socks5') {
+        } else if (base === 'socks5') {
             portLabel.textContent = _('port') + ' (TCP)';
-            portInput.value = '38080';
+            portInput.value = currentInstallAnother ? nextSuggestedPort(currentInstallProto, 38080) : '38080';
             portInput.disabled = false;
-            portHint.textContent = _('socks5_port_hint');
+            portHint.textContent = currentInstallAnother ? _('port_next_instance_hint') : _('socks5_port_hint');
             socks5Opts.style.display = 'block';
-        } else if (proto === 'adguard') {
+        } else if (base === 'adguard') {
             portLabel.textContent = _('adguard_dns_port');
             portInput.value = '53';
             portInput.disabled = false;
             portHint.textContent = _('adguard_dns_port_hint');
             adguardOpts.style.display = 'block';
+        } else if (base === 'nginx') {
+            portLabel.textContent = _('port') + ' (HTTPS/TCP)';
+            portInput.value = '443';
+            portInput.disabled = false;
+            portHint.textContent = _('nginx_port_hint');
+            nginxOpts.style.display = 'block';
+            updateNginxDnsHint();
         } else {
             portLabel.textContent = _('port') + ' (UDP)';
-            portInput.value = '55424';
+            portInput.value = currentInstallAnother ? nextSuggestedPort(currentInstallProto, 55424) : '55424';
             portInput.disabled = false;
-            portHint.textContent = _('port_default_hint');
+            portHint.textContent = currentInstallAnother ? _('port_next_instance_hint') : _('port_default_hint');
         }
 
         document.getElementById('installForm').classList.remove('hidden');
@@ -1137,7 +1772,7 @@
         progressDiv.classList.remove('hidden');
         const logEl = document.getElementById('installLog');
         const fillEl = document.getElementById('installProgressFill');
-        logEl.innerHTML = '<div class="log-line info">Начинаем установку...</div>';
+        logEl.innerHTML = `<div class="log-line info">${_('install_starting')}</div>`;
         fillEl.style.width = '10%';
         fillEl.style.background = '';
         try {
@@ -1156,16 +1791,16 @@
                 }
             }, 2000);
             const params = {
-                protocol: currentInstallProto, port: port,
+                protocol: currentInstallProto, port: port, install_another: currentInstallAnother,
             };
-            if (currentInstallProto === 'telemt') {
+            if (protoBase(currentInstallProto) === 'telemt') {
                 params.tls_emulation = document.getElementById('installTelemtTls').checked;
                 params.tls_domain = document.getElementById('installTelemtDomain').value;
                 params.max_connections = parseInt(document.getElementById('installTelemtMaxConns').value) || 0;
-            } else if (currentInstallProto === 'socks5') {
+            } else if (protoBase(currentInstallProto) === 'socks5') {
                 params.socks5_username = document.getElementById('installSocks5User').value || 'proxy_user';
                 params.socks5_password = document.getElementById('installSocks5Pass').value || '';
-            } else if (currentInstallProto === 'adguard') {
+            } else if (protoBase(currentInstallProto) === 'adguard') {
                 const modeRadio = document.querySelector('input[name="adguardMode"]:checked');
                 params.adguard_mode = modeRadio ? modeRadio.value : 'sidebyside';
                 params.adguard_web_port = parseInt(document.getElementById('installAdguardWebPort').value) || 3000;
@@ -1174,6 +1809,9 @@
                 params.adguard_doh_port = parseInt(document.getElementById('installAdguardDohPort').value) || 443;
                 params.adguard_expose_dot = document.getElementById('installAdguardExposeDot').checked;
                 params.adguard_expose_doh = document.getElementById('installAdguardExposeDoh').checked;
+            } else if (protoBase(currentInstallProto) === 'nginx') {
+                params.nginx_domain = document.getElementById('installNginxDomain').value.trim();
+                params.nginx_email = document.getElementById('installNginxEmail').value.trim();
             }
             const result = await apiCall(`/api/servers/${SERVER_ID}/install`, 'POST', params);
             clearInterval(progressInterval);
@@ -1186,6 +1824,7 @@
             logEl.scrollTop = logEl.scrollHeight;
             showToast(_('install_success'), 'success');
             document.getElementById('installDone').style.display = '';
+            setTimeout(() => checkServer(), 800);
         } catch (err) {
             fillEl.style.width = '100%';
             fillEl.style.background = 'linear-gradient(135deg, #ef4444, #dc2626)';
@@ -1193,6 +1832,100 @@
             logEl.scrollTop = logEl.scrollHeight;
             showToast(_('install_error') + err.message, 'error');
             document.getElementById('installDone').style.display = '';
+        }
+    }
+
+    function formatBackupTime(mtime) {
+        if (!mtime) return '—';
+        try { return new Date(mtime * 1000).toLocaleString(); } catch (_) { return '—'; }
+    }
+
+    function backupDownloadUrl(proto, filename) {
+        return `/api/servers/${SERVER_ID}/backups/download`;
+    }
+
+    async function showProtocolBackups(proto) {
+        document.getElementById('backupProto').value = proto;
+        document.getElementById('backupModalTitle').textContent = `${_('backups')} — ${getProtoTitle(proto)}`;
+        openModal('backupModal');
+        await loadProtocolBackups();
+    }
+
+    async function loadProtocolBackups() {
+        const proto = document.getElementById('backupProto').value;
+        const list = document.getElementById('backupList');
+        const empty = document.getElementById('backupEmpty');
+        const loading = document.getElementById('backupLoading');
+        list.innerHTML = '';
+        empty.classList.add('hidden');
+        loading.classList.remove('hidden');
+        try {
+            const res = await apiCall(`/api/servers/${SERVER_ID}/backups`, 'POST', { protocol: proto });
+            const backups = res.backups || [];
+            if (!backups.length) {
+                empty.classList.remove('hidden');
+                return;
+            }
+            list.innerHTML = backups.map(b => `
+                <div class="protocol-info-item" style="align-items:center; gap:var(--space-sm);">
+                    <div style="min-width:0; flex:1;">
+                        <div class="protocol-info-value" style="word-break:break-all;">${b.name}</div>
+                        <div class="protocol-info-label">${formatBytes(b.size)} • ${formatBackupTime(b.mtime)}</div>
+                    </div>
+                    <button class="btn btn-secondary btn-sm" onclick="downloadProtocolBackup('${proto}', '${b.name}')">${_('download')}</button>
+                </div>
+            `).join('');
+        } catch (err) {
+            showToast(_('error') + ': ' + err.message, 'error');
+        } finally {
+            loading.classList.add('hidden');
+        }
+    }
+
+    async function createProtocolBackup() {
+        const proto = document.getElementById('backupProto').value;
+        const btn = document.getElementById('createBackupBtn');
+        const oldText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = _('creating_backup') || 'Creating backup...';
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/backups/create`, 'POST', { protocol: proto });
+            showToast(_('backup_created'), 'success');
+            await loadProtocolBackups();
+        } catch (err) {
+            showToast(_('error') + ': ' + err.message, 'error');
+        } finally {
+            btn.disabled = false;
+            btn.textContent = oldText;
+        }
+    }
+
+    async function downloadProtocolBackup(proto, filename) {
+        try {
+            const res = await fetch(`/api/servers/${SERVER_ID}/backups/download`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ protocol: proto, filename })
+            });
+            if (!res.ok) {
+                let message = 'Download failed';
+                try {
+                    const data = await res.json();
+                    message = data.error || message;
+                } catch (_) {}
+                throw new Error(message);
+            }
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+        } catch (err) {
+            showToast(_('error') + ': ' + err.message, 'error');
         }
     }
 
@@ -1204,14 +1937,15 @@
             showToast(`${name} ${_('stopped')}`, 'success');
             setTimeout(() => window.location.reload(), 800);
         } catch (err) {
-            showToast('Ошибка: ' + err.message, 'error');
+            showToast(_('error') + ': ' + err.message, 'error');
         }
     }
 
     // ========== SOCKS5 Settings ==========
-    async function openSocks5Settings() {
+    async function openSocks5Settings(proto = 'socks5') {
+        currentSocks5Proto = proto || 'socks5';
         try {
-            const data = await apiCall(`/api/servers/${SERVER_ID}/socks5/credentials`);
+            const data = await apiCall(`/api/servers/${SERVER_ID}/socks5/credentials?protocol=${encodeURIComponent(currentSocks5Proto)}`);
             document.getElementById('socks5SetPort').value = data.port || 38080;
             document.getElementById('socks5SetUser').value = data.username || 'proxy_user';
             document.getElementById('socks5SetPass').value = data.password || '';
@@ -1233,7 +1967,7 @@
         spinner.classList.remove('hidden');
         try {
             const res = await apiCall(`/api/servers/${SERVER_ID}/socks5/credentials`, 'POST', {
-                port, username, password
+                protocol: currentSocks5Proto, port, username, password
             });
             if (res.status === 'success') {
                 showToast(_('socks5_settings_saved'), 'success');
@@ -1339,7 +2073,7 @@
             });
         } catch (err) {
             loading.style.display = 'none';
-            showToast('Ошибка загрузки подключений: ' + err.message, 'error');
+            showToast(_('connections_load_error') + ': ' + err.message, 'error');
         }
     }
 
@@ -1368,7 +2102,7 @@
             }
             const result = await apiCall(isEditingConn ? `/api/servers/${SERVER_ID}/connections/edit` : `/api/servers/${SERVER_ID}/connections/add`, 'POST', params);
             if (isEditingConn) {
-                showToast('Подключение обновлено', 'success');
+                showToast(_('connection_updated'), 'success');
                 closeModal('addConnectionModal');
             } else {
                 showToast(_('connection_created').replace('{}', connName), 'success');
@@ -1378,7 +2112,7 @@
                     currentConfig = result.config;
                     currentVpnLink = result.vpn_link || '';
                     currentConfigName = connName.replace(/\s+/g, '_');
-                    document.getElementById('configModalTitle').textContent = `Конфигурация — ${connName}`;
+                    document.getElementById('configModalTitle').textContent = `${_('config')} — ${connName}`;
                     document.getElementById('configText').textContent = result.config;
                     document.getElementById('vpnLinkText').textContent = currentVpnLink;
                     document.getElementById('panel-vpn').style.display = (proto === 'telemt' ? 'none' : '');
@@ -1390,10 +2124,10 @@
             }
             loadConnections();
         } catch (err) {
-            showToast('Ошибка: ' + err.message, 'error');
+            showToast(_('error') + ': ' + err.message, 'error');
         } finally {
             btn.disabled = false;
-            text.textContent = 'Создать';
+            text.textContent = _('create');
             spinner.classList.add('hidden');
         }
     }
@@ -1406,8 +2140,8 @@
         const proto = document.getElementById('connProtoSelect').value;
         const telemtOpts = document.getElementById('telemtConnOptions');
 
-        document.getElementById('addConnectionModalTitle').textContent = isEdit ? 'Редактировать подключение' : 'Добавить подключение';
-        document.getElementById('addConnBtnText').textContent = isEdit ? 'Сохранить' : 'Создать';
+        document.getElementById('addConnectionModalTitle').textContent = isEdit ? _('edit_connection') : _('add_connection');
+        document.getElementById('addConnBtnText').textContent = isEdit ? _('save') : _('create');
         document.getElementById('connectionNameGroup').style.display = isEdit ? 'none' : 'block';
 
         if (proto === 'telemt') {
@@ -1452,7 +2186,7 @@
             showToast(_('connection_deleted'), 'success');
             loadConnections();
         } catch (err) {
-            showToast('Ошибка: ' + err.message, 'error');
+            showToast(_('error') + ': ' + err.message, 'error');
         }
     }
 
@@ -1499,22 +2233,22 @@
                 generateQR(result.config);
             }
         } catch (err) {
-            showToast('Ошибка: ' + err.message, 'error');
+            showToast(_('error') + ': ' + err.message, 'error');
         }
     }
 
     async function toggleConnection(clientId, enable) {
         const proto = document.getElementById('connProtoSelect').value;
-        const action = enable ? 'Включить' : 'Отключить';
+        const action = enable ? _('enable_connection_progress') : _('disable_connection_progress');
         try {
-            showToast(`${action} подключение...`, 'info');
+            showToast(action, 'info');
             await apiCall(`/api/servers/${SERVER_ID}/connections/toggle`, 'POST', {
                 protocol: proto, client_id: clientId, enable: enable,
             });
-            showToast(`Подключение ${enable ? 'включено' : 'отключено'}`, 'success');
+            showToast(enable ? _('connection_enabled') : _('connection_disabled'), 'success');
             loadConnections();
         } catch (err) {
-            showToast('Ошибка: ' + err.message, 'error');
+            showToast(_('error') + ': ' + err.message, 'error');
         }
     }
 
@@ -1606,6 +2340,7 @@
     }
 
     // ========== Init ==========
+    applyInstalledAppsVisibility();
     checkServer();
     loadServerStats();
 </script>

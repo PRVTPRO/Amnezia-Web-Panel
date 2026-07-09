@@ -1,6 +1,6 @@
 # Amnezia Web Panel
 
-A modern, high-performance web interface for managing **AmneziaWG**, **Classic WireGuard**, **Xray (XTLS-Reality)**, **Telemt (Telegram MTProxy)**, **AmneziaDNS**, **AdGuard Home** and **SOCKS5** services on remote Ubuntu servers — from a single dashboard. Designed to provide a premium user experience with robust administrative capabilities.
+A modern, high-performance web interface for managing **AmneziaWG**, **Classic WireGuard**, **Xray (XTLS-Reality)**, **Telemt (Telegram MTProxy)**, **Cloudflare WARP**, **AmneziaDNS**, **AdGuard Home**, **SOCKS5**, and **NGINX + Let's Encrypt** services on remote Ubuntu servers — from a single dashboard. Designed to provide a premium user experience with robust administrative capabilities.
 
 > ### 🔄 Compatibility with Official Amnezia Client
 > 
@@ -63,17 +63,22 @@ Configuration panel for system parameters and preferences:
     *   **Classic WireGuard**: Standard, high-performance WireGuard protocol for unmatched speed and broad device compatibility with traffic monitoring support.
     *   **Xray (XTLS-Reality)**: Stealthy protocol that masks VPN traffic as standard HTTPS browsing. Pinned to **Xray-core v26.x**; transparently reads both the **panel layout** (`meta.json` + `clientsTable.json`) and the **native Amnezia client layout** (`xray_*.key` files + `clientsTable`), so a node first installed via the official mobile/desktop app can be attached to the panel without re-installation.
     *   **Telemt (Telegram MTProxy)**: High-performance Telegram MTProxy with TLS emulation and comprehensive management (quotas, IP limits, real-time session tracking). Robust install path that auto-configures Docker's official apt/yum repository when needed.
+    *   **Cloudflare WARP**: Add and manage WARP-powered connectivity from the panel for routing and network flexibility.
 *   **🛠 Services**:
     *   **AmneziaDNS**: Internal DNS resolver on a private docker network (`amnezia-dns-net`, IP `172.29.172.254`) to prevent DNS leaks and blockings.
-    *   **AdGuard Home** *(new)*: DNS-based ad blocker with a web admin UI. Two install modes: **Replace AmneziaDNS** (takes its IP, all VPN clients use AdGuard immediately) or **Side-by-side** (parallel deployment on `172.29.172.253`, web UI accessible only over the VPN by default). Optional opt-in checkboxes to expose the web UI / DoT / DoH on the host.
-    *   **SOCKS5 Proxy** *(new)*: Single-account 3proxy-based SOCKS5 server modelled after the official Amnezia client. Auto-generated 16-character password on install, port and credentials editable later from the panel without re-install.
+    *   **AdGuard Home**: DNS-based ad blocker with a web admin UI. Two install modes: **Replace AmneziaDNS** (takes its IP, all VPN clients use AdGuard immediately) or **Side-by-side** (parallel deployment on `172.29.172.253`, web UI accessible only over the VPN by default). Optional opt-in checkboxes to expose the web UI / DoT / DoH on the host.
+    *   **SOCKS5 Proxy**: Single-account 3proxy-based SOCKS5 server modelled after the official Amnezia client. Auto-generated 16-character password on install, port and credentials editable later from the panel without re-install.
+    *   **NGINX + Let's Encrypt**: Reverse-proxy and HTTPS automation with certificate management for secure public endpoints.
 *   **⚙️ Core Server Management**:
     *   **Add / Edit / Delete / Reorder** server entries — drag-and-drop reorder updates `server_id` references in saved connections automatically.
     *   **Live ping indicator** next to each server name — non-blocking TCP-connect probe to the SSH port, runs on the asyncio loop in parallel for all servers.
     *   **Clear server** wipes every Amnezia-related container, image and `/opt/amnezia` directory in a single sudo script — works for any current or future `amnezia-*` protocol.
     *   **Reboot** the server directly from the UI.
-    *   Strictly concurrent protocol status polling — all 9 protocols/services checked in parallel for immediate feedback.
+    *   Strictly concurrent protocol status polling — all supported protocols/services checked in parallel for immediate feedback.
     *   **Asynchronous Processing**: Resilient, non-blocking background architecture prevents the UI panel from freezing, even if remote endpoints hang.
+*   **🧩 Marketplace & Templates**:
+    *   Market templates provide quick presets for installing and configuring supported protocols and services.
+    *   Multi-protocol management lets you run and control multiple protocol instances on the same server.
 *   **🌐 Internationalization (i18n)**:
     *   Full support for **English**, **Russian**, **French**, **Chinese**, and **Persian**.
     *   Native **RTL (Right-to-Left)** support for Persian language.
@@ -88,21 +93,23 @@ Configuration panel for system parameters and preferences:
 *   **🤖 Telegram Bot Integration**:
     *   Notify users about new connections or limits.
     *   Integrated management via Telegram commands.
+    *   Admin-role workflows for managing servers, protocols, users, and connections directly from Telegram.
 *   **🔄 Built-in Update Checker**:
     *   View your current panel version directly in Settings.
     *   One-click check for fresh GitHub releases to stay up to date.
 *   **📤 Data Interoperability**:
     *   **Remnawave Sync**: Automatically import and sync users from Remnawave.
     *   **Simple Backup**: Effortless JSON-based export and restore of all panel data.
+    *   **Backup / Migrate protocols (Alpha)**: Move protocol configurations between nodes for maintenance, recovery, and migration workflows.
 *   **🔗 Public Sharing**:
     *   Generate password-protected links for users to download their configurations without panel access.
-*   **🌍 One-click Public Tunnels** *(new)*:
+*   **🌍 One-click Public Tunnels**:
     *   Open the local panel to the internet from `/settings` using **Cloudflare Quick Tunnel** or **ngrok**.
     *   Shows the local server URL, installation state, running state, and issued public HTTPS URLs directly in the UI.
     *   Supports one-click install, enable, stop, and delete for panel-managed tunnel binaries.
     *   Persists tunnel PID/public URL state across panel restarts and can detect already running tunnel processes.
     *   Works on Windows, Linux, and Docker-friendly environments; `TUNNEL_BIN_DIR` and `TUNNEL_STATE_FILE` can override binary/state locations.
-*   **🔑 API Tokens for External Integrations** *(new)*:
+*   **🔑 API Tokens for External Integrations**:
     *   Issue bearer tokens from `/settings` for CI bots, monitoring, or any third-party service.
     *   Panel never stores the raw token — only its SHA-256 hash. The full value is shown **once** at creation; lose it and you must rotate.
     *   Tokens inherit the role of the admin who created them and are revoked automatically if that user is disabled or demoted.
@@ -114,8 +121,8 @@ If you require any custom features not currently available in the panel, **let u
 
 * **Database Support**: PostgreSQL, MySQL/MariaDB, SQLite, Oracle, and MS SQL Server
 * **In-Panel File Editor**: Edit configuration files inside containers directly from the web interface
-* **Backup & Restore nodes/protocols**: Comprehensive backup solutions for nodes and protocols
-* **Protocol Migration**: Seamlessly move protocols between nodes
+* **Advanced backup automation**: Scheduled backups, external storage, and richer recovery workflows
+* **Advanced protocol migration**: Extended migration tooling for complex multi-node setups
 * **Xray Self-Steal Mode**: Advanced Xray configuration with self-steal functionality
 * **And much more!**
 
@@ -262,3 +269,4 @@ This project is licensed under the **GNU General Public License v3.0** - see the
 
 ---
 *Built with ❤️ for the Amnezia community.*
+

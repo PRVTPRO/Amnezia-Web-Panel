@@ -10,6 +10,8 @@ import asyncio
 import platform
 import re
 import shutil
+import shlex
+import tempfile
 import subprocess
 import tarfile
 import threading
@@ -20,6 +22,7 @@ import signal
 from datetime import datetime
 import io
 from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse, StreamingResponse, FileResponse
+from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi import FastAPI, Request, Query, UploadFile, File
@@ -38,6 +41,7 @@ from managers.ssh_manager import SSHManager
 from managers.awg_manager import AWGManager
 from managers.xray_manager import XrayManager
 from managers.wireguard_manager import WireGuardManager
+from managers.backup_manager import BackupManager
 import telegram_bot as tg_bot
 
 # Configure logging
@@ -93,7 +97,7 @@ else:
     application_path = os.path.dirname(__file__)
 
 DATA_FILE = os.path.join(application_path, 'data.json')
-CURRENT_VERSION = "v1.4.4"
+CURRENT_VERSION = "v1.5.0"
 BIN_DIR = os.environ.get('TUNNEL_BIN_DIR', os.path.join(application_path, 'bin'))
 TUNNEL_STATE_FILE = os.environ.get('TUNNEL_STATE_FILE', os.path.join(application_path, 'tunnels_state.json'))
 
@@ -114,6 +118,8 @@ TUNNEL_RUNTIMES = {
 }
 TUNNEL_LOCK = threading.Lock()
 TUNNEL_URL_RE = re.compile(r'https://[^\s"\']+')
+WARP_CLI_COMMAND = 'warp-cli.exe' if os.name == 'nt' else 'warp-cli'
+
 
 
 # ======================== Translations ========================
@@ -215,6 +221,135 @@ def get_panel_tunnel_target_url():
     scheme = 'https' if ssl_conf.get('enabled') else 'http'
     port = ssl_conf.get('panel_port', 5000) or 5000
     return f"{scheme}://127.0.0.1:{port}"
+
+
+def get_warp_cli_binary():
+    found = shutil.which(WARP_CLI_COMMAND)
+    if found:
+        return found
+    if os.name == 'nt':
+        for base in (os.environ.get('ProgramFiles'), os.environ.get('ProgramFiles(x86)')):
+            if not base:
+                continue
+            candidate = os.path.join(base, 'Cloudflare', 'Cloudflare WARP', 'warp-cli.exe')
+            if os.path.exists(candidate):
+                return candidate
+    return None
+
+
+def is_warp_cli_installed():
+    return bool(get_warp_cli_binary())
+
+
+def _warp_install_hint():
+    system = platform.system().lower()
+    if system == 'windows':
+        return 'Install Cloudflare WARP from https://1.1.1.1/ or winget install Cloudflare.Warp, then restart this panel.'
+    if system == 'darwin':
+        return 'Install Cloudflare WARP from https://1.1.1.1/ or brew install --cask cloudflare-warp, then restart this panel.'
+    return 'Install the official cloudflare-warp package for your Linux distribution, start warp-svc, then restart this panel.'
+
+
+def run_warp_cli(*args, timeout: int = 12):
+    binary = get_warp_cli_binary()
+    if not binary:
+        raise RuntimeError(_warp_install_hint())
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+    command = [binary]
+    if '--accept-tos' not in args:
+        command.append('--accept-tos')
+    command.extend(args)
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding='utf-8',
+        errors='replace',
+        timeout=timeout,
+        creationflags=creationflags,
+    )
+    output = '\n'.join(part.strip() for part in (result.stdout, result.stderr) if part and part.strip())
+    if result.returncode != 0:
+        raise RuntimeError(output or f'warp-cli exited with code {result.returncode}')
+    return output
+
+
+def _parse_warp_status(output: str):
+    lowered = (output or '').lower()
+    if 'registration missing' in lowered or 'not registered' in lowered or 'not enrolled' in lowered:
+        return 'not_registered'
+    if 'disconnect' in lowered or 'disabled' in lowered:
+        return 'disconnected'
+    if 'connecting' in lowered:
+        return 'connecting'
+    if 'connected' in lowered:
+        return 'connected'
+    return 'unknown'
+
+
+def get_warp_status():
+    installed = is_warp_cli_installed()
+    status = {
+        'installed': installed,
+        'running': False,
+        'connected': False,
+        'status': 'not_installed' if not installed else 'unknown',
+        'raw': '',
+        'last_error': '' if installed else _warp_install_hint(),
+        'install_hint': _warp_install_hint(),
+    }
+    if not installed:
+        return status
+    try:
+        output = run_warp_cli('status')
+        parsed = _parse_warp_status(output)
+        status.update({
+            'running': parsed in ('connected', 'connecting'),
+            'connected': parsed == 'connected',
+            'status': parsed,
+            'raw': output,
+            'last_error': '',
+        })
+    except Exception as e:
+        status['last_error'] = str(e)
+        lowered = str(e).lower()
+        if 'registration missing' in lowered or 'not registered' in lowered or 'not enrolled' in lowered:
+            status['status'] = 'not_registered'
+        elif 'service' in lowered or 'daemon' in lowered or 'warp-svc' in lowered:
+            status['status'] = 'service_unavailable'
+        else:
+            status['status'] = 'error'
+    return status
+
+
+def enable_warp():
+    current = get_warp_status()
+    if not current.get('installed'):
+        raise RuntimeError(current.get('install_hint') or _warp_install_hint())
+    try:
+        if current.get('status') == 'not_registered':
+            run_warp_cli('registration', 'new', timeout=30)
+        run_warp_cli('mode', 'warp', timeout=15)
+        run_warp_cli('connect', timeout=30)
+    except Exception as e:
+        message = str(e)
+        if 'registration' in message.lower() or 'not registered' in message.lower() or 'not enrolled' in message.lower():
+            run_warp_cli('registration', 'new', timeout=30)
+            run_warp_cli('mode', 'warp', timeout=15)
+            run_warp_cli('connect', timeout=30)
+        else:
+            raise
+    time.sleep(1)
+    return get_warp_status()
+
+
+def disable_warp():
+    current = get_warp_status()
+    if not current.get('installed'):
+        raise RuntimeError(current.get('install_hint') or _warp_install_hint())
+    run_warp_cli('disconnect', timeout=20)
+    time.sleep(0.5)
+    return get_warp_status()
 
 
 def get_tunnel_command_name(provider: str):
@@ -719,27 +854,152 @@ async def wait_for_tunnel_url(provider: str, seconds: int = 20):
     return get_tunnel_status(provider)
 
 
+BASE_PROTOCOLS = ['awg', 'awg2', 'awg_legacy', 'xray', 'telemt', 'dns', 'wireguard', 'socks5', 'adguard', 'nginx']
+MULTI_INSTANCE_PROTOCOLS = {'awg', 'awg2', 'awg_legacy', 'xray', 'telemt', 'socks5'}
+
+
+def protocol_base(protocol: str) -> str:
+    return str(protocol or 'awg').split('__', 1)[0]
+
+
+def protocol_instance(protocol: str) -> int:
+    parts = str(protocol or '').split('__', 1)
+    if len(parts) == 2:
+        try:
+            return max(1, int(parts[1]))
+        except ValueError:
+            return 1
+    return 1
+
+
+def protocol_key(base: str, instance: int = 1) -> str:
+    base = protocol_base(base)
+    return base if int(instance or 1) <= 1 else f'{base}__{int(instance)}'
+
+
+def next_protocol_key(protocols: dict, base: str) -> str:
+    base = protocol_base(base)
+    used = {protocol_instance(k) for k in (protocols or {}).keys() if protocol_base(k) == base}
+    idx = 1
+    while idx in used:
+        idx += 1
+    return protocol_key(base, idx)
+
+
+def protocol_display_name(protocol: str) -> str:
+    base = protocol_base(protocol)
+    idx = protocol_instance(protocol)
+    names = {
+        'awg': 'AmneziaWG',
+        'awg2': 'AmneziaWG 2.0',
+        'awg_legacy': 'AmneziaWG Legacy',
+        'xray': 'Xray',
+        'telemt': 'Telemt',
+        'dns': 'AmneziaDNS',
+        'wireguard': 'WireGuard',
+        'socks5': 'SOCKS5',
+        'adguard': 'AdGuard Home',
+        'nginx': 'NGINX',
+    }
+    name = names.get(base, base)
+    return name if idx <= 1 else f'{name} #{idx}'
+
+
+def protocol_container_name(protocol: str) -> Optional[str]:
+    base = protocol_base(protocol)
+    idx = protocol_instance(protocol)
+    base_names = {
+        'awg': 'amnezia-awg',
+        'awg2': 'amnezia-awg2',
+        'awg_legacy': 'amnezia-awg-legacy',
+        'xray': 'amnezia-xray',
+        'telemt': 'telemt',
+        'dns': 'amnezia-dns',
+        'wireguard': 'amnezia-wireguard',
+        'socks5': 'amnezia-socks5proxy',
+        'adguard': 'amnezia-adguard',
+        'nginx': 'amnezia-nginx',
+    }
+    name = base_names.get(base)
+    if not name:
+        return None
+    return name if idx <= 1 else f'{name}-{idx}'
+
+
+def is_valid_protocol(protocol: str) -> bool:
+    return protocol_base(protocol) in BASE_PROTOCOLS
+
+
 def get_protocol_manager(ssh, protocol: str):
-    if protocol == 'xray':
+    base = protocol_base(protocol)
+    if base == 'xray':
         from managers.xray_manager import XrayManager
-        return XrayManager(ssh)
-    elif protocol == 'telemt':
+        return XrayManager(ssh, protocol)
+    elif base == 'telemt':
         from managers.telemt_manager import TelemtManager
-        return TelemtManager(ssh)
-    elif protocol == 'dns':
+        return TelemtManager(ssh, protocol)
+    elif base == 'dns':
         from managers.dns_manager import DNSManager
         return DNSManager(ssh)
-    elif protocol == 'wireguard':
+    elif base == 'wireguard':
         from managers.wireguard_manager import WireGuardManager
         return WireGuardManager(ssh)
-    elif protocol == 'socks5':
+    elif base == 'socks5':
         from managers.socks5_manager import Socks5Manager
-        return Socks5Manager(ssh)
-    elif protocol == 'adguard':
+        return Socks5Manager(ssh, protocol)
+    elif base == 'adguard':
         from managers.adguard_manager import AdguardManager
         return AdguardManager(ssh)
+    elif base == 'nginx':
+        from managers.nginx_manager import NginxManager
+        return NginxManager(ssh, protocol)
     from managers.awg_manager import AWGManager
     return AWGManager(ssh)
+
+
+
+def ensure_docker_installed(ssh):
+    """Ensure Docker is installed and running before installing any protocol/service."""
+    out, _, code = ssh.run_command("docker --version 2>/dev/null")
+    if code == 0 and out.strip():
+        status, _, _ = ssh.run_command("systemctl is-active docker 2>/dev/null || service docker status 2>/dev/null")
+        if 'active' in status or 'running' in status.lower():
+            return 'Docker already installed'
+        ssh.run_sudo_command("systemctl enable --now docker 2>/dev/null || service docker start 2>/dev/null || true", timeout=60)
+        status, _, _ = ssh.run_command("systemctl is-active docker 2>/dev/null || service docker status 2>/dev/null")
+        if 'active' in status or 'running' in status.lower():
+            return 'Docker service started'
+
+    script = r"""
+set -e
+if command -v apt-get >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y
+  apt-get install -y docker.io
+elif command -v dnf >/dev/null 2>&1; then
+  dnf install -y docker
+elif command -v yum >/dev/null 2>&1; then
+  yum install -y docker
+elif command -v zypper >/dev/null 2>&1; then
+  zypper --non-interactive refresh
+  zypper --non-interactive install docker
+elif command -v pacman >/dev/null 2>&1; then
+  pacman -Sy --noconfirm --noprogressbar docker
+else
+  echo "Packet manager not found" >&2
+  exit 1
+fi
+(systemctl enable --now docker || service docker start || true)
+sleep 3
+docker --version
+"""
+    out, err, code = ssh.run_sudo_script(script, timeout=300)
+    if code != 0:
+        raise RuntimeError(f"Failed to install Docker: {err or out}")
+    status, _, _ = ssh.run_command("systemctl is-active docker 2>/dev/null || service docker status 2>/dev/null")
+    if 'active' not in status and 'running' not in status.lower():
+        raise RuntimeError("Docker installed but service is not running")
+    return 'Docker installed successfully'
 
 
 def _manager_call(manager, method, protocol, *args, **kwargs):
@@ -1186,6 +1446,7 @@ class ReorderServersRequest(BaseModel):
 class InstallProtocolRequest(BaseModel):
     protocol: str = 'awg'
     port: str = '55424'
+    install_another: Optional[bool] = False
     tls_emulation: Optional[bool] = None
     tls_domain: Optional[str] = None
     max_connections: Optional[int] = None
@@ -1201,9 +1462,13 @@ class InstallProtocolRequest(BaseModel):
     adguard_expose_dns: Optional[bool] = None
     adguard_expose_dot: Optional[bool] = None
     adguard_expose_doh: Optional[bool] = None
+    # NGINX
+    nginx_domain: Optional[str] = None
+    nginx_email: Optional[str] = None
 
 
 class Socks5SettingsRequest(BaseModel):
+    protocol: str = 'socks5'
     port: Optional[int] = None
     username: Optional[str] = None
     password: Optional[str] = None
@@ -1272,6 +1537,16 @@ class AddUserRequest(BaseModel):
 class ServerConfigSaveRequest(BaseModel):
     protocol: str
     config: str
+
+
+class NginxSiteSaveRequest(BaseModel):
+    protocol: str = 'nginx'
+    html: str = ''
+
+
+class BackupDownloadRequest(BaseModel):
+    protocol: str
+    filename: str
 
 
 class AppearanceSettings(BaseModel):
@@ -1442,7 +1717,7 @@ async def startup():
     tg_cfg = data.get('settings', {}).get('telegram', {})
     if tg_cfg.get('enabled') and tg_cfg.get('token'):
         logger.info("Starting Telegram bot from saved settings...")
-        tg_bot.launch_bot(tg_cfg['token'], load_data, generate_vpn_link)
+        tg_bot.launch_bot(tg_cfg['token'], load_data, generate_vpn_link, save_data)
 
 
 def _scrape_server_traffic(server, sid, my_conns):
@@ -2050,39 +2325,108 @@ async def api_check_server(request: Request, server_id: int):
         if 'protocols' not in server:
             server['protocols'] = {}
 
-        import concurrent.futures
+        def merge_saved_protocol_status(proto, result=None, error=None):
+            """Merge live status with saved protocol metadata.
+
+            Multi-instance protocols are source-of-truth in data.json because
+            they cannot be discovered from BASE_PROTOCOLS alone. A transient
+            check failure must not delete awg2__2/awg2__3 from the panel.
+            """
+            db_proto = server.get('protocols', {}).get(proto, {}) or {}
+            merged = dict(result or {})
+            merged.setdefault('protocol', proto)
+            if error:
+                merged['error'] = error
+            if not merged.get('port') and db_proto.get('port'):
+                merged['port'] = db_proto['port']
+            if db_proto.get('awg_params') and not merged.get('awg_params'):
+                merged['awg_params'] = db_proto.get('awg_params')
+            merged['base_protocol'] = db_proto.get('base_protocol') or protocol_base(proto)
+            merged['instance'] = db_proto.get('instance') or protocol_instance(proto)
+            merged['display_name'] = db_proto.get('display_name') or protocol_display_name(proto)
+            merged['container_name'] = db_proto.get('container_name') or protocol_container_name(proto)
+            if protocol_base(proto) == 'adguard':
+                for key in ('web_port', 'mode', 'internal_ip', 'expose_web'):
+                    if db_proto.get(key) not in (None, ''):
+                        if key == 'web_port' and merged.get('web_exposed'):
+                            continue
+                        merged[key] = db_proto[key]
+                if 'expose_web' in db_proto and 'web_exposed' not in merged:
+                    merged['web_exposed'] = bool(db_proto.get('expose_web'))
+            if protocol_base(proto) == 'nginx':
+                for key in ('domain', 'email', 'site_url'):
+                    if db_proto.get(key) not in (None, ''):
+                        merged[key] = db_proto[key]
+            return merged
+
+        def should_preserve_saved_protocol(proto, result=None, err=None):
+            """Return True when check must not remove a saved protocol record."""
+            db_proto = server.get('protocols', {}).get(proto)
+            if not db_proto:
+                return False
+            # Additional AWG-family instances are only known by their saved
+            # dynamic keys (awg__2/awg2__2/awg_legacy__2). Keep them unless
+            # the user explicitly uninstalls them.
+            if protocol_base(proto) in MULTI_INSTANCE_PROTOCOLS and protocol_instance(proto) > 1:
+                return True
+            # Do not delete any saved protocol on command/check errors; only a
+            # clean live result with container_exists=False may prune base apps.
+            if err or (result and result.get('error')):
+                return True
+            return False
 
         def check_proto(proto):
             try:
                 p_manager = get_protocol_manager(ssh, proto)
                 result = _manager_call(p_manager, 'get_server_status', proto)
-                db_proto = server.get('protocols', {}).get(proto, {})
-                if not result.get('port') and db_proto.get('port'):
-                    result['port'] = db_proto['port']
-                return proto, result, None
+                return proto, merge_saved_protocol_status(proto, result), None
             except Exception as e:
-                return proto, None, str(e)
+                return proto, merge_saved_protocol_status(proto, {}, str(e)), str(e)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=9) as executor:
-            futures = [executor.submit(check_proto, p) for p in ['awg', 'awg2', 'awg_legacy', 'xray', 'telemt', 'dns', 'wireguard', 'socks5', 'adguard']]
-            for future in concurrent.futures.as_completed(futures):
-                proto, result, err = future.result()
-                if err:
-                    status['protocols'][proto] = {'error': err}
-                else:
-                    status['protocols'][proto] = result
-                    if result.get('container_exists'):
-                        if proto not in server['protocols']:
-                            server['protocols'][proto] = {
-                                'installed': True,
-                                'port': result.get('port', '55424'),
-                                'awg_params': result.get('awg_params', {})
-                            }
-                            changed = True
+        protocols_to_check = list(dict.fromkeys(BASE_PROTOCOLS + list(server.get('protocols', {}).keys())))
+        # Run checks sequentially. Several managers use the same SSH connection;
+        # checking them in parallel through one SSH object can produce false
+        # negatives and previously caused dynamic AWG instances to be removed.
+        for proto in protocols_to_check:
+            proto, result, err = check_proto(proto)
+            status['protocols'][proto] = result
+            if err:
+                continue
+            if result.get('container_exists'):
+                if proto not in server['protocols']:
+                    server['protocols'][proto] = {
+                        'installed': True,
+                        'port': result.get('port', '55424'),
+                        'awg_params': result.get('awg_params', {}),
+                        'base_protocol': protocol_base(proto),
+                        'instance': protocol_instance(proto),
+                        'display_name': protocol_display_name(proto),
+                        'container_name': protocol_container_name(proto),
+                    }
+                    if protocol_base(proto) == 'adguard':
+                        server['protocols'][proto].update({
+                            'mode': result.get('mode'),
+                            'internal_ip': result.get('internal_ip'),
+                            'web_port': result.get('web_port'),
+                            'expose_web': result.get('web_exposed'),
+                        })
+                    if protocol_base(proto) == 'nginx':
+                        server['protocols'][proto].update({
+                            'domain': result.get('domain'),
+                            'email': result.get('email'),
+                            'site_url': result.get('site_url'),
+                        })
+                    changed = True
+            else:
+                if proto in server['protocols']:
+                    if should_preserve_saved_protocol(proto, result, err):
+                        # Keep saved dynamic instances visible as installed but stopped/unchecked.
+                        status['protocols'][proto]['container_exists'] = True
+                        status['protocols'][proto].setdefault('container_running', False)
+                        status['protocols'][proto]['status_preserved'] = True
                     else:
-                        if proto in server['protocols']:
-                            del server['protocols'][proto]
-                            changed = True
+                        del server['protocols'][proto]
+                        changed = True
                 
         if changed:
             save_data(data)
@@ -2102,35 +2446,47 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
         data = load_data()
         if server_id >= len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
-        if req.protocol not in ['awg', 'awg2', 'awg_legacy', 'xray', 'telemt', 'dns', 'wireguard', 'socks5', 'adguard']:
+        if not is_valid_protocol(req.protocol):
             return JSONResponse({'error': 'Invalid protocol type'}, status_code=400)
 
         server = data['servers'][server_id]
+        if 'protocols' not in server:
+            server['protocols'] = {}
+        base_protocol = protocol_base(req.protocol)
+        if req.install_another:
+            if base_protocol not in MULTI_INSTANCE_PROTOCOLS:
+                return JSONResponse({'error': 'Multiple instances are not supported for this protocol yet'}, status_code=400)
+            install_protocol = next_protocol_key(server.get('protocols', {}), base_protocol)
+        else:
+            install_protocol = req.protocol
+        install_base = protocol_base(install_protocol)
+
         ssh = get_ssh(server)
         ssh.connect()
-        manager = get_protocol_manager(ssh, req.protocol)
+        docker_install_log = ensure_docker_installed(ssh)
+        manager = get_protocol_manager(ssh, install_protocol)
 
         # Pass parameters to installer
-        if req.protocol == 'telemt':
+        if install_base == 'telemt':
             result = manager.install_protocol(
-                protocol_type=req.protocol,
+                protocol_type=install_protocol,
                 port=req.port,
                 tls_emulation=req.tls_emulation if req.tls_emulation is not None else True,
                 tls_domain=req.tls_domain,
                 max_connections=req.max_connections if req.max_connections is not None else 0
             )
-        elif req.protocol == 'xray':
+        elif install_base == 'xray':
             result = manager.install_protocol(port=req.port)
-        elif req.protocol == 'wireguard':
+        elif install_base == 'wireguard':
             result = manager.install_protocol(port=req.port)
-        elif req.protocol == 'socks5':
+        elif install_base == 'socks5':
             result = manager.install_protocol(
-                protocol_type='socks5',
+                protocol_type=install_protocol,
                 port=req.port,
                 username=req.socks5_username,
                 password=req.socks5_password,
             )
-        elif req.protocol == 'adguard':
+        elif install_base == 'adguard':
             result = manager.install_protocol(
                 protocol_type='adguard',
                 mode=req.adguard_mode or 'sidebyside',
@@ -2143,20 +2499,48 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
                 expose_dot=bool(req.adguard_expose_dot),
                 expose_doh=bool(req.adguard_expose_doh),
             )
+        elif install_base == 'nginx':
+            result = manager.install_protocol(
+                protocol_type='nginx',
+                port=req.port,
+                domain=req.nginx_domain,
+                email=req.nginx_email,
+            )
         else:
-            result = manager.install_protocol(req.protocol, port=req.port)
+            result = manager.install_protocol(install_protocol, port=req.port)
+
+        if not isinstance(result, dict):
+            result = {'status': 'success', 'message': str(result)}
+        if docker_install_log:
+            result.setdefault('log', [])
+            result['log'].insert(0, docker_install_log)
+        if result.get('status') == 'error' or result.get('error'):
+            ssh.disconnect()
+            return JSONResponse({'error': result.get('message') or result.get('error') or 'Installation failed'}, status_code=400)
 
         proto_record = {
             'installed': True,
             'port': req.port,
             'awg_params': result.get('awg_params', {}),
         }
-        if req.protocol == 'adguard':
+        if install_base == 'adguard':
             proto_record['mode'] = result.get('mode')
             proto_record['internal_ip'] = result.get('internal_ip')
             proto_record['web_port'] = result.get('web_port')
             proto_record['expose_web'] = result.get('expose_web')
-        server['protocols'][req.protocol] = proto_record
+        if install_base == 'nginx':
+            proto_record['domain'] = result.get('domain')
+            proto_record['email'] = result.get('email')
+            proto_record['site_url'] = result.get('site_url')
+        proto_record['base_protocol'] = install_base
+        proto_record['instance'] = protocol_instance(install_protocol)
+        proto_record['display_name'] = protocol_display_name(install_protocol)
+        proto_record['container_name'] = protocol_container_name(install_protocol)
+        server['protocols'][install_protocol] = proto_record
+        result['protocol'] = install_protocol
+        result['base_protocol'] = install_base
+        result['display_name'] = proto_record['display_name']
+        result['container_name'] = proto_record['container_name']
         save_data(data)
         ssh.disconnect()
         return result
@@ -2166,7 +2550,7 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
 
 
 @app.get('/api/servers/{server_id}/socks5/credentials', tags=["Protocols"])
-async def api_socks5_get_credentials(request: Request, server_id: int):
+async def api_socks5_get_credentials(request: Request, server_id: int, protocol: str = 'socks5'):
     """Return the current SOCKS5 port/username/password for the panel UI."""
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -2175,9 +2559,10 @@ async def api_socks5_get_credentials(request: Request, server_id: int):
         if server_id >= len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
+        protocol = protocol if is_valid_protocol(protocol) and protocol_base(protocol) == 'socks5' else 'socks5'
         ssh = get_ssh(server)
         ssh.connect()
-        manager = get_protocol_manager(ssh, 'socks5')
+        manager = get_protocol_manager(ssh, protocol)
         creds = manager.get_credentials()
         ssh.disconnect()
         return {'status': 'success', **creds}
@@ -2197,9 +2582,10 @@ async def api_socks5_update_credentials(request: Request, server_id: int, req: S
         if server_id >= len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
+        protocol = req.protocol if is_valid_protocol(req.protocol) and protocol_base(req.protocol) == 'socks5' else 'socks5'
         ssh = get_ssh(server)
         ssh.connect()
-        manager = get_protocol_manager(ssh, 'socks5')
+        manager = get_protocol_manager(ssh, protocol)
         result = manager.update_credentials(
             port=req.port, username=req.username, password=req.password
         )
@@ -2207,9 +2593,13 @@ async def api_socks5_update_credentials(request: Request, server_id: int, req: S
         # Persist the new port in the saved server record so the dashboard
         # shows the right value on next check without an SSH round-trip.
         if result.get('status') == 'success' and result.get('port'):
-            srv_proto = server.setdefault('protocols', {}).setdefault('socks5', {})
+            srv_proto = server.setdefault('protocols', {}).setdefault(protocol, {})
             srv_proto['port'] = str(result['port'])
             srv_proto['installed'] = True
+            srv_proto['base_protocol'] = protocol_base(protocol)
+            srv_proto['instance'] = protocol_instance(protocol)
+            srv_proto['display_name'] = protocol_display_name(protocol)
+            srv_proto['container_name'] = protocol_container_name(protocol)
             save_data(data)
         return result
     except Exception as e:
@@ -2229,7 +2619,8 @@ async def api_uninstall_protocol(request: Request, server_id: int, req: Protocol
         ssh = get_ssh(server)
         ssh.connect()
         manager = get_protocol_manager(ssh, req.protocol)
-        if req.protocol in ('xray', 'wireguard'):
+        base = protocol_base(req.protocol)
+        if base in ('xray', 'wireguard'):
             manager.remove_container()
         else:
             manager.remove_container(req.protocol)
@@ -2253,7 +2644,125 @@ CONTAINER_NAMES = {
     'wireguard': 'amnezia-wireguard',
     'socks5': 'amnezia-socks5proxy',
     'adguard': 'amnezia-adguard',
+    'nginx': 'amnezia-nginx',
 }
+
+
+
+@app.post('/api/servers/{server_id}/backups', tags=["Protocols"])
+async def api_protocol_backups_list(request: Request, server_id: int, req: ProtocolRequest):
+    """List backups created on the remote server for one protocol."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if not is_valid_protocol(req.protocol):
+        return JSONResponse({'error': 'Unknown protocol'}, status_code=400)
+    ssh = None
+    try:
+        data = load_data()
+        if server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        ssh = get_ssh(server)
+        ssh.connect()
+        result = BackupManager(ssh).list_backups(req.protocol)
+        if result.get('status') == 'error':
+            return JSONResponse({'error': result.get('message', 'Failed to list backups')}, status_code=500)
+        return result
+    except Exception as e:
+        logger.exception("Error listing protocol backups")
+        return JSONResponse({'error': str(e)}, status_code=500)
+    finally:
+        if ssh:
+            ssh.disconnect()
+
+
+@app.post('/api/servers/{server_id}/backups/create', tags=["Protocols"])
+async def api_protocol_backup_create(request: Request, server_id: int, req: ProtocolRequest):
+    """Create a protocol backup archive on the remote server."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if not is_valid_protocol(req.protocol):
+        return JSONResponse({'error': 'Unknown protocol'}, status_code=400)
+    ssh = None
+    try:
+        data = load_data()
+        if server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        container = protocol_container_name(req.protocol)
+        if not container:
+            return JSONResponse({'error': 'Unknown protocol'}, status_code=400)
+        server = data['servers'][server_id]
+        ssh = get_ssh(server)
+        ssh.connect()
+        result = BackupManager(ssh).create_backup(req.protocol, container)
+        if result.get('status') == 'error':
+            return JSONResponse({'error': result.get('message', 'Failed to create backup')}, status_code=500)
+        return result
+    except Exception as e:
+        logger.exception("Error creating protocol backup")
+        return JSONResponse({'error': str(e)}, status_code=500)
+    finally:
+        if ssh:
+            ssh.disconnect()
+
+
+@app.post('/api/servers/{server_id}/backups/download', tags=["Protocols"])
+async def api_protocol_backup_download(request: Request, server_id: int, req: BackupDownloadRequest):
+    """Download one remote protocol backup archive through the panel."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if not is_valid_protocol(req.protocol):
+        return JSONResponse({'error': 'Unknown protocol'}, status_code=400)
+    manager = BackupManager(None)
+    safe_proto = manager.safe_protocol(req.protocol)
+    filename = manager.safe_filename(req.filename)
+    if not filename:
+        return JSONResponse({'error': 'Invalid backup filename'}, status_code=400)
+    ssh = None
+    tmp_path = None
+    tmp_remote = f'/tmp/{filename}'
+    remote_path = f'{manager.BACKUP_ROOT}/{safe_proto}/{filename}'
+    try:
+        data = load_data()
+        if server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        ssh = get_ssh(server)
+        ssh.connect()
+        quoted_remote = shlex.quote(remote_path)
+        quoted_tmp = shlex.quote(tmp_remote)
+        _, err, code = ssh.run_sudo_command(
+            f"test -f {quoted_remote} && cp {quoted_remote} {quoted_tmp} && chmod 0644 {quoted_tmp}"
+        )
+        if code != 0:
+            return JSONResponse({'error': err or 'Backup not found'}, status_code=404)
+        fd, tmp_path = tempfile.mkstemp(prefix='amnezia-backup-', suffix='.tar.gz')
+        os.close(fd)
+        sftp = ssh.client.open_sftp()
+        try:
+            sftp.get(tmp_remote, tmp_path)
+        finally:
+            sftp.close()
+            ssh.run_sudo_command(f"rm -f {quoted_tmp}")
+            ssh.disconnect()
+            ssh = None
+        return FileResponse(
+            tmp_path,
+            media_type='application/gzip',
+            filename=filename,
+            background=BackgroundTask(lambda p=tmp_path: os.path.exists(p) and os.remove(p)),
+        )
+    except Exception as e:
+        logger.exception("Error downloading protocol backup")
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+        return JSONResponse({'error': str(e)}, status_code=500)
+    finally:
+        if ssh:
+            ssh.disconnect()
 
 
 @app.post('/api/servers/{server_id}/container/toggle', tags=["Protocols"])
@@ -2265,7 +2774,7 @@ async def api_container_toggle(request: Request, server_id: int, req: ProtocolRe
         data = load_data()
         if server_id >= len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
-        container = CONTAINER_NAMES.get(req.protocol)
+        container = protocol_container_name(req.protocol)
         if not container:
             return JSONResponse({'error': 'Unknown protocol'}, status_code=400)
         server = data['servers'][server_id]
@@ -2301,20 +2810,24 @@ async def api_server_config(request: Request, server_id: int, req: ProtocolReque
         server = data['servers'][server_id]
         ssh = get_ssh(server)
         ssh.connect()
-        if req.protocol == 'xray':
+        if protocol_base(req.protocol) == 'xray':
             from managers.xray_manager import XrayManager
-            mgr = XrayManager(ssh)
+            mgr = XrayManager(ssh, req.protocol)
             data_json = mgr._get_server_json()
             import json as _json
             config = _json.dumps(data_json, indent=2, ensure_ascii=False) if data_json else ''
-        elif req.protocol == 'telemt':
+        elif protocol_base(req.protocol) == 'telemt':
             from managers.telemt_manager import TelemtManager
-            mgr = TelemtManager(ssh)
+            mgr = TelemtManager(ssh, req.protocol)
             config = mgr._get_server_config()
-        elif req.protocol == 'wireguard':
+        elif protocol_base(req.protocol) == 'wireguard':
             from managers.wireguard_manager import WireGuardManager
             mgr = WireGuardManager(ssh)
             config = mgr._get_server_config()
+        elif protocol_base(req.protocol) == 'nginx':
+            from managers.nginx_manager import NginxManager
+            mgr = NginxManager(ssh, req.protocol)
+            config = mgr._get_server_config(req.protocol)
         else:
             mgr = AWGManager(ssh)
             config = mgr._get_server_config(req.protocol)
@@ -2337,9 +2850,9 @@ async def api_server_config_save(request: Request, server_id: int, req: ServerCo
         server = data['servers'][server_id]
         ssh = get_ssh(server)
         ssh.connect()
-        if req.protocol == 'xray':
+        if protocol_base(req.protocol) == 'xray':
             from managers.xray_manager import XrayManager
-            mgr = XrayManager(ssh)
+            mgr = XrayManager(ssh, req.protocol)
             import json as _json
             try:
                 data_json = _json.loads(req.config)
@@ -2347,14 +2860,18 @@ async def api_server_config_save(request: Request, server_id: int, req: ServerCo
                 ssh.disconnect()
                 return JSONResponse({'error': f'Invalid JSON format: {str(e)}'}, status_code=400)
             mgr._save_server_json(data_json)
-        elif req.protocol == 'telemt':
+        elif protocol_base(req.protocol) == 'telemt':
             from managers.telemt_manager import TelemtManager
-            mgr = TelemtManager(ssh)
+            mgr = TelemtManager(ssh, req.protocol)
             mgr.save_server_config(req.protocol, req.config)
-        elif req.protocol == 'wireguard':
+        elif protocol_base(req.protocol) == 'wireguard':
             from managers.wireguard_manager import WireGuardManager
             mgr = WireGuardManager(ssh)
             mgr.save_server_config(req.config)
+        elif protocol_base(req.protocol) == 'nginx':
+            from managers.nginx_manager import NginxManager
+            mgr = NginxManager(ssh, req.protocol)
+            mgr.save_server_config(req.protocol, req.config)
         else:
             mgr = AWGManager(ssh)
             mgr.save_server_config(req.protocol, req.config)
@@ -2366,6 +2883,54 @@ async def api_server_config_save(request: Request, server_id: int, req: ServerCo
 
 
 
+
+
+@app.post('/api/servers/{server_id}/nginx/site', tags=["Protocols"])
+async def api_nginx_site_get(request: Request, server_id: int, req: ProtocolRequest):
+    """Return editable NGINX site index.html."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        if protocol_base(req.protocol) != 'nginx':
+            return JSONResponse({'error': 'Invalid protocol type'}, status_code=400)
+        server = data['servers'][server_id]
+        ssh = get_ssh(server)
+        ssh.connect()
+        from managers.nginx_manager import NginxManager
+        mgr = NginxManager(ssh, req.protocol)
+        html = mgr.get_site_index(req.protocol)
+        ssh.disconnect()
+        return {'status': 'success', 'html': html}
+    except Exception as e:
+        logger.exception("Error getting NGINX site")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/nginx/site/save', tags=["Protocols"])
+async def api_nginx_site_save(request: Request, server_id: int, req: NginxSiteSaveRequest):
+    """Save editable NGINX site index.html."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        if protocol_base(req.protocol) != 'nginx':
+            return JSONResponse({'error': 'Invalid protocol type'}, status_code=400)
+        server = data['servers'][server_id]
+        ssh = get_ssh(server)
+        ssh.connect()
+        from managers.nginx_manager import NginxManager
+        mgr = NginxManager(ssh, req.protocol)
+        mgr.save_site_index(req.protocol, req.html)
+        ssh.disconnect()
+        return {'status': 'success'}
+    except Exception as e:
+        logger.exception("Error saving NGINX site")
+        return JSONResponse({'error': str(e)}, status_code=500)
 
 @app.get('/api/servers/{server_id}/connections', tags=["Connections"])
 async def api_get_connections(request: Request, server_id: int, protocol: str = Query(default='awg')):
@@ -2419,7 +2984,7 @@ async def api_add_connection(request: Request, server_id: int, req: AddConnectio
         ssh.connect()
         manager = get_protocol_manager(ssh, req.protocol)
         
-        if req.protocol == 'telemt':
+        if protocol_base(req.protocol) == 'telemt':
             result = manager.add_client(
                 req.protocol, req.name, server['host'], port,
                 telemt_quota=req.telemt_quota,
@@ -2429,7 +2994,7 @@ async def api_add_connection(request: Request, server_id: int, req: AddConnectio
                 user_ad_tag=req.telemt_ad_tag,
                 max_tcp_conns=req.telemt_max_conns
             )
-        elif req.protocol == 'wireguard':
+        elif protocol_base(req.protocol) == 'wireguard':
             result = manager.add_client(req.name, server['host'])
         else:
             result = manager.add_client(req.protocol, req.name, server['host'], port)
@@ -2501,7 +3066,7 @@ async def api_edit_connection(request: Request, server_id: int, req: EditConnect
         manager = get_protocol_manager(ssh, req.protocol)
         
         edit_params = {}
-        if req.protocol == 'telemt':
+        if protocol_base(req.protocol) == 'telemt':
             edit_params['telemt_quota'] = req.telemt_quota
             edit_params['telemt_max_ips'] = req.telemt_max_ips
             edit_params['telemt_expiry'] = req.telemt_expiry
@@ -2680,7 +3245,7 @@ async def api_add_user(request: Request, req: AddUserRequest):
                 ssh = get_ssh(server)
                 ssh.connect()
                 manager = get_protocol_manager(ssh, req.protocol)
-                if req.protocol == 'telemt':
+                if protocol_base(req.protocol) == 'telemt':
                     conn_result = manager.add_client(
                         req.protocol, conn_name, server['host'], port,
                         telemt_quota=req.telemt_quota,
@@ -2738,7 +3303,8 @@ async def api_update_user(request: Request, user_id: str, req: UpdateUserRequest
             user['traffic_reset_strategy'] = req.traffic_reset_strategy
             user['last_reset_at'] = datetime.now().isoformat()
             
-        if req.expiration_date is not None:
+        req_fields = getattr(req, 'model_fields_set', getattr(req, '__fields_set__', set()))
+        if 'expiration_date' in req_fields:
             user['expiration_date'] = req.expiration_date or None
 
         if req.password:
@@ -2821,7 +3387,7 @@ async def api_add_user_connection(request: Request, user_id: str, req: AddUserCo
             result = {'client_id': target_client_id, 'config': config}
         else:
             # Create new client
-            if req.protocol == 'telemt':
+            if protocol_base(req.protocol) == 'telemt':
                 result = await asyncio.to_thread(
                     manager.add_client, req.protocol, req.name, server['host'], port,
                     telemt_quota=req.telemt_quota,
@@ -3060,6 +3626,7 @@ async def api_tunnels_status(request: Request):
         'local_server': get_panel_local_url(request),
         'cloudflare': get_tunnel_status('cloudflare'),
         'ngrok': get_tunnel_status('ngrok'),
+        'warp': get_warp_status(),
     }
 
 
@@ -3123,6 +3690,28 @@ async def api_tunnel_delete(request: Request, provider: str):
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
+@app.post('/api/settings/warp/connect', tags=["Settings"])
+async def api_warp_connect(request: Request):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        return await asyncio.to_thread(enable_warp)
+    except Exception as e:
+        logger.exception("Error connecting Cloudflare WARP")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/settings/warp/disconnect', tags=["Settings"])
+async def api_warp_disconnect(request: Request):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        return await asyncio.to_thread(disable_warp)
+    except Exception as e:
+        logger.exception("Error disconnecting Cloudflare WARP")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
 # @app.post('/api/settings/save')
 # async def api_save_settings(request: Request, body: SaveSettingsRequest):
 #     _check_admin(request)
@@ -3155,7 +3744,7 @@ async def save_settings(request: Request, payload: SaveSettingsRequest):
     if tg_cfg.enabled and tg_cfg.token:
         if not tg_bot.is_running():
             logger.info("Starting Telegram bot (settings save)...")
-            tg_bot.launch_bot(tg_cfg.token, load_data, generate_vpn_link)
+            tg_bot.launch_bot(tg_cfg.token, load_data, generate_vpn_link, save_data)
     else:
         if tg_bot.is_running():
             logger.info("Stopping Telegram bot (settings save)...")
@@ -3182,7 +3771,7 @@ async def api_telegram_toggle(request: Request):
         save_data(data)
         return {'status': 'stopped', 'bot_running': False}
     else:
-        tg_bot.launch_bot(token, load_data, generate_vpn_link)
+        tg_bot.launch_bot(token, load_data, generate_vpn_link, save_data)
         tg_cfg['enabled'] = True
         data['settings']['telegram'] = tg_cfg
         save_data(data)

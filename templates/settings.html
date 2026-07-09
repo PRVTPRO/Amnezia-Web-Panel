@@ -160,6 +160,26 @@
                         </button>
                     </div>
                 </div>
+
+
+                <div class="tunnel-row" data-provider="warp" style="padding: var(--space-md); border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-primary);">
+                    <div style="display:flex; align-items:center; justify-content:space-between; gap:var(--space-md); margin-bottom: var(--space-sm);">
+                        <strong>Cloudflare WARP</strong>
+                        <span class="badge badge-secondary" id="warpInstallBadge">{{ _('not_installed') }}</span>
+                    </div>
+                    <div id="warpStatusText" class="form-hint" style="margin-bottom: var(--space-sm);">{{ _('warp_status_unknown') }}</div>
+                    <div id="warpHintText" class="form-hint" style="margin-bottom: var(--space-sm);">{{ _('warp_hint') }}</div>
+                    <div style="display:grid; grid-template-columns: 1fr 1fr; gap: var(--space-sm);">
+                        <button type="button" class="btn btn-primary" id="warpConnectBtn" onclick="connectWarp()">
+                            <span id="warpConnectBtnText">{{ _('warp_connect') }}</span>
+                            <div class="spinner hidden" id="warpConnectSpinner" style="width:14px; height:14px;"></div>
+                        </button>
+                        <button type="button" class="btn btn-secondary hidden" id="warpDisconnectBtn" onclick="disconnectWarp()">
+                            <span id="warpDisconnectBtnText">{{ _('warp_disconnect') }}</span>
+                            <div class="spinner hidden" id="warpDisconnectSpinner" style="width:14px; height:14px;"></div>
+                        </button>
+                    </div>
+                </div>
             </div>
             <p class="form-hint" style="margin-top: var(--space-md);">{{ _('tunnels_hint') }}</p>
         </div>
@@ -540,8 +560,73 @@
             if (data.local_server) document.getElementById('localServerUrl').textContent = data.local_server;
             updateTunnelProvider('cloudflare', data.cloudflare || {});
             updateTunnelProvider('ngrok', data.ngrok || {});
+            updateWarpStatus(data.warp || {});
         } catch (err) {
             showToast(`${_('error')}: ` + err.message, 'error');
+        }
+    }
+
+    function updateWarpStatus(status) {
+        const badge = document.getElementById('warpInstallBadge');
+        const statusText = document.getElementById('warpStatusText');
+        const hintText = document.getElementById('warpHintText');
+        const connectBtn = document.getElementById('warpConnectBtn');
+        const disconnectBtn = document.getElementById('warpDisconnectBtn');
+        const connectText = document.getElementById('warpConnectBtnText');
+        if (!badge || !statusText || !connectBtn || !disconnectBtn || !connectText) return;
+
+        const installed = !!status.installed;
+        const connected = !!status.connected || status.status === 'connected';
+        badge.className = connected ? 'badge badge-success' : (installed ? 'badge badge-info' : 'badge badge-secondary');
+        badge.textContent = connected ? _('warp_connected') : (installed ? _('installed') : _('not_installed'));
+
+        const statusKey = `warp_status_${status.status || 'unknown'}`;
+        statusText.textContent = _(statusKey) || status.status || _('warp_status_unknown');
+        hintText.textContent = status.last_error || (installed ? _('warp_hint') : (status.install_hint || _('warp_install_hint')));
+        connectText.textContent = installed ? _('warp_connect') : _('warp_install_required');
+        connectBtn.disabled = connected;
+        disconnectBtn.classList.toggle('hidden', !connected);
+    }
+
+    async function connectWarp() {
+        const btn = document.getElementById('warpConnectBtn');
+        const spinner = document.getElementById('warpConnectSpinner');
+        const text = document.getElementById('warpConnectBtnText');
+        btn.disabled = true;
+        spinner.classList.remove('hidden');
+        text.textContent = _('loading');
+
+        try {
+            const status = await apiCall('/api/settings/warp/connect', 'POST');
+            updateWarpStatus(status);
+            showToast(_('warp_connected'), 'success');
+        } catch (err) {
+            showToast(`${_('error')}: ` + err.message, 'error');
+            await loadTunnelStatus();
+        } finally {
+            spinner.classList.add('hidden');
+        }
+    }
+
+    async function disconnectWarp() {
+        const btn = document.getElementById('warpDisconnectBtn');
+        const spinner = document.getElementById('warpDisconnectSpinner');
+        const text = document.getElementById('warpDisconnectBtnText');
+        btn.disabled = true;
+        spinner.classList.remove('hidden');
+        text.textContent = _('loading');
+
+        try {
+            const status = await apiCall('/api/settings/warp/disconnect', 'POST');
+            updateWarpStatus(status);
+            showToast(_('warp_disconnected'), 'success');
+        } catch (err) {
+            showToast(`${_('error')}: ` + err.message, 'error');
+            await loadTunnelStatus();
+        } finally {
+            btn.disabled = false;
+            text.textContent = _('warp_disconnect');
+            spinner.classList.add('hidden');
         }
     }
 
