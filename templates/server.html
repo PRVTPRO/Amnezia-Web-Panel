@@ -1856,6 +1856,7 @@
         html += row('conntrack', `${h.conntrack_count || 0} / ${h.conntrack || '—'}`);
         html += row('netdev_max_backlog', h.netdev_max_backlog);
         html += row('somaxconn', h.somaxconn);
+        html += row('amneziawg module', h.awg_module ? `kernel v${h.awg_module}` : 'userspace (amneziawg-go)');
         for (const c of (t.containers || [])) {
             html += `<div style="font-weight:600;margin:12px 0 2px;">🐳 ${esc(c.name)} ${c.running ? '<span style="color:var(--success,#3fb950)">● online</span>' : '<span style="color:var(--danger,#f85149)">● stopped</span>'}</div>`;
             if (c.running && c.ct) {

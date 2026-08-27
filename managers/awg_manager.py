@@ -702,6 +702,68 @@ fi
             logger.warning(f"prepare_host warning: {err}")
         return True
 
+    # Kernel module version that supports AWG 3.1 features and stays
+    # backward-compatible with AWG 2.0 configs.
+    AWG_MODULE_VERSION = "3.1.20260812"
+    AWG_MODULE_REPO = "https://github.com/amnezia-vpn/amneziawg-linux-kernel-module.git"
+
+    def setup_kernel_module(self):
+        """Install the amneziawg kernel module via DKMS (best effort).
+
+        Without the module, awg-quick inside the container falls back to
+        the userspace amneziawg-go implementation, which is noticeably
+        slower under load. The container mounts /lib/modules and has
+        SYS_MODULE capability, so once the module exists on the host,
+        awg-quick picks it automatically on (re)start.
+
+        Skipped (userspace fallback) when:
+        - module already present
+        - Secure Boot is enabled (unsigned module would not load)
+        - kernel headers / build tools cannot be installed
+        - the DKMS build fails (e.g. very old kernels)
+        """
+        v = self.AWG_MODULE_VERSION
+        script = f"""
+set -e
+if modinfo amneziawg >/dev/null 2>&1; then
+    echo "KERNEL_MODULE: already present ($(modinfo amneziawg | awk '/^version:/{{print $2; exit}}'))"
+    exit 0
+fi
+if command -v mokutil >/dev/null 2>&1 && mokutil --sb-state 2>/dev/null | grep -qi 'enabled'; then
+    echo "KERNEL_MODULE: skipped (Secure Boot enabled)"
+    exit 0
+fi
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get install -y -qq dkms "linux-headers-$(uname -r)" git make gcc
+rm -rf /tmp/awg-module
+git clone --depth 1 --branch v{v} {self.AWG_MODULE_REPO} /tmp/awg-module
+cd /tmp/awg-module/src
+sed -i 's/^PACKAGE_VERSION=.*/PACKAGE_VERSION="{v}"/' dkms.conf
+dkms add .
+dkms build amneziawg/{v}
+dkms install amneziawg/{v}
+modprobe amneziawg
+cd / && rm -rf /tmp/awg-module
+echo "KERNEL_MODULE: installed {v}"
+"""
+        try:
+            out, err, code = self.ssh.run_sudo_script(script, timeout=600)
+            marker = ''
+            for line in (out or '').splitlines():
+                if line.startswith('KERNEL_MODULE:'):
+                    marker = line
+                    logger.info(f"setup_kernel_module: {line}")
+            if code != 0:
+                logger.warning(f"setup_kernel_module failed, userspace fallback: {err}")
+                return 'failed'
+            if 'installed' in marker or 'already present' in marker:
+                return 'ok'
+            return 'skipped'
+        except Exception as err:
+            logger.warning(f"setup_kernel_module warning (userspace fallback): {err}")
+            return 'failed'
+
     def setup_firewall(self):
         """Setup host firewall (mirrors setup_host_firewall.sh).
 
@@ -769,6 +831,7 @@ echo "HOST_CONNTRACK=$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null)
 echo "HOST_CONNTRACK_COUNT=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null)"
 echo "HOST_BACKLOG=$(sysctl -n net.core.netdev_max_backlog 2>/dev/null)"
 echo "HOST_SOMAXCONN=$(sysctl -n net.core.somaxconn 2>/dev/null)"
+echo "HOST_AWG_MODULE=$(modinfo amneziawg 2>/dev/null | awk '/^version:/{print $2; exit}')"
 for c in $(docker ps -a --format '{{.Names}}' | grep '^amnezia-awg' | sort); do
   echo "CT_NAME=$c"
   if docker ps --format '{{.Names}}' | grep -qx "$c"; then
@@ -855,6 +918,16 @@ done
         results.append("Preparing host...")
         self.prepare_host(protocol_type)
         results.append("Host prepared")
+
+        # Step 2.5: Kernel module (best effort, userspace fallback)
+        results.append("Checking amneziawg kernel module...")
+        km = self.setup_kernel_module()
+        if km == 'ok':
+            results.append("Kernel module ready")
+        elif km == 'skipped':
+            results.append("Kernel module skipped, userspace mode (amneziawg-go)")
+        else:
+            results.append("Kernel module build failed, userspace mode (amneziawg-go)")
 
         # Step 3: Remove old container if exists
         if self.check_protocol_installed(protocol_type):
