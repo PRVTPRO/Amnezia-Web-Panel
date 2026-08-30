@@ -97,7 +97,7 @@ else:
     application_path = os.path.dirname(__file__)
 
 DATA_FILE = os.path.join(application_path, 'data.json')
-CURRENT_VERSION = "v1.5.0"
+CURRENT_VERSION = "v1.6.0"
 BIN_DIR = os.environ.get('TUNNEL_BIN_DIR', os.path.join(application_path, 'bin'))
 TUNNEL_STATE_FILE = os.environ.get('TUNNEL_STATE_FILE', os.path.join(application_path, 'tunnels_state.json'))
 
