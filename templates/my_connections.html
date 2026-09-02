@@ -169,15 +169,11 @@
         }[ch]));
     }
 
-    function getProtocolLabel(proto) {
-        const labels = {
-            awg: 'AmneziaWG',
-            awg2: 'AmneziaWG 2.0',
-            awg_legacy: 'AWG Legacy',
-            xray: 'Xray',
-            telemt: 'Telemt'
-        };
-        return labels[proto] || (proto || '').toUpperCase();
+    function getProtocolLabel(proto, protocolName) {
+        if (protocolName) {
+            return protocolName;
+        }
+        return String(proto || '').split('__', 1)[0].toUpperCase() || '—';
     }
 
     async function loadConnections() {
@@ -226,7 +222,7 @@
                     <div class="client-name" style="margin-bottom: 4px;">${escapeHtml(c.name || _('my_connections_title'))}</div>
                     <div class="client-meta" style="display: flex; align-items: center; gap: var(--space-sm); flex-wrap: wrap;">
                         <span>🖥 ${escapeHtml(c.server_name || '—')}</span>
-                        <span style="color: var(--text-muted);">${escapeHtml(getProtocolLabel(c.protocol))}</span>
+                        <span style="color: var(--text-muted);">${escapeHtml(getProtocolLabel(c.protocol, c.protocol_name))}</span>
                     </div>
                 </div>
                 <button class="btn btn-secondary btn-sm btn-icon"

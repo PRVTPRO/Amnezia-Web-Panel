@@ -10,6 +10,72 @@ DISALLOWED_CONNECTION_NAME_CHARS = set('<>"\'&')
 
 logger = logging.getLogger(__name__)
 
+SELF_SERVICE_PROTOCOL_ORDER = (
+    'awg', 'awg2', 'awg3', 'awg_legacy', 'xray', 'telemt', 'wireguard',
+)
+
+SELF_SERVICE_PROTOCOLS = frozenset(SELF_SERVICE_PROTOCOL_ORDER)
+
+_PROTOCOL_DISPLAY_NAMES = {
+    'awg': 'AmneziaWG',
+    'awg2': 'AmneziaWG 2.0',
+    'awg3': 'AmneziaWG 3.1',
+    'awg_legacy': 'AmneziaWG Legacy',
+    'xray': 'Xray',
+    'telemt': 'Telemt',
+    'wireguard': 'WireGuard',
+}
+
+
+def protocol_base(protocol: str) -> str:
+    return str(protocol or 'awg').split('__', 1)[0]
+
+
+def protocol_instance(protocol: str) -> int:
+    parts = str(protocol or '').split('__', 1)
+    if len(parts) == 2:
+        try:
+            return max(1, int(parts[1]))
+        except ValueError:
+            return 1
+    return 1
+
+
+def sanitize_allowed_protocols(allowed) -> list:
+    seen = set()
+    result = []
+    for proto in allowed or []:
+        base = protocol_base(proto)
+        if base in SELF_SERVICE_PROTOCOLS and base not in seen:
+            seen.add(base)
+            result.append(base)
+    return result
+
+
+def self_service_protocol_display_name(protocol: str) -> str:
+    base = protocol_base(protocol)
+    idx = protocol_instance(protocol)
+    name = _PROTOCOL_DISPLAY_NAMES.get(base, base)
+    return name if idx <= 1 else f'{name} #{idx}'
+
+
+def self_service_protocol_choices():
+    return [
+        {'id': proto, 'name': self_service_protocol_display_name(proto)}
+        for proto in SELF_SERVICE_PROTOCOL_ORDER
+    ]
+
+
+def server_self_service_protocols(server, allowed_bases) -> list:
+    allowed = set(sanitize_allowed_protocols(allowed_bases))
+    if not allowed:
+        return []
+    return [
+        proto
+        for proto in (server.get('protocols') or {}).keys()
+        if protocol_base(proto) in allowed
+    ]
+
 
 DEFAULT_SELF_SERVICE_SETTINGS = {
     'enabled': False,
@@ -64,15 +130,15 @@ class ConnectionService:
         user_connections = self._user_connections(data, user['id'])
         max_connections = int(settings.get('max_connections_per_user', 5))
         remaining = max(0, max_connections - len(user_connections))
-        allowed_protocols = set(settings.get('allowed_protocols') or []) & {'awg', 'awg2'}
+        allowed_bases = sanitize_allowed_protocols(settings.get('allowed_protocols'))
         servers = []
         for server_id, server in enumerate(data.get('servers', [])):
             if not server.get('self_service_enabled', False):
                 continue
-            protocols = []
-            for protocol in ('awg', 'awg2'):
-                if protocol in allowed_protocols and protocol in server.get('protocols', {}):
-                    protocols.append({'protocol': protocol, 'name': self._protocol_name(protocol)})
+            protocols = [
+                {'protocol': protocol, 'name': self_service_protocol_display_name(protocol)}
+                for protocol in server_self_service_protocols(server, allowed_bases)
+            ]
             if protocols:
                 servers.append({
                     'id': server_id,
@@ -253,8 +319,8 @@ class ConnectionService:
         server = data['servers'][server_id]
         if not server.get('self_service_enabled', False):
             raise SelfServiceError('Server self-service is disabled', status_code=403, forbidden=True)
-        allowed = set(settings.get('allowed_protocols') or []) & {'awg', 'awg2'}
-        if protocol not in allowed:
+        allowed_bases = set(sanitize_allowed_protocols(settings.get('allowed_protocols')))
+        if protocol_base(protocol) not in allowed_bases:
             raise SelfServiceError('Protocol is not allowed')
         if protocol not in server.get('protocols', {}):
             raise SelfServiceError('Protocol is not installed on this server')
@@ -272,8 +338,8 @@ class ConnectionService:
         return clean
 
     def _validate_protocol(self, protocol):
-        if protocol not in ('awg', 'awg2'):
-            raise SelfServiceError('Only awg and awg2 are supported')
+        if protocol_base(protocol) not in SELF_SERVICE_PROTOCOLS:
+            raise SelfServiceError('Protocol is not supported for self-service')
 
     def _user_connections(self, data, user_id):
         return [c for c in data.get('user_connections', []) if c.get('user_id') == user_id]
@@ -307,5 +373,3 @@ class ConnectionService:
         except Exception as e:
             logger.warning("Rollback failed for client %s: %s", client_id, e)
 
-    def _protocol_name(self, protocol):
-        return 'AWG 2' if protocol == 'awg2' else 'AWG'

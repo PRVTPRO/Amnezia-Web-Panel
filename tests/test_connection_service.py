@@ -127,7 +127,7 @@ class ConnectionServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(options['remaining_connections'], 5)
         self.assertEqual(
             options['servers'],
-            [{'id': 0, 'name': 'Server 1', 'protocols': [{'protocol': 'awg', 'name': 'AWG'}]}],
+            [{'id': 0, 'name': 'Server 1', 'protocols': [{'protocol': 'awg', 'name': 'AmneziaWG'}]}],
         )
 
     async def test_create_rejects_when_user_reaches_max_connections(self):
@@ -371,6 +371,99 @@ class ConnectionServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(state['users'][0]['enabled'])
         self.assertEqual(state['user_connections'], [])
         self.assertEqual(fake_manager.removed, [('awg', 'client-1')])
+
+    async def test_options_includes_allowed_protocols_when_installed(self):
+        data = base_data()
+        data['settings']['self_service']['allowed_protocols'] = ['awg', 'xray', 'awg3']
+        data['servers'][0]['protocols'] = {
+            'awg': {'port': '55424'},
+            'xray': {'port': '443'},
+            'awg3': {'port': '55426'},
+        }
+        service, _, _ = self.make_service(data)
+
+        options = await service.get_self_service_options('user-1', 'web')
+        protos = [p['protocol'] for p in options['servers'][0]['protocols']]
+
+        self.assertEqual(protos, ['awg', 'xray', 'awg3'])
+
+    async def test_options_omits_protocols_not_in_allowlist(self):
+        data = base_data()
+        data['servers'][0]['protocols'] = {
+            'awg': {'port': '55424'},
+            'xray': {'port': '443'},
+        }
+        service, _, _ = self.make_service(data)
+
+        options = await service.get_self_service_options('user-1', 'web')
+        protos = [p['protocol'] for p in options['servers'][0]['protocols']]
+
+        self.assertEqual(protos, ['awg'])
+        self.assertNotIn('xray', protos)
+
+    async def test_options_includes_extra_protocol_instances(self):
+        data = base_data()
+        data['servers'][0]['protocols'] = {
+            'awg': {'port': '55424'},
+            'awg__2': {'port': '55425'},
+        }
+        service, _, _ = self.make_service(data)
+
+        options = await service.get_self_service_options('user-1', 'web')
+        protos = [p['protocol'] for p in options['servers'][0]['protocols']]
+
+        self.assertEqual(protos, ['awg', 'awg__2'])
+        self.assertEqual(
+            next(p['name'] for p in options['servers'][0]['protocols'] if p['protocol'] == 'awg__2'),
+            'AmneziaWG #2',
+        )
+
+    async def test_options_excludes_infrastructure_protocols(self):
+        data = base_data()
+        data['settings']['self_service']['allowed_protocols'] = [
+            'awg', 'dns', 'socks5', 'adguard', 'nginx',
+        ]
+        data['servers'][0]['protocols'] = {
+            'awg': {'port': '55424'},
+            'dns': {'port': '53'},
+            'socks5': {'port': '1080'},
+        }
+        service, _, _ = self.make_service(data)
+
+        options = await service.get_self_service_options('user-1', 'web')
+        protos = [p['protocol'] for p in options['servers'][0]['protocols']]
+
+        self.assertEqual(protos, ['awg'])
+
+    async def test_create_succeeds_for_xray(self):
+        data = base_data()
+        data['settings']['self_service']['allowed_protocols'] = ['awg', 'xray']
+        service, state, _ = self.make_service(data)
+
+        result = await service.create_user_connection('user-1', 0, 'xray', 'laptop', 'web')
+
+        self.assertEqual(result['status'], 'success')
+        self.assertEqual(result['connection']['protocol'], 'xray')
+
+    async def test_create_succeeds_for_extra_awg_instance(self):
+        data = base_data()
+        data['servers'][0]['protocols']['awg__2'] = {'port': '55425'}
+        service, state, _ = self.make_service(data)
+
+        result = await service.create_user_connection('user-1', 0, 'awg__2', 'tablet', 'web')
+
+        self.assertEqual(result['status'], 'success')
+        self.assertEqual(result['connection']['protocol'], 'awg__2')
+
+    async def test_create_rejects_protocol_not_in_allowlist(self):
+        data = base_data()
+        data['servers'][0]['protocols']['xray'] = {'port': '443'}
+        service, _, _ = self.make_service(data)
+
+        with self.assertRaises(SelfServiceError) as ctx:
+            await service.create_user_connection('user-1', 0, 'xray', 'home', 'web')
+
+        self.assertIn('not allowed', str(ctx.exception).lower())
 
 
 if __name__ == '__main__':
