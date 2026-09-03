@@ -1383,6 +1383,13 @@ done < "$BW"
         self._server_config_cache[protocol_type] = (time.time(), out)
         return out
 
+    def _invalidate_config_cache(self, protocol_type):
+        """Forget the cached server config after the file in the container was
+        rewritten. Every writer must call this, otherwise a second read on the
+        same manager instance within _CACHE_TTL returns the pre-write content
+        (a peer removed and re-added in one go would be resurrected)."""
+        self._server_config_cache.pop(protocol_type, None)
+
     @staticmethod
     def _sanitize_server_config(config_content):
         """awg-quick chokes on a bare `DNS =` key in the server config (it calls
@@ -1629,6 +1636,7 @@ tail -f /dev/null
             f"docker cp /tmp/_amnz_add_peer.conf {container_name}:{config_path}"
         )
         self.ssh.run_command("rm -f /tmp/_amnz_add_peer.conf")
+        self._invalidate_config_cache(protocol_type)
 
     def _extract_ipv4(self, value):
         """Extract the first IPv4 address from AllowedIPs/clientIp-like values."""
@@ -2237,6 +2245,7 @@ AllowedIPs = {allowed_ips}
             self.ssh.run_sudo_command(
                 f"docker exec -i {container_name} bash -c 'echo \"{escaped_peer}\" >> {config_path}'"
             )
+            self._invalidate_config_cache(protocol_type)
         else:
             # Remove peer from server config, but first persist its current
             # AllowedIPs so native/external clients can be enabled later.
@@ -2284,6 +2293,7 @@ AllowedIPs = {allowed_ips}
                 f"docker cp /tmp/_amnz_config.conf {container_name}:{config_path}"
             )
             self.ssh.run_command("rm -f /tmp/_amnz_config.conf")
+            self._invalidate_config_cache(protocol_type)
 
         # Sync config
         self.ssh.run_sudo_command(
@@ -2327,6 +2337,7 @@ AllowedIPs = {allowed_ips}
             f"docker cp /tmp/_amnz_config.conf {container_name}:{config_path}"
         )
         self.ssh.run_command("rm -f /tmp/_amnz_config.conf")
+        self._invalidate_config_cache(protocol_type)
 
         # Sync config
         self.ssh.run_sudo_command(
@@ -2482,6 +2493,7 @@ AllowedIPs = {allowed_ips}
             f"docker cp /tmp/_amnz_settings.conf {container_name}:{config_path}"
         )
         self.ssh.run_command("rm -f /tmp/_amnz_settings.conf")
+        self._invalidate_config_cache(protocol_type)
         if code != 0:
             raise RuntimeError(f"Failed to write server config: {err or out}")
 
