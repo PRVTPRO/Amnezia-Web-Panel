@@ -11,6 +11,8 @@ services:
     volumes:
       - amnezia_data:/app/data
 
+    environment:
+      DATA_FILE: /app/data/data.json
     restart: unless-stopped
 
     healthcheck:

@@ -108,7 +108,9 @@ if getattr(sys, 'frozen', False):
 else:
     application_path = os.path.dirname(__file__)
 
-DATA_FILE = os.path.join(application_path, 'data.json')
+DATA_FILE = os.path.abspath(os.path.expanduser(
+    os.environ.get('DATA_FILE') or os.path.join(application_path, 'data.json')
+))
 CURRENT_VERSION = "v1.6.2"
 BIN_DIR = os.environ.get('TUNNEL_BIN_DIR', os.path.join(application_path, 'bin'))
 TUNNEL_STATE_FILE = os.environ.get('TUNNEL_STATE_FILE', os.path.join(application_path, 'tunnels_state.json'))
@@ -218,6 +220,7 @@ def load_data():
 
 def save_data(data):
     data_dir = os.path.dirname(DATA_FILE) or '.'
+    os.makedirs(data_dir, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(prefix='.data-', suffix='.json', dir=data_dir)
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
