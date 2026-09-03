@@ -189,12 +189,60 @@ docker pull ghcr.io/prvtpro/amnezia-panel:latest
 docker pull ghcr.io/prvtpro/amnezia-panel:latest-warp
 ```
 
+The bundled `docker-compose.yml` sets `DATA_FILE=/app/data/data.json` so panel state lands on the
+`amnezia_data` volume and survives container rebuilds — see [Environment Variables](#-environment-variables)
+for the full list of knobs.
+
 
 ### Initial Login
 *   **Username**: `admin`
 *   **Password**: `admin`
 > [!IMPORTANT]  
 > Secure your panel by changing the default password in the **Users** section immediately after first login.
+
+## 🧰 Environment Variables
+
+Every variable is optional — the panel starts with working defaults. Paths marked `<app dir>` resolve
+next to `app.py`, or next to the executable in the standalone builds from *Installation Method 2*.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SECRET_KEY` | random on each start | Key used to sign session cookies. Without it a fresh key is generated at every start, which logs all admins out on restart — set a long random value in production. |
+| `DATA_FILE` | `<app dir>/data.json` | Path to the JSON state file (servers, users, API tokens, settings). `~` is expanded and missing parent directories are created on first save. |
+| `TUNNEL_STATE_FILE` | `<app dir>/tunnels_state.json` | Path where Cloudflare/ngrok tunnel runtime state (PID, public URL) is persisted between restarts. |
+| `TUNNEL_BIN_DIR` | `<app dir>/bin` | Directory holding the panel-managed `cloudflared` / `ngrok` binaries downloaded from the **Settings** page. |
+| `AWG_IPV6` | `auto` | Dual-stack policy for AWG tunnels: `auto` probes the host and the protocol container, `off` keeps every tunnel IPv4-only, `on` forces dual-stack. |
+
+Two things that are deliberately *not* environment variables: the port the panel listens on and its SSL
+certificates, both configured in **Settings → SSL** and stored in the state file. For ngrok, the authtoken
+comes from **Settings** as well and overrides an inherited `NGROK_AUTHTOKEN`.
+
+Running from source or from a binary:
+
+```bash
+export SECRET_KEY="$(python -c 'import secrets; print(secrets.token_hex(32))')"
+export DATA_FILE=/var/lib/amnezia-panel/data.json
+python app.py
+```
+
+With Docker, pass the same variables through `-e`:
+
+```bash
+docker run -d \
+  -p 5000:5000 \
+  -e SECRET_KEY=change-me \
+  -e DATA_FILE=/state/data.json \
+  -v panel_state:/state \
+  ghcr.io/prvtpro/amnezia-panel:latest
+```
+
+Docker Compose additionally reads these from your shell or from an `.env` file next to
+`docker-compose.yml`. They configure Compose itself rather than the panel process:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `APP_PORT` | `5000` | Host port published for the panel container. |
+| `DATA_FILE` | `/app/data/data.json` | Forwarded into the container; keep it under `/app/data` so state stays on the `amnezia_data` volume. |
 
 ## 🔧 Project Details
 
@@ -240,7 +288,7 @@ curl -H "Authorization: Bearer $TOKEN" http://your-panel:5000/api/servers/0/ping
 ### Technology Stack
 *   **Backend**: FastAPI (Python), `asyncio` for concurrent SSH/probe work
 *   **Frontend**: Vanilla JS, Jinja2, Custom CSS (Glassmorphism, full set of CSS animations for promo blocks)
-*   **Database**: Local JSON storage (`data.json`) with an `asyncio.Lock` for thread-safe writes
+*   **Database**: Local JSON storage (`data.json`, path overridable via the `DATA_FILE` environment variable) with an `asyncio.Lock` for thread-safe writes
 *   **SSH Engine**: Paramiko
 
 ### Project Structure
@@ -268,7 +316,7 @@ web-panel/
 
 *   **Reverse Proxy**: It is highly recommended to run the panel behind Nginx/Apache with an SSL certificate.
 *   **SSH Keys**: Use SSH keys rather than passwords for connecting to your VPN servers.
-*   **Secret Key**: Set a custom `SECRET_KEY` environment variable for secure session management.
+*   **Secret Key**: Set a custom `SECRET_KEY` environment variable for secure session management (see [Environment Variables](#-environment-variables)).
 *   **IPv6**: if your servers have global IPv6 but Docker is IPv4-only, leave `AWG_IPV6` at `auto` — the panel probes the container and keeps tunnels IPv4-only rather than blackholing client IPv6. Set `AWG_IPV6=off` to disable dual-stack everywhere.
 *   **API Tokens**: Treat each token like a password — store it in your integration's secret manager. Revoke it from `/settings` if it leaks or the integration is decommissioned. Rotate periodically; tokens inherit admin rights.
 
