@@ -1,0 +1,36 @@
+FROM amneziavpn/amnezia-wg:latest
+
+LABEL maintainer="AmneziaVPN"
+
+RUN apk add --no-cache bash curl dumb-init iptables
+RUN apk --update upgrade --no-cache
+
+
+RUN mkdir -p /opt/amnezia
+RUN echo "#!/bin/bash" > /opt/amnezia/start.sh && echo "sysctl -p /etc/sysctl.conf 2>/dev/null || true" >> /opt/amnezia/start.sh && echo "tail -f /dev/null" >> /opt/amnezia/start.sh
+RUN chmod a+x /opt/amnezia/start.sh
+
+# Network tuning (mirrors AmneziaVPN container tuning)
+RUN printf '%s\n' \
+'fs.file-max = 51200' \
+'net.core.rmem_max = 67108864' \
+'net.core.wmem_max = 67108864' \
+'net.core.netdev_max_backlog = 250000' \
+'net.core.somaxconn = 4096' \
+'net.ipv4.tcp_syncookies = 1' \
+'net.ipv4.tcp_tw_reuse = 1' \
+'net.ipv4.tcp_fin_timeout = 30' \
+'net.ipv4.tcp_keepalive_time = 1200' \
+'net.ipv4.ip_local_port_range = 10000 65000' \
+'net.ipv4.tcp_max_syn_backlog = 8192' \
+'net.ipv4.tcp_max_tw_buckets = 5000' \
+'net.ipv4.tcp_fastopen = 3' \
+'net.ipv4.tcp_mem = 25600 51200 102400' \
+'net.ipv4.tcp_rmem = 4096 87380 67108864' \
+'net.ipv4.tcp_wmem = 4096 65536 67108864' \
+'net.ipv4.tcp_mtu_probing = 1' \
+ >> /etc/sysctl.conf && \
+mkdir -p /etc/security && \
+printf '%s\n' '* soft nofile 51200' '* hard nofile 51200' >> /etc/security/limits.conf
+
+ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
