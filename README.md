@@ -72,6 +72,7 @@ Configuration panel for system parameters and preferences:
     *   **NGINX + Let's Encrypt**: Reverse-proxy and HTTPS automation with certificate management for secure public endpoints.
 *   **⚙️ Core Server Management**:
     *   **Add / Edit / Delete / Reorder** server entries — drag-and-drop reorder updates `server_id` references in saved connections automatically.
+    *   Every server carries a stable `uid` (assigned on add and backfilled for existing records at startup) for cross-server references that must survive reorder and delete.
     *   **Live ping indicator** next to each server name — non-blocking TCP-connect probe to the SSH port, runs on the asyncio loop in parallel for all servers.
     *   **Clear server** wipes every Amnezia-related container, image and `/opt/amnezia` directory in a single sudo script — works for any current or future `amnezia-*` protocol.
     *   **Reboot** the server directly from the UI.

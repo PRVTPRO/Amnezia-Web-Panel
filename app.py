@@ -935,6 +935,31 @@ BASE_PROTOCOLS = ['awg', 'awg2', 'awg3', 'awg_legacy', 'xray', 'telemt', 'dns', 
 MULTI_INSTANCE_PROTOCOLS = {'awg', 'awg2', 'awg3', 'awg_legacy', 'xray', 'telemt', 'socks5'}
 
 
+def backfill_server_uids(servers) -> bool:
+    """Give every server record without a stable `uid` one; return True when
+    something changed. Only write paths call this (startup migration,
+    add-server, backup restore): minting ids inside load_data() would let two
+    concurrent readers hand out different uids for the same record."""
+    changed = False
+    for server in servers or []:
+        if not server.get('uid'):
+            server['uid'] = uuid.uuid4().hex
+            changed = True
+    return changed
+
+
+def find_server_by_uid(data, uid):
+    """Return (index, server) for a stable server uid, or (None, None) when the
+    uid is empty or unknown. Index-based server_id values shift on reorder and
+    delete, so cross-server references must resolve through this instead."""
+    if not uid:
+        return None, None
+    for idx, server in enumerate(data.get('servers', []) or []):
+        if server.get('uid') == uid:
+            return idx, server
+    return None, None
+
+
 def protocol_base(protocol: str) -> str:
     return str(protocol or 'awg').split('__', 1)[0]
 
@@ -2288,6 +2313,11 @@ async def startup():
         changed = True
         logger.info("Initialised empty api_tokens collection")
 
+    # Stable server identity: list indices shift on reorder/delete, uids don't.
+    if backfill_server_uids(data.get('servers')):
+        changed = True
+        logger.info("Assigned uids to servers that had none")
+
     # Auto backup settings migration
     auto_backup = data.setdefault('settings', {}).setdefault('auto_backup', {})
     if 'enabled' not in auto_backup:
@@ -2743,6 +2773,7 @@ async def api_add_server(request: Request, req: AddServerRequest):
             return JSONResponse({'error': f'Connection failed: {str(e)}'}, status_code=400)
 
         server = {
+            'uid': uuid.uuid4().hex,
             'name': name, 'host': host, 'ssh_port': req.ssh_port,
             'username': username, 'password': req.password,
             'private_key': req.private_key, 'server_info': server_info,
@@ -5026,7 +5057,9 @@ async def api_backup_restore(request: Request, file: UploadFile = File(...)):
         if not isinstance(backup_data['servers'], list) or not isinstance(backup_data['users'], list):
             return JSONResponse({'error': 'Invalid structure: servers and users must be lists'}, status_code=400)
 
-        # Save the new data
+        # Save the new data; older backups predate server uids, mint them now
+        # so the file on disk is complete without waiting for the next restart.
+        backfill_server_uids(backup_data['servers'])
         async with DATA_LOCK:
             save_data(backup_data)
         
