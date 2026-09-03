@@ -15,6 +15,15 @@ from typing import Optional, Callable
 
 import httpx
 
+from connection_service import (
+    SELF_SERVICE_PROTOCOLS,
+    protocol_base,
+    protocol_instance,
+    sanitize_allowed_protocols,
+    self_service_protocol_display_name,
+    server_self_service_protocols,
+)
+
 logger = logging.getLogger(__name__)
 
 # ----------------------------------------------------------------------- #
@@ -24,7 +33,12 @@ _bot_task: Optional[asyncio.Task] = None
 _callback_refs = {}
 _pending_inputs = {}
 
-CLIENT_PROTOCOLS = {"awg", "awg2", "awg_legacy", "xray", "telemt", "wireguard"}
+_EXTRA_PROTOCOL_DISPLAY_NAMES = {
+    "dns": "AmneziaDNS",
+    "socks5": "SOCKS5",
+    "adguard": "AdGuard Home",
+    "nginx": "NGINX",
+}
 SERVICE_PROTOCOLS = {"dns", "adguard", "socks5", "nginx"}
 
 TG_TRANSLATIONS = {
@@ -357,6 +371,8 @@ def _tg_lang(from_user: Optional[dict]) -> str:
 def _tt(lang: str, key: str, **kwargs) -> str:
     text = TG_TRANSLATIONS.get(lang, TG_TRANSLATIONS["en"]).get(key, TG_TRANSLATIONS["en"].get(key, key))
     return text.format(**kwargs) if kwargs else text
+
+
 def _format_bytes(value) -> str:
     try:
         value = float(value or 0)
@@ -372,31 +388,13 @@ def _format_bytes(value) -> str:
     return f"{value:.2f} {units[idx]}"
 
 
-def _proto_base(protocol: str) -> str:
-    return str(protocol or "awg").split("__", 1)[0]
-
-
 def _protocol_display_name(protocol: str) -> str:
-    base = _proto_base(protocol)
-    names = {
-        "awg": "AmneziaWG",
-        "awg2": "AmneziaWG 2.0",
-        "awg_legacy": "AmneziaWG Legacy",
-        "xray": "Xray",
-        "telemt": "Telemt",
-        "dns": "AmneziaDNS",
-        "wireguard": "WireGuard",
-        "socks5": "SOCKS5",
-        "adguard": "AdGuard Home",
-        "nginx": "NGINX",
-    }
-    name = names.get(base, base)
-    if "__" in str(protocol):
-        try:
-            return f"{name} #{int(str(protocol).split('__', 1)[1])}"
-        except Exception:
-            return name
-    return name
+    base = protocol_base(protocol)
+    if base in SELF_SERVICE_PROTOCOLS:
+        return self_service_protocol_display_name(protocol)
+    name = _EXTRA_PROTOCOL_DISPLAY_NAMES.get(base, base)
+    idx = protocol_instance(protocol)
+    return name if idx <= 1 else f"{name} #{idx}"
 
 
 def _find_user(load_data_fn: Callable, tg_id: str, username: Optional[str] = None):
@@ -448,37 +446,45 @@ def _resolve_ref(data_str: str):
 # ----------------------------------------------------------------------- #
 #  Self-service helpers
 # ----------------------------------------------------------------------- #
+def _self_service_settings(data: dict) -> dict:
+    return (data.get("settings") or {}).get("self_service") or {}
+
+
 def _self_service_is_enabled(data: dict) -> bool:
     """Returns True if self-service is enabled globally in panel settings."""
-    settings = data.get("settings", {}) or {}
-    ss = settings.get("self_service", {}) or {}
-    return bool(ss.get("enabled", False))
+    return bool(_self_service_settings(data).get("enabled", False))
 
 
 def _self_service_telegram_enabled(data: dict) -> bool:
     """Returns True if self-service is enabled and Telegram channel is active."""
-    if not _self_service_is_enabled(data):
-        return False
-    settings = data.get("settings", {}) or {}
-    ss = settings.get("self_service", {}) or {}
-    return bool(ss.get("telegram_enabled", False))
+    ss = _self_service_settings(data)
+    return bool(ss.get("enabled", False) and ss.get("telegram_enabled", False))
 
 
-def _get_eligible_servers(data: dict, allowed_protocols: Optional[set] = None) -> list:
+def _get_eligible_servers(data: dict, allowed_protocols=None) -> list:
     """Returns list of (server_id, server, available_protos) tuples for self-service."""
     if allowed_protocols is None:
-        settings = data.get("settings", {}) or {}
-        ss = settings.get("self_service", {}) or {}
-        allowed_protocols = set(ss.get("allowed_protocols", []) or []) & {"awg", "awg2"}
+        allowed_protocols = _self_service_settings(data).get("allowed_protocols", [])
+    allowed_bases = sanitize_allowed_protocols(allowed_protocols)
     servers = data.get("servers", [])
     eligible = []
     for sid, server in enumerate(servers):
         if not server.get("self_service_enabled", False):
             continue
-        available = [p for p in ("awg", "awg2") if p in allowed_protocols and p in server.get("protocols", {})]
+        available = server_self_service_protocols(server, allowed_bases)
         if available:
             eligible.append((sid, server, available))
     return eligible
+
+
+def _user_create_server_keyboard(eligible, lang: str = "en") -> dict:
+    rows = []
+    for sid, server, protos in eligible:
+        name = server.get("name") or server.get("host") or f"Server {sid + 1}"
+        proto_text = ", ".join(self_service_protocol_display_name(p) for p in protos)
+        rows.append([{"text": f"🖥 {name} ({proto_text})", "callback_data": _ref("user_create_server", {"sid": sid})}])
+    rows.append([{"text": f"❌ {_tt(lang, 'btn_cancel')}", "callback_data": "user_create_cancel"}])
+    return {"inline_keyboard": rows}
 
 
 def _build_connections_keyboard(conns: list, data: dict, lang: str = "en") -> dict:
@@ -610,9 +616,9 @@ def _protocols_keyboard(server_id: int, server: dict, lang: str = "en") -> dict:
 
 
 def _protocol_keyboard(server_id: int, proto: str, proto_info: dict, lang: str = "en") -> dict:
-    base = _proto_base(proto)
+    base = protocol_base(proto)
     rows = []
-    if base in CLIENT_PROTOCOLS:
+    if base in SELF_SERVICE_PROTOCOLS:
         rows.append([{"text": f" {_tt(lang, 'btn_connections')}", "callback_data": _ref("clients", {"sid": server_id, "proto": proto})}])
         rows.append([{"text": f" {_tt(lang, 'btn_create_connection')}", "callback_data": _ref("add_client", {"sid": server_id, "proto": proto})}])
     is_running = proto_info.get("container_running") is True
@@ -656,7 +662,7 @@ def _get_ssh_and_manager(server: dict, proto: str):
         server.get("password", ""),
         server.get("private_key", ""),
     )
-    base = _proto_base(proto)
+    base = protocol_base(proto)
     if base == "xray":
         manager = XrayManager(ssh, proto)
     elif base == "telemt":
@@ -869,7 +875,7 @@ async def _send_config_by_client(api: TelegramAPI, chat_id: int, server: dict, p
         server_name = server.get("name") or server.get("host", "Unknown")
         await api.send_message(chat_id, f"✅ <b>{_e(conn_name)}</b>\n🌐 {_tt(lang, 'servers_title')}: <b>{_e(server_name)}</b>\n🔌 {_tt(lang, 'protocol_label')}: <b>{_e(proto.upper())}</b>")
 
-        is_link_proto = _proto_base(proto) in ("xray", "telemt")
+        is_link_proto = protocol_base(proto) in ("xray", "telemt")
         if is_link_proto:
             await api.send_message(chat_id, f"🔗 <b>{_tt(lang, 'connection_link_label')}</b> (tap to copy):\n<code>{_e(config)}</code>")
         else:
@@ -1179,9 +1185,9 @@ async def _admin_create_client(api: TelegramAPI, chat_id: int, message_id: int, 
         ssh, manager = _get_ssh_and_manager(server, proto)
         try:
             ssh.connect()
-            if _proto_base(proto) == "telemt":
+            if protocol_base(proto) == "telemt":
                 result = manager.add_client(proto, name, server["host"], port)
-            elif _proto_base(proto) == "wireguard":
+            elif protocol_base(proto) == "wireguard":
                 result = manager.add_client(name, server["host"])
             else:
                 result = manager.add_client(proto, name, server["host"], port)
@@ -1220,7 +1226,7 @@ async def _admin_create_client(api: TelegramAPI, chat_id: int, message_id: int, 
 
 async def _send_config_text(api: TelegramAPI, chat_id: int, server: dict, proto: str, conn_name: str, config: str, generate_vpn_link_fn: Callable, lang: str = "en"):
     await api.send_message(chat_id, f"✅ <b>{_e(conn_name)}</b>\n🌐 {_tt(lang, 'servers_title')}: <b>{_e(server.get('name') or server.get('host'))}</b>\n {_tt(lang, 'protocol_label')}: <b>{_e(proto.upper())}</b>")
-    if _proto_base(proto) in ("xray", "telemt"):
+    if protocol_base(proto) in ("xray", "telemt"):
         await api.send_message(chat_id, f"🔗 <b>{_tt(lang, 'connection_link_label')}</b>:\n<code>{_e(config)}</code>")
     else:
         await api.send_message(chat_id, f"<b>📄 Configuration:</b>\n<pre>{_e(config)}</pre>")
@@ -1369,19 +1375,11 @@ async def _user_create_start(api: TelegramAPI, chat_id: int, message_id: int, ca
         return
 
     await api.answer_callback(callback_id)
-
-    rows = []
-    for sid, server, protos in eligible:
-        name = server.get("name") or server.get("host") or f"Server {sid + 1}"
-        proto_text = ", ".join(_protocol_display_name(p) for p in protos)
-        rows.append([{"text": f"🖥 {name} ({proto_text})", "callback_data": _ref("user_create_server", {"sid": sid})}])
-    rows.append([{"text": f"❌ {_tt(lang, 'btn_cancel')}", "callback_data": "user_create_cancel"}])
-
     await api.edit_message(
         chat_id,
         message_id,
         f"➕ <b>{_tt(lang, 'btn_create_connection')}</b>\n\n{_tt(lang, 'choose_server')}",
-        reply_markup={"inline_keyboard": rows},
+        reply_markup=_user_create_server_keyboard(eligible, lang),
     )
 
 
@@ -1401,17 +1399,10 @@ async def _user_create_start_message(api: TelegramAPI, chat_id: int, tg_id: str,
         await api.send_message(chat_id, _tt(lang, "self_service_no_servers"))
         return
 
-    rows = []
-    for sid, server, protos in eligible:
-        name = server.get("name") or server.get("host") or f"Server {sid + 1}"
-        proto_text = ", ".join(_protocol_display_name(p) for p in protos)
-        rows.append([{"text": f"🖥 {name} ({proto_text})", "callback_data": _ref("user_create_server", {"sid": sid})}])
-    rows.append([{"text": f"❌ {_tt(lang, 'btn_cancel')}", "callback_data": "user_create_cancel"}])
-
     await api.send_message(
         chat_id,
         f"➕ <b>{_tt(lang, 'btn_create_connection')}</b>\n\n{_tt(lang, 'choose_server')}",
-        reply_markup={"inline_keyboard": rows},
+        reply_markup=_user_create_server_keyboard(eligible, lang),
     )
 
 
@@ -1439,8 +1430,8 @@ async def _user_create_server(api: TelegramAPI, chat_id: int, message_id: int, c
         await api.edit_message(chat_id, message_id, _tt(lang, "server_not_self_service"))
         return
 
-    allowed_protocols = set(data.get("settings", {}).get("self_service", {}).get("allowed_protocols", []) or []) & {"awg", "awg2"}
-    available_protos = [p for p in ("awg", "awg2") if p in allowed_protocols and p in server.get("protocols", {})]
+    allowed_bases = sanitize_allowed_protocols(_self_service_settings(data).get("allowed_protocols", []))
+    available_protos = server_self_service_protocols(server, allowed_bases)
     if not available_protos:
         await api.edit_message(chat_id, message_id, _tt(lang, "no_protocols_available"))
         return

@@ -454,13 +454,12 @@
                     </div>
                     <div class="form-group">
                         <label class="form-label">{{ _('self_service_protocols') }}</label>
-                        <div class="flex gap-md" style="display:flex; gap:var(--space-md);">
+                        <div class="flex gap-md" style="display:flex; gap:var(--space-md); flex-wrap:wrap;">
+                            {% for choice in self_service_protocol_choices %}
                             <label style="display:flex; align-items:center; gap:var(--space-sm);">
-                                <input type="checkbox" id="ss_proto_awg" {% if 'awg' in settings.self_service.allowed_protocols | default(['awg']) %}checked{% endif %}> AWG
+                                <input type="checkbox" name="ss_proto" value="{{ choice.id }}" {% if choice.id in settings.self_service.allowed_protocols | default(['awg', 'awg2']) %}checked{% endif %}> {{ choice.name }}
                             </label>
-                            <label style="display:flex; align-items:center; gap:var(--space-sm);">
-                                <input type="checkbox" id="ss_proto_awg2" {% if 'awg2' in settings.self_service.allowed_protocols | default([]) %}checked{% endif %}> AWG 2.0
-                            </label>
+                            {% endfor %}
                         </div>
                     </div>
                 </div>
@@ -907,10 +906,7 @@
             max_connections_per_user: parseInt(document.getElementById('ss_max_connections').value || '5'),
             rate_limit_count: parseInt(document.getElementById('ss_rate_limit').value || '3'),
             rate_limit_window_seconds: parseInt(document.getElementById('ss_rate_window').value || '60'),
-            allowed_protocols: [
-                ...(document.getElementById('ss_proto_awg').checked ? ['awg'] : []),
-                ...(document.getElementById('ss_proto_awg2').checked ? ['awg2'] : []),
-            ],
+            allowed_protocols: Array.from(document.querySelectorAll('input[name="ss_proto"]:checked')).map(el => el.value),
         };
 
         try {

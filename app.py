@@ -52,6 +52,8 @@ from connection_service import (
     DEFAULT_SELF_SERVICE_SETTINGS,
     RateLimitError,
     SelfServiceError,
+    sanitize_allowed_protocols,
+    self_service_protocol_choices,
 )
 
 # Configure logging
@@ -4476,6 +4478,7 @@ async def api_my_connections(request: Request):
             c['server_name'] = data['servers'][sid].get('name', '')
         else:
             c['server_name'] = 'Unknown'
+        c['protocol_name'] = protocol_display_name(c.get('protocol', ''))
     return {'connections': conns}
 
 
@@ -4658,7 +4661,14 @@ async def settings_page(request: Request):
     if not user:
         return RedirectResponse('/login')
     data = load_data()
-    return tpl(request, 'settings.html', settings=data.get('settings', {}), servers=data.get('servers', []), current_version=CURRENT_VERSION)
+    return tpl(
+        request,
+        'settings.html',
+        settings=data.get('settings', {}),
+        servers=data.get('servers', []),
+        current_version=CURRENT_VERSION,
+        self_service_protocol_choices=self_service_protocol_choices(),
+    )
 
 
 @app.get('/api/settings', tags=["Settings"])
@@ -4800,7 +4810,7 @@ async def save_settings(request: Request, payload: SaveSettingsRequest):
         'last_error': old_auto_backup.get('last_error')
     }
     self_service = payload.self_service.dict()
-    self_service['allowed_protocols'] = [p for p in self_service.get('allowed_protocols', []) if p in ('awg', 'awg2')]
+    self_service['allowed_protocols'] = sanitize_allowed_protocols(self_service.get('allowed_protocols'))
     settings['self_service'] = self_service
     save_data(data)
     logger.info("Settings saved (including captcha, telegram and auto backup)")
