@@ -202,7 +202,7 @@ RUN echo "fs.file-max = 51200" >> /etc/sysctl.conf && \\
     echo "net.ipv4.tcp_rmem = 4096 87380 67108864" >> /etc/sysctl.conf && \\
     echo "net.ipv4.tcp_wmem = 4096 65536 67108864" >> /etc/sysctl.conf && \\
     echo "net.ipv4.tcp_mtu_probing = 1" >> /etc/sysctl.conf && \\
-    echo "net.ipv4.tcp_congestion_control = hybla" >> /etc/sysctl.conf
+    echo "net.ipv4.tcp_congestion_control = bbr" >> /etc/sysctl.conf
 
 RUN mkdir -p /etc/security && \\
     echo "* soft nofile 51200" >> /etc/security/limits.conf && \\
