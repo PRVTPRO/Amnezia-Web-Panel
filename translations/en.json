@@ -475,5 +475,13 @@
   "warnings_cleared": "Warnings cleared",
   "max_speed": "Max speed (Mbps)",
   "speed_limit_unlim": "Speed limit (0 = unlim.)",
-  "port_in_use_by": "Port {port} is already used by {owner}. Choose another port."
+  "port_in_use_by": "Port {port} is already used by {owner}. Choose another port.",
+  "restore": "Restore",
+  "restore_confirm_protocol": "Are you sure? The current protocol configuration will be overwritten with this backup.",
+  "restore_success": "Backup restored successfully!",
+  "delete_backup_confirm": "Delete this backup from the server? This cannot be undone.",
+  "backup_deleted": "Backup deleted",
+  "upload_backup": "Upload",
+  "uploading_backup": "Uploading...",
+  "backup_uploaded": "Backup uploaded"
 }
