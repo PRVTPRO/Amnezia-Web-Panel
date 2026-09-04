@@ -875,50 +875,9 @@ done
         results.append("Pulling Docker image...")
         dockerfile_folder = f"/opt/amnezia/{container_name}"
 
-        # Create Dockerfile - matches original from client/server_scripts/awg/
-        dockerfile_content = (
-            f"FROM {docker_image}\n"
-            f"\n"
-            f'LABEL maintainer="AmneziaVPN"\n'
-            f"\n"
-            f"RUN apk add --no-cache bash curl dumb-init iptables\n"
-            f"RUN apk --update upgrade --no-cache\n"
-            f"\n"
-            # Only the AWG images ship awg-quick; the legacy one runs wg-quick
-            # against the plain WireGuard module, which has nothing to fall
-            # back to.
-            f"{AWG_QUICK_FORCE_USERSPACE_PATCH if base_proto in (self.AWG, self.AWG2, self.AWG3) else ''}"
-            f"\n"
-            f"RUN mkdir -p /opt/amnezia\n"
-            f'RUN echo "#!/bin/bash" > /opt/amnezia/start.sh && '
-            f'echo "sysctl -p /etc/sysctl.conf 2>/dev/null || true" >> /opt/amnezia/start.sh && '
-            f'echo "tail -f /dev/null" >> /opt/amnezia/start.sh\n'
-            f"RUN chmod a+x /opt/amnezia/start.sh\n"
-            f"\n"
-            f"# Network tuning (mirrors AmneziaVPN container tuning)\n"
-            f"RUN printf '%s\\n' \\\n"
-            f"'fs.file-max = 51200' \\\n"
-            f"'net.core.rmem_max = 67108864' \\\n"
-            f"'net.core.wmem_max = 67108864' \\\n"
-            f"'net.core.netdev_max_backlog = 250000' \\\n"
-            f"'net.core.somaxconn = 4096' \\\n"
-            f"'net.ipv4.tcp_syncookies = 1' \\\n"
-            f"'net.ipv4.tcp_tw_reuse = 1' \\\n"
-            f"'net.ipv4.tcp_fin_timeout = 30' \\\n"
-            f"'net.ipv4.tcp_keepalive_time = 1200' \\\n"
-            f"'net.ipv4.ip_local_port_range = 10000 65000' \\\n"
-            f"'net.ipv4.tcp_max_syn_backlog = 8192' \\\n"
-            f"'net.ipv4.tcp_max_tw_buckets = 5000' \\\n"
-            f"'net.ipv4.tcp_fastopen = 3' \\\n"
-            f"'net.ipv4.tcp_mem = 25600 51200 102400' \\\n"
-            f"'net.ipv4.tcp_rmem = 4096 87380 67108864' \\\n"
-            f"'net.ipv4.tcp_wmem = 4096 65536 67108864' \\\n"
-            f"'net.ipv4.tcp_mtu_probing = 1' \\\n"
-            f" >> /etc/sysctl.conf && \\\n"
-            f"mkdir -p /etc/security && \\\n"
-            f"printf '%s\\n' '* soft nofile 51200' '* hard nofile 51200' >> /etc/security/limits.conf\n"
-            f"\n"
-            f'ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]\n'
+        dockerfile_content = self._dockerfile_content(
+            docker_image,
+            AWG_QUICK_FORCE_USERSPACE_PATCH if base_proto in (self.AWG, self.AWG2, self.AWG3) else '',
         )
         self.ssh.run_sudo_command(f"mkdir -p {dockerfile_folder}")
         self.ssh.upload_file_sudo(dockerfile_content, f"{dockerfile_folder}/Dockerfile")
@@ -934,28 +893,10 @@ done
         # Step 5: Run container
         results.append("Starting container...")
         # Detect host IPv6 BEFORE creating the container: the netns
-        # disable_ipv6 flags are fixed at container creation time, so a
-        # container started without these sysctls can never add an IPv6
-        # address to a tunnel interface (ip -6 address add -> RTNETLINK
-        # Permission denied, and awg-quick then deletes the whole awg0).
+        # disable_ipv6 flags are fixed at container creation time, see
+        # _docker_run_cmd.
         ipv6_enabled = self._detect_server_ipv6()
-        ipv6_sysctls = (
-            '--sysctl="net.ipv6.conf.all.disable_ipv6=0" \\\n'
-            '--sysctl="net.ipv6.conf.default.disable_ipv6=0" \\\n'
-            if ipv6_enabled else ''
-        )
-        run_cmd = f"""docker run -d \
---restart always \
---privileged \
---cap-add=NET_ADMIN \
---cap-add=SYS_MODULE \
--p {port}:{port}/udp \
--v /lib/modules:/lib/modules \
---sysctl="net.ipv4.conf.all.src_valid_mark=1" \
-{ipv6_sysctls} --name {container_name} \
---ulimit nofile=51200:51200 \
---name {container_name} \
-{container_name}"""
+        run_cmd = self._docker_run_cmd(container_name, container_name, port, ipv6_enabled)
 
         out, err, code = self.ssh.run_sudo_command(run_cmd)
         if code != 0:
@@ -983,7 +924,7 @@ done
 
         # Step 7: Upload and run start script
         results.append("Starting AWG service...")
-        self._upload_start_script(protocol_type, port, awg_params)
+        self._upload_start_script(protocol_type)
         self._verify_interface_up(protocol_type)
         results.append("AWG service started")
 
@@ -1138,14 +1079,92 @@ H4 = {awg_params['transport_packet_magic_header']}
         if code != 0:
             raise RuntimeError(f"Failed to configure container: {err}")
 
-    def _upload_start_script(self, protocol_type, port, awg_params):
-        """Upload and execute the start script inside the container."""
-        container_name = self._container_name(protocol_type)
-        quick_bin = self._quick_binary(protocol_type)
-        config_path = self._config_path(protocol_type)
-        userspace_guard = self._userspace_guard(protocol_type)
+    # ===================== CONTAINER BUILDERS =====================
+    # Pure string builders (no SSH), pinned by golden fixtures in
+    # tests/test_awg_start_script.py so the generated container files can be
+    # changed deliberately, never by accident.
 
-        start_script = f"""#!/bin/bash
+    @staticmethod
+    def _dockerfile_content(docker_image, userspace_patch):
+        """Dockerfile of a protocol container - matches the original from
+        client/server_scripts/awg/. `userspace_patch` is the awg-quick sed
+        patch for AWG images or '' for the legacy one (it runs wg-quick
+        against the plain WireGuard module, which has nothing to fall back
+        to)."""
+        return (
+            f"FROM {docker_image}\n"
+            f"\n"
+            f'LABEL maintainer="AmneziaVPN"\n'
+            f"\n"
+            f"RUN apk add --no-cache bash curl dumb-init iptables\n"
+            f"RUN apk --update upgrade --no-cache\n"
+            f"\n"
+            f"{userspace_patch}"
+            f"\n"
+            f"RUN mkdir -p /opt/amnezia\n"
+            f'RUN echo "#!/bin/bash" > /opt/amnezia/start.sh && '
+            f'echo "sysctl -p /etc/sysctl.conf 2>/dev/null || true" >> /opt/amnezia/start.sh && '
+            f'echo "tail -f /dev/null" >> /opt/amnezia/start.sh\n'
+            f"RUN chmod a+x /opt/amnezia/start.sh\n"
+            f"\n"
+            f"# Network tuning (mirrors AmneziaVPN container tuning)\n"
+            f"RUN printf '%s\\n' \\\n"
+            f"'fs.file-max = 51200' \\\n"
+            f"'net.core.rmem_max = 67108864' \\\n"
+            f"'net.core.wmem_max = 67108864' \\\n"
+            f"'net.core.netdev_max_backlog = 250000' \\\n"
+            f"'net.core.somaxconn = 4096' \\\n"
+            f"'net.ipv4.tcp_syncookies = 1' \\\n"
+            f"'net.ipv4.tcp_tw_reuse = 1' \\\n"
+            f"'net.ipv4.tcp_fin_timeout = 30' \\\n"
+            f"'net.ipv4.tcp_keepalive_time = 1200' \\\n"
+            f"'net.ipv4.ip_local_port_range = 10000 65000' \\\n"
+            f"'net.ipv4.tcp_max_syn_backlog = 8192' \\\n"
+            f"'net.ipv4.tcp_max_tw_buckets = 5000' \\\n"
+            f"'net.ipv4.tcp_fastopen = 3' \\\n"
+            f"'net.ipv4.tcp_mem = 25600 51200 102400' \\\n"
+            f"'net.ipv4.tcp_rmem = 4096 87380 67108864' \\\n"
+            f"'net.ipv4.tcp_wmem = 4096 65536 67108864' \\\n"
+            f"'net.ipv4.tcp_mtu_probing = 1' \\\n"
+            f" >> /etc/sysctl.conf && \\\n"
+            f"mkdir -p /etc/security && \\\n"
+            f"printf '%s\\n' '* soft nofile 51200' '* hard nofile 51200' >> /etc/security/limits.conf\n"
+            f"\n"
+            f'ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]\n'
+        )
+
+    @staticmethod
+    def _docker_run_cmd(container_name, image, port, ipv6_enabled):
+        """`docker run` command line of a protocol container.
+
+        The IPv6 sysctls have to be passed at creation time: the netns
+        disable_ipv6 flags are fixed then, so a container started without
+        them can never add an IPv6 address to a tunnel interface (ip -6
+        address add -> RTNETLINK Permission denied, and awg-quick then
+        deletes the whole awg0).
+        """
+        ipv6_sysctls = (
+            '--sysctl="net.ipv6.conf.all.disable_ipv6=0" \\\n'
+            '--sysctl="net.ipv6.conf.default.disable_ipv6=0" \\\n'
+            if ipv6_enabled else ''
+        )
+        return f"""docker run -d \
+--restart always \
+--privileged \
+--cap-add=NET_ADMIN \
+--cap-add=SYS_MODULE \
+-p {port}:{port}/udp \
+-v /lib/modules:/lib/modules \
+--sysctl="net.ipv4.conf.all.src_valid_mark=1" \
+{ipv6_sysctls} --name {container_name} \
+--ulimit nofile=51200:51200 \
+{image}"""
+
+    @staticmethod
+    def _start_script_body(config_path, quick_bin, userspace_guard, subnet_default, bwlimits_path):
+        """/opt/amnezia/start.sh of a protocol container: brings the tunnel
+        up, sets up forwarding/NAT and applies per-peer bandwidth limits."""
+        return f"""#!/bin/bash
 echo "Container startup"
 
 # Apply container network tuning (see Dockerfile)
@@ -1154,7 +1173,7 @@ sysctl -p /etc/sysctl.conf 2>/dev/null || true
 # Read subnet from server config dynamically (IPv4 part of the Address line)
 SUBNET=$(grep '^Address' {config_path} | head -1 | cut -d'=' -f2 | cut -d',' -f1 | tr -d ' ')
 if [ -z "$SUBNET" ]; then
-  SUBNET={AWG_DEFAULTS['subnet_ip']}/{AWG_DEFAULTS['subnet_cidr']}
+  SUBNET={subnet_default}
 fi
 
 # IPv6 subnet, if the tunnel is dual-stack (second part of the Address line)
@@ -1195,24 +1214,39 @@ if [ -n "$SUBNET6" ] && command -v ip6tables >/dev/null 2>&1; then
 fi
 
 # Apply per-peer bandwidth limits (flat file written by the panel)
-if [ -f /opt/amnezia/awg/bwlimits ]; then
+if [ -f {bwlimits_path} ]; then
 (
-{self._tc_apply_body('/opt/amnezia/awg/bwlimits', config_path)}
+{AWGManager._tc_apply_body(bwlimits_path, config_path)}
 )
 fi
 
 tail -f /dev/null
 """
 
-        # Upload start script to container via SFTP + docker cp
-        self.ssh.upload_file(start_script, "/tmp/_amnz_start.sh")
+    def _render_start_script(self, protocol_type, config_path=None):
+        """start.sh for one protocol instance. `config_path` overrides the
+        default location - save_server_config passes the resolved path of an
+        existing container."""
+        return self._start_script_body(
+            config_path or self._config_path(protocol_type),
+            self._quick_binary(protocol_type),
+            self._userspace_guard(protocol_type),
+            f"{AWG_DEFAULTS['subnet_ip']}/{AWG_DEFAULTS['subnet_cidr']}",
+            self._bwlimits_path(),
+        )
+
+    def _write_start_script(self, protocol_type, config_path=None):
+        """Put a freshly rendered start.sh into the container (no restart)."""
+        container_name = self._container_name(protocol_type)
+        self.ssh.upload_file(self._render_start_script(protocol_type, config_path), "/tmp/_amnz_start.sh")
         self.ssh.run_sudo_command(f"docker cp /tmp/_amnz_start.sh {container_name}:/opt/amnezia/start.sh")
         self.ssh.run_sudo_command(f"docker exec {container_name} chmod +x /opt/amnezia/start.sh")
         self.ssh.run_command("rm -f /tmp/_amnz_start.sh")
 
-        # Restart to apply the start script
-        self.ssh.run_sudo_command(f"docker restart {container_name}")
-        import time
+    def _upload_start_script(self, protocol_type):
+        """Write the start script and restart the container to run it."""
+        self._write_start_script(protocol_type)
+        self.ssh.run_sudo_command(f"docker restart {self._container_name(protocol_type)}")
         time.sleep(5)
 
     def remove_container(self, protocol_type):
@@ -1420,70 +1454,7 @@ done < "$BW"
         self.ssh.run_command("rm -f /tmp/_amnz_edit_config.conf")
 
         # Regenerate start script so iptables rules pick up the (possibly changed) subnet
-        quick_bin = self._quick_binary(protocol_type)
-        userspace_guard = self._userspace_guard(protocol_type)
-        start_script = f"""#!/bin/bash
-echo "Container startup"
-
-# Apply container network tuning (see Dockerfile)
-sysctl -p /etc/sysctl.conf 2>/dev/null || true
-
-# Read subnet from server config dynamically (IPv4 part of the Address line)
-SUBNET=$(grep '^Address' {config_path} | head -1 | cut -d'=' -f2 | cut -d',' -f1 | tr -d ' ')
-if [ -z "$SUBNET" ]; then
-  SUBNET={AWG_DEFAULTS['subnet_ip']}/{AWG_DEFAULTS['subnet_cidr']}
-fi
-
-# IPv6 subnet, if the tunnel is dual-stack (second part of the Address line)
-SUBNET6=$(grep '^Address' {config_path} | head -1 | tr ',' '\n' | grep ':' | sed 's/^[^=]*=//' | tr -d ' ' | head -1)
-{userspace_guard}
-# kill daemons in case of restart
-{quick_bin} down {config_path} 2>/dev/null
-
-# start daemons if configured
-if [ -f {config_path} ]; then {quick_bin} up {config_path}; fi
-
-# Allow traffic on the TUN interface
-IFACE=$(basename {config_path} .conf)
-iptables -A INPUT -i $IFACE -j ACCEPT
-iptables -A FORWARD -i $IFACE -j ACCEPT
-iptables -A OUTPUT -o $IFACE -j ACCEPT
-
-# Allow forwarding traffic only from the VPN
-iptables -A FORWARD -i $IFACE -o eth0 -s $SUBNET -j ACCEPT
-iptables -A FORWARD -i $IFACE -o eth1 -s $SUBNET -j ACCEPT
-
-iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT
-
-iptables -t nat -A POSTROUTING -s $SUBNET -o eth0 -j MASQUERADE
-iptables -t nat -A POSTROUTING -s $SUBNET -o eth1 -j MASQUERADE
-
-# IPv6 forwarding + NAT66, only when the tunnel has an IPv6 subnet
-if [ -n "$SUBNET6" ] && command -v ip6tables >/dev/null 2>&1; then
-  sysctl -w net.ipv6.conf.all.forwarding=1 2>/dev/null || true
-  ip6tables -A INPUT -i $IFACE -j ACCEPT
-  ip6tables -A FORWARD -i $IFACE -j ACCEPT
-  ip6tables -A OUTPUT -o $IFACE -j ACCEPT
-  ip6tables -A FORWARD -i $IFACE -o eth0 -s $SUBNET6 -j ACCEPT
-  ip6tables -A FORWARD -i $IFACE -o eth1 -s $SUBNET6 -j ACCEPT
-  ip6tables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT
-  ip6tables -t nat -A POSTROUTING -s $SUBNET6 -o eth0 -j MASQUERADE
-  ip6tables -t nat -A POSTROUTING -s $SUBNET6 -o eth1 -j MASQUERADE
-fi
-
-# Apply per-peer bandwidth limits (flat file written by the panel)
-if [ -f /opt/amnezia/awg/bwlimits ]; then
-(
-{self._tc_apply_body('/opt/amnezia/awg/bwlimits', config_path)}
-)
-fi
-
-tail -f /dev/null
-"""
-        self.ssh.upload_file(start_script, "/tmp/_amnz_start.sh")
-        self.ssh.run_sudo_command(f"docker cp /tmp/_amnz_start.sh {container_name}:/opt/amnezia/start.sh")
-        self.ssh.run_sudo_command(f"docker exec {container_name} chmod +x /opt/amnezia/start.sh")
-        self.ssh.run_command("rm -f /tmp/_amnz_start.sh")
+        self._write_start_script(protocol_type, config_path)
 
         # Restart container to apply all changes (including port and interface changes)
         self.ssh.run_sudo_command(f"docker restart {container_name}")

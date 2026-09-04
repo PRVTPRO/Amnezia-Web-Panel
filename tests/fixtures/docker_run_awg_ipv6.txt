@@ -1,0 +1,3 @@
+docker run -d --restart always --privileged --cap-add=NET_ADMIN --cap-add=SYS_MODULE -p 55424:55424/udp -v /lib/modules:/lib/modules --sysctl="net.ipv4.conf.all.src_valid_mark=1" --sysctl="net.ipv6.conf.all.disable_ipv6=0" \
+--sysctl="net.ipv6.conf.default.disable_ipv6=0" \
+ --name amnezia-awg --ulimit nofile=51200:51200 --name amnezia-awg amnezia-awg
