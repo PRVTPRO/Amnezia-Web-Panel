@@ -2012,6 +2012,19 @@ class ProtocolRequest(BaseModel):
     protocol: str = 'awg'
 
 
+class WgEasyPreviewRequest(BaseModel):
+    web_port: int = 51821
+    password: str = ''
+    username: Optional[str] = 'admin'
+
+
+class WgEasyImportRequest(BaseModel):
+    web_port: int = 51821
+    password: str = ''
+    username: Optional[str] = 'admin'
+    client_ids: Optional[list] = None  # None = import all
+
+
 class AddConnectionRequest(BaseModel):
     protocol: str = 'awg'
     name: str = 'Connection'
@@ -3876,6 +3889,90 @@ async def api_host_tuning(request: Request, server_id: int):
         return info
     except Exception as e:
         logger.exception("Error getting host tuning info")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/wgeasy/preview', tags=["Protocols"])
+async def api_wgeasy_preview(request: Request, server_id: int, req: WgEasyPreviewRequest):
+    """Fetch the client list from a wg-easy / amnezia-wg-easy panel running on
+    this server (via its local web API over SSH). No secrets are returned."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        ssh = get_ssh(server)
+        ssh.connect()
+        try:
+            from managers.wgeasy_import import WgEasyImporter, WgEasyError, normalize_clients
+            importer = WgEasyImporter(ssh, web_port=req.web_port)
+            backup = importer.fetch_backup(req.password, req.username or 'admin')
+            clients = normalize_clients(backup)
+        finally:
+            ssh.disconnect()
+        return {
+            'status': 'success',
+            'release': backup.get('_release'),
+            'server_address': (backup.get('server') or {}).get('address', ''),
+            'clients': [{
+                'id': c['id'],
+                'name': c['name'],
+                'address': c['address'],
+                'enabled': c['enabled'],
+            } for c in clients],
+            'has_server_private_key': bool((backup.get('server') or {}).get('privateKey')),
+        }
+    except WgEasyError as e:
+        return JSONResponse({'error': str(e)}, status_code=400)
+    except Exception as e:
+        logger.exception("Error previewing wg-easy import")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/wgeasy/import', tags=["Protocols"])
+async def api_wgeasy_import(request: Request, server_id: int, req: WgEasyImportRequest):
+    """Migrate clients from a wg-easy panel on this server into a panel-managed
+    WireGuard instance, preserving keys/IPs/port so client configs keep working."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        if 'protocols' not in server:
+            server['protocols'] = {}
+        if 'wireguard' in server['protocols']:
+            return JSONResponse(
+                {'error': 'WireGuard protocol is already installed on this server. '
+                          'Remove it first if you want to re-import.'}, status_code=400)
+        ssh = get_ssh(server)
+        ssh.connect()
+        try:
+            from managers.wgeasy_import import WgEasyImporter, WgEasyError, run_import
+            importer = WgEasyImporter(ssh, web_port=req.web_port)
+            backup = importer.fetch_backup(req.password, req.username or 'admin')
+            result = run_import(ssh, backup, client_ids=req.client_ids)
+        finally:
+            ssh.disconnect()
+
+        server['protocols']['wireguard'] = {
+            'installed': True,
+            'port': result['port'],
+            'awg_params': {},
+            'base_protocol': 'wireguard',
+            'instance': protocol_instance('wireguard'),
+            'display_name': protocol_display_name('wireguard'),
+            'container_name': protocol_container_name('wireguard'),
+        }
+        save_data(data)
+        return result
+    except WgEasyError as e:
+        return JSONResponse({'error': str(e)}, status_code=400)
+    except Exception as e:
+        logger.exception("Error importing from wg-easy")
         return JSONResponse({'error': str(e)}, status_code=500)
 
 

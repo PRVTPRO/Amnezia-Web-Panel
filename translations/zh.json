@@ -450,5 +450,16 @@
   "backup_deleted": "备份已删除",
   "upload_backup": "上传",
   "uploading_backup": "正在上传...",
-  "backup_uploaded": "备份已上传"
+  "backup_uploaded": "备份已上传",
+  "wgeasy_import": "Import from wg-easy",
+  "wgeasy_import_title": "Import from wg-easy / amnezia-wg-easy",
+  "wgeasy_web_port": "wg-easy web UI port (on this server)",
+  "wgeasy_password": "wg-easy admin password",
+  "wgeasy_username": "Username (v15 only)",
+  "wgeasy_fetch": "Load clients",
+  "wgeasy_import_btn": "Import",
+  "wgeasy_import_warning": "The old wg-easy container will be stopped (not deleted). User configs keep working unchanged.",
+  "wgeasy_no_clients": "No clients selected",
+  "wgeasy_confirm": "Import selected clients? The old wg-easy container will be stopped.",
+  "wgeasy_importing": "Importing, this may take a few minutes..."
 }

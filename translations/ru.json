@@ -483,5 +483,16 @@
   "backup_deleted": "Бекап удалён",
   "upload_backup": "Загрузить",
   "uploading_backup": "Загрузка...",
-  "backup_uploaded": "Бекап загружен"
+  "backup_uploaded": "Бекап загружен",
+  "wgeasy_import": "Импорт из wg-easy",
+  "wgeasy_import_title": "Импорт из wg-easy / amnezia-wg-easy",
+  "wgeasy_web_port": "Порт веб-интерфейса wg-easy (на этом сервере)",
+  "wgeasy_password": "Пароль админки wg-easy",
+  "wgeasy_username": "Логин (только v15)",
+  "wgeasy_fetch": "Загрузить клиентов",
+  "wgeasy_import_btn": "Импортировать",
+  "wgeasy_import_warning": "Старый контейнер wg-easy будет остановлен (не удалён). Конфиги пользователей продолжат работать без изменений.",
+  "wgeasy_no_clients": "Не выбрано ни одного клиента",
+  "wgeasy_confirm": "Импортировать выбранных клиентов? Старый контейнер wg-easy будет остановлен.",
+  "wgeasy_importing": "Импортирую, это может занять несколько минут..."
 }

@@ -160,6 +160,9 @@
                 <button class="btn btn-secondary btn-sm" onclick="openHostTuning()" id="hostTuningBtn">
                     <span>📊</span> {{ _('host_tuning') }}
                 </button>
+                <button class="btn btn-secondary btn-sm" onclick="openWgEasyImport()" id="wgeasyImportBtn">
+                    <span>📥</span> {{ _('wgeasy_import') }}
+                </button>
             </div>
         </div>
     </div>
@@ -549,6 +552,52 @@
 </div>
 
 <!-- ===== Marketplace Modal ===== -->
+<!-- wg-easy Import Modal -->
+<div class="modal-backdrop" id="wgeasyImportModal">
+    <div class="modal" style="max-width: 640px;">
+        <div class="modal-header">
+            <h2 class="modal-title">📥 {{ _('wgeasy_import_title') }}</h2>
+            <button class="modal-close" onclick="closeModal('wgeasyImportModal')">×</button>
+        </div>
+        <div class="modal-body">
+            <div class="form-group">
+                <label class="form-label">{{ _('wgeasy_web_port') }}</label>
+                <input type="number" class="form-input" id="wgeasyWebPort" value="51821" min="1" max="65535">
+            </div>
+            <div class="form-group">
+                <label class="form-label">{{ _('wgeasy_password') }}</label>
+                <input type="password" class="form-input" id="wgeasyPassword" autocomplete="off">
+            </div>
+            <div class="form-group" id="wgeasyUsernameGroup" style="display:none;">
+                <label class="form-label">{{ _('wgeasy_username') }}</label>
+                <input type="text" class="form-input" id="wgeasyUsername" value="admin" autocomplete="off">
+            </div>
+            <div id="wgeasyPreviewArea" class="hidden" style="margin-top: var(--space-md);">
+                <div class="text-muted text-sm" id="wgeasyPreviewInfo" style="margin-bottom: var(--space-sm);"></div>
+                <div style="max-height: 260px; overflow-y: auto; border: 1px solid var(--border-color); border-radius: var(--radius-md);">
+                    <table style="width:100%; border-collapse: collapse; font-size: 0.85rem;">
+                        <thead>
+                            <tr style="position:sticky; top:0; background: var(--bg-secondary, #1f2937);">
+                                <th style="padding:6px 10px; text-align:left;"><input type="checkbox" id="wgeasyCheckAll" checked></th>
+                                <th style="padding:6px 10px; text-align:left;">{{ _('name') }}</th>
+                                <th style="padding:6px 10px; text-align:left;">IP</th>
+                                <th style="padding:6px 10px; text-align:left;">{{ _('status') }}</th>
+                            </tr>
+                        </thead>
+                        <tbody id="wgeasyClientsBody"></tbody>
+                    </table>
+                </div>
+                <div class="text-muted text-sm" style="margin-top: var(--space-sm);">⚠️ {{ _('wgeasy_import_warning') }}</div>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="closeModal('wgeasyImportModal')">{{ _('cancel') }}</button>
+            <button class="btn btn-primary" onclick="wgeasyPreview()" id="wgeasyPreviewBtn">{{ _('wgeasy_fetch') }}</button>
+            <button class="btn btn-primary hidden" onclick="wgeasyDoImport()" id="wgeasyImportGoBtn">{{ _('wgeasy_import_btn') }}</button>
+        </div>
+    </div>
+</div>
+
 <div class="modal-backdrop" id="marketplaceModal">
     <div class="modal" style="max-width: 980px;">
         <div class="modal-header">
@@ -1872,6 +1921,95 @@
         }
         if (!(t.containers || []).length) html += `<div style="opacity:.6;margin-top:8px;">No AWG containers</div>`;
         el.innerHTML = html;
+    }
+
+    // ---------- wg-easy import ----------
+    let wgeasyClients = [];
+
+    function openWgEasyImport() {
+        document.getElementById('wgeasyPreviewArea').classList.add('hidden');
+        document.getElementById('wgeasyImportGoBtn').classList.add('hidden');
+        document.getElementById('wgeasyPreviewBtn').classList.remove('hidden');
+        document.getElementById('wgeasyUsernameGroup').style.display = 'none';
+        wgeasyClients = [];
+        openModal('wgeasyImportModal');
+    }
+
+    async function wgeasyPreview() {
+        const btn = document.getElementById('wgeasyPreviewBtn');
+        const oldText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = '...';
+        try {
+            const body = {
+                web_port: parseInt(document.getElementById('wgeasyWebPort').value, 10) || 51821,
+                password: document.getElementById('wgeasyPassword').value,
+                username: document.getElementById('wgeasyUsername').value || 'admin',
+            };
+            const res = await apiCall(`/api/servers/${SERVER_ID}/wgeasy/preview`, 'POST', body);
+            wgeasyClients = res.clients || [];
+            if (res.release >= 15) {
+                document.getElementById('wgeasyUsernameGroup').style.display = '';
+            }
+            renderWgEasyPreview(res);
+            document.getElementById('wgeasyPreviewArea').classList.remove('hidden');
+            document.getElementById('wgeasyImportGoBtn').classList.remove('hidden');
+        } catch (err) {
+            showToast((_('error') || 'Error') + ': ' + err.message, 'error');
+        } finally {
+            btn.disabled = false;
+            btn.textContent = oldText;
+        }
+    }
+
+    function renderWgEasyPreview(res) {
+        const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+        const info = document.getElementById('wgeasyPreviewInfo');
+        info.textContent = `wg-easy API v${res.release} • ${esc(res.server_address)} • ${res.clients.length} ${_('clients') || 'clients'}`;
+        const tbody = document.getElementById('wgeasyClientsBody');
+        tbody.innerHTML = res.clients.map(c => `
+            <tr>
+                <td style="padding:5px 10px;"><input type="checkbox" class="wgeasy-client-check" data-id="${esc(c.id)}" checked></td>
+                <td style="padding:5px 10px;">${esc(c.name)}</td>
+                <td style="padding:5px 10px;" class="font-mono">${esc(c.address)}</td>
+                <td style="padding:5px 10px;">${c.enabled ? '🟢' : '⚫'}</td>
+            </tr>`).join('');
+        const checkAll = document.getElementById('wgeasyCheckAll');
+        checkAll.checked = true;
+        checkAll.onchange = () => {
+            tbody.querySelectorAll('.wgeasy-client-check').forEach(cb => cb.checked = checkAll.checked);
+        };
+    }
+
+    async function wgeasyDoImport() {
+        const ids = [...document.querySelectorAll('.wgeasy-client-check:checked')].map(cb => cb.dataset.id);
+        if (!ids.length) {
+            showToast(_('wgeasy_no_clients') || 'No clients selected', 'error');
+            return;
+        }
+        if (!confirm((_('wgeasy_confirm') || 'Import selected clients? The old wg-easy container will be stopped.'))) {
+            return;
+        }
+        const btn = document.getElementById('wgeasyImportGoBtn');
+        btn.disabled = true;
+        btn.textContent = '...';
+        showToast(_('wgeasy_importing') || 'Importing, this may take a few minutes...', 'info');
+        try {
+            const body = {
+                web_port: parseInt(document.getElementById('wgeasyWebPort').value, 10) || 51821,
+                password: document.getElementById('wgeasyPassword').value,
+                username: document.getElementById('wgeasyUsername').value || 'admin',
+                client_ids: ids,
+            };
+            const res = await apiCall(`/api/servers/${SERVER_ID}/wgeasy/import`, 'POST', body);
+            showToast(`${_('success') || 'Done'}: ${res.imported} ↑ / ${res.disabled} ⏸ • :${res.port} ${res.subnet}`, 'success');
+            closeModal('wgeasyImportModal');
+            setTimeout(() => location.reload(), 1500);
+        } catch (err) {
+            showToast((_('error') || 'Error') + ': ' + err.message, 'error');
+            btn.disabled = false;
+            btn.textContent = _('wgeasy_import_btn');
+        }
     }
 
     // Save server config changes
