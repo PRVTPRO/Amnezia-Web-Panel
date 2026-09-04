@@ -1320,7 +1320,7 @@ async def _handle_pending_input(api: TelegramAPI, msg: dict, load_data_fn: Calla
 
     if state.get("kind") == "user_add_client_name":
         panel_user = _find_user(load_data_fn, str(msg["from"]["id"]), msg["from"].get("username"))
-        if not panel_user or _is_admin(panel_user):
+        if not panel_user:
             _pending_inputs.pop(key, None)
             await api.send_message(chat_id, f"❌ {_tt(lang, 'access_denied')}")
             return True

@@ -358,6 +358,25 @@ class TestUserAddClientNameInputState(unittest.IsolatedAsyncioTestCase):
         call_args = self.mock_service.create_user_connection.call_args
         self.assertEqual(call_args[0][0], 'user-1')
 
+    async def test_input_state_creates_connection_for_admin(self):
+        tg_bot._pending_inputs['222:222'] = {
+            'kind': 'user_add_client_name',
+            'sid': 0,
+            'proto': 'awg',
+            'ts': 0,
+        }
+        msg = {'chat': {'id': 222}, 'from': {'id': 222, 'first_name': 'Admin'}, 'text': 'AdminPhone'}
+
+        handled = await tg_bot._handle_pending_input(
+            self.api, msg, self.load_data, None, lambda c: 'vpn://x', self.mock_service
+        )
+
+        self.assertTrue(handled)
+        self.mock_service.create_user_connection.assert_called_once()
+        call_args = self.mock_service.create_user_connection.call_args
+        self.assertEqual(call_args[0][0], 'user-2')
+        self.assertEqual(call_args[0][3], 'AdminPhone')
+
     async def test_input_state_rejects_unlinked_user(self):
         tg_bot._pending_inputs['999:999'] = {
             'kind': 'user_add_client_name',
