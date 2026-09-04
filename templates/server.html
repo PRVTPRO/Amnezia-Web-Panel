@@ -1965,7 +1965,10 @@
     function renderWgEasyPreview(res) {
         const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
         const info = document.getElementById('wgeasyPreviewInfo');
-        info.textContent = `wg-easy API v${res.release} • ${esc(res.server_address)} • ${res.clients.length} ${_('clients') || 'clients'}`;
+        const targetLabel = res.recommended_target === 'awg2'
+            ? ('{{ _("wgeasy_target_awg") }}')
+            : ('{{ _("wgeasy_target_wg") }}');
+        info.textContent = `wg-easy API v${res.release} • ${esc(res.server_address)} • :${res.listen_port} • ${res.clients.length} ${_('clients') || 'clients'} → ${targetLabel}`;
         const tbody = document.getElementById('wgeasyClientsBody');
         tbody.innerHTML = res.clients.map(c => `
             <tr>

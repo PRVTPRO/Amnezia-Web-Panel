@@ -2023,6 +2023,7 @@ class WgEasyImportRequest(BaseModel):
     password: str = ''
     username: Optional[str] = 'admin'
     client_ids: Optional[list] = None  # None = import all
+    target: str = 'auto'  # auto | wireguard | awg2
 
 
 class AddConnectionRequest(BaseModel):
@@ -3910,12 +3911,16 @@ async def api_wgeasy_preview(request: Request, server_id: int, req: WgEasyPrevie
             importer = WgEasyImporter(ssh, web_port=req.web_port)
             backup = importer.fetch_backup(req.password, req.username or 'admin')
             clients = normalize_clients(backup)
+            _, listen_port, _, obfuscation = importer.detect_source()
         finally:
             ssh.disconnect()
         return {
             'status': 'success',
             'release': backup.get('_release'),
             'server_address': (backup.get('server') or {}).get('address', ''),
+            'listen_port': int(listen_port),
+            'obfuscation': bool(obfuscation),
+            'recommended_target': 'awg2' if obfuscation else 'wireguard',
             'clients': [{
                 'id': c['id'],
                 'name': c['name'],
@@ -3944,28 +3949,31 @@ async def api_wgeasy_import(request: Request, server_id: int, req: WgEasyImportR
         server = data['servers'][server_id]
         if 'protocols' not in server:
             server['protocols'] = {}
-        if 'wireguard' in server['protocols']:
-            return JSONResponse(
-                {'error': 'WireGuard protocol is already installed on this server. '
-                          'Remove it first if you want to re-import.'}, status_code=400)
         ssh = get_ssh(server)
         ssh.connect()
         try:
             from managers.wgeasy_import import WgEasyImporter, WgEasyError, run_import
             importer = WgEasyImporter(ssh, web_port=req.web_port)
             backup = importer.fetch_backup(req.password, req.username or 'admin')
-            result = run_import(ssh, backup, client_ids=req.client_ids)
+            _, _, _, obfuscation = importer.detect_source()
+            target = req.target if req.target in ('wireguard', 'awg2') else (
+                'awg2' if obfuscation else 'wireguard')
+            if target in server['protocols']:
+                return JSONResponse(
+                    {'error': f'Protocol {target} is already installed on this server. '
+                              'Remove it first if you want to re-import.'}, status_code=400)
+            result = run_import(ssh, backup, client_ids=req.client_ids, target=target)
         finally:
             ssh.disconnect()
 
-        server['protocols']['wireguard'] = {
+        server['protocols'][target] = {
             'installed': True,
             'port': result['port'],
             'awg_params': {},
-            'base_protocol': 'wireguard',
-            'instance': protocol_instance('wireguard'),
-            'display_name': protocol_display_name('wireguard'),
-            'container_name': protocol_container_name('wireguard'),
+            'base_protocol': target,
+            'instance': protocol_instance(target),
+            'display_name': protocol_display_name(target),
+            'container_name': protocol_container_name(target),
         }
         save_data(data)
         return result

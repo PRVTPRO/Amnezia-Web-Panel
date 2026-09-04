@@ -177,6 +177,32 @@ class WgEasyImporter:
             'clients': result_clients,
         }
 
+    def read_source_config(self, container_name):
+        """Read the source wg0.conf from the wg-easy container."""
+        out, err, code = self.ssh.run_sudo_command(
+            f"docker exec -i {_sh(container_name)} cat /etc/wireguard/wg0.conf"
+        )
+        if code != 0 or '[Interface]' not in out:
+            raise WgEasyError(f"Cannot read wg0.conf from container {container_name}: {err.strip()}")
+        return out
+
+    def detect_source(self):
+        """Locate the source wg-easy container. Returns
+        (container_name, listen_port, config_text, obfuscation_dict)."""
+        containers = self.find_containers()
+        for prefer_running in (True, False):
+            for c in containers:
+                if prefer_running and not c['running']:
+                    continue
+                if not c['udp_port']:
+                    continue
+                try:
+                    conf = self.read_source_config(c['name'])
+                except WgEasyError:
+                    continue
+                return c['name'], c['udp_port'], conf, parse_obfuscation(conf)
+        raise WgEasyError("No wg-easy / amnezia-wg-easy container found on this server")
+
     # ---------- public ----------
 
     def fetch_backup(self, password, username='admin'):
@@ -206,6 +232,30 @@ def _conf_value(config_text, key, section=None):
     return ''
 
 
+OBFUSCATION_KEYS = ('Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'S3', 'S4',
+                    'H1', 'H2', 'H3', 'H4')
+
+
+def parse_obfuscation(config_text):
+    """Extract AmneziaWG obfuscation params (Jc/../H4) from the [Interface]
+    section of a source wg0.conf. Returns an ordered dict, empty for plain
+    WireGuard sources."""
+    result = {}
+    in_interface = False
+    for line in config_text.splitlines():
+        s = line.strip()
+        if s.startswith('['):
+            in_interface = s.strip('[]').lower() == 'interface'
+            continue
+        if not in_interface or '=' not in s:
+            continue
+        key, _, value = s.partition('=')
+        key, value = key.strip(), value.strip()
+        if key in OBFUSCATION_KEYS and value:
+            result[key] = value
+    return result
+
+
 def normalize_clients(backup):
     """Return a list of clients sorted by IPv4 address.
 
@@ -232,8 +282,9 @@ def normalize_clients(backup):
     return clients
 
 
-def build_server_config(server_info, clients, listen_port):
-    """Build wg0.conf content for the imported instance (enabled clients only)."""
+def build_server_config(server_info, clients, listen_port, obfuscation=None):
+    """Build wg0.conf/awg0.conf content for the imported instance (enabled
+    clients only). `obfuscation` carries Jc/../H4 lines for AWG targets."""
     address = server_info.get('address') or ''
     if '/' not in address:
         address += '/24'
@@ -242,8 +293,11 @@ def build_server_config(server_info, clients, listen_port):
         f"PrivateKey = {server_info.get('privateKey', '')}",
         f"Address = {address}",
         f"ListenPort = {listen_port}",
-        '',
     ]
+    for key in OBFUSCATION_KEYS:
+        if obfuscation and obfuscation.get(key):
+            lines.append(f"{key} = {obfuscation[key]}")
+    lines.append('')
     for c in clients:
         if not c['enabled']:
             continue
@@ -277,11 +331,14 @@ def build_clients_table(clients):
     return table
 
 
-def run_import(ssh, backup, client_ids=None):
-    """Replace wg-easy on this server with a panel-managed WireGuard instance.
+def run_import(ssh, backup, client_ids=None, target='auto'):
+    """Replace wg-easy on this server with a panel-managed instance.
 
-    Steps: stop the old wg-easy container -> install the panel WireGuard
-    protocol on the same port -> overwrite identity (server key, subnet,
+    target='auto': AWG 2.0 when the source config has obfuscation params
+    (w0rng/amnezia-wg-easy), plain WireGuard otherwise.
+
+    Steps: stop the old wg-easy container -> install the panel protocol on
+    the same port -> overwrite identity (server key, subnet, obfuscation,
     peers, clientsTable) -> restart. Returns a summary dict.
     """
     importer = WgEasyImporter(ssh)
@@ -302,23 +359,13 @@ def run_import(ssh, backup, client_ids=None):
     subnet_ip = address.split('/')[0]
     subnet_cidr = address.split('/')[1] if '/' in address else '24'
 
-    # Detect listen port from the source container's published UDP port
-    containers = importer.find_containers()
-    listen_port = None
-    source_container = None
-    for c in containers:
-        if c['running'] and c['udp_port']:
-            listen_port = c['udp_port']
-            source_container = c['name']
-            break
-    if not listen_port:
-        for c in containers:
-            if c['udp_port']:
-                listen_port = c['udp_port']
-                source_container = source_container or c['name']
-                break
-    if not listen_port:
-        raise WgEasyError("Could not detect the wg-easy UDP listen port from its container")
+    # Detect source container, listen port and obfuscation from its config
+    source_container, listen_port, source_conf, obfuscation = importer.detect_source()
+    if target == 'auto':
+        target = 'awg2' if obfuscation else 'wireguard'
+    if target == 'awg2' and not obfuscation:
+        raise WgEasyError("Target AWG 2.0 requested, but the source has no "
+                          "obfuscation params — plain WireGuard target fits better")
 
     # Keep a server-side backup copy before touching anything
     stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
@@ -331,36 +378,57 @@ def run_import(ssh, backup, client_ids=None):
     if source_container:
         ssh.run_sudo_command(f"docker stop {_sh(source_container)}")
 
-    # Install the panel-managed WireGuard instance on the same port
-    mgr = WireGuardManager(ssh)
-    mgr.install_protocol(port=int(listen_port))
+    config = build_server_config(server_info, clients, listen_port,
+                                 obfuscation if target == 'awg2' else None)
+    table = build_clients_table(clients)
 
     try:
+        if target == 'awg2':
+            from managers.awg_manager import AWGManager
+            mgr = AWGManager(ssh)
+            mgr.install_protocol('awg2', port=int(listen_port))
+            container = mgr._container_name('awg2')
+            config_path = mgr._config_path('awg2')
+            key_dir = '/opt/amnezia/awg'
+            clients_table_path = mgr._clients_table_path()
+        else:
+            mgr = WireGuardManager(ssh)
+            mgr.install_protocol(port=int(listen_port))
+            container = mgr.CONTAINER_NAME
+            config_path = mgr.CONFIG_PATH
+            key_dir = mgr.KEY_DIR
+            clients_table_path = mgr.CLIENTS_TABLE_PATH
+            config = WireGuardManager._sanitize_server_config(config)
+
         # Overwrite server identity and peers
-        config = build_server_config(server_info, clients, listen_port)
-        config = WireGuardManager._sanitize_server_config(config)
         ssh.upload_file(config, "/tmp/_wgeasy_wg0.conf")
-        ssh.run_sudo_command(f"docker cp /tmp/_wgeasy_wg0.conf {mgr.CONTAINER_NAME}:{mgr.CONFIG_PATH}")
+        ssh.run_sudo_command(f"docker cp /tmp/_wgeasy_wg0.conf {container}:{config_path}")
         ssh.run_command("rm -f /tmp/_wgeasy_wg0.conf")
 
         ssh.upload_file(server_info['privateKey'] + '\n', "/tmp/_wgeasy_srvkey")
         ssh.run_sudo_command(
-            f"docker cp /tmp/_wgeasy_srvkey {mgr.CONTAINER_NAME}:{mgr.KEY_DIR}/wireguard_server_private_key.key")
+            f"docker cp /tmp/_wgeasy_srvkey {container}:{key_dir}/wireguard_server_private_key.key")
         if server_info.get('publicKey'):
             ssh.upload_file(server_info['publicKey'] + '\n', "/tmp/_wgeasy_srvpub")
             ssh.run_sudo_command(
-                f"docker cp /tmp/_wgeasy_srvpub {mgr.CONTAINER_NAME}:{mgr.KEY_DIR}/wireguard_server_public_key.key")
+                f"docker cp /tmp/_wgeasy_srvpub {container}:{key_dir}/wireguard_server_public_key.key")
         ssh.run_command("rm -f /tmp/_wgeasy_srvkey /tmp/_wgeasy_srvpub")
 
         # Clients table (all clients incl. disabled)
-        table = build_clients_table(clients)
         ssh.upload_file(json.dumps(table, indent=2), "/tmp/_wgeasy_clients.json")
         ssh.run_sudo_command(
-            f"docker cp /tmp/_wgeasy_clients.json {mgr.CONTAINER_NAME}:{mgr.CLIENTS_TABLE_PATH}")
+            f"docker cp /tmp/_wgeasy_clients.json {container}:{clients_table_path}")
         ssh.run_command("rm -f /tmp/_wgeasy_clients.json")
 
-        # Rewrite the start script so NAT rules match the imported subnet
-        mgr._upload_start_script(int(listen_port), subnet_ip=subnet_ip, subnet_cidr=subnet_cidr)
+        if target == 'awg2':
+            # The AWG start script reads the subnet from the config at
+            # runtime, so a plain restart applies the imported identity.
+            ssh.run_sudo_command(f"docker restart {container}")
+            import time
+            time.sleep(5)
+        else:
+            # Rewrite the start script so NAT rules match the imported subnet
+            mgr._upload_start_script(int(listen_port), subnet_ip=subnet_ip, subnet_cidr=subnet_cidr)
     except Exception:
         # Best effort: bring the old container back up on failure
         if source_container:
@@ -369,6 +437,8 @@ def run_import(ssh, backup, client_ids=None):
 
     return {
         'status': 'success',
+        'target': target,
+        'obfuscation': bool(obfuscation),
         'imported': len([c for c in clients if c['enabled']]),
         'disabled': len([c for c in clients if not c['enabled']]),
         'port': int(listen_port),

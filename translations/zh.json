@@ -461,5 +461,7 @@
   "wgeasy_import_warning": "The old wg-easy container will be stopped (not deleted). User configs keep working unchanged.",
   "wgeasy_no_clients": "No clients selected",
   "wgeasy_confirm": "Import selected clients? The old wg-easy container will be stopped.",
-  "wgeasy_importing": "Importing, this may take a few minutes..."
+  "wgeasy_importing": "Importing, this may take a few minutes...",
+  "wgeasy_target_wg": "target: WireGuard (no obfuscation)",
+  "wgeasy_target_awg": "obfuscation detected → target: AmneziaWG 2.0"
 }
