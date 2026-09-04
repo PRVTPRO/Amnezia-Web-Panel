@@ -867,10 +867,14 @@
         </div>
         <input type="hidden" id="backupProto" value="" />
         <div class="form-hint" style="margin-bottom:var(--space-md);">{{ _('backup_desc') }}</div>
-        <div class="config-actions" style="margin-bottom:var(--space-md);">
-            <button class="btn btn-primary btn-sm" onclick="createProtocolBackup()" id="createBackupBtn" style="flex:1">
+        <div class="backup-toolbar">
+            <button class="btn btn-primary btn-sm" onclick="createProtocolBackup()" id="createBackupBtn">
                 {{ _('create_backup') }}
             </button>
+            <button class="btn btn-secondary btn-sm" onclick="document.getElementById('backupUploadFile').click()" id="uploadBackupBtn">
+                {{ _('upload_backup') }}
+            </button>
+            <input type="file" id="backupUploadFile" class="hidden" accept=".tar.gz,application/gzip,application/x-gzip">
             <button class="btn btn-secondary btn-sm" onclick="loadProtocolBackups()">{{ _('refresh') }}</button>
         </div>
         <div id="backupLoading" class="form-hint hidden">{{ _('loading') }}</div>
@@ -879,7 +883,7 @@
             <div class="empty-title">{{ _('no_backups') }}</div>
             <div class="empty-desc">{{ _('no_backups_desc') }}</div>
         </div>
-        <div id="backupList" style="display:flex; flex-direction:column; gap:var(--space-sm);"></div>
+        <div id="backupList" class="backup-list"></div>
     </div>
 </div>
 
@@ -2151,6 +2155,17 @@
         await loadProtocolBackups();
     }
 
+    document.getElementById('backupList').addEventListener('click', function (event) {
+        const btn = event.target.closest('[data-backup-action]');
+        if (!btn || !document.getElementById('backupList').contains(btn)) return;
+        const proto = btn.getAttribute('data-proto');
+        const filename = btn.getAttribute('data-filename');
+        const action = btn.getAttribute('data-backup-action');
+        if (action === 'restore') restoreProtocolBackup(proto, filename);
+        else if (action === 'download') downloadProtocolBackup(proto, filename);
+        else if (action === 'delete') deleteProtocolBackup(proto, filename);
+    });
+
     async function loadProtocolBackups() {
         const proto = document.getElementById('backupProto').value;
         const list = document.getElementById('backupList');
@@ -2167,12 +2182,16 @@
                 return;
             }
             list.innerHTML = backups.map(b => `
-                <div class="protocol-info-item" style="align-items:center; gap:var(--space-sm);">
-                    <div style="min-width:0; flex:1;">
-                        <div class="protocol-info-value" style="word-break:break-all;">${b.name}</div>
-                        <div class="protocol-info-label">${formatBytes(b.size)} • ${formatBackupTime(b.mtime)}</div>
+                <div class="backup-row">
+                    <div class="backup-row-meta">
+                        <div class="backup-row-name" title="${escapeHtml(b.name)}">${escapeHtml(b.name)}</div>
+                        <div class="backup-row-info">${formatBytes(b.size)} · ${formatBackupTime(b.mtime)}</div>
                     </div>
-                    <button class="btn btn-secondary btn-sm" onclick="downloadProtocolBackup('${proto}', '${b.name}')">${_('download')}</button>
+                    <div class="backup-row-actions">
+                        <button type="button" class="btn btn-secondary btn-sm" data-backup-action="restore" data-proto="${escapeHtml(proto)}" data-filename="${escapeHtml(b.name)}">${_('restore')}</button>
+                        <button type="button" class="btn btn-secondary btn-sm" data-backup-action="download" data-proto="${escapeHtml(proto)}" data-filename="${escapeHtml(b.name)}">${_('download')}</button>
+                        <button type="button" class="btn btn-danger btn-sm" data-backup-action="delete" data-proto="${escapeHtml(proto)}" data-filename="${escapeHtml(b.name)}">${_('delete')}</button>
+                    </div>
                 </div>
             `).join('');
         } catch (err) {
@@ -2191,6 +2210,42 @@
         try {
             await apiCall(`/api/servers/${SERVER_ID}/backups/create`, 'POST', { protocol: proto });
             showToast(_('backup_created'), 'success');
+            await loadProtocolBackups();
+        } catch (err) {
+            showToast(_('error') + ': ' + err.message, 'error');
+        } finally {
+            btn.disabled = false;
+            btn.textContent = oldText;
+        }
+    }
+
+    document.getElementById('backupUploadFile').addEventListener('change', uploadProtocolBackup);
+
+    async function uploadProtocolBackup(event) {
+        const file = event.target.files && event.target.files[0];
+        event.target.value = '';
+        if (!file) return;
+        const proto = document.getElementById('backupProto').value;
+        const btn = document.getElementById('uploadBackupBtn');
+        const oldText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = _('uploading_backup');
+        try {
+            const body = new FormData();
+            body.append('protocol', proto);
+            body.append('file', file);
+            const res = await fetch(`/api/servers/${SERVER_ID}/backups/upload`, {
+                method: 'POST',
+                body
+            });
+            let data = {};
+            try {
+                data = await res.json();
+            } catch (_) {}
+            if (!res.ok) {
+                throw new Error(data.error || 'Upload failed');
+            }
+            showToast(_('backup_uploaded'), 'success');
             await loadProtocolBackups();
         } catch (err) {
             showToast(_('error') + ': ' + err.message, 'error');
@@ -2224,6 +2279,37 @@
             a.click();
             a.remove();
             URL.revokeObjectURL(url);
+        } catch (err) {
+            showToast(_('error') + ': ' + err.message, 'error');
+        }
+    }
+
+    async function restoreProtocolBackup(proto, filename) {
+        if (!confirm(_('restore_confirm_protocol'))) return;
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/backups/restore`, 'POST', {
+                protocol: proto,
+                filename: filename
+            });
+            showToast(_('restore_success'), 'success');
+            await loadProtocolBackups();
+            if (typeof loadConnections === 'function') {
+                await loadConnections();
+            }
+        } catch (err) {
+            showToast(_('error') + ': ' + err.message, 'error');
+        }
+    }
+
+    async function deleteProtocolBackup(proto, filename) {
+        if (!confirm(_('delete_backup_confirm'))) return;
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/backups/delete`, 'POST', {
+                protocol: proto,
+                filename: filename
+            });
+            showToast(_('backup_deleted'), 'success');
+            await loadProtocolBackups();
         } catch (err) {
             showToast(_('error') + ': ' + err.message, 'error');
         }

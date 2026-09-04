@@ -442,5 +442,13 @@
   "warnings_cleared": "Avertissements effacés",
   "max_speed": "Vitesse max (Mbps)",
   "speed_limit_unlim": "Limite de vitesse (0 = illimité)",
-  "port_in_use_by": "Le port {port} est déjà utilisé par {owner}. Choisissez un autre port."
+  "port_in_use_by": "Le port {port} est déjà utilisé par {owner}. Choisissez un autre port.",
+  "restore": "Restaurer",
+  "restore_confirm_protocol": "Êtes-vous sûr ? La configuration actuelle du protocole sera écrasée par cette sauvegarde.",
+  "restore_success": "Sauvegarde restaurée avec succès !",
+  "delete_backup_confirm": "Supprimer cette sauvegarde du serveur ? Cette action est irréversible.",
+  "backup_deleted": "Sauvegarde supprimée",
+  "upload_backup": "Téléverser",
+  "uploading_backup": "Téléversement...",
+  "backup_uploaded": "Sauvegarde téléversée"
 }

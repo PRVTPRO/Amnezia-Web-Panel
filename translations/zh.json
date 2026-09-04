@@ -442,5 +442,13 @@
   "warnings_cleared": "警告已清除",
   "max_speed": "最大速度 (Mbps)",
   "speed_limit_unlim": "速度限制（0 = 不限）",
-  "port_in_use_by": "端口 {port} 已被 {owner} 占用，请选择其他端口。"
+  "port_in_use_by": "端口 {port} 已被 {owner} 占用，请选择其他端口。",
+  "restore": "恢复",
+  "restore_confirm_protocol": "您确定吗？当前协议配置将被此备份覆盖。",
+  "restore_success": "备份恢复成功！",
+  "delete_backup_confirm": "从服务器删除此备份？此操作无法撤销。",
+  "backup_deleted": "备份已删除",
+  "upload_backup": "上传",
+  "uploading_backup": "正在上传...",
+  "backup_uploaded": "备份已上传"
 }

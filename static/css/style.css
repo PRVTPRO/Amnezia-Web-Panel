@@ -1223,6 +1223,76 @@ a:hover {
     font-family: 'SF Mono', 'Fira Code', monospace;
 }
 
+/* ===== Protocol backup list ===== */
+.backup-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+    max-height: min(420px, 52vh);
+    overflow-y: auto;
+    margin-right: -4px;
+    padding-right: 4px;
+}
+
+.backup-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-sm);
+    margin-bottom: var(--space-md);
+}
+
+.backup-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-md);
+    padding: 10px 12px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    text-align: left;
+}
+
+.backup-row-meta {
+    min-width: 0;
+    flex: 1;
+}
+
+.backup-row-name {
+    font-size: 0.82rem;
+    font-weight: 500;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.backup-row-info {
+    margin-top: 2px;
+    font-size: 0.72rem;
+    color: var(--text-muted);
+}
+
+.backup-row-actions {
+    display: flex;
+    flex-shrink: 0;
+    gap: var(--space-xs);
+}
+
+@media (max-width: 520px) {
+    .backup-row {
+        flex-wrap: wrap;
+        align-items: flex-start;
+    }
+
+    .backup-row-actions {
+        width: 100%;
+        justify-content: flex-end;
+    }
+}
+
 /* ===== Clients Table ===== */
 .clients-section {
     margin-top: var(--space-xl);

@@ -28,7 +28,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse, Stre
 from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from fastapi import FastAPI, Request, Query, UploadFile, File
+from fastapi import FastAPI, Request, Query, UploadFile, File, Form
 from starlette.middleware.sessions import SessionMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict
@@ -3670,6 +3670,116 @@ async def api_protocol_backup_download(request: Request, server_id: int, req: Ba
             except Exception:
                 pass
         return JSONResponse({'error': str(e)}, status_code=500)
+    finally:
+        if ssh:
+            ssh.disconnect()
+
+
+@app.post('/api/servers/{server_id}/backups/upload', tags=["Protocols"])
+async def api_protocol_backup_upload(
+    request: Request,
+    server_id: int,
+    protocol: str = Form(...),
+    file: UploadFile = File(...),
+):
+    """Upload a protocol backup archive onto the remote server."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if not is_valid_protocol(protocol):
+        return JSONResponse({'error': 'Unknown protocol'}, status_code=400)
+    ssh = None
+    tmp_path = None
+    try:
+        data = load_data()
+        if server_id < 0 or server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        content = await file.read(BackupManager.MAX_UPLOAD_BYTES + 1)
+        if not content:
+            return JSONResponse({'error': 'Empty file'}, status_code=400)
+        if len(content) > BackupManager.MAX_UPLOAD_BYTES:
+            return JSONResponse({'error': 'Backup file is too large'}, status_code=413)
+        fd, tmp_path = tempfile.mkstemp(prefix='amnezia-backup-upload-', suffix='.tar.gz')
+        os.write(fd, content)
+        os.close(fd)
+        fd = None
+        server = data['servers'][server_id]
+        ssh = get_ssh(server)
+        ssh.connect()
+        result = BackupManager(ssh).upload_backup(protocol, file.filename, tmp_path)
+        if result.get('status') == 'error':
+            return JSONResponse({'error': result.get('message', 'Failed to upload backup')}, status_code=400)
+        return result
+    except Exception as e:
+        logger.exception("Error uploading protocol backup")
+        return JSONResponse({'error': 'Internal server error'}, status_code=500)
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+        if ssh:
+            ssh.disconnect()
+
+
+@app.post('/api/servers/{server_id}/backups/restore', tags=["Protocols"])
+async def api_protocol_backup_restore(request: Request, server_id: int, req: BackupDownloadRequest):
+    """Restore a protocol from a backup archive on the remote server."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if not is_valid_protocol(req.protocol):
+        return JSONResponse({'error': 'Unknown protocol'}, status_code=400)
+    filename = BackupManager.safe_filename(req.filename)
+    if not filename:
+        return JSONResponse({'error': 'Invalid backup filename'}, status_code=400)
+    ssh = None
+    try:
+        data = load_data()
+        if server_id < 0 or server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        container = protocol_container_name(req.protocol)
+        if not container:
+            return JSONResponse({'error': 'Unknown protocol'}, status_code=400)
+        ssh = get_ssh(server)
+        ssh.connect()
+        result = BackupManager(ssh).restore_backup(req.protocol, container, filename)
+        if result.get('status') == 'error':
+            return JSONResponse({'error': result.get('message', 'Failed to restore backup')}, status_code=500)
+        return result
+    except Exception as e:
+        logger.exception("Error restoring protocol backup")
+        return JSONResponse({'error': 'Internal server error'}, status_code=500)
+    finally:
+        if ssh:
+            ssh.disconnect()
+
+
+@app.post('/api/servers/{server_id}/backups/delete', tags=["Protocols"])
+async def api_protocol_backup_delete(request: Request, server_id: int, req: BackupDownloadRequest):
+    """Delete one protocol backup archive on the remote server."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if not is_valid_protocol(req.protocol):
+        return JSONResponse({'error': 'Unknown protocol'}, status_code=400)
+    filename = BackupManager.safe_filename(req.filename)
+    if not filename:
+        return JSONResponse({'error': 'Invalid backup filename'}, status_code=400)
+    ssh = None
+    try:
+        data = load_data()
+        if server_id < 0 or server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        ssh = get_ssh(server)
+        ssh.connect()
+        result = BackupManager(ssh).delete_backup(req.protocol, filename)
+        if result.get('status') == 'error':
+            return JSONResponse({'error': result.get('message', 'Failed to delete backup')}, status_code=404)
+        return result
+    except Exception as e:
+        logger.exception("Error deleting protocol backup")
+        return JSONResponse({'error': 'Internal server error'}, status_code=500)
     finally:
         if ssh:
             ssh.disconnect()

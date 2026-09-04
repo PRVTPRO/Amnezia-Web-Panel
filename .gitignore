@@ -35,3 +35,5 @@ data.json
 # IDEs
 .vscode/
 .idea/
+.worktrees/
+docs/
