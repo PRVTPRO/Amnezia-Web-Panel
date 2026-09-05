@@ -450,5 +450,8 @@
   "backup_deleted": "备份已删除",
   "upload_backup": "上传",
   "uploading_backup": "正在上传...",
-  "backup_uploaded": "备份已上传"
+  "backup_uploaded": "备份已上传",
+  "rename_instance": "Rename instance",
+  "instance_name": "Instance name",
+  "rename_instance_hint": "Leave empty to restore the default name."
 }

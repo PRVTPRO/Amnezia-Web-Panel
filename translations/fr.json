@@ -450,5 +450,8 @@
   "backup_deleted": "Sauvegarde supprimée",
   "upload_backup": "Téléverser",
   "uploading_backup": "Téléversement...",
-  "backup_uploaded": "Sauvegarde téléversée"
+  "backup_uploaded": "Sauvegarde téléversée",
+  "rename_instance": "Rename instance",
+  "instance_name": "Instance name",
+  "rename_instance_hint": "Leave empty to restore the default name."
 }

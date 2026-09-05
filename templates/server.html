@@ -187,7 +187,7 @@
          marketplace but never gets a tile here. -->
     <div class="card card-hover protocol-card protocol-awg" id="proto-awg3">
         <div class="protocol-card-head">
-            <div class="protocol-icon">🛡</div>
+            <div class="protocol-icon"><img src="/static/img/amnezia.svg" alt="AmneziaWG"></div>
             <div class="protocol-name">AmneziaWG 3.1 <span style="font-size:0.65rem; background:var(--accent); color:#fff; padding:2px 6px; border-radius:8px; vertical-align:middle;">NEW</span></div>
         </div>
         <div class="flex gap-sm protocol-ctrl" id="awg3-ctrl" style="display:none!important;"></div>
@@ -211,7 +211,7 @@
     <!-- AWG2 Card -->
     <div class="card card-hover protocol-card protocol-awg" id="proto-awg2">
         <div class="protocol-card-head">
-            <div class="protocol-icon">✨</div>
+            <div class="protocol-icon"><img src="/static/img/amnezia.svg" alt="AmneziaWG"></div>
             <div class="protocol-name">AmneziaWG 2.0</div>
         </div>
         <div class="flex gap-sm protocol-ctrl" id="awg2-ctrl" style="display:none!important;"></div>
@@ -235,7 +235,7 @@
     <!-- AWG Card -->
     <div class="card card-hover protocol-card protocol-awg" id="proto-awg">
         <div class="protocol-card-head">
-            <div class="protocol-icon">🔮</div>
+            <div class="protocol-icon"><img src="/static/img/amnezia.svg" alt="AmneziaWG"></div>
             <div class="protocol-name">AmneziaWG</div>
         </div>
         <div class="flex gap-sm protocol-ctrl" id="awg-ctrl" style="display:none!important;"></div>
@@ -259,7 +259,7 @@
     <!-- AWG Legacy Card -->
     <div class="card card-hover protocol-card protocol-legacy" id="proto-awg-legacy">
         <div class="protocol-card-head">
-            <div class="protocol-icon">📡</div>
+            <div class="protocol-icon"><img src="/static/img/amnezia.svg" alt="AmneziaWG"></div>
             <div class="protocol-name">AmneziaWG Legacy</div>
         </div>
         <div class="flex gap-sm protocol-ctrl" id="awg-legacy-ctrl" style="display:none!important;"></div>
@@ -283,7 +283,7 @@
     <!-- Xray Card -->
     <div class="card card-hover protocol-card protocol-xray" id="proto-xray">
         <div class="protocol-card-head">
-            <div class="protocol-icon">⚡</div>
+            <div class="protocol-icon"><img src="/static/img/xray.png" alt="Xray"></div>
             <div class="protocol-name">Xray (VLESS-Reality)</div>
         </div>
         <div class="flex gap-sm protocol-ctrl" id="xray-ctrl" style="display:none!important;"></div>
@@ -331,7 +331,7 @@
     <!-- WireGuard Card -->
     <div class="card card-hover protocol-card protocol-wireguard" id="proto-wireguard">
         <div class="protocol-card-head">
-            <div class="protocol-icon">🔒</div>
+            <div class="protocol-icon"><img src="/static/img/wireguard.webp" alt="WireGuard"></div>
             <div class="protocol-name">WireGuard</div>
         </div>
         <div class="flex gap-sm protocol-ctrl" id="wireguard-ctrl" style="display:none!important;"></div>
@@ -549,6 +549,27 @@
 </div>
 
 <!-- ===== Marketplace Modal ===== -->
+<!-- Rename Instance Modal -->
+<div class="modal-backdrop" id="renameProtoModal">
+    <div class="modal" style="max-width: 420px;">
+        <div class="modal-header">
+            <h2 class="modal-title">✏️ {{ _('rename_instance') }}</h2>
+            <button class="modal-close" onclick="closeModal('renameProtoModal')">×</button>
+        </div>
+        <div class="modal-body">
+            <div class="form-group">
+                <label class="form-label">{{ _('instance_name') }}</label>
+                <input type="text" class="form-input" id="renameProtoInput" maxlength="64">
+                <div class="text-muted text-sm" style="margin-top: var(--space-xs);">{{ _('rename_instance_hint') }}</div>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="closeModal('renameProtoModal')">{{ _('cancel') }}</button>
+            <button class="btn btn-primary" onclick="saveRenameProtocol()" id="renameProtoSaveBtn">{{ _('save') }}</button>
+        </div>
+    </div>
+</div>
+
 <div class="modal-backdrop" id="marketplaceModal">
     <div class="modal" style="max-width: 980px;">
         <div class="modal-header">
@@ -1071,6 +1092,11 @@
 <script>
     const SERVER_ID = {{ server_id }};
     const SERVER_HOST = "{{ server.host }}";
+    const CUSTOM_PROTO_NAMES = {
+        {%- for proto, info in (server.get('protocols') or {}).items() if info.get('custom_name') %}
+        {{ proto|tojson }}: {{ info.get('custom_name')|tojson }},
+        {%- endfor %}
+    };
     const MARKETPLACE_APPS = [
         { proto: 'awg3', category: 'protocols', icon: '🛡', title: 'AmneziaWG 3.1', descKey: 'awg3_desc', badge: 'NEW' },
         { proto: 'awg2', category: 'protocols', icon: '✨', title: 'AmneziaWG 2.0', descKey: 'awg_desc' },
@@ -1386,9 +1412,11 @@
         const loading = document.getElementById('installedAppsLoading');
         if (loading) loading.classList.toggle('hidden', !installedAppsLoading);
         if (grid) grid.classList.toggle('apps-pending', installedAppsLoading);
+          applyCustomTitles();
     }
 
     function getProtoTitle(proto) {
+        if (CUSTOM_PROTO_NAMES[proto]) return CUSTOM_PROTO_NAMES[proto];
         const base = protoBase(proto);
         const idx = protoInstance(proto);
         let title;
@@ -1407,6 +1435,20 @@
             default: title = proto;
         }
         return idx > 1 ? `${title} #${idx}` : title;
+    }
+
+    // Apply custom instance names to the visible card titles (static cards
+    // keep hardcoded names in HTML, so they need an explicit override).
+    function applyCustomTitles() {
+        Object.entries(CUSTOM_PROTO_NAMES).forEach(([proto, name]) => {
+            const card = document.getElementById(`proto-${protoDomKey(proto)}`);
+            const nameEl = card && card.querySelector('.protocol-name');
+            if (nameEl) {
+                const pencil = nameEl.querySelector('.proto-rename');
+                nameEl.textContent = name;
+                if (pencil) nameEl.appendChild(pencil);
+            }
+        });
     }
 
     // ========== Server Stats ==========
@@ -1799,6 +1841,21 @@
                 ctrlEl.innerHTML = '';
             }
         }
+        // Small pencil next to the instance name (visible on name hover).
+        // data-proto is (re)assigned here because cloned multi-instance cards
+        // inherit the base card's stale value.
+        const nameEl = document.querySelector(`#proto-${protoDomKey(proto)} .protocol-name`);
+        if (nameEl) {
+            let pencil = nameEl.querySelector('.proto-rename');
+            if (!pencil) {
+                pencil = document.createElement('span');
+                pencil.className = 'proto-rename';
+                pencil.title = _('rename_instance');
+                pencil.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>';
+                nameEl.appendChild(pencil);
+            }
+            pencil.dataset.proto = proto;
+        }
     }
 
     // Toggle Docker container start/stop
@@ -1872,6 +1929,45 @@
         }
         if (!(t.containers || []).length) html += `<div style="opacity:.6;margin-top:8px;">No AWG containers</div>`;
         el.innerHTML = html;
+    }
+
+    // ---------- rename protocol instance ----------
+    let renameProtoTarget = null;
+
+    // Pencils live inside .protocol-name and are (re)built on every status
+    // refresh, so one delegated listener covers static and cloned cards.
+    document.addEventListener('click', (e) => {
+        const el = e.target.closest('.proto-rename');
+        if (el && el.dataset.proto) openRenameProtocol(el.dataset.proto);
+    });
+
+    function openRenameProtocol(proto) {
+        renameProtoTarget = proto;
+        document.getElementById('renameProtoInput').value = CUSTOM_PROTO_NAMES[proto] || getProtoTitle(proto);
+        openModal('renameProtoModal');
+    }
+
+    async function saveRenameProtocol() {
+        const proto = renameProtoTarget;
+        if (!proto) return;
+        const name = document.getElementById('renameProtoInput').value.trim();
+        const btn = document.getElementById('renameProtoSaveBtn');
+        btn.disabled = true;
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/protocol/rename`, 'POST', { protocol: proto, name });
+            if (name) {
+                CUSTOM_PROTO_NAMES[proto] = name;
+            } else {
+                delete CUSTOM_PROTO_NAMES[proto];
+            }
+            closeModal('renameProtoModal');
+            showToast(_('success') || 'Saved', 'success');
+            setTimeout(() => location.reload(), 800);
+        } catch (err) {
+            showToast((_('error') || 'Error') + ': ' + err.message, 'error');
+        } finally {
+            btn.disabled = false;
+        }
     }
 
     // Save server config changes

@@ -483,5 +483,8 @@
   "backup_deleted": "Backup deleted",
   "upload_backup": "Upload",
   "uploading_backup": "Uploading...",
-  "backup_uploaded": "Backup uploaded"
+  "backup_uploaded": "Backup uploaded",
+  "rename_instance": "Rename instance",
+  "instance_name": "Instance name",
+  "rename_instance_hint": "Leave empty to restore the default name."
 }
