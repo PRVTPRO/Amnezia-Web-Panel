@@ -674,12 +674,16 @@ fi
 # containers get no IPv6 route and dual-stack tunnels silently fall back
 # to IPv4-only. Also enable ip6tables (+experimental): without them Docker
 # sets no NAT66 for the fixed-cidr-v6 ULA subnet and v6 traffic blackholes.
-# daemon.json is merged (not overwritten), backed up, docker restarted
-# only when the file actually changed.
+# daemon.json is merged (not overwritten) and backed up. Docker is
+# restarted only when the file actually changed AND no amnezia-* or panel
+# containers are running - restarting the daemon mid-install kills every
+# container on the host (tunnels drop, a dockerized panel dies with its
+# own install request). Otherwise the restart is deferred and reported
+# as AWP_DOCKER_IPV6=pending so the install log can warn the admin.
 if ip -6 -o addr show scope global 2>/dev/null | grep -q inet6; then
   cp /etc/docker/daemon.json /etc/docker/daemon.json.bak.awp 2>/dev/null
-  python3 - <<'PYEOF' 2>/dev/null || (grep -q '"ipv6"' /etc/docker/daemon.json 2>/dev/null || (echo '{{"ipv6": true, "fixed-cidr-v6": "fd00:42::/64", "experimental": true, "ip6tables": true}}' > /etc/docker/daemon.json && systemctl restart docker))
-import json, os, subprocess
+  IPV6_CHANGED=$(python3 - <<'PYEOF' 2>/dev/null
+import json, os
 p = '/etc/docker/daemon.json'
 d = {{}}
 if os.path.exists(p):
@@ -693,14 +697,32 @@ if 'fixed-cidr-v6' not in d:
     d['fixed-cidr-v6'] = 'fd00:42::/64'; changed = True
 if changed:
     json.dump(d, open(p, 'w'), indent=2)
-    subprocess.run(['systemctl', 'restart', 'docker'], check=False)
+    print('yes')
 PYEOF
+)
+  if [ -z "$IPV6_CHANGED" ] && ! grep -q '"ipv6"' /etc/docker/daemon.json 2>/dev/null; then
+    echo '{{"ipv6": true, "fixed-cidr-v6": "fd00:42::/64", "experimental": true, "ip6tables": true}}' > /etc/docker/daemon.json
+    IPV6_CHANGED=yes
+  fi
+  if [ "$IPV6_CHANGED" = "yes" ]; then
+    if docker ps --format '{{{{.Names}}}}' 2>/dev/null | grep -qiE '^amnezia-|panel'; then
+      echo "AWP_DOCKER_IPV6=pending"
+    else
+      systemctl restart docker
+      echo "AWP_DOCKER_IPV6=restarted"
+    fi
+  else
+    echo "AWP_DOCKER_IPV6=ok"
+  fi
 fi
 """
         out, err, code = self.ssh.run_sudo_script(script)
         if code != 0:
             logger.warning(f"prepare_host warning: {err}")
-        return True
+        for line in (out or '').splitlines():
+            if line.startswith('AWP_DOCKER_IPV6='):
+                return line.split('=', 1)[1].strip()
+        return None
 
     # Kernel module version that supports AWG 3.1 features and stays
     # backward-compatible with AWG 2.0 configs.
@@ -916,8 +938,16 @@ done
 
         # Step 2: Prepare host
         results.append("Preparing host...")
-        self.prepare_host(protocol_type)
+        docker_ipv6 = self.prepare_host(protocol_type)
         results.append("Host prepared")
+        if docker_ipv6 == 'pending':
+            results.append(
+                "! Docker IPv6 was enabled in /etc/docker/daemon.json, but Docker "
+                "was NOT restarted because other containers are running. Tunnels "
+                "stay IPv4-only until you run: systemctl restart docker"
+            )
+        elif docker_ipv6 == 'restarted':
+            results.append("Docker restarted to apply IPv6 config")
 
         # Step 2.5: Kernel module (best effort, userspace fallback)
         results.append("Checking amneziawg kernel module...")
