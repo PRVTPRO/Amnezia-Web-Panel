@@ -450,5 +450,8 @@
   "backup_deleted": "پشتیبان حذف شد",
   "upload_backup": "بارگذاری",
   "uploading_backup": "در حال بارگذاری...",
-  "backup_uploaded": "پشتیبان بارگذاری شد"
+  "backup_uploaded": "پشتیبان بارگذاری شد",
+  "rename_instance": "Rename instance",
+  "instance_name": "Instance name",
+  "rename_instance_hint": "Leave empty to restore the default name."
 }

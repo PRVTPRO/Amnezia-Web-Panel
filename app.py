@@ -2012,6 +2012,11 @@ class ProtocolRequest(BaseModel):
     protocol: str = 'awg'
 
 
+class RenameProtocolRequest(BaseModel):
+    protocol: str = ''
+    name: str = ''  # empty = reset to default
+
+
 class AddConnectionRequest(BaseModel):
     protocol: str = 'awg'
     name: str = 'Connection'
@@ -3876,6 +3881,31 @@ async def api_host_tuning(request: Request, server_id: int):
         return info
     except Exception as e:
         logger.exception("Error getting host tuning info")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/protocol/rename', tags=["Protocols"])
+async def api_rename_protocol(request: Request, server_id: int, req: RenameProtocolRequest):
+    """Set or clear a custom display name for an installed protocol instance."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        protocols = server.get('protocols') or {}
+        if req.protocol not in protocols:
+            return JSONResponse({'error': 'Protocol is not installed on this server'}, status_code=404)
+        name = req.name.strip()[:64]
+        if name:
+            protocols[req.protocol]['custom_name'] = name
+        else:
+            protocols[req.protocol].pop('custom_name', None)
+        save_data(data)
+        return {'status': 'success', 'custom_name': name}
+    except Exception as e:
+        logger.exception("Error renaming protocol instance")
         return JSONResponse({'error': str(e)}, status_code=500)
 
 

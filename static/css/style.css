@@ -892,18 +892,50 @@ a:hover {
     margin-bottom: var(--space-md);
 }
 
+.protocol-icon img {
+    width: 40px;
+    height: 40px;
+    object-fit: contain;
+}
+
+/* Small pencil next to the instance name: hidden until the name is hovered,
+   fades in like button hovers, 25% opacity, full on its own hover. */
+.proto-rename {
+    display: inline-flex;
+    width: 14px;
+    height: 14px;
+    margin-left: 6px;
+    vertical-align: middle;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+}
+
+.proto-rename svg {
+    width: 100%;
+    height: 100%;
+}
+
+.protocol-name:hover .proto-rename {
+    opacity: 0.25;
+}
+
+.protocol-name:hover .proto-rename:hover {
+    opacity: 1;
+}
+
 .protocol-awg .protocol-icon {
-    background: linear-gradient(135deg, rgba(139, 92, 246, 0.2), rgba(99, 102, 241, 0.1));
+    background: #303030;
     color: var(--accent-light);
 }
 
 .protocol-legacy .protocol-icon {
-    background: linear-gradient(135deg, rgba(59, 130, 246, 0.2), rgba(99, 102, 241, 0.1));
+    background: #303030;
     color: var(--info);
 }
 
 .protocol-xray .protocol-icon {
-    background: linear-gradient(135deg, rgba(239, 68, 68, 0.2), rgba(245, 158, 11, 0.1));
+    background: #010001;
     color: var(--warning);
 }
 
@@ -918,7 +950,7 @@ a:hover {
 }
 
 .protocol-wireguard .protocol-icon {
-    background: linear-gradient(135deg, rgba(16, 185, 129, 0.2), rgba(52, 211, 153, 0.1));
+    background: #871719;
     color: #10b981;
 }
 
