@@ -47,6 +47,7 @@ from managers.wireguard_manager import WireGuardManager
 from managers.backup_manager import BackupManager
 import telegram_bot as tg_bot
 
+from pwa import build_manifest
 from connection_service import (
     ConnectionService,
     DEFAULT_SELF_SERVICE_SETTINGS,
@@ -1919,6 +1920,32 @@ def tpl(request, template, **kwargs):
     }
     ctx.update(kwargs)
     return templates.TemplateResponse(template, ctx)
+
+
+@app.get('/manifest.webmanifest')
+async def web_manifest(request: Request):
+    """Installable PWA manifest — public, no auth (browsers fetch without credentials)."""
+    data = load_data()
+    lang = request.cookies.get('lang', 'en')
+    appearance = data.get('settings', {}).get('appearance', {})
+    return JSONResponse(
+        build_manifest(appearance, lang),
+        media_type='application/manifest+json',
+    )
+
+
+@app.get('/sw.js')
+async def service_worker():
+    """Root-scoped service worker. Must not live under /static/ or scope is confined."""
+    path = os.path.join(application_path, 'static', 'sw.js')
+    return FileResponse(
+        path,
+        media_type='text/javascript',
+        headers={
+            'Cache-Control': 'no-cache',
+            'Service-Worker-Allowed': '/',
+        },
+    )
 
 
 # ======================== Pydantic Models ========================

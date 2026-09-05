@@ -1,32 +1,33 @@
 {% extends "base.html" %}
 
 {% block title_extra %} — {{ _('users_title') }}{% endblock %}
+{% block page_class %}page page--users{% endblock %}
 
 {% block content %}
 <section>
-    <div class="flex items-center justify-between"
-        style="margin-bottom: var(--space-lg); gap: var(--space-md); flex-wrap: wrap;">
-        <h1 class="section-title" style="margin-bottom:0; flex-shrink: 0;">
-            <span class="icon">👥</span>
+    <div class="page-header page-header--with-search">
+        <h1 class="section-title page-header__title">
+            <span class="icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2"/><circle cx="10" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>
             {{ _('users_title') }}
         </h1>
 
-        <div style="flex: 1; min-width: 250px; max-width: 500px; position: relative;">
+        <div class="page-header__search search-field toolbar-search">
             <input type="text" class="form-input" id="userSearch" placeholder="{{ _('search_placeholder') }}"
-                oninput="handleSearch(this.value)" style="padding-left: 40px;">
-            <span style="position: absolute; left: 14px; top: 50%; transform: translateY(-50%); opacity: 0.5;">🔍</span>
+                oninput="handleSearch(this.value)">
+            <span class="search-field-icon">🔍</span>
         </div>
 
         {% if current_user.role == 'admin' %}
-        <button class="btn btn-primary" onclick="openModal('addUserModal')" style="flex-shrink: 0;">
-            <span>＋</span> {{ _('add_user') }}
-        </button>
+        <div class="page-header__actions">
+            <button class="btn btn-primary" onclick="openModal('addUserModal')">
+                <span>＋</span> {{ _('add_user') }}
+            </button>
+        </div>
         {% endif %}
     </div>
 
     <div id="usersContainer" class="hidden">
-        <div class="clients-list" id="usersGrid"
-            style="display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-md);">
+        <div class="clients-list cards-grid-2" id="usersGrid">
             <!-- Users will be loaded here via JS -->
         </div>
 
@@ -79,7 +80,7 @@
                 </select>
             </div>
 
-            <div class="grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-md);">
+            <div class="grid grid-2">
                 <div class="form-group">
                     <label class="form-label">{{ _('tg_id_label') }}</label>
                     <input class="form-input" type="text" id="newTelegramId" placeholder="Numeric Telegram ID">
@@ -90,7 +91,7 @@
                 </div>
             </div>
 
-            <div class="grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-md);">
+            <div class="grid grid-2">
                 <div class="form-group">
                     <label class="form-label">{{ _('traffic_limit_label') }}</label>
                     <input class="form-input" type="number" step="0.01" min="0" id="newTrafficLimit" placeholder="0">
@@ -108,10 +109,10 @@
 
             <div class="form-group">
                 <label class="form-label">{{ _('expiration_date_label') }}</label>
-                <div class="grid" style="display: grid; grid-template-columns: 1fr 120px auto; gap: var(--space-sm); align-items: center;">
+                <div class="grid grid-expiry">
                     <input class="form-input" type="date" id="newExpirationDate" aria-label="Expiration date">
                     <select class="form-select" id="newExpirationTime" aria-label="Expiration time"></select>
-                    <button type="button" class="btn btn-secondary btn-sm" onclick="clearDateTimeFields('newExpirationDate', 'newExpirationTime')">Без срока</button>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="clearDateTimeFields('newExpirationDate', 'newExpirationTime')">{{ _('no_expiry') }}</button>
                 </div>
             </div>
 
@@ -151,24 +152,24 @@
 
             <div id="newUserTelemtOptions" style="display:none; padding: var(--space-md); background: rgba(0,0,0,0.03); border-radius: var(--radius-md); margin-bottom: var(--space-md);">
                 <div class="form-group">
-                    <label class="form-label">Secret (Hex 32 chars)</label>
-                    <input class="form-input" type="text" id="newUserTelemtSecret" placeholder="Optional">
+                    <label class="form-label">{{ _('telemt_secret_label') }}</label>
+                    <input class="form-input" type="text" id="newUserTelemtSecret" placeholder="{{ _('optional') }}">
                 </div>
                 <div class="form-group">
-                    <label class="form-label">AD Tag (Hex 32 chars)</label>
-                    <input class="form-input" type="text" id="newUserTelemtAdTag" placeholder="Optional">
+                    <label class="form-label">{{ _('telemt_ad_tag_label') }}</label>
+                    <input class="form-input" type="text" id="newUserTelemtAdTag" placeholder="{{ _('optional') }}">
                 </div>
                 <div class="form-group">
-                    <label class="form-label">Max TCP Conns</label>
-                    <input class="form-input" type="number" id="newUserTelemtMaxConns" placeholder="Optional" min="0">
+                    <label class="form-label">{{ _('telemt_max_conns_label') }}</label>
+                    <input class="form-input" type="number" id="newUserTelemtMaxConns" placeholder="{{ _('optional') }}" min="0">
                 </div>
                 <div class="form-group">
-                    <label class="form-label">Quota (Bytes)</label>
-                    <input class="form-input" type="number" id="newUserTelemtQuota" placeholder="Optional" min="0">
+                    <label class="form-label">{{ _('telemt_quota_label') }}</label>
+                    <input class="form-input" type="number" id="newUserTelemtQuota" placeholder="{{ _('optional') }}" min="0">
                 </div>
                 <div class="form-group">
-                    <label class="form-label">Max Unique IPs</label>
-                    <input class="form-input" type="number" id="newUserTelemtMaxIps" placeholder="Optional" min="1">
+                    <label class="form-label">{{ _('telemt_max_ips_label') }}</label>
+                    <input class="form-input" type="number" id="newUserTelemtMaxIps" placeholder="{{ _('optional') }}" min="1">
                 </div>
                 <div class="form-group">
                     <label class="form-label">{{ _('expiration_date_label') }}</label>
@@ -206,15 +207,15 @@
                 <label class="form-label">{{ _('edit_user_email') }}</label>
                 <input type="email" class="form-input" id="editUserEmail" placeholder="user@example.com">
             </div>
-            <div class="grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-md);">
+            <div class="grid grid-2">
                 <div class="form-group">
                     <label class="form-label">{{ _('edit_user_limit') }}</label>
                     <input type="number" step="0.01" min="0" class="form-input" id="editUserLimit" placeholder="0">
                 </div>
                 <div class="form-group">
                     <label class="form-label">{{ _('traffic_reset_strategy_label') }}</label>
-                    <div style="display: grid; grid-template-columns: 1fr auto; gap: var(--space-sm); align-items: center;">
-                        <select class="form-select" id="editUserTrafficResetStrategy">
+                    <div class="row-between" style="gap: var(--space-sm);">
+                        <select class="form-select" id="editUserTrafficResetStrategy" style="flex: 1; min-width: 0;">
                             <option value="never">{{ _('traffic_reset_never') }}</option>
                             <option value="daily">{{ _('traffic_reset_daily') }}</option>
                             <option value="weekly">{{ _('traffic_reset_weekly') }}</option>
@@ -229,10 +230,10 @@
             </div>
             <div class="form-group">
                 <label class="form-label">{{ _('expiration_date_label') }}</label>
-                <div class="grid" style="display: grid; grid-template-columns: 1fr 120px auto; gap: var(--space-sm); align-items: center;">
+                <div class="grid grid-expiry">
                     <input class="form-input" type="date" id="editUserExpiration" aria-label="Expiration date">
                     <select class="form-select" id="editUserExpirationTime" aria-label="Expiration time"></select>
-                    <button type="button" class="btn btn-secondary btn-sm" onclick="clearDateTimeFields('editUserExpiration', 'editUserExpirationTime')">Без срока</button>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="clearDateTimeFields('editUserExpiration', 'editUserExpirationTime')">{{ _('no_expiry') }}</button>
                 </div>
             </div>
             <div class="form-group">
@@ -304,27 +305,27 @@
 
         <div id="ucTelemtOptions" style="display:none; padding: var(--space-md); background: rgba(0,0,0,0.03); border-radius: var(--radius-md); margin-bottom: var(--space-md);">
             <div class="form-group">
-                <label class="form-label">Secret (Hex 32 chars)</label>
-                <input class="form-input" type="text" id="ucTelemtSecret" placeholder="Optional">
+                <label class="form-label">{{ _('telemt_secret_label') }}</label>
+                <input class="form-input" type="text" id="ucTelemtSecret" placeholder="{{ _('optional') }}">
             </div>
             <div class="form-group">
-                <label class="form-label">AD Tag (Hex 32 chars)</label>
-                <input class="form-input" type="text" id="ucTelemtAdTag" placeholder="Optional">
+                <label class="form-label">{{ _('telemt_ad_tag_label') }}</label>
+                <input class="form-input" type="text" id="ucTelemtAdTag" placeholder="{{ _('optional') }}">
             </div>
             <div class="form-group">
-                <label class="form-label">Max TCP Conns</label>
-                <input class="form-input" type="number" id="ucTelemtMaxConns" placeholder="Optional" min="0">
+                <label class="form-label">{{ _('telemt_max_conns_label') }}</label>
+                <input class="form-input" type="number" id="ucTelemtMaxConns" placeholder="{{ _('optional') }}" min="0">
             </div>
             <div class="form-group">
-                <label class="form-label">Quota (Bytes)</label>
-                <input class="form-input" type="number" id="ucTelemtQuota" placeholder="Optional" min="0">
+                <label class="form-label">{{ _('telemt_quota_label') }}</label>
+                <input class="form-input" type="number" id="ucTelemtQuota" placeholder="{{ _('optional') }}" min="0">
             </div>
             <div class="form-group">
-                <label class="form-label">Max Unique IPs</label>
-                <input class="form-input" type="number" id="ucTelemtMaxIps" placeholder="Optional" min="1">
+                <label class="form-label">{{ _('telemt_max_ips_label') }}</label>
+                <input class="form-input" type="number" id="ucTelemtMaxIps" placeholder="{{ _('optional') }}" min="1">
             </div>
             <div class="form-group">
-                <label class="form-label">Expiration Date (ISO 8601)</label>
+                <label class="form-label">{{ _('telemt_expiry_label') }}</label>
                 <input class="form-input" type="text" id="ucTelemtExpiry" placeholder="e.g. 2026-12-31T23:59:59Z">
             </div>
         </div>
@@ -505,10 +506,10 @@
             }
 
             grid.innerHTML = data.users.map(u => `
-                <div class="client-item" id="user-${u.id}" style="${u.enabled ? '' : 'opacity:0.5;'}">
+                <div class="client-item entity-card user-card" id="user-${u.id}" style="${u.enabled ? '' : 'opacity:0.5;'}">
                     <div class="client-info">
                         <div class="client-avatar">${u.username[0].toUpperCase()}</div>
-                        <div>
+                        <div class="entity-card-body user-card-body">
                             <div class="client-name">
                                 ${u.username}
                                 <span class="badge badge-${u.role === 'admin' ? 'success' : (u.role === 'support' ? 'info' : 'warn')}" 
@@ -563,14 +564,14 @@
                              ${u.traffic_reset_strategy !== 'never' ? `<div class="client-meta" style="font-size: 0.7rem; opacity: 0.6;">🔄 ${_('traffic_reset_strategy_label')}: ${_('traffic_reset_' + u.traffic_reset_strategy)}</div>` : ''}
                         </div>
                     </div>
-                    <div class="client-actions" style="flex-wrap: wrap; justify-content: flex-end; max-width: 140px;">
+                    <div class="client-actions entity-card-actions">
                         {% if current_user.role == 'admin' %}
                         <button class="btn btn-secondary btn-sm btn-icon" 
                                 onclick="openAddConnectionForUser('${u.id}', '${u.username}')" 
                                 title="${_('add_connection')}">🔗</button>
                         <button class="btn btn-secondary btn-sm btn-icon" 
                                 onclick='openEditUser({"id": "${u.id}", "username": "${u.username}", "tg": "${u.telegramId || ""}", "email": "${u.email || ""}", "desc": "${u.description || ""}", "limit": "${u.traffic_limit ? (u.traffic_limit / Math.pow(1024, 3)).toFixed(2) : 0}", "strategy": "${u.traffic_reset_strategy || 'never'}", "expiration": "${u.expiration_date || ''}"})'
-                                title="${_('edit')}">✏️</button>
+                                title="${_('edit')}">${ICON_PENCIL}</button>
                         <button class="btn btn-secondary btn-sm btn-icon" onclick="openShareModal(this.dataset)"
                                 data-id="${u.id}" data-username="${u.username}" data-token="${u.share_token || ''}"
                                 data-enabled="${u.share_enabled ? 'true' : 'false'}"
@@ -582,7 +583,7 @@
                                     title="${u.enabled ? _('stop_btn') : _('start_btn')}">
                                 ${u.enabled ? '🔵' : '⚫'}
                             </button>
-                            <button class="btn btn-danger btn-sm btn-icon" onclick="deleteUser('${u.id}')" title="${_('delete')}">🗑</button>
+                            <button class="btn btn-danger btn-sm btn-icon" onclick="deleteUser('${u.id}')" title="${_('delete')}">${ICON_TRASH}</button>
                         ` : ''}
                         {% endif %}
                     </div>
@@ -968,11 +969,11 @@
         const hint = document.getElementById('qrFormatHint');
         if (!named) {
             if (hint) hint.textContent = _('qr_format_wireguard_hint');
-            drawQr(currentQrConfig, 280);
+            drawQr(currentQrConfig, qrSize(document.getElementById('qrCode') || document.body, 280));
             return;
         }
         const paint = () => {
-            drawQr(currentQrChunks[qrFrame], 300);
+            drawQr(currentQrChunks[qrFrame], qrSize(document.getElementById('qrCode') || document.body, 300));
             if (hint) {
                 hint.textContent = currentQrChunks.length > 1
                     ? `${_('qr_format_amnezia_hint')} ${qrFrame + 1}/${currentQrChunks.length}`
@@ -1037,9 +1038,9 @@
 
             <div class="form-group">
                 <label class="form-label">{{ _('public_link_label') }}</label>
-                <div class="flex gap-sm">
+                <div class="flex gap-sm" style="flex-wrap: wrap;">
                     <input class="form-input" type="text" id="shareLink" readonly
-                        style="background: var(--bg-primary);">
+                        style="background: var(--bg-primary); flex: 1; min-width: 0;">
                     <button class="btn btn-secondary" onclick="copyShareLink()">📋</button>
                 </div>
             </div>
