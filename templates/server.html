@@ -2002,7 +2002,7 @@
         const name = document.getElementById('renameProtoInput').value.trim();
         const btn = document.getElementById('renameProtoSaveBtn');
         btn.disabled = true;
-        btn.innerHTML = '<span class="spinner" style="display:inline-block;width:14px;height:14px;vertical-align:-2px;"></span>';
+        btn.innerHTML = '<span class="spinner" style="display:inline-block;width:14px;height:14px;vertical-align:-2px;border:2px solid rgba(255,255,255,0.25);border-top-color:#fff;border-radius:50%;animation:spin 0.6s linear infinite;"></span>';
         document.getElementById('renameProtoInput').disabled = true;
         try {
             await apiCall(`/api/servers/${SERVER_ID}/protocol/rename`, 'POST', { protocol: proto, name });
@@ -2973,7 +2973,7 @@
             cancelBtn.disabled = true;
             input.disabled = true;
             if (speedInput) speedInput.disabled = true;
-            saveBtn.innerHTML = '<span class="spinner" style="display:inline-block;width:14px;height:14px;"></span>';
+            saveBtn.innerHTML = '<span class="spinner" style="display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,0.25);border-top-color:#fff;border-radius:50%;animation:spin 0.6s linear infinite;"></span>';
             await saveRenameConnection(clientId, input.value, speedInput ? (parseFloat(speedInput.value) || 0) : -1);
             // On success loadConnections() rerenders the list and wipes this
             // editor; restore only when it is still in the DOM (error path).
