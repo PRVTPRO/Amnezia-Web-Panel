@@ -63,7 +63,7 @@ class WgEasyImporter:
             raise WgEasyError(f"Unexpected response from {self.base}/api/release: {out[:100]!r}")
 
     def find_containers(self):
-        """List wg-easy family containers: [{name, image, running, udp_port}]."""
+        """List wg-easy family containers: [{name, image, running, udp_port, web_port}]."""
         out, _, _ = self.ssh.run_sudo_command(
             "docker ps -a --format '{{.Names}}|{{.Image}}|{{.State}}|{{.Ports}}'"
         )
@@ -79,11 +79,16 @@ class WgEasyImporter:
             m = re.search(r':(\d+)->(\d+)/udp', ports)
             if m:
                 udp_port = m.group(1)
+            web_port = None
+            m = re.search(r':(\d+)->(\d+)/tcp', ports)
+            if m:
+                web_port = m.group(1)
             containers.append({
                 'name': name,
                 'image': image,
                 'running': state.lower() == 'running',
                 'udp_port': udp_port,
+                'web_port': web_port,
             })
         return containers
 
@@ -188,10 +193,18 @@ class WgEasyImporter:
 
     def detect_source(self):
         """Locate the source wg-easy container. Returns
-        (container_name, listen_port, config_text, obfuscation_dict)."""
+        (container_name, listen_port, config_text, obfuscation_dict).
+
+        When several wg-easy containers run on the same host, the one whose
+        published web (TCP) port matches the panel we authenticated against
+        is preferred — otherwise we could mix the client list from one panel
+        with the server identity of another."""
         containers = self.find_containers()
+        preferred = [c for c in containers
+                     if c.get('web_port') and c['web_port'] == str(self.web_port)]
+        ordered = preferred + [c for c in containers if c not in preferred]
         for prefer_running in (True, False):
-            for c in containers:
+            for c in ordered:
                 if prefer_running and not c['running']:
                     continue
                 if not c['udp_port']:
