@@ -2742,7 +2742,7 @@
 
                 // Per-peer bandwidth limit badge (AWG): ∞ by default, ⚡X Mbps when set
                 const maxSpeed = parseFloat(userData.maxSpeed || 0) || 0;
-                if (proto.startsWith('awg')) metaHtml += `<span class="traffic-badge" title="${_('max_speed')}">⚡${maxSpeed > 0 ? maxSpeed + ' Mbps' : '<span style="font-size:1.25em; line-height:0;">∞</span>'}</span>`;
+                if (proto.startsWith('awg') || protoBase(proto) === 'wireguard') metaHtml += `<span class="traffic-badge" title="${_('max_speed')}">⚡${maxSpeed > 0 ? maxSpeed + ' Mbps' : '<span style="font-size:1.25em; line-height:0;">∞</span>'}</span>`;
 
                 if (proto === 'telemt') {
                     if (userData.total_octets) metaHtml += `<span class="traffic-badge">📊 ${formatBytes(userData.total_octets)}</span>`;
@@ -2941,7 +2941,7 @@
         clone.querySelectorAll('.client-ip').forEach(el => el.remove());
         const oldName = clone.textContent.trim();
         const proto = document.getElementById('connProtoSelect').value;
-        const isAwg = proto.startsWith('awg');
+        const isAwg = proto.startsWith('awg') || protoBase(proto) === 'wireguard';
         const curSpeed = item.dataset.maxspeed || '0';
         nameEl.innerHTML = `
             <span class="rename-editor" style="display:inline-flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
