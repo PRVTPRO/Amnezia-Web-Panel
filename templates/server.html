@@ -2002,6 +2002,8 @@
         const name = document.getElementById('renameProtoInput').value.trim();
         const btn = document.getElementById('renameProtoSaveBtn');
         btn.disabled = true;
+        btn.innerHTML = '<span class="spinner" style="display:inline-block;width:14px;height:14px;vertical-align:-2px;"></span>';
+        document.getElementById('renameProtoInput').disabled = true;
         try {
             await apiCall(`/api/servers/${SERVER_ID}/protocol/rename`, 'POST', { protocol: proto, name });
             if (name) {
@@ -2016,6 +2018,8 @@
             showToast((_('error') || 'Error') + ': ' + err.message, 'error');
         } finally {
             btn.disabled = false;
+            btn.innerHTML = '{{ _("save") }}';
+            document.getElementById('renameProtoInput').disabled = false;
         }
     }
 
@@ -2936,6 +2940,7 @@
     function startRenameConnection(clientId, btn) {
         const item = btn.closest('.client-item');
         const nameEl = item.querySelector('.client-name');
+        const origHtml = nameEl.innerHTML;
         // .client-name also contains the .client-ip span; edit the name only
         const clone = nameEl.cloneNode(true);
         clone.querySelectorAll('.client-ip').forEach(el => el.remove());
@@ -2968,7 +2973,7 @@
             cancelBtn.disabled = true;
             input.disabled = true;
             if (speedInput) speedInput.disabled = true;
-            saveBtn.innerHTML = '<span class="spinner" style="display:inline-block;"></span>';
+            saveBtn.innerHTML = '<span class="spinner" style="display:inline-block;width:14px;height:14px;"></span>';
             await saveRenameConnection(clientId, input.value, speedInput ? (parseFloat(speedInput.value) || 0) : -1);
             // On success loadConnections() rerenders the list and wipes this
             // editor; restore only when it is still in the DOM (error path).
@@ -2980,15 +2985,17 @@
                 saveBtn.innerHTML = '✔';
             }
         };
+        // Cancel closes the editor locally, without reloading the whole panel.
+        const cancelEdit = () => { nameEl.innerHTML = origHtml; };
         saveBtn.addEventListener('click', doSave);
-        cancelBtn.addEventListener('click', () => loadConnections());
+        cancelBtn.addEventListener('click', cancelEdit);
         input.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') doSave();
-            if (e.key === 'Escape') loadConnections();
+            if (e.key === 'Escape') cancelEdit();
         });
         if (speedInput) speedInput.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') doSave();
-            if (e.key === 'Escape') loadConnections();
+            if (e.key === 'Escape') cancelEdit();
         });
         input.focus();
         input.select();
