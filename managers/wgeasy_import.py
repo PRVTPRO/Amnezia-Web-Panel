@@ -331,16 +331,28 @@ def build_clients_table(clients):
     return table
 
 
-def run_import(ssh, backup, client_ids=None, target='auto'):
-    """Replace wg-easy on this server with a panel-managed instance.
+def run_import(ssh, backup, client_ids=None, target='auto', log=None):
+    """Recreate wg-easy data as a panel-managed instance.
 
     target='auto': AWG 2.0 when the source config has obfuscation params
-    (w0rng/amnezia-wg-easy), plain WireGuard otherwise.
+    (w0rng/amnezia-wg-easy), plain WireGuard otherwise. May also be a full
+    instance key like 'awg2__2' when the first instance is already taken.
 
     Steps: stop the old wg-easy container -> install the panel protocol on
     the same port -> overwrite identity (server key, subnet, obfuscation,
     peers, clientsTable) -> restart. Returns a summary dict.
+
+    Progress lines are appended to the optional `log` list so the caller
+    can show them in the UI.
     """
+    def _log(msg):
+        if log is not None:
+            log.append(msg)
+
+    # Full instance keys ('awg2__2') are accepted: comparisons use the base,
+    # installation uses the full key so additional instances land in their
+    # own containers (amnezia-awg2-2 etc.).
+    base = target.split('__', 1)[0] if target != 'auto' else 'auto'
     importer = WgEasyImporter(ssh)
     clients = normalize_clients(backup)
     if client_ids:
@@ -361,11 +373,15 @@ def run_import(ssh, backup, client_ids=None, target='auto'):
 
     # Detect source container, listen port and obfuscation from its config
     source_container, listen_port, source_conf, obfuscation = importer.detect_source()
-    if target == 'auto':
-        target = 'awg2' if obfuscation else 'wireguard'
-    if target == 'awg2' and not obfuscation:
+    _log(f"Source: {source_container or '?'} • port {listen_port} • "
+         f"obfuscation {'yes' if obfuscation else 'no'}")
+    if base == 'auto':
+        base = 'awg2' if obfuscation else 'wireguard'
+        target = base
+    if base == 'awg2' and not obfuscation:
         raise WgEasyError("Target AWG 2.0 requested, but the source has no "
                           "obfuscation params — plain WireGuard target fits better")
+    _log(f"Target: {target} • {len(clients)} client(s) • subnet {subnet_ip}/{subnet_cidr}")
 
     # Keep a server-side backup copy before touching anything
     stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
@@ -373,32 +389,37 @@ def run_import(ssh, backup, client_ids=None, target='auto'):
     ssh.upload_file(json.dumps(backup, indent=2, ensure_ascii=False), "/tmp/_wgeasy_backup_copy.json")
     ssh.run_sudo_command(f"cp /tmp/_wgeasy_backup_copy.json {backup_path}")
     ssh.run_command("rm -f /tmp/_wgeasy_backup_copy.json")
+    _log(f"Backup saved to {backup_path}")
 
     # Stop the old wg-easy container (frees the UDP port)
     if source_container:
         ssh.run_sudo_command(f"docker stop {_sh(source_container)}")
+        _log(f"Old container {source_container} stopped")
 
     config = build_server_config(server_info, clients, listen_port,
-                                 obfuscation if target == 'awg2' else None)
+                                 obfuscation if base == 'awg2' else None)
     table = build_clients_table(clients)
 
     try:
-        if target == 'awg2':
+        if base == 'awg2':
             from managers.awg_manager import AWGManager
             mgr = AWGManager(ssh)
-            mgr.install_protocol('awg2', port=int(listen_port))
-            container = mgr._container_name('awg2')
-            config_path = mgr._config_path('awg2')
+            _log(f"Installing {target} on port {int(listen_port)}...")
+            mgr.install_protocol(target, port=int(listen_port))
+            container = mgr._container_name(target)
+            config_path = mgr._config_path(target)
             key_dir = '/opt/amnezia/awg'
             clients_table_path = mgr._clients_table_path()
         else:
             mgr = WireGuardManager(ssh)
+            _log(f"Installing WireGuard on port {int(listen_port)}...")
             mgr.install_protocol(port=int(listen_port))
             container = mgr.CONTAINER_NAME
             config_path = mgr.CONFIG_PATH
             key_dir = mgr.KEY_DIR
             clients_table_path = mgr.CLIENTS_TABLE_PATH
             config = WireGuardManager._sanitize_server_config(config)
+        _log(f"Container {container} installed")
 
         # Overwrite server identity and peers
         ssh.upload_file(config, "/tmp/_wgeasy_wg0.conf")
@@ -413,6 +434,7 @@ def run_import(ssh, backup, client_ids=None, target='auto'):
             ssh.run_sudo_command(
                 f"docker cp /tmp/_wgeasy_srvpub {container}:{key_dir}/wireguard_server_public_key.key")
         ssh.run_command("rm -f /tmp/_wgeasy_srvkey /tmp/_wgeasy_srvpub")
+        _log("Server identity (keys, peers, obfuscation) applied")
 
         # Clients table (all clients incl. disabled)
         ssh.upload_file(json.dumps(table, indent=2), "/tmp/_wgeasy_clients.json")
@@ -420,7 +442,7 @@ def run_import(ssh, backup, client_ids=None, target='auto'):
             f"docker cp /tmp/_wgeasy_clients.json {container}:{clients_table_path}")
         ssh.run_command("rm -f /tmp/_wgeasy_clients.json")
 
-        if target == 'awg2':
+        if base == 'awg2':
             # The AWG start script reads the subnet from the config at
             # runtime, so a plain restart applies the imported identity.
             ssh.run_sudo_command(f"docker restart {container}")
@@ -429,12 +451,17 @@ def run_import(ssh, backup, client_ids=None, target='auto'):
         else:
             # Rewrite the start script so NAT rules match the imported subnet
             mgr._upload_start_script(int(listen_port), subnet_ip=subnet_ip, subnet_cidr=subnet_cidr)
-    except Exception:
+        _log(f"Container {container} restarted with imported identity")
+    except Exception as e:
+        _log(f"ERROR: {e}")
         # Best effort: bring the old container back up on failure
         if source_container:
             ssh.run_sudo_command(f"docker start {_sh(source_container)}")
+            _log(f"Old container {source_container} started back")
         raise
 
+    _log(f"Done: {len([c for c in clients if c['enabled']])} active, "
+         f"{len([c for c in clients if not c['enabled']])} disabled")
     return {
         'status': 'success',
         'target': target,
