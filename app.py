@@ -3972,6 +3972,7 @@ async def api_wgeasy_import(request: Request, server_id: int, req: WgEasyImportR
     WireGuard instance, preserving keys/IPs/port so client configs keep working."""
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    log = []
     try:
         data = load_data()
         if server_id >= len(data['servers']):
@@ -3988,11 +3989,19 @@ async def api_wgeasy_import(request: Request, server_id: int, req: WgEasyImportR
             _, _, _, obfuscation = importer.detect_source()
             target = req.target if req.target in ('wireguard', 'awg2') else (
                 'awg2' if obfuscation else 'wireguard')
-            if target in server['protocols']:
+            # Additional instances are supported for AWG 2.0: when the first
+            # slot is taken, import as the next free instance key (awg2__2,
+            # awg2__3, ...). WireGuard is single-instance for now.
+            if target in server['protocols'] and target != 'awg2':
                 return JSONResponse(
                     {'error': f'Protocol {target} is already installed on this server. '
                               'Remove it first if you want to re-import.'}, status_code=400)
-            result = run_import(ssh, backup, client_ids=req.client_ids, target=target)
+            if target == 'awg2' and any(k.split('__', 1)[0] == 'awg2'
+                                        for k in server['protocols']):
+                target = next_protocol_key(server['protocols'], 'awg2')
+            result = run_import(ssh, backup, client_ids=req.client_ids,
+                                target=target, log=log)
+            result['log'] = log
         finally:
             ssh.disconnect()
 
@@ -4000,7 +4009,7 @@ async def api_wgeasy_import(request: Request, server_id: int, req: WgEasyImportR
             'installed': True,
             'port': result['port'],
             'awg_params': {},
-            'base_protocol': target,
+            'base_protocol': protocol_base(target),
             'instance': protocol_instance(target),
             'display_name': protocol_display_name(target),
             'container_name': protocol_container_name(target),
@@ -4008,10 +4017,10 @@ async def api_wgeasy_import(request: Request, server_id: int, req: WgEasyImportR
         save_data(data)
         return result
     except WgEasyError as e:
-        return JSONResponse({'error': str(e)}, status_code=400)
+        return JSONResponse({'error': str(e), 'log': log}, status_code=400)
     except Exception as e:
         logger.exception("Error importing from wg-easy")
-        return JSONResponse({'error': str(e)}, status_code=500)
+        return JSONResponse({'error': str(e), 'log': log}, status_code=500)
 
 
 @app.post('/api/servers/{server_id}/server_config/save', tags=["Protocols"])
