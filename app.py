@@ -3972,6 +3972,7 @@ async def api_wgeasy_import(request: Request, server_id: int, req: WgEasyImportR
     WireGuard instance, preserving keys/IPs/port so client configs keep working."""
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    from managers.wgeasy_import import WgEasyError  # noqa: needed in except below
     log = []
     try:
         data = load_data()
