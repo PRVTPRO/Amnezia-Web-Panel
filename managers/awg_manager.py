@@ -1659,14 +1659,48 @@ done < "$BW"
                     ips.append(match.group(1))
         return ips
 
+    def _get_reserved_ips(self, protocol_type):
+        """IPv4 addresses reserved in clientsTable by ANY client, disabled included.
+
+        A disabled client keeps its address, so allocation must never hand it
+        to someone else. Raises if the table cannot be read at all — silently
+        treating the reservation pool as empty would break that guarantee.
+        """
+        container_name = self._container_name(protocol_type)
+        clients_table_path = self._clients_table_path()
+        out, err, code = self.ssh.run_sudo_command(
+            f"docker exec -i {container_name} cat {clients_table_path} 2>/dev/null"
+        )
+        if code != 0:
+            raise RuntimeError(
+                f"Cannot read clients table from {container_name}: {err.strip()}")
+        if not out.strip():
+            return set()
+        try:
+            data = json.loads(out)
+        except json.JSONDecodeError:
+            raise RuntimeError(f"Clients table in {container_name} is not valid JSON")
+        entries = data if isinstance(data, list) else [
+            {'clientId': k, 'userData': v} for k, v in data.items()]
+        reserved = set()
+        for c in entries:
+            ud = c.get('userData') or {}
+            ip = self._extract_ipv4(ud.get('allowedIps') or ud.get('clientIp') or '')
+            if ip:
+                reserved.add(ip)
+        return reserved
+
     def _get_next_ip(self, protocol_type):
         """Return the first free IP in the subnet, filling gaps left by deleted clients.
 
         The old implementation took the last IP in file order and incremented it,
         which produced duplicate IPs when peers were not sorted by IP and never
         reused addresses freed by deleted clients.
+
+        Occupied = active config peers + reservations in clientsTable (disabled
+        clients keep their IPs; only deletion releases an address).
         """
-        used_ips = self._get_used_ips(protocol_type)
+        used_ips = set(self._get_used_ips(protocol_type)) | self._get_reserved_ips(protocol_type)
         base = self._get_subnet_base(protocol_type)
         parts = base.split('.')
         prefix = '.'.join(parts[:3])
@@ -2309,6 +2343,24 @@ PersistentKeepalive = 25
             ud = client.setdefault('userData', {})
             psk = ud.get('psk', '')
             client_ip = self._client_ip_from_userdata(ud)
+            if client_ip:
+                # A disabled client's address stays reserved in clientsTable.
+                # Refuse to re-enable when another client owns it now.
+                for other in clients_table:
+                    if other.get('clientId') == client_id:
+                        continue
+                    other_ip = self._extract_ipv4(
+                        (other.get('userData') or {}).get('allowedIps')
+                        or (other.get('userData') or {}).get('clientIp') or '')
+                    if other_ip == client_ip:
+                        raise RuntimeError(
+                            f"Cannot enable client: IP {client_ip} is already "
+                            f"reserved by another client. Resolve the conflict "
+                            f"(delete one of them) first.")
+                if client_ip in self._get_used_ips(protocol_type):
+                    raise RuntimeError(
+                        f"Cannot enable client: IP {client_ip} is already "
+                        f"present in the active server config")
             if not client_ip:
                 client_ip = self._get_next_ip(protocol_type)
                 logger.warning(

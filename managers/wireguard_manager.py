@@ -535,15 +535,57 @@ tail -f /dev/null
                     ips.append(match.group(1))
         return ips
 
+    def _get_reserved_ips(self):
+        """IPv4 addresses reserved in clientsTable by ANY client, disabled included.
+
+        A disabled client keeps its address, so allocation must never hand it
+        to someone else. Raises if the table cannot be read at all — silently
+        treating the reservation pool as empty would break that guarantee.
+        """
+        out, err, code = self.ssh.run_sudo_command(
+            f"docker exec -i {self.CONTAINER_NAME} cat {self.CLIENTS_TABLE_PATH} 2>/dev/null"
+        )
+        if code != 0:
+            raise RuntimeError(
+                f"Cannot read clients table from {self.CONTAINER_NAME}: {err.strip()}")
+        if not out.strip():
+            return set()
+        try:
+            data = json.loads(out)
+        except json.JSONDecodeError:
+            raise RuntimeError(
+                f"Clients table in {self.CONTAINER_NAME} is not valid JSON")
+        reserved = set()
+        for c in (data if isinstance(data, list) else []):
+            ud = c.get('userData') or {}
+            value = ud.get('allowedIps') or ud.get('clientIp') or ''
+            match = re.search(r'(\d+\.\d+\.\d+\.\d+)', str(value))
+            if match:
+                reserved.add(match.group(1))
+        return reserved
+
     def _get_next_ip(self):
         """Return the first free IP in the subnet, filling gaps left by deleted clients.
 
         The old implementation took the last IP in file order and incremented it,
         which produced duplicate IPs when peers were not sorted by IP and never
         reused addresses freed by deleted clients.
+
+        Occupied = active config peers + reservations in clientsTable (disabled
+        clients keep their IPs; only deletion releases an address).
         """
-        used_ips = self._get_used_ips()
+        used_ips = set(self._get_used_ips()) | self._get_reserved_ips()
+        # The subnet comes from the live config (imported instances may use a
+        # subnet different from the default).
         base = WG_DEFAULTS['subnet_address']
+        config = self._get_server_config()
+        for line in config.split('\n'):
+            line = line.strip()
+            if line.startswith('Address'):
+                match = re.search(r'(\d+\.\d+\.\d+\.\d+)', line)
+                if match:
+                    base = match.group(1)
+                break
         parts = base.split('.')
         prefix = '.'.join(parts[:3])
 
@@ -855,6 +897,28 @@ PersistentKeepalive = 25
             ud = client.get('userData', {})
             psk = ud.get('psk', '') or self._get_server_psk()
             client_ip = ud.get('clientIp', '')
+            if client_ip:
+                # A disabled client's address stays reserved in clientsTable.
+                # Refuse to re-enable when another client owns it now.
+                for other in clients_table:
+                    if other.get('clientId') == client_id:
+                        continue
+                    other_ud = other.get('userData') or {}
+                    other_val = other_ud.get('allowedIps') or other_ud.get('clientIp') or ''
+                    m = re.search(r'(\d+\.\d+\.\d+\.\d+)', str(other_val))
+                    if m and m.group(1) == client_ip:
+                        raise RuntimeError(
+                            f"Cannot enable client: IP {client_ip} is already "
+                            f"reserved by another client. Resolve the conflict "
+                            f"(delete one of them) first.")
+                if client_ip in self._get_used_ips():
+                    raise RuntimeError(
+                        f"Cannot enable client: IP {client_ip} is already "
+                        f"present in the active server config")
+            if not client_ip:
+                client_ip = self._get_next_ip()
+                ud['clientIp'] = client_ip
+                client.setdefault('userData', {})['clientIp'] = client_ip
 
             peer_section = f"""
 [Peer]
