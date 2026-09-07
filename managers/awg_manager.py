@@ -1672,8 +1672,15 @@ done < "$BW"
             f"docker exec -i {container_name} cat {clients_table_path} 2>/dev/null"
         )
         if code != 0:
-            raise RuntimeError(
-                f"Cannot read clients table from {container_name}: {err.strip()}")
+            # cat fails both when docker exec is broken and when the file
+            # simply does not exist yet (fresh instance). Fail loudly only
+            # for the former; an absent table means no reservations.
+            _, terr, tcode = self.ssh.run_sudo_command(
+                f"docker exec -i {container_name} true")
+            if tcode != 0:
+                raise RuntimeError(
+                    f"Cannot read clients table from {container_name}: {terr.strip() or err.strip()}")
+            return set()
         if not out.strip():
             return set()
         try:
