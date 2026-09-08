@@ -2815,6 +2815,7 @@
     function startRenameConnection(clientId, btn) {
         const item = btn.closest('.client-item');
         const nameEl = item.querySelector('.client-name');
+        const origHtml = nameEl.innerHTML;
         // .client-name also contains the .client-ip span; edit the name only
         const clone = nameEl.cloneNode(true);
         clone.querySelectorAll('.client-ip').forEach(el => el.remove());
@@ -2840,16 +2841,36 @@
         const speedInput = nameEl.querySelector('.rename-speed');
         const saveBtn = nameEl.querySelector('button:not(.rename-cancel)');
         const cancelBtn = nameEl.querySelector('.rename-cancel');
-        const doSave = () => saveRenameConnection(clientId, input.value, speedInput ? (parseFloat(speedInput.value) || 0) : -1);
+        const doSave = async () => {
+            // Immediate busy feedback so a second click is impossible and the
+            // user sees the save is in flight (rename + tc apply takes 2-4s).
+            saveBtn.disabled = true;
+            cancelBtn.disabled = true;
+            input.disabled = true;
+            if (speedInput) speedInput.disabled = true;
+            saveBtn.innerHTML = '<span class="spinner" style="display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,0.25);border-top-color:#1c1c30;border-radius:50%;animation:spin 0.6s linear infinite;"></span>';
+            await saveRenameConnection(clientId, input.value, speedInput ? (parseFloat(speedInput.value) || 0) : -1);
+            // On success loadConnections() rerenders the list and wipes this
+            // editor; restore only when it is still in the DOM (error path).
+            if (saveBtn.isConnected) {
+                saveBtn.disabled = false;
+                cancelBtn.disabled = false;
+                input.disabled = false;
+                if (speedInput) speedInput.disabled = false;
+                saveBtn.innerHTML = '✔';
+            }
+        };
+        // Cancel closes the editor locally, without reloading the whole panel.
+        const cancelEdit = () => { nameEl.innerHTML = origHtml; };
         saveBtn.addEventListener('click', doSave);
-        cancelBtn.addEventListener('click', () => loadConnections());
+        cancelBtn.addEventListener('click', cancelEdit);
         input.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') doSave();
-            if (e.key === 'Escape') loadConnections();
+            if (e.key === 'Escape') cancelEdit();
         });
         if (speedInput) speedInput.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') doSave();
-            if (e.key === 'Escape') loadConnections();
+            if (e.key === 'Escape') cancelEdit();
         });
         input.focus();
         input.select();
