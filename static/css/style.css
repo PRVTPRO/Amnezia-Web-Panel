@@ -1568,7 +1568,6 @@ a:hover {
     flex-shrink: 0;
     margin-left: var(--space-md);
     flex-wrap: wrap;
-    max-width: 140px;
 }
 
 /* Normalized entity cards used by Users and My Connections only. */
