@@ -3928,12 +3928,9 @@ async def api_host_tuning(request: Request, server_id: int):
 async def api_wgeasy_preview(request: Request, server_id: int, req: WgEasyPreviewRequest):
     """Fetch the client list from a wg-easy / amnezia-wg-easy panel running on
     this server (via its local web API over SSH). No secrets are returned."""
-    
-@app.post('/api/servers/{server_id}/protocol/rename', tags=["Protocols"])
-async def api_rename_protocol(request: Request, server_id: int, req: RenameProtocolRequest):
-    """Set or clear a custom display name for an installed protocol instance."""
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    from managers.wgeasy_import import WgEasyError
     try:
         data = load_data()
         if server_id >= len(data['servers']):
@@ -3942,7 +3939,7 @@ async def api_rename_protocol(request: Request, server_id: int, req: RenameProto
         ssh = get_ssh(server)
         ssh.connect()
         try:
-            from managers.wgeasy_import import WgEasyImporter, WgEasyError, normalize_clients
+            from managers.wgeasy_import import WgEasyImporter, normalize_clients
             importer = WgEasyImporter(ssh, web_port=req.web_port)
             backup = importer.fetch_backup(req.password, req.username or 'admin')
             clients = normalize_clients(backup)
@@ -3968,6 +3965,31 @@ async def api_rename_protocol(request: Request, server_id: int, req: RenameProto
         return JSONResponse({'error': str(e)}, status_code=400)
     except Exception as e:
         logger.exception("Error previewing wg-easy import")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/protocol/rename', tags=["Protocols"])
+async def api_rename_protocol(request: Request, server_id: int, req: RenameProtocolRequest):
+    """Set or clear a custom display name for an installed protocol instance."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        proto = req.protocol.strip()
+        if proto not in server.get('protocols', {}):
+            return JSONResponse({'error': 'Protocol not found'}, status_code=404)
+        name = req.name.strip()
+        if name:
+            server['protocols'][proto]['custom_name'] = name
+        else:
+            server['protocols'][proto].pop('custom_name', None)
+        save_data(data)
+        return {'status': 'success', 'protocol': proto, 'name': name}
+    except Exception as e:
+        logger.exception("Error renaming protocol")
         return JSONResponse({'error': str(e)}, status_code=500)
 
 

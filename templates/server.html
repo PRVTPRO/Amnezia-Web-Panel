@@ -615,6 +615,10 @@
             <button class="btn btn-secondary" onclick="closeModal('wgeasyImportModal')">{{ _('cancel') }}</button>
             <button class="btn btn-primary" onclick="wgeasyPreview()" id="wgeasyPreviewBtn">{{ _('wgeasy_fetch') }}</button>
             <button class="btn btn-primary hidden" onclick="wgeasyDoImport()" id="wgeasyImportGoBtn">{{ _('wgeasy_import_btn') }}</button>
+        </div>
+    </div>
+</div>
+
 <!-- Rename Instance Modal -->
 <div class="modal-backdrop" id="renameProtoModal">
     <div class="modal" style="max-width: 420px;">
@@ -2031,6 +2035,14 @@
             renderWgEasyPreview(res);
             document.getElementById('wgeasyPreviewArea').classList.remove('hidden');
             document.getElementById('wgeasyImportGoBtn').classList.remove('hidden');
+        } catch (err) {
+            showToast((_('error') || 'Error') + ': ' + err.message, 'error');
+        } finally {
+            btn.disabled = false;
+            btn.textContent = oldText;
+        }
+    }
+
     // ---------- rename protocol instance ----------
     let renameProtoTarget = null;
 
