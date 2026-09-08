@@ -307,9 +307,10 @@ web-panel/
 │   ├── dns_manager.py        # AmneziaDNS (Unbound)
 │   ├── adguard_manager.py    # AdGuard Home
 │   └── socks5_manager.py     # 3proxy-based SOCKS5
-├── static/                   # CSS / favicon / vendored JS
+├── static/                   # CSS / favicon / PWA icons / SW / vendored JS
 ├── templates/                # Jinja2 templates
 ├── translations/             # en / ru / fr / zh / fa
+├── pwa.py                    # Web app manifest builder
 └── data.json                 # Panel state (servers, users, tokens, settings)
 ```
 
@@ -320,6 +321,28 @@ web-panel/
 *   **Secret Key**: Set a custom `SECRET_KEY` environment variable for secure session management (see [Environment Variables](#-environment-variables)).
 *   **IPv6**: if your servers have global IPv6 but Docker is IPv4-only, leave `AWG_IPV6` at `auto` — the panel probes the container and keeps tunnels IPv4-only rather than blackholing client IPv6. Set `AWG_IPV6=off` to disable dual-stack everywhere.
 *   **API Tokens**: Treat each token like a password — store it in your integration's secret manager. Revoke it from `/settings` if it leaks or the integration is decommissioned. Rotate periodically; tokens inherit admin rights.
+
+## 📱 Progressive Web App (PWA)
+
+The panel is installable as a Progressive Web App on phones and desktops. On mobile (≤768px) you get a compact sticky header, a role-gated bottom tab bar, and touch-friendly controls; QR codes and forms adapt to narrow viewports.
+
+### Install
+
+*   **Android (Chrome / Edge)**: open the panel over HTTPS, then use the browser menu → **Install app** / **Add to Home screen**.
+*   **iOS (Safari)**: Share → **Add to Home Screen**. Standalone mode uses a translucent status bar; safe-area insets keep controls clear of the notch.
+*   After install, the app opens in standalone chrome with shortcuts to **Connections** (`/my`) and **Users** (`/users`).
+
+### HTTPS requirement
+
+Service workers (and therefore installability) require a **secure context**: HTTPS or `localhost`. The default `docker-compose.yml` exposes plain HTTP on port **5000**, which is fine for local development but **not** installable on a remote phone.
+
+To make the PWA installable in production, terminate TLS in one of these ways:
+
+*   Enable **HTTPS** in **Settings → SSL** (`settings.ssl`) with a certificate and key (or paste PEM text).
+*   Put the panel behind a reverse proxy with a real certificate.
+*   Use the built-in **Cloudflare Quick Tunnel** or **ngrok** tunnels from Settings — they provide public HTTPS URLs suitable for install and for sharing the panel.
+
+The service worker caches **only** `/static/*` assets. HTML pages and `/api/*` always hit the network so session-authenticated content is never shared across users on the same device.
 
 ## 🤝 Contributing
 

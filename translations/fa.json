@@ -450,5 +450,13 @@
   "backup_deleted": "پشتیبان حذف شد",
   "upload_backup": "بارگذاری",
   "uploading_backup": "در حال بارگذاری...",
-  "backup_uploaded": "پشتیبان بارگذاری شد"
+  "backup_uploaded": "پشتیبان بارگذاری شد",
+  "no_expiry": "بدون انقضا",
+  "telemt_secret_label": "رمز (hex)",
+  "telemt_ad_tag_label": "تگ AD (hex)",
+  "telemt_max_conns_label": "حداکثر اتصالات TCP",
+  "telemt_quota_label": "سهمیه (بایت)",
+  "telemt_max_ips_label": "حداکثر IP یکتا",
+  "telemt_expiry_label": "انقضا (ISO 8601)",
+  "optional": "اختیاری"
 }

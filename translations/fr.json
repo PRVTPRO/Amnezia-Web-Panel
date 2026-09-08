@@ -450,5 +450,13 @@
   "backup_deleted": "Sauvegarde supprimée",
   "upload_backup": "Téléverser",
   "uploading_backup": "Téléversement...",
-  "backup_uploaded": "Sauvegarde téléversée"
+  "backup_uploaded": "Sauvegarde téléversée",
+  "no_expiry": "Sans expiration",
+  "telemt_secret_label": "Secret (hex)",
+  "telemt_ad_tag_label": "Tag AD (hex)",
+  "telemt_max_conns_label": "Connexions TCP max",
+  "telemt_quota_label": "Quota (octets)",
+  "telemt_max_ips_label": "IP uniques max",
+  "telemt_expiry_label": "Expiration (ISO 8601)",
+  "optional": "Facultatif"
 }

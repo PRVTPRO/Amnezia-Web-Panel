@@ -483,5 +483,13 @@
   "backup_deleted": "Бекап удалён",
   "upload_backup": "Загрузить",
   "uploading_backup": "Загрузка...",
-  "backup_uploaded": "Бекап загружен"
+  "backup_uploaded": "Бекап загружен",
+  "no_expiry": "Без срока",
+  "telemt_secret_label": "Секрет (hex)",
+  "telemt_ad_tag_label": "AD-тег (hex)",
+  "telemt_max_conns_label": "Макс. TCP-соединений",
+  "telemt_quota_label": "Квота (байты)",
+  "telemt_max_ips_label": "Макс. уникальных IP",
+  "telemt_expiry_label": "Истекает (ISO 8601)",
+  "optional": "Необязательно"
 }

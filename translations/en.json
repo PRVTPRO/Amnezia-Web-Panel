@@ -483,5 +483,13 @@
   "backup_deleted": "Backup deleted",
   "upload_backup": "Upload",
   "uploading_backup": "Uploading...",
-  "backup_uploaded": "Backup uploaded"
+  "backup_uploaded": "Backup uploaded",
+  "no_expiry": "No expiry",
+  "telemt_secret_label": "Secret (hex)",
+  "telemt_ad_tag_label": "AD tag (hex)",
+  "telemt_max_conns_label": "Max TCP connections",
+  "telemt_quota_label": "Quota (bytes)",
+  "telemt_max_ips_label": "Max unique IPs",
+  "telemt_expiry_label": "Expiration (ISO 8601)",
+  "optional": "Optional"
 }

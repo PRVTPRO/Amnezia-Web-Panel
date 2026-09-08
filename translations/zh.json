@@ -450,5 +450,13 @@
   "backup_deleted": "备份已删除",
   "upload_backup": "上传",
   "uploading_backup": "正在上传...",
-  "backup_uploaded": "备份已上传"
+  "backup_uploaded": "备份已上传",
+  "no_expiry": "无期限",
+  "telemt_secret_label": "密钥 (hex)",
+  "telemt_ad_tag_label": "AD 标签 (hex)",
+  "telemt_max_conns_label": "最大 TCP 连接数",
+  "telemt_quota_label": "配额 (字节)",
+  "telemt_max_ips_label": "最大唯一 IP 数",
+  "telemt_expiry_label": "到期时间 (ISO 8601)",
+  "optional": "可选"
 }

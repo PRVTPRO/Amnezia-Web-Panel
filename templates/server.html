@@ -1,18 +1,12 @@
 {% extends "base.html" %}
 
 {% block title_extra %} — {{ server.name }}{% endblock %}
+{% block page_class %}page page--server-detail{% endblock %}
 
 {% block head_extra %}
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/material-darker.min.css">
 <style>
-    .client-actions {
-        display: flex !important;
-        flex-direction: row !important;
-        flex-wrap: nowrap !important;
-        gap: var(--space-xs) !important;
-        align-items: center;
-    }
     .marketplace-grid {
         display: grid;
         grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
@@ -64,6 +58,7 @@
         align-items: center;
         gap: var(--space-sm);
         margin-left: auto;
+        flex-wrap: wrap;
     }
     .installed-app-hidden,
     .promo-block.installed-app-hidden,
@@ -116,6 +111,31 @@
         white-space: pre;
         padding: var(--space-sm);
     }
+    @media (max-width: 768px) {
+        .config-editor-wrap .CodeMirror,
+        .config-editor-fallback {
+            height: 220px;
+            min-height: 220px;
+        }
+        .clients-header {
+            flex-direction: column;
+            align-items: stretch;
+            gap: var(--space-md);
+        }
+        .config-actions {
+            flex-direction: column;
+        }
+        .config-actions .btn {
+            flex: none !important;
+            width: 100%;
+        }
+        .rename-editor .form-input {
+            width: 100% !important;
+        }
+        .rename-editor label {
+            flex: 1 1 100%;
+        }
+    }
     .config-editor-hint {
         margin-top: var(--space-xs);
         color: var(--text-muted);
@@ -125,11 +145,11 @@
 {% endblock %}
 
 {% block content %}
-<a href="/" class="back-link">{{ _('back_to_servers') }}</a>
+<a href="/" class="back-link page-back-link">{{ _('back_to_servers') }}</a>
 
 <!-- Server Info Header -->
-<div class="card" style="margin-bottom: var(--space-xl);">
-    <div class="flex items-center justify-between" style="flex-wrap: wrap; gap: var(--space-md);">
+<div class="card page-header-card">
+    <div class="page-header page-header--card">
         <div class="flex items-center gap-md">
             <div class="server-icon" style="width:56px; height:56px; font-size:1.6rem;">🖥</div>
             <div>
@@ -138,7 +158,7 @@
                     }}</div>
             </div>
         </div>
-        <div class="flex gap-sm items-center">
+        <div class="page-header__actions">
             <div class="flex gap-sm items-center" id="serverStats" style="display:none;"></div>
             <button class="btn btn-secondary btn-sm" onclick="checkServer()" id="checkBtn">
                 <span id="checkBtnText">{{ _('server_check') }}</span>
@@ -512,14 +532,14 @@
 
 <!-- Connections Section (renamed from Clients) -->
 <div class="clients-section" id="connectionsSection" style="display:none;">
-    <div class="clients-header">
-        <h2 class="section-title" style="margin-bottom:0;">
+    <div class="clients-header page-header page-header--secondary">
+        <h2 class="section-title page-header__title">
             <span class="icon">🔗</span>
             {{ _('connections') }}
         </h2>
-        <div class="flex gap-sm items-center">
+        <div class="page-header__actions">
             <select class="form-select" id="connProtoSelect" onchange="loadConnections()"
-                style="width:auto; min-width:160px;">
+                style="width:auto;">
                 <option value="awg">AmneziaWG</option>
                 <option value="awg2">AmneziaWG 2.0</option>
                 <option value="awg3">AmneziaWG 3.1</option>
@@ -917,28 +937,28 @@
         <div id="telemtConnOptions"
             style="display:none; padding: var(--space-md); background: rgba(0,0,0,0.03); border-radius: var(--radius-md); margin-bottom: var(--space-md);">
             <div class="form-group">
-                <label class="form-label">Secret (Hex 32 chars)</label>
+                <label class="form-label">{{ _('telemt_secret_label') }}</label>
                 <input class="form-input" type="text" id="telemtSecret" placeholder="Optional (auto-generated if empty)">
             </div>
             <div class="form-group">
-                <label class="form-label">AD Tag (Hex 32 chars)</label>
+                <label class="form-label">{{ _('telemt_ad_tag_label') }}</label>
                 <input class="form-input" type="text" id="telemtAdTag" placeholder="Optional">
             </div>
             <div class="form-group">
-                <label class="form-label">Max TCP Conns</label>
+                <label class="form-label">{{ _('telemt_max_conns_label') }}</label>
                 <input class="form-input" type="number" id="telemtMaxConns" placeholder="Optional (e.g. 1000)" min="0">
             </div>
             <div class="form-group">
-                <label class="form-label">Quota (Bytes)</label>
-                <input class="form-input" type="number" id="telemtQuota" placeholder="Optional (e.g. 1073741824)"
+                <label class="form-label">{{ _('telemt_quota_label') }}</label>
+                <input class="form-input" type="number" id="telemtQuota" placeholder="{{ _('optional') }} (e.g. 1073741824)"
                     min="0">
             </div>
             <div class="form-group">
-                <label class="form-label">Max Unique IPs</label>
+                <label class="form-label">{{ _('telemt_max_ips_label') }}</label>
                 <input class="form-input" type="number" id="telemtMaxIps" placeholder="Optional (e.g. 16)" min="1">
             </div>
             <div class="form-group">
-                <label class="form-label">Expiration Date (ISO 8601)</label>
+                <label class="form-label">{{ _('telemt_expiry_label') }}</label>
                 <input class="form-input" type="text" id="telemtExpiry" placeholder="e.g. 2026-12-31T23:59:59Z">
             </div>
         </div>
@@ -1248,7 +1268,7 @@
                     <span style="font-size: 1.2rem; margin-right: 8px;">🧹</span> ${_('clear_server')}
                 </button>
                 <button class="btn btn-danger" onclick="closeModal('managementModal'); deleteServer();" style="justify-content: flex-start; padding: 12px 20px;">
-                    <span style="font-size: 1.2rem; margin-right: 8px;">🗑️</span> ${_('remove_server')}
+                    <span class="btn-text-with-icon">${ICON_TRASH}</span> ${_('remove_server')}
                 </button>
             </div>
         `;
@@ -1538,7 +1558,7 @@
             mode: options.mode || 'nginx',
             theme: 'material-darker',
             lineNumbers: true,
-            lineWrapping: false,
+            lineWrapping: true,
             indentUnit: 4,
             tabSize: 4,
             indentWithTabs: false,
@@ -1851,7 +1871,7 @@
         if (!el) return;
         if (!t) { el.innerHTML = ''; return; }
         const esc = s => String(s ?? '—').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-        const row = (k, v) => `<div style="display:flex;justify-content:space-between;gap:12px;"><span style="opacity:.7">${k}</span><code>${esc(v)}</code></div>`;
+        const row = (k, v) => `<div class="row-between" style="gap:12px;"><span style="opacity:.7">${k}</span><code style="word-break:break-all;text-align:end;">${esc(v)}</code></div>`;
         let html = '';
         const h = t.host || {};
         html += `<div style="opacity:.85;font-weight:600;margin-bottom:2px;">Host</div>`;
@@ -2500,7 +2520,7 @@
                             .replace('{count}', ev.count);
                         return `<div class="conn-warning">${escapeHtml(text)}</div>`;
                     }).join('') +
-                    `<button class="btn btn-secondary btn-sm btn-icon conn-warning-clear" onclick="clearConnWarnings('${escapeJs(client.clientId)}')" title="${_('clear_warnings')}" style="margin-top:4px;">🗑</button></div>`;
+                    `<button class="btn btn-secondary btn-sm btn-icon conn-warning-clear" onclick="clearConnWarnings('${escapeJs(client.clientId)}')" title="${_('clear_warnings')}" style="margin-top:4px;">${ICON_TRASH}</button></div>`;
                 }
 
                 // Per-peer bandwidth limit badge (AWG): ∞ by default, ⚡X Mbps when set
@@ -2546,11 +2566,11 @@
                             </div>
                         </div>
                         <div class="client-actions">
-                            <button class="btn btn-secondary btn-sm btn-icon" onclick="startRenameConnection('${escapeJs(client.clientId)}', this)" title="${_('rename')}">✏️</button>
+                            <button class="btn btn-secondary btn-sm btn-icon" onclick="startRenameConnection('${escapeJs(client.clientId)}', this)" title="${_('rename')}">${ICON_PENCIL}</button>
                             <button class="btn btn-secondary btn-sm btn-icon" onclick="showConnectionConfig('${escapeJs(client.clientId)}', '${escapeJs(name)}', ${!!userData.clientPrivateKey || proto === 'xray' || proto === 'telemt'})" title="${_('config')}">📄</button>
                             ${proto === 'telemt' ? `<button class="btn btn-secondary btn-sm btn-icon" onclick="editConnection('${escapeJs(client.clientId)}')" title="${_('edit')}">⚙️</button>` : ''}
                             <button class="btn btn-secondary btn-sm btn-icon" onclick="toggleConnection('${escapeJs(client.clientId)}', ${!enabled})" title="${toggleTitle}">${toggleIcon}</button>
-                            <button class="btn btn-danger btn-sm btn-icon" onclick="removeConnection('${escapeJs(client.clientId)}')" title="${_('delete')}">🗑</button>
+                            <button class="btn btn-danger btn-sm btn-icon" onclick="removeConnection('${escapeJs(client.clientId)}')" title="${_('delete')}">${ICON_TRASH}</button>
                         </div>
                     </div>
                 `;
@@ -2707,14 +2727,14 @@
         const isAwg = proto.startsWith('awg');
         const curSpeed = item.dataset.maxspeed || '0';
         nameEl.innerHTML = `
-            <span class="rename-editor" style="display:inline-flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
-                <label style="display:flex;flex-direction:column;gap:2px;font-size:0.7rem;opacity:.7;">
+            <span class="rename-editor" style="display:inline-flex;gap:12px;align-items:flex-end;flex-wrap:wrap;width:100%;">
+                <label style="display:flex;flex-direction:column;gap:2px;font-size:0.7rem;opacity:.7;flex:1;min-width:140px;">
                     ${_('name')}
-                    <input type="text" class="form-input" style="padding:2px 8px;font-size:0.85rem;width:160px;height:auto;" value="${escapeHtml(oldName)}">
+                    <input type="text" class="form-input" style="padding:2px 8px;font-size:0.85rem;width:100%;height:auto;" value="${escapeHtml(oldName)}">
                 </label>
-                ${isAwg ? `<label style="display:flex;flex-direction:column;gap:2px;font-size:0.7rem;opacity:.7;">
+                ${isAwg ? `<label style="display:flex;flex-direction:column;gap:2px;font-size:0.7rem;opacity:.7;flex:1;min-width:140px;">
                     ${_('speed_limit_unlim')}
-                    <input type="number" class="form-input rename-speed" min="0" step="0.1" style="padding:2px 8px;font-size:0.85rem;width:110px;height:auto;" value="${curSpeed}" placeholder="∞">
+                    <input type="number" class="form-input rename-speed" min="0" step="0.1" style="padding:2px 8px;font-size:0.85rem;width:100%;height:auto;" value="${curSpeed}" placeholder="∞">
                 </label>` : ''}
                 <button class="btn btn-secondary btn-sm btn-icon" title="${_('save')}">✔</button>
                 <button class="btn btn-secondary btn-sm btn-icon rename-cancel" title="${_('cancel')}">✖</button>
@@ -2926,11 +2946,11 @@
         const hint = document.getElementById('qrFormatHint');
         if (!named) {
             if (hint) hint.textContent = _('qr_format_wireguard_hint');
-            drawQr(currentQrConfig, 280);
+            drawQr(currentQrConfig, qrSize(document.getElementById('qrCode') || document.body, 280));
             return;
         }
         const paint = () => {
-            drawQr(currentQrChunks[qrFrame], 300);
+            drawQr(currentQrChunks[qrFrame], qrSize(document.getElementById('qrCode') || document.body, 300));
             if (hint) {
                 hint.textContent = currentQrChunks.length > 1
                     ? `${_('qr_format_amnezia_hint')} ${qrFrame + 1}/${currentQrChunks.length}`
