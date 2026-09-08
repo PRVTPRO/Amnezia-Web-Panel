@@ -2814,7 +2814,8 @@
                 if (!enabled) metaHtml += `<span class="badge badge-danger" style="font-size:0.65rem">${_('stop')}</span>`;
 
                 const disabledStyle = enabled ? '' : 'opacity:0.5;';
-                const toggleIcon = enabled ? '🔵' : '⚫';
+                // 💡 is used for both states; the "off" look lives in CSS (.peer-toggle-off)
+                const toggleClass = enabled ? 'peer-toggle' : 'peer-toggle peer-toggle-off';
                 const toggleTitle = enabled ? _('stop') : _('starting');
                 // Show config button for all WireGuard-based clients.
                 // If clientPrivateKey is missing (created via native app), we show a warning instead.
@@ -2834,7 +2835,7 @@
                             <button class="btn btn-secondary btn-sm btn-icon" onclick="startRenameConnection('${escapeJs(client.clientId)}', this)" title="${_('rename')}">${ICON_PENCIL}</button>
                             <button class="btn btn-secondary btn-sm btn-icon" onclick="showConnectionConfig('${escapeJs(client.clientId)}', '${escapeJs(name)}', ${!!userData.clientPrivateKey || proto === 'xray' || proto === 'telemt'})" title="${_('config')}">📄</button>
                             ${proto === 'telemt' ? `<button class="btn btn-secondary btn-sm btn-icon" onclick="editConnection('${escapeJs(client.clientId)}')" title="${_('edit')}">⚙️</button>` : ''}
-                            <button class="btn btn-secondary btn-sm btn-icon" onclick="toggleConnection('${escapeJs(client.clientId)}', ${!enabled})" title="${toggleTitle}">${toggleIcon}</button>
+                            <button class="btn btn-secondary btn-sm btn-icon ${toggleClass}" onclick="toggleConnection('${escapeJs(client.clientId)}', ${!enabled}, this)" title="${toggleTitle}">💡</button>
                             <button class="btn btn-danger btn-sm btn-icon" onclick="removeConnection('${escapeJs(client.clientId)}')" title="${_('delete')}">${ICON_TRASH}</button>
                         </div>
                     </div>
@@ -3146,9 +3147,27 @@
         }
     }
 
-    async function toggleConnection(clientId, enable) {
+    async function toggleConnection(clientId, enable, btn) {
         const proto = document.getElementById('connProtoSelect').value;
         const action = enable ? _('enable_connection_progress') : _('disable_connection_progress');
+        // Lock the whole client row and swap the bulb for a spinner until done
+        const row = btn ? btn.closest('.client-item') : null;
+        let originalContent = null;
+        if (row) {
+            row.classList.add('client-toggling');
+            row.querySelectorAll('button').forEach(b => b.disabled = true);
+        }
+        if (btn) {
+            originalContent = btn.innerHTML;
+            btn.innerHTML = '<span class="spinner"></span>';
+        }
+        const restore = () => {
+            if (row) {
+                row.classList.remove('client-toggling');
+                row.querySelectorAll('button').forEach(b => b.disabled = false);
+            }
+            if (btn && originalContent !== null) btn.innerHTML = originalContent;
+        };
         try {
             showToast(action, 'info');
             await apiCall(`/api/servers/${SERVER_ID}/connections/toggle`, 'POST', {
@@ -3157,6 +3176,7 @@
             showToast(enable ? _('connection_enabled') : _('connection_disabled'), 'success');
             loadConnections();
         } catch (err) {
+            restore();
             showToast(_('error') + ': ' + err.message, 'error');
         }
     }

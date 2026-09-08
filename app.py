@@ -101,7 +101,18 @@ async def custom_redoc():
 app.add_middleware(SessionMiddleware, secret_key=os.environ.get('SECRET_KEY', secrets.token_hex(32)))
 
 # Mount static files & templates
-app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
+class CachedStaticFiles(StaticFiles):
+    """Static assets are fingerprinted with ?v=<static mtime> (see
+    static_version()), so a redeploy changes the URL and busts the cache.
+    That lets us hand the browser a long 180-day cache lifetime."""
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        if response.status_code == 200:
+            response.headers['Cache-Control'] = 'public, max-age=15552000, immutable'
+        return response
+
+app.mount("/static", CachedStaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
 templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "templates"))
 
 if getattr(sys, 'frozen', False):

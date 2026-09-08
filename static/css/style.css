@@ -1383,6 +1383,18 @@ a:hover {
     }
 }
 
+/* Peer on/off toggle: a bulb for both states, "off" is a greyed-out bulb. */
+.peer-toggle.peer-toggle-off {
+    filter: grayscale(100%) brightness(1.2);
+    opacity: 0.7;
+}
+
+/* Whole client row while a toggle request is in flight. */
+.client-item.client-toggling {
+    opacity: 0.5;
+    transition: opacity var(--transition-base);
+}
+
 .protocol-name {
     font-size: 1.1rem;
     font-weight: 700;
