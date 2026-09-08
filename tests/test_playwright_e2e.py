@@ -1,6 +1,14 @@
 """Playwright E2E tests for Amnezia Web Panel."""
-import pytest
-from playwright.sync_api import Page, expect
+import unittest
+
+try:
+    import pytest
+    from playwright.sync_api import Page, expect
+except ImportError:
+    # The unit-test CI job installs only requirements.txt (no pytest), and
+    # `unittest discover` imports every test module: fail soft here instead
+    # of breaking the whole suite with ModuleNotFoundError.
+    raise unittest.SkipTest("pytest/playwright not installed, skipping E2E tests")
 
 BASE_URL = "http://127.0.0.1:8000"
 
