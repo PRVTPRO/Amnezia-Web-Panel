@@ -2788,9 +2788,9 @@
                     `<button class="btn btn-secondary btn-sm btn-icon conn-warning-clear" onclick="clearConnWarnings('${escapeJs(client.clientId)}')" title="${_('clear_warnings')}" style="margin-top:4px;">${ICON_TRASH}</button></div>`;
                 }
 
-                // Per-peer bandwidth limit badge (AWG): ∞ by default, ⚡X Mbps when set
+                // Per-peer bandwidth limit badge (AWG): ⚡∞ by default, 🐢 X Mbps when a limit is set
                 const maxSpeed = parseFloat(userData.maxSpeed || 0) || 0;
-                if (proto.startsWith('awg') || protoBase(proto) === 'wireguard') metaHtml += `<span class="traffic-badge" title="${_('max_speed')}">⚡${maxSpeed > 0 ? maxSpeed + ' Mbps' : '<span style="font-size:1.25em; line-height:0;">∞</span>'}</span>`;
+                if (proto.startsWith('awg') || protoBase(proto) === 'wireguard') metaHtml += `<span class="traffic-badge" title="${_('max_speed')}">${maxSpeed > 0 ? '🐢 ' + maxSpeed + ' Mbps' : '⚡<span style="font-size:1.25em; line-height:0;">∞</span>'}</span>`;
 
                 if (proto === 'telemt') {
                     if (userData.total_octets) metaHtml += `<span class="traffic-badge">📊 ${formatBytes(userData.total_octets)}</span>`;
