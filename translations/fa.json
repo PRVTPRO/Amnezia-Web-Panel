@@ -451,6 +451,9 @@
   "upload_backup": "بارگذاری",
   "uploading_backup": "در حال بارگذاری...",
   "backup_uploaded": "پشتیبان بارگذاری شد",
+  "rename_instance": "Rename instance",
+  "instance_name": "Instance name",
+  "rename_instance_hint": "Leave empty to restore the default name."
   "no_expiry": "بدون انقضا",
   "telemt_secret_label": "رمز (hex)",
   "telemt_ad_tag_label": "تگ AD (hex)",

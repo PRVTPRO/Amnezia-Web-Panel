@@ -451,6 +451,9 @@
   "upload_backup": "Téléverser",
   "uploading_backup": "Téléversement...",
   "backup_uploaded": "Sauvegarde téléversée",
+  "rename_instance": "Rename instance",
+  "instance_name": "Instance name",
+  "rename_instance_hint": "Leave empty to restore the default name."
   "no_expiry": "Sans expiration",
   "telemt_secret_label": "Secret (hex)",
   "telemt_ad_tag_label": "Tag AD (hex)",

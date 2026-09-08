@@ -451,6 +451,9 @@
   "upload_backup": "上传",
   "uploading_backup": "正在上传...",
   "backup_uploaded": "备份已上传",
+  "rename_instance": "Rename instance",
+  "instance_name": "Instance name",
+  "rename_instance_hint": "Leave empty to restore the default name."
   "no_expiry": "无期限",
   "telemt_secret_label": "密钥 (hex)",
   "telemt_ad_tag_label": "AD 标签 (hex)",
