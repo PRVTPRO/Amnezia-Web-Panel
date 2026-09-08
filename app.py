@@ -47,6 +47,7 @@ from managers.wireguard_manager import WireGuardManager
 from managers.backup_manager import BackupManager
 import telegram_bot as tg_bot
 
+from pwa import build_manifest
 from connection_service import (
     ConnectionService,
     DEFAULT_SELF_SERVICE_SETTINGS,
@@ -111,7 +112,7 @@ else:
 DATA_FILE = os.path.abspath(os.path.expanduser(
     os.environ.get('DATA_FILE') or os.path.join(application_path, 'data.json')
 ))
-CURRENT_VERSION = "v1.6.3"
+CURRENT_VERSION = "v1.6.4"
 BIN_DIR = os.environ.get('TUNNEL_BIN_DIR', os.path.join(application_path, 'bin'))
 TUNNEL_STATE_FILE = os.environ.get('TUNNEL_STATE_FILE', os.path.join(application_path, 'tunnels_state.json'))
 
@@ -1921,6 +1922,32 @@ def tpl(request, template, **kwargs):
     return templates.TemplateResponse(template, ctx)
 
 
+@app.get('/manifest.webmanifest')
+async def web_manifest(request: Request):
+    """Installable PWA manifest — public, no auth (browsers fetch without credentials)."""
+    data = load_data()
+    lang = request.cookies.get('lang', 'en')
+    appearance = data.get('settings', {}).get('appearance', {})
+    return JSONResponse(
+        build_manifest(appearance, lang),
+        media_type='application/manifest+json',
+    )
+
+
+@app.get('/sw.js')
+async def service_worker():
+    """Root-scoped service worker. Must not live under /static/ or scope is confined."""
+    path = os.path.join(application_path, 'static', 'sw.js')
+    return FileResponse(
+        path,
+        media_type='text/javascript',
+        headers={
+            'Cache-Control': 'no-cache',
+            'Service-Worker-Allowed': '/',
+        },
+    )
+
+
 # ======================== Pydantic Models ========================
 
 class LoginRequest(BaseModel):
@@ -2024,8 +2051,7 @@ class WgEasyImportRequest(BaseModel):
     username: Optional[str] = 'admin'
     client_ids: Optional[list] = None  # None = import all
     target: str = 'auto'  # auto | wireguard | awg2
-
-
+      
 class RenameProtocolRequest(BaseModel):
     protocol: str = ''
     name: str = ''  # empty = reset to default
@@ -3929,6 +3955,7 @@ async def api_wgeasy_preview(request: Request, server_id: int, req: WgEasyPrevie
     this server (via its local web API over SSH). No secrets are returned."""
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    from managers.wgeasy_import import WgEasyError
     try:
         data = load_data()
         if server_id >= len(data['servers']):
@@ -3937,7 +3964,7 @@ async def api_wgeasy_preview(request: Request, server_id: int, req: WgEasyPrevie
         ssh = get_ssh(server)
         ssh.connect()
         try:
-            from managers.wgeasy_import import WgEasyImporter, WgEasyError, normalize_clients
+            from managers.wgeasy_import import WgEasyImporter, normalize_clients
             importer = WgEasyImporter(ssh, web_port=req.web_port)
             backup = importer.fetch_backup(req.password, req.username or 'admin')
             clients = normalize_clients(backup)

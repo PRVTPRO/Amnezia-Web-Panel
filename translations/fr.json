@@ -466,5 +466,13 @@
   "wgeasy_target_awg": "obfuscation detected → target: AmneziaWG 2.0",
   "rename_instance": "Rename instance",
   "instance_name": "Instance name",
-  "rename_instance_hint": "Leave empty to restore the default name."
+  "rename_instance_hint": "Leave empty to restore the default name.",
+  "no_expiry": "Sans expiration",
+  "telemt_secret_label": "Secret (hex)",
+  "telemt_ad_tag_label": "Tag AD (hex)",
+  "telemt_max_conns_label": "Connexions TCP max",
+  "telemt_quota_label": "Quota (octets)",
+  "telemt_max_ips_label": "IP uniques max",
+  "telemt_expiry_label": "Expiration (ISO 8601)",
+  "optional": "Facultatif"
 }

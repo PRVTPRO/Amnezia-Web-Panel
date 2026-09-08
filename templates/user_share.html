@@ -152,8 +152,8 @@
             grid.classList.remove('hidden');
             grid.innerHTML = data.connections.map(c => `
             <div class="card" style="padding: var(--space-md); border: 1px solid var(--border-color);">
-                <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: var(--space-sm);">
-                    <div style="text-align: initial;">
+                <div class="row-between" style="align-items: flex-start; margin-bottom: var(--space-sm);">
+                    <div style="text-align: initial; min-width: 0;">
                         <div style="font-weight: 600; font-size: 1.1rem;">${c.name}</div>
                         <div style="font-size: 0.8rem; color: var(--text-muted);">${c.protocol.toUpperCase()} • ${c.server_name}</div>
                     </div>
@@ -244,11 +244,11 @@
         const hint = document.getElementById('qrFormatHint');
         if (!named) {
             if (hint) hint.textContent = _('qr_format_wireguard_hint');
-            drawQr(currentQrConfig, 280);
+            drawQr(currentQrConfig, qrSize(document.getElementById('qrCode') || document.body, 280));
             return;
         }
         const paint = () => {
-            drawQr(currentQrChunks[qrFrame], 300);
+            drawQr(currentQrChunks[qrFrame], qrSize(document.getElementById('qrCode') || document.body, 300));
             if (hint) {
                 hint.textContent = currentQrChunks.length > 1
                     ? `${_('qr_format_amnezia_hint')} ${qrFrame + 1}/${currentQrChunks.length}`
