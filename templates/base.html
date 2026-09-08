@@ -319,7 +319,9 @@
             const data = await res.json();
 
             if (!res.ok) {
-                throw new Error(data.error || 'Unknown error');
+                const err = new Error(data.error || 'Unknown error');
+                err.payload = data;  // keep extra fields (e.g. import log)
+                throw err;
             }
             return data;
         }

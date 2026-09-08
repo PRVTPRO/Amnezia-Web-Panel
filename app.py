@@ -2039,6 +2039,19 @@ class ProtocolRequest(BaseModel):
     protocol: str = 'awg'
 
 
+class WgEasyPreviewRequest(BaseModel):
+    web_port: int = 51821
+    password: str = ''
+    username: Optional[str] = 'admin'
+
+
+class WgEasyImportRequest(BaseModel):
+    web_port: int = 51821
+    password: str = ''
+    username: Optional[str] = 'admin'
+    client_ids: Optional[list] = None  # None = import all
+    target: str = 'auto'  # auto | wireguard | awg2
+      
 class RenameProtocolRequest(BaseModel):
     protocol: str = ''
     name: str = ''  # empty = reset to default
@@ -3911,6 +3924,11 @@ async def api_host_tuning(request: Request, server_id: int):
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
+@app.post('/api/servers/{server_id}/wgeasy/preview', tags=["Protocols"])
+async def api_wgeasy_preview(request: Request, server_id: int, req: WgEasyPreviewRequest):
+    """Fetch the client list from a wg-easy / amnezia-wg-easy panel running on
+    this server (via its local web API over SSH). No secrets are returned."""
+    
 @app.post('/api/servers/{server_id}/protocol/rename', tags=["Protocols"])
 async def api_rename_protocol(request: Request, server_id: int, req: RenameProtocolRequest):
     """Set or clear a custom display name for an installed protocol instance."""
@@ -3921,6 +3939,94 @@ async def api_rename_protocol(request: Request, server_id: int, req: RenameProto
         if server_id >= len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
+        ssh = get_ssh(server)
+        ssh.connect()
+        try:
+            from managers.wgeasy_import import WgEasyImporter, WgEasyError, normalize_clients
+            importer = WgEasyImporter(ssh, web_port=req.web_port)
+            backup = importer.fetch_backup(req.password, req.username or 'admin')
+            clients = normalize_clients(backup)
+            _, listen_port, _, obfuscation = importer.detect_source()
+        finally:
+            ssh.disconnect()
+        return {
+            'status': 'success',
+            'release': backup.get('_release'),
+            'server_address': (backup.get('server') or {}).get('address', ''),
+            'listen_port': int(listen_port),
+            'obfuscation': bool(obfuscation),
+            'recommended_target': 'awg2' if obfuscation else 'wireguard',
+            'clients': [{
+                'id': c['id'],
+                'name': c['name'],
+                'address': c['address'],
+                'enabled': c['enabled'],
+            } for c in clients],
+            'has_server_private_key': bool((backup.get('server') or {}).get('privateKey')),
+        }
+    except WgEasyError as e:
+        return JSONResponse({'error': str(e)}, status_code=400)
+    except Exception as e:
+        logger.exception("Error previewing wg-easy import")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/wgeasy/import', tags=["Protocols"])
+async def api_wgeasy_import(request: Request, server_id: int, req: WgEasyImportRequest):
+    """Migrate clients from a wg-easy panel on this server into a panel-managed
+    WireGuard instance, preserving keys/IPs/port so client configs keep working."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    from managers.wgeasy_import import WgEasyError  # noqa: needed in except below
+    log = []
+    try:
+        data = load_data()
+        if server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        if 'protocols' not in server:
+            server['protocols'] = {}
+        ssh = get_ssh(server)
+        ssh.connect()
+        try:
+            from managers.wgeasy_import import WgEasyImporter, WgEasyError, run_import
+            importer = WgEasyImporter(ssh, web_port=req.web_port)
+            backup = importer.fetch_backup(req.password, req.username or 'admin')
+            _, _, _, obfuscation = importer.detect_source()
+            target = req.target if req.target in ('wireguard', 'awg2') else (
+                'awg2' if obfuscation else 'wireguard')
+            # Additional instances are supported for AWG 2.0: when the first
+            # slot is taken, import as the next free instance key (awg2__2,
+            # awg2__3, ...). WireGuard is single-instance for now.
+            if target in server['protocols'] and target != 'awg2':
+                return JSONResponse(
+                    {'error': f'Protocol {target} is already installed on this server. '
+                              'Remove it first if you want to re-import.'}, status_code=400)
+            if target == 'awg2' and any(k.split('__', 1)[0] == 'awg2'
+                                        for k in server['protocols']):
+                target = next_protocol_key(server['protocols'], 'awg2')
+            result = run_import(ssh, backup, client_ids=req.client_ids,
+                                target=target, log=log)
+            result['log'] = log
+        finally:
+            ssh.disconnect()
+
+        server['protocols'][target] = {
+            'installed': True,
+            'port': result['port'],
+            'awg_params': {},
+            'base_protocol': protocol_base(target),
+            'instance': protocol_instance(target),
+            'display_name': protocol_display_name(target),
+            'container_name': protocol_container_name(target),
+        }
+        save_data(data)
+        return result
+    except WgEasyError as e:
+        return JSONResponse({'error': str(e), 'log': log}, status_code=400)
+    except Exception as e:
+        logger.exception("Error importing from wg-easy")
+        return JSONResponse({'error': str(e), 'log': log}, status_code=500)
         protocols = server.get('protocols') or {}
         if req.protocol not in protocols:
             return JSONResponse({'error': 'Protocol is not installed on this server'}, status_code=404)

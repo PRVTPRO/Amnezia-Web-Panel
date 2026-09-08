@@ -296,10 +296,10 @@ EOF
         if code != 0:
             raise RuntimeError(f"Failed to configure container: {err}")
 
-    def _upload_start_script(self, port):
+    def _upload_start_script(self, port, subnet_ip=None, subnet_cidr=None):
         """Upload and execute the start script inside the container."""
-        subnet_ip = WG_DEFAULTS['subnet_ip']
-        subnet_cidr = WG_DEFAULTS['subnet_cidr']
+        subnet_ip = subnet_ip or WG_DEFAULTS['subnet_ip']
+        subnet_cidr = subnet_cidr or WG_DEFAULTS['subnet_cidr']
 
         start_script = f"""#!/bin/bash
 echo "WireGuard container startup"
