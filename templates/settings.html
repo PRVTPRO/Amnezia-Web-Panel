@@ -1,19 +1,34 @@
 {% extends "base.html" %}
 
 {% block title_extra %} — {{ _('nav_settings') }}{% endblock %}
+{% block page_class %}page page--settings{% endblock %}
 
 {% block content %}
-<div class="section-title">
-    <span class="icon">⚙️</span>
-    {{ _('settings_title') }}
+<div class="page-header">
+    <h1 class="section-title page-header__title">
+        <span class="icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg></span>
+        {{ _('settings_title') }}
+    </h1>
 </div>
 
-<div class="grid"
-    style="display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: var(--space-lg); align-items: start;">
+<nav class="settings-nav" aria-label="{{ _('settings_title') }}">
+    <a href="#settings-appearance">{{ _('appearance') }}</a>
+    <a href="#settings-captcha">{{ _('captcha_title') }}</a>
+    <a href="#settings-telegram">{{ _('telegram_bot_title') }}</a>
+    <a href="#settings-tunnels">{{ _('tunnels_title') }}</a>
+    <a href="#settings-ssl">{{ _('ssl_title') }}</a>
+    <a href="#settings-import">{{ _('import_users_title') }}</a>
+    <a href="#settings-backup">{{ _('backup_title') }}</a>
+    <a href="#settings-tokens">{{ _('api_tokens_title') }}</a>
+    <a href="#settings-self-service">{{ _('self_service_title') }}</a>
+    <a href="#settings-about">{{ _('about_title') }}</a>
+</nav>
+
+<div class="grid grid-2 settings-grid" style="gap: var(--space-lg); align-items: start;">
     <!-- LEFT COLUMN -->
     <div style="display: flex; flex-direction: column; gap: var(--space-lg);">
         <!-- BLOCK 1: Appearance -->
-        <div class="card">
+        <div class="card" id="settings-appearance">
             <h3 class="card-title" style="margin-bottom: var(--space-lg);">{{ _('appearance') }}</h3>
             <form id="appearanceForm">
                 <div class="form-group">
@@ -33,7 +48,7 @@
         </div>
 
         <!-- BLOCK Captcha -->
-        <div class="card">
+        <div class="card" id="settings-captcha">
             <h3 class="card-title" style="margin-bottom: var(--space-lg);">{{ _('captcha_title') }}</h3>
             <form id="captchaForm">
                 <div class="form-group">
@@ -46,7 +61,7 @@
         </div>
 
         <!-- BLOCK Telegram Bot -->
-        <div class="card">
+        <div class="card" id="settings-telegram">
             <h3 class="card-title" style="margin-bottom: var(--space-lg);">{{ _('telegram_bot_title') }}</h3>
             <form id="telegramForm">
                 <div class="form-group">
@@ -54,7 +69,7 @@
                     <input type="text" class="form-input" id="tg_token" value="{{ telegram_settings.token or '' }}"
                         placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11">
                 </div>
-                <div style="display: flex; align-items: center; gap: var(--space-md); margin-top: var(--space-md);">
+                <div class="row-between" style="margin-top: var(--space-md);">
                     <div style="display: flex; align-items: center; gap: var(--space-sm);">
                         <span style="font-size: 0.85rem; color: var(--text-muted);">{{ _('bot_status') }}:</span>
                         {% if bot_running %}
@@ -100,11 +115,11 @@
         </div>
 
         <!-- BLOCK Tunnels -->
-        <div class="card">
-            <h3 class="card-title" style="margin-bottom: var(--space-lg);">🌍 {{ _('tunnels_title') }}</h3>
+        <div class="card" id="settings-tunnels">
+            <h3 class="card-title" style="margin-bottom: var(--space-lg);"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="margin-right: 6px; vertical-align: -2px;"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>{{ _('tunnels_title') }}</h3>
             <div style="display: flex; flex-direction: column; gap: var(--space-md);">
                 <div style="padding: var(--space-md); border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-primary);">
-                    <div style="display:flex; align-items:center; justify-content:space-between; gap:var(--space-md); margin-bottom: var(--space-sm);">
+                    <div class="row-between" style="margin-bottom: var(--space-sm);">
                         <strong>{{ _('local_server') }}</strong>
                         <span class="badge badge-info">{{ _('active') }}</span>
                     </div>
@@ -115,12 +130,12 @@
                 </div>
 
                 <div class="tunnel-row" data-provider="cloudflare" style="padding: var(--space-md); border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-primary);">
-                    <div style="display:flex; align-items:center; justify-content:space-between; gap:var(--space-md); margin-bottom: var(--space-sm);">
+                    <div class="row-between" style="margin-bottom: var(--space-sm);">
                         <strong>Cloudflare Quick Tunnel</strong>
                         <span class="badge badge-secondary" id="cloudflareInstallBadge">{{ _('not_installed') }}</span>
                     </div>
                     <div id="cloudflarePublicUrls" class="form-hint" style="margin-bottom: var(--space-sm);">{{ _('tunnel_no_public_url') }}</div>
-                    <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap: var(--space-sm);">
+                    <div class="btn-group-3">
                         <button type="button" class="btn btn-primary" id="cloudflareTunnelBtn" onclick="enableTunnel('cloudflare')">
                             <span id="cloudflareTunnelBtnText">{{ _('tunnel_install_enable') }}</span>
                             <div class="spinner hidden" id="cloudflareTunnelSpinner" style="width:14px; height:14px;"></div>
@@ -137,7 +152,7 @@
                 </div>
 
                 <div class="tunnel-row" data-provider="ngrok" style="padding: var(--space-md); border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-primary);">
-                    <div style="display:flex; align-items:center; justify-content:space-between; gap:var(--space-md); margin-bottom: var(--space-sm);">
+                    <div class="row-between" style="margin-bottom: var(--space-sm);">
                         <strong>ngrok Tunnel + Authtoken</strong>
                         <span class="badge badge-secondary" id="ngrokInstallBadge">{{ _('not_installed') }}</span>
                     </div>
@@ -145,7 +160,7 @@
                         <input type="password" class="form-input" id="ngrokAuthtoken" placeholder="{{ _('ngrok_authtoken_placeholder') }}" autocomplete="off">
                     </div>
                     <div id="ngrokPublicUrls" class="form-hint" style="margin-bottom: var(--space-sm);">{{ _('tunnel_no_public_url') }}</div>
-                    <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap: var(--space-sm);">
+                    <div class="btn-group-3">
                         <button type="button" class="btn btn-primary" id="ngrokTunnelBtn" onclick="enableTunnel('ngrok')">
                             <span id="ngrokTunnelBtnText">{{ _('tunnel_install_enable') }}</span>
                             <div class="spinner hidden" id="ngrokTunnelSpinner" style="width:14px; height:14px;"></div>
@@ -163,13 +178,13 @@
 
 
                 <div class="tunnel-row" data-provider="warp" style="padding: var(--space-md); border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-primary);">
-                    <div style="display:flex; align-items:center; justify-content:space-between; gap:var(--space-md); margin-bottom: var(--space-sm);">
+                    <div class="row-between" style="margin-bottom: var(--space-sm);">
                         <strong>Cloudflare WARP</strong>
                         <span class="badge badge-secondary" id="warpInstallBadge">{{ _('not_installed') }}</span>
                     </div>
                     <div id="warpStatusText" class="form-hint" style="margin-bottom: var(--space-sm);">{{ _('warp_status_unknown') }}</div>
                     <div id="warpHintText" class="form-hint" style="margin-bottom: var(--space-sm);">{{ _('warp_hint') }}</div>
-                    <div style="display:grid; grid-template-columns: 1fr 1fr; gap: var(--space-sm);">
+                    <div class="grid-2" style="gap: var(--space-sm);">
                         <button type="button" class="btn btn-primary" id="warpConnectBtn" onclick="connectWarp()">
                             <span id="warpConnectBtnText">{{ _('warp_connect') }}</span>
                             <div class="spinner hidden" id="warpConnectSpinner" style="width:14px; height:14px;"></div>
@@ -185,8 +200,8 @@
         </div>
 
         <!-- BLOCK SSL/HTTPS -->
-        <div class="card">
-            <h3 class="card-title" style="margin-bottom: var(--space-lg);">🔒 {{ _('ssl_title') }}</h3>
+        <div class="card" id="settings-ssl">
+            <h3 class="card-title" style="margin-bottom: var(--space-lg);"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="margin-right: 6px; vertical-align: -2px;"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>{{ _('ssl_title') }}</h3>
             <form id="sslForm">
                 <div class="form-group">
                     <label class="form-label">
@@ -204,7 +219,7 @@
                         <input type="text" class="form-input" id="ssl_domain" value="{{ settings.get('ssl', {}).get('domain', '') }}" placeholder="vpn.example.com">
                     </div>
 
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-md);">
+                    <div class="grid-2">
                         <div class="form-group">
                             <label class="form-label">{{ _('cert_path_label') }}</label>
                             <input type="text" class="form-input" id="ssl_cert_path" value="{{ settings.get('ssl', {}).get('cert_path', '') }}" placeholder="/etc/amnezia/cert.pem">
@@ -235,12 +250,12 @@
     <!-- RIGHT COLUMN -->
     <div style="display: flex; flex-direction: column; gap: var(--space-lg);">
         <!-- BLOCK 3: Import Users -->
-        <div class="card">
+        <div class="card" id="settings-import">
             <h3 class="card-title" style="margin-bottom: var(--space-lg);">{{ _('import_users_title') }}</h3>
             <form id="syncForm">
                 <div class="form-group" style="margin-bottom: var(--space-lg);">
                     <label class="form-label">{{ _('import_source_label') }}</label>
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-sm);">
+                    <div class="grid-2" style="gap: var(--space-sm);">
                         <label style="display: flex; align-items: center; gap: var(--space-sm); cursor: pointer;">
                             <input type="checkbox" name="remnawave_sync" {% if settings.sync.remnawave_sync %}checked{%
                                 endif %}> Remnawave
@@ -296,7 +311,18 @@
                             </button>
                             <button type="button" class="btn btn-danger btn-sm" onclick="deleteSyncRemnawave()"
                                 id="syncDelBtn">
-                                <span id="syncDelBtnText">🗑 {{ _('delete_sync_btn') }}</span>
+                                <span id="syncDelBtnText" class="btn-text-with-icon">
+                                    <svg class="btn-icon-svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+                                        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                                        aria-hidden="true">
+                                        <path d="M3 6h18" />
+                                        <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
+                                        <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+                                        <line x1="10" y1="11" x2="10" y2="17" />
+                                        <line x1="14" y1="11" x2="14" y2="17" />
+                                    </svg>
+                                    {{ _('delete_sync_btn') }}
+                                </span>
                                 <div class="spinner hidden" id="syncDelSpinner" style="width:14px; height:14px;"></div>
                             </button>
                         </div>
@@ -340,8 +366,8 @@
         </div>
 
         <!-- BLOCK: Simple Backup -->
-        <div class="card" style="margin-top: var(--space-lg);">
-            <h3 class="card-title" style="margin-bottom: var(--space-lg);">📤 {{ _('backup_title') }}</h3>
+        <div class="card" id="settings-backup" style="margin-top: var(--space-lg);">
+            <h3 class="card-title" style="margin-bottom: var(--space-lg);"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="margin-right: 6px; vertical-align: -2px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>{{ _('backup_title') }}</h3>
             <div style="display: flex; flex-direction: column; gap: var(--space-md);">
                 <div style="display: flex; gap: var(--space-sm);">
                     <a href="/api/settings/backup/download" class="btn btn-secondary"
@@ -401,9 +427,9 @@
         </div>
 
         <!-- BLOCK: API Tokens -->
-        <div class="card" style="margin-top: var(--space-lg);">
-            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom: var(--space-md);">
-                <h3 class="card-title" style="margin:0;">🔑 {{ _('api_tokens_title') }}</h3>
+        <div class="card" id="settings-tokens" style="margin-top: var(--space-lg);">
+            <div class="row-between" style="margin-bottom: var(--space-md);">
+                <h3 class="card-title" style="margin:0;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="margin-right: 6px; vertical-align: -2px;"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>{{ _('api_tokens_title') }}</h3>
                 <button type="button" class="btn btn-primary btn-sm" onclick="openCreateTokenModal()">
                     <span>＋</span> {{ _('api_tokens_create') }}
                 </button>
@@ -417,8 +443,8 @@
         </div>
 
         <!-- BLOCK: Self-Service -->
-        <div class="card" style="margin-top: var(--space-lg);">
-            <h3 class="card-title" style="margin-bottom: var(--space-lg);">🔐 {{ _('self_service_title') }}</h3>
+        <div class="card" id="settings-self-service" style="margin-top: var(--space-lg);">
+            <h3 class="card-title" style="margin-bottom: var(--space-lg);"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="margin-right: 6px; vertical-align: -2px;"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>{{ _('self_service_title') }}</h3>
             <form id="selfServiceForm">
                 <div class="form-group">
                     <label style="display: flex; align-items: center; gap: var(--space-sm); cursor: pointer;">
@@ -467,10 +493,10 @@
         </div>
 
         <!-- BLOCK: About & Updates -->
-        <div class="card" style="margin-top: var(--space-lg);">
-            <h3 class="card-title" style="margin-bottom: var(--space-lg);">ℹ️ {{ _('about_title') }}</h3>
+        <div class="card" id="settings-about" style="margin-top: var(--space-lg);">
+            <h3 class="card-title" style="margin-bottom: var(--space-lg);"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="margin-right: 6px; vertical-align: -2px;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>{{ _('about_title') }}</h3>
             <div style="display: flex; flex-direction: column; gap: var(--space-md);">
-                <div style="display: flex; justify-content: space-between; align-items: center; padding: var(--space-sm) 0; border-bottom: 1px solid var(--border-color);">
+                <div class="row-between" style="padding: var(--space-sm) 0; border-bottom: 1px solid var(--border-color);">
                     <span style="font-weight: 500;">{{ _('current_version') }}</span>
                     <span class="badge badge-info" id="currentVersionBadge" style="font-size: 0.95rem;">{{ current_version }}</span>
                 </div>
@@ -493,7 +519,7 @@
     </div>
 </div>
 
-<div style="margin-top: var(--space-xl); text-align: right;">
+<div style="margin-top: var(--space-xl); text-align: right;" class="btn-full-mobile">
     <button class="btn btn-primary btn-lg" onclick="saveSettings()" id="saveBtn">
         <span>{{ _('save_changes') }}</span>
         <div class="spinner hidden" id="saveSpinner"></div>
@@ -543,7 +569,7 @@
             ⚠️ <strong>{{ _('api_tokens_warning_title') }}</strong>
             <div class="form-hint" style="margin-top: 4px;">{{ _('api_tokens_warning_body') }}</div>
         </div>
-        <div class="form-hint" style="margin-bottom: var(--space-sm); font-family: 'SF Mono', monospace; font-size: 0.78rem; padding: var(--space-sm); background: var(--bg-primary); border-radius: var(--radius-sm);">
+        <div class="form-hint" style="margin-bottom: var(--space-sm); font-family: 'SF Mono', monospace; font-size: 0.78rem; padding: var(--space-sm); background: var(--bg-primary); border-radius: var(--radius-sm); word-break: break-all;">
             curl -H "Authorization: Bearer &lt;your_token&gt;" {{ request.url.scheme }}://{{ request.url.netloc }}/api/users
         </div>
         <div class="modal-footer">
@@ -843,7 +869,7 @@
             showToast(`${_('error')}: ` + err.message, 'error');
         } finally {
             btn.disabled = false;
-            text.textContent = `🗑 ${_('delete_sync_btn')}`;
+            text.innerHTML = `${ICON_TRASH} ${_('delete_sync_btn')}`;
             spinner.classList.add('hidden');
         }
     }
@@ -1058,14 +1084,14 @@
             return;
         }
         container.innerHTML = tokens.map(t => `
-            <div class="token-row" style="display:flex; align-items:center; justify-content:space-between; gap:var(--space-md); padding:var(--space-sm) 0; border-bottom:1px solid var(--border-color);">
+            <div class="token-row row-between" style="padding:var(--space-sm) 0; border-bottom:1px solid var(--border-color);">
                 <div style="min-width:0; flex:1;">
                     <div style="font-weight:600;">${escapeHTML(t.name)}</div>
-                    <div class="text-muted" style="font-size:0.78rem; font-family: 'SF Mono', monospace;">
+                    <div class="text-muted" style="font-size:0.78rem; font-family: 'SF Mono', monospace; display:flex; flex-wrap:wrap; gap:var(--space-sm);">
                         <span>${escapeHTML(t.token_prefix || '')}…</span>
-                        <span style="margin-left:var(--space-md);">${_('api_tokens_created')}: ${fmtTokenDate(t.created_at)}</span>
-                        <span style="margin-left:var(--space-md);">${_('api_tokens_last_used')}: ${fmtTokenDate(t.last_used_at)}</span>
-                        ${t.owner ? `<span style="margin-left:var(--space-md);">${_('api_tokens_owner')}: ${escapeHTML(t.owner)}</span>` : ''}
+                        <span>${_('api_tokens_created')}: ${fmtTokenDate(t.created_at)}</span>
+                        <span>${_('api_tokens_last_used')}: ${fmtTokenDate(t.last_used_at)}</span>
+                        ${t.owner ? `<span>${_('api_tokens_owner')}: ${escapeHTML(t.owner)}</span>` : ''}
                     </div>
                 </div>
                 <button class="btn btn-danger btn-sm" onclick="revokeToken('${t.id}', '${escapeHTML(t.name)}')">

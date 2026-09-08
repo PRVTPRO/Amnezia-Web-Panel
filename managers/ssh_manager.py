@@ -26,6 +26,14 @@ class SSHManager:
         # Serializes connect/disconnect so concurrent threads (UI request
         # handler + background monitor) cannot race a half-built transport.
         self._conn_lock = threading.Lock()
+        # Serializes command/SFTP execution on the shared transport. Pooled
+        # managers are used concurrently by request handlers and background
+        # threads (traffic sync, conn monitor); without this a failed
+        # exec on one side triggers a reconnect that closes the client the
+        # other side is mid-command on ('NoneType open_session', EOFError
+        # in open_sftp, bursts of 500s followed by the connect cooldown).
+        # RLock because run_command retries by calling itself.
+        self._exec_lock = threading.RLock()
         # Backoff: after a failed connect, do not hammer the dead server on
         # every request (each attempt costs up to `timeout` seconds and can
         # exhaust the web worker pool when several servers are down).
@@ -152,6 +160,10 @@ class SSHManager:
 
     def run_command(self, command, timeout=60, _retried=False):
         """Execute command on remote server."""
+        with self._exec_lock:
+            return self._run_command_locked(command, timeout, _retried)
+
+    def _run_command_locked(self, command, timeout, _retried):
         self.ensure_connected()
 
         logger.info(f"Running command: {command[:100]}...")
@@ -251,6 +263,10 @@ class SSHManager:
 
     def upload_file(self, content, remote_path):
         """Upload text content to a remote file via SFTP."""
+        with self._exec_lock:
+            return self._upload_file_locked(content, remote_path)
+
+    def _upload_file_locked(self, content, remote_path):
         self.ensure_connected()
 
         # Normalize line endings (Windows CRLF -> Unix LF)
@@ -286,6 +302,10 @@ class SSHManager:
 
     def download_file(self, remote_path):
         """Download text content from a remote file."""
+        with self._exec_lock:
+            return self._download_file_locked(remote_path)
+
+    def _download_file_locked(self, remote_path):
         self.ensure_connected()
 
         sftp = self.client.open_sftp()
@@ -297,6 +317,10 @@ class SSHManager:
 
     def file_exists(self, remote_path):
         """Check if a remote file exists."""
+        with self._exec_lock:
+            return self._file_exists_locked(remote_path)
+
+    def _file_exists_locked(self, remote_path):
         self.ensure_connected()
 
         sftp = self.client.open_sftp()

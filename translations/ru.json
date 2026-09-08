@@ -487,4 +487,12 @@
   "rename_instance": "Переименовать инстанс",
   "instance_name": "Название инстанса",
   "rename_instance_hint": "Пустое поле — вернуть название по умолчанию."
+  "no_expiry": "Без срока",
+  "telemt_secret_label": "Секрет (hex)",
+  "telemt_ad_tag_label": "AD-тег (hex)",
+  "telemt_max_conns_label": "Макс. TCP-соединений",
+  "telemt_quota_label": "Квота (байты)",
+  "telemt_max_ips_label": "Макс. уникальных IP",
+  "telemt_expiry_label": "Истекает (ISO 8601)",
+  "optional": "Необязательно"
 }
