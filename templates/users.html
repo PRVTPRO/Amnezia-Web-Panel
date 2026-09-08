@@ -67,13 +67,15 @@
             </div>
 
             <div class="form-group">
-                <label class="form-label">{{ _('password_label') }}</label>
-                <input class="form-input" type="password" id="newPassword" placeholder="••••••••" required>
+                <label class="form-label" id="newPasswordLabel">{{ _('password_label') }}</label>
+                <input class="form-input" type="password" id="newPassword" placeholder="••••••••">
+                <div class="form-hint">{{ _('password_optional_no_role') }}</div>
             </div>
 
             <div class="form-group">
                 <label class="form-label">{{ _('role_label') }}</label>
-                <select class="form-select" id="newRole">
+                <select class="form-select" id="newRole" onchange="toggleNewUserPasswordReq()">
+                    <option value="none" selected>{{ _('role_none_desc') }}</option>
                     <option value="user">{{ _('role_user_desc') }}</option>
                     <option value="support">{{ _('role_support_desc') }}</option>
                     <option value="admin">{{ _('role_admin_desc') }}</option>
@@ -199,6 +201,10 @@
         </div>
         <form id="editUserForm" onsubmit="event.preventDefault(); saveEditUser();">
             <input type="hidden" id="editUserId">
+            <div class="form-group">
+                <label class="form-label">{{ _('username_label') }}</label>
+                <input type="text" class="form-input" id="editUserName" placeholder="username" required>
+            </div>
             <div class="form-group">
                 <label class="form-label">{{ _('edit_user_tg') }}</label>
                 <input type="text" class="form-input" id="editUserTG" placeholder="Numeric Telegram ID">
@@ -512,9 +518,9 @@
                         <div class="entity-card-body user-card-body">
                             <div class="client-name">
                                 ${u.username}
-                                <span class="badge badge-${u.role === 'admin' ? 'success' : (u.role === 'support' ? 'info' : 'warn')}" 
+                                <span class="badge badge-${u.role === 'admin' ? 'success' : (u.role === 'support' ? 'info' : (u.role === 'none' ? 'secondary' : 'warn'))}" 
                                       style="font-size:0.65rem; margin-left: var(--space-xs);">
-                                    ${u.role.toUpperCase()}
+                                    ${u.role === 'none' ? _('role_none_badge') : u.role.toUpperCase()}
                                 </span>
                                 <span class="badge badge-secondary" style="font-size:0.65rem; opacity: 0.7;">
                                     ${u.source}
@@ -675,8 +681,22 @@
         updateTelemtOptions('ucProtocol', 'ucTelemtOptions');
     });
 
+    function toggleNewUserPasswordReq() {
+        const needsPass = document.getElementById('newRole').value !== 'none';
+        const input = document.getElementById('newPassword');
+        input.required = needsPass;
+        document.getElementById('newPasswordLabel').textContent =
+            needsPass ? _('password_label') : _('password_label') + ' (' + _('optional') + ')';
+    }
+
     async function addUser(e) {
         e.preventDefault();
+        const role = document.getElementById('newRole').value;
+        const password = document.getElementById('newPassword').value;
+        if (role !== 'none' && !password) {
+            showToast(_('password_required_for_role'), 'error');
+            return;
+        }
         const btn = document.getElementById('addUserBtn');
         const text = document.getElementById('addUserBtnText');
         const spinner = document.getElementById('addUserSpinner');
@@ -686,8 +706,8 @@
         try {
             const body = {
                 username: document.getElementById('newUsername').value,
-                password: document.getElementById('newPassword').value,
-                role: document.getElementById('newRole').value,
+                password: password || null,
+                role: role,
                 telegramId: document.getElementById('newTelegramId').value || null,
                 email: document.getElementById('newEmail').value || null,
                 description: document.getElementById('newDescription').value || null,
@@ -1075,6 +1095,7 @@
     function openEditUser(data) {
         document.getElementById('editUserId').value = data.id;
         document.getElementById('editUserTitle').textContent = data.username;
+        document.getElementById('editUserName').value = data.username || '';
         document.getElementById('editUserTG').value = data.tg || '';
         document.getElementById('editUserEmail').value = data.email || '';
         document.getElementById('editUserDesc').value = data.desc || '';
@@ -1116,6 +1137,7 @@
         const spinner = document.getElementById('saveEditSpinner');
 
         const payload = {
+            username: document.getElementById('editUserName').value.trim(),
             telegramId: document.getElementById('editUserTG').value,
             email: document.getElementById('editUserEmail').value,
             description: document.getElementById('editUserDesc').value,

@@ -2105,8 +2105,10 @@ class ToggleConnectionRequest(BaseModel):
 
 class AddUserRequest(BaseModel):
     username: str
-    password: str
-    role: str = 'user'
+    # Password is optional: role 'none' (the default) is a record-only user
+    # who cannot log in, so no password is needed. Any real role requires one.
+    password: Optional[str] = None
+    role: str = 'none'
     telegramId: Optional[str] = None
     email: Optional[str] = None
     description: Optional[str] = None
@@ -2197,6 +2199,7 @@ class SelfServiceConnectionRequest(BaseModel):
 
 
 class UpdateUserRequest(BaseModel):
+    username: Optional[str] = None
     telegramId: Optional[str] = None
     email: Optional[str] = None
     description: Optional[str] = None
@@ -2755,7 +2758,8 @@ async def api_login(request: Request, req: LoginRequest):
         request.session.pop('captcha_answer', None)
 
     for u in data.get('users', []):
-        if u['username'] == req.username and verify_password(req.password, u['password_hash']):
+        # Users without a password (role 'none', record-only) can never log in.
+        if u['username'] == req.username and u.get('password_hash') and verify_password(req.password, u['password_hash']):
             lang = request.cookies.get('lang', 'ru')
             if not u.get('enabled', True):
                 return JSONResponse({'error': _t('account_disabled', lang)}, status_code=403)
@@ -4529,12 +4533,14 @@ async def api_add_user(request: Request, req: AddUserRequest):
         # Check duplicate
         if any(u['username'] == req.username for u in data.get('users', [])):
             return JSONResponse({'error': _t('user_exists', lang)}, status_code=400)
-        if req.role not in ('admin', 'support', 'user'):
+        if req.role not in ('admin', 'support', 'user', 'none'):
             return JSONResponse({'error': 'Invalid role'}, status_code=400)
+        if req.role != 'none' and not req.password:
+            return JSONResponse({'error': _t('password_required_for_role', lang)}, status_code=400)
         new_user = {
             'id': str(uuid.uuid4()),
             'username': req.username,
-            'password_hash': hash_password(req.password),
+            'password_hash': hash_password(req.password) if req.password else None,
             'role': req.role,
             'telegramId': telegram_id,
             'email': req.email,
@@ -4614,6 +4620,14 @@ async def api_update_user(request: Request, user_id: str, req: UpdateUserRequest
         if not user:
             return JSONResponse({'error': 'User not found'}, status_code=404)
             
+        if req.username is not None:
+            new_name = req.username.strip()
+            if not new_name:
+                return JSONResponse({'error': 'Username must not be empty'}, status_code=400)
+            if any(u['username'] == new_name and u['id'] != user_id for u in data.get('users', [])):
+                lang = request.cookies.get('lang', 'ru')
+                return JSONResponse({'error': _t('user_exists', lang)}, status_code=400)
+            user['username'] = new_name
         if req.telegramId is not None:
             try:
                 user['telegramId'] = _normalize_telegram_id(req.telegramId)

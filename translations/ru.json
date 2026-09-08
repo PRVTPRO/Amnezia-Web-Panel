@@ -293,7 +293,7 @@
   "download_backup": "Скачать data.json",
   "restore_backup": "Восстановить из файла",
   "restore_confirm": "Вы уверены? Текущие данные будут перезаписаны, и приложение перезагрузится.",
-  "restore_success": "Восстановление успешно! Перезагрузка...",
+  "restore_success": "Бекап успешно восстановлен!",
   "auto_backup_title": "Auto backup",
   "enable_auto_backup": "Включить автобекапы серверов",
   "auto_backup_interval_label": "Интервал создания",
@@ -478,7 +478,6 @@
   "port_in_use_by": "Порт {port} уже занят ({owner}). Выберите другой порт.",
   "restore": "Восстановить",
   "restore_confirm_protocol": "Вы уверены? Текущая конфигурация протокола будет заменена данным бекапом.",
-  "restore_success": "Бекап успешно восстановлен!",
   "delete_backup_confirm": "Удалить этот бекап с сервера? Это действие нельзя отменить.",
   "backup_deleted": "Бекап удалён",
   "upload_backup": "Загрузить",
@@ -507,5 +506,9 @@
   "telemt_quota_label": "Квота (байты)",
   "telemt_max_ips_label": "Макс. уникальных IP",
   "telemt_expiry_label": "Истекает (ISO 8601)",
-  "optional": "Необязательно"
+  "optional": "Необязательно",
+  "role_none_desc": "Без роли — только учётная запись, без входа",
+  "role_none_badge": "Без роли",
+  "password_optional_no_role": "Для роли «Без роли» пароль не нужен",
+  "password_required_for_role": "Для выбранной роли пароль обязателен"
 }

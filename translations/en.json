@@ -293,7 +293,7 @@
   "download_backup": "Download data.json",
   "restore_backup": "Restore from file",
   "restore_confirm": "Are you sure? Current data will be overwritten and the application will restart.",
-  "restore_success": "Restore successful! Restarting...",
+  "restore_success": "Backup restored successfully!",
   "auto_backup_title": "Auto backup",
   "enable_auto_backup": "Enable server auto backups",
   "auto_backup_interval_label": "Creation interval",
@@ -478,7 +478,6 @@
   "port_in_use_by": "Port {port} is already used by {owner}. Choose another port.",
   "restore": "Restore",
   "restore_confirm_protocol": "Are you sure? The current protocol configuration will be overwritten with this backup.",
-  "restore_success": "Backup restored successfully!",
   "delete_backup_confirm": "Delete this backup from the server? This cannot be undone.",
   "backup_deleted": "Backup deleted",
   "upload_backup": "Upload",
@@ -507,5 +506,9 @@
   "telemt_quota_label": "Quota (bytes)",
   "telemt_max_ips_label": "Max unique IPs",
   "telemt_expiry_label": "Expiration (ISO 8601)",
-  "optional": "Optional"
+  "optional": "Optional",
+  "role_none_desc": "No role — record only, cannot log in",
+  "role_none_badge": "No role",
+  "password_optional_no_role": "No password needed for the “No role” role",
+  "password_required_for_role": "A password is required for the selected role"
 }
