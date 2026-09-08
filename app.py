@@ -47,6 +47,7 @@ from managers.wireguard_manager import WireGuardManager
 from managers.backup_manager import BackupManager
 import telegram_bot as tg_bot
 
+from exit_link_service import ExitLinkError, ExitLinkService
 from pwa import build_manifest
 from connection_service import (
     ConnectionService,
@@ -66,7 +67,7 @@ OPENAPI_TAGS = [
     {"name": "System Templates", "description": "HTML pages served to browsers. These return Jinja-rendered templates rather than a JSON contract — they are not part of the public API and are listed here only for completeness."},
     {"name": "Authentication", "description": "Login, captcha, and session lifecycle."},
     {"name": "Servers", "description": "Server inventory, lifecycle and host-level operations (add, edit, delete, ping, reorder, reboot, clear, stats, status check)."},
-    {"name": "Protocols", "description": "Install, uninstall, container start/stop and raw config editing for the protocols/services on a server (AWG, Xray, WireGuard, Telemt, AmneziaDNS, AdGuard Home, SOCKS5)."},
+    {"name": "Protocols", "description": "Install, uninstall, container start/stop and raw config editing for the protocols/services on a server (AWG, Xray, WireGuard, Telemt, AmneziaDNS, AdGuard Home, SOCKS5, Exit node)."},
     {"name": "Connections", "description": "Per-protocol VPN client connections on a server (CRUD plus enable/disable and config retrieval)."},
     {"name": "Users", "description": "Panel user accounts and the connections assigned to them."},
     {"name": "Self-service", "description": "Endpoints called by a regular user for their own data (the /my surface)."},
@@ -193,6 +194,7 @@ def load_data():
         'remnawave_protocol': 'awg'
     })
     settings.setdefault('captcha', {'enabled': False})
+    settings.setdefault('exit_nodes', {'default_exit_uid': ''})
     settings.setdefault('telegram', {'token': '', 'enabled': False})
     settings.setdefault('ssl', {
         'enabled': False,
@@ -932,7 +934,7 @@ async def wait_for_tunnel_url(provider: str, seconds: int = 20):
     return get_tunnel_status(provider)
 
 
-BASE_PROTOCOLS = ['awg', 'awg2', 'awg3', 'awg_legacy', 'xray', 'telemt', 'dns', 'wireguard', 'socks5', 'adguard', 'nginx']
+BASE_PROTOCOLS = ['awg', 'awg2', 'awg3', 'awg_legacy', 'xray', 'telemt', 'dns', 'wireguard', 'socks5', 'adguard', 'nginx', 'exit']
 MULTI_INSTANCE_PROTOCOLS = {'awg', 'awg2', 'awg3', 'awg_legacy', 'xray', 'telemt', 'socks5'}
 
 
@@ -947,6 +949,14 @@ def backfill_server_uids(servers) -> bool:
             server['uid'] = uuid.uuid4().hex
             changed = True
     return changed
+
+
+def should_link_default_exit(default_uid, server_uid, is_awg, reinstall, previous_link):
+    """Whether a just-installed instance should join the default exit node:
+    only a newly added AWG instance on another server, and only when nothing
+    (a link of its own, or an earlier deliberate unlink) already speaks for it."""
+    return bool(default_uid) and is_awg and not reinstall and not previous_link \
+        and default_uid != server_uid
 
 
 def find_server_by_uid(data, uid):
@@ -1004,6 +1014,7 @@ def protocol_display_name(protocol: str) -> str:
         'socks5': 'SOCKS5',
         'adguard': 'AdGuard Home',
         'nginx': 'NGINX',
+        'exit': 'Exit Node',
     }
     name = names.get(base, base)
     return name if idx <= 1 else f'{name} #{idx}'
@@ -1024,6 +1035,7 @@ def protocol_container_name(protocol: str) -> Optional[str]:
         'socks5': 'amnezia-socks5proxy',
         'adguard': 'amnezia-adguard',
         'nginx': 'amnezia-nginx',
+        'exit': 'amnezia-exit',
     }
     name = base_names.get(base)
     if not name:
@@ -1058,6 +1070,9 @@ def get_protocol_manager(ssh, protocol: str):
     elif base == 'nginx':
         from managers.nginx_manager import NginxManager
         return NginxManager(ssh, protocol)
+    elif base == 'exit':
+        from managers.exit_manager import ExitManager
+        return ExitManager(ssh, protocol)
     from managers.awg_manager import AWGManager
     return AWGManager(ssh)
 
@@ -1167,6 +1182,7 @@ def protocol_short_name(protocol: str) -> str:
         'dns': 'DNS',
         'adguard': 'AdGuard',
         'nginx': 'NGINX',
+        'exit': 'Exit',
     }
     name = names.get(base, base.upper())
     return name if idx <= 1 else f'{name}#{idx}'
@@ -1498,6 +1514,25 @@ self_service_connections = ConnectionService(
     get_protocol_manager=get_protocol_manager,
     manager_call=_manager_call,
     generate_vpn_link=generate_vpn_link,
+)
+
+
+def _exit_manager_factory(ssh):
+    from managers.exit_manager import ExitManager
+    return ExitManager(ssh)
+
+
+exit_link_svc = ExitLinkService(
+    load_data=load_data,
+    save_data=save_data,
+    data_lock=DATA_LOCK,
+    get_ssh=get_ssh,
+    awg_manager_factory=lambda ssh: AWGManager(ssh),
+    exit_manager_factory=_exit_manager_factory,
+    protocol_base=protocol_base,
+    awg_protocols=AWG_PROTOCOLS,
+    protocol_display_name=protocol_display_name,
+    find_server_by_uid=find_server_by_uid,
 )
 
 
@@ -2005,6 +2040,9 @@ class InstallProtocolRequest(BaseModel):
     # NGINX
     nginx_domain: Optional[str] = None
     nginx_email: Optional[str] = None
+    # Exit node
+    exit_subnet: Optional[str] = None       # transit subnet, default 10.9.0.0/24
+    exit_obfuscation: Optional[bool] = None  # AmneziaWG obfuscation on the transit link
     # AmneziaWG: values that end up in the generated client configs
     awg_mtu: Optional[str] = None
     awg_dns1: Optional[str] = None
@@ -2028,6 +2066,30 @@ class AwgSettingsRequest(BaseModel):
     i5: Optional[str] = None
 
 
+class ExitPeerAddRequest(BaseModel):
+    protocol: str = 'exit'
+    peer_id: str = ''
+    name: str = ''
+    public_key: str = ''
+
+
+class ExitPeerRemoveRequest(BaseModel):
+    protocol: str = 'exit'
+    public_key: str = ''
+    peer_id: str = ''
+
+
+class ExitLinkRequest(BaseModel):
+    protocol: str = 'awg'
+    exit_uid: str = ''
+    force: Optional[bool] = False
+
+
+class ExitDnsRequest(BaseModel):
+    protocol: str = 'awg'
+    enabled: bool = False
+
+
 class Socks5SettingsRequest(BaseModel):
     protocol: str = 'socks5'
     port: Optional[int] = None
@@ -2037,6 +2099,11 @@ class Socks5SettingsRequest(BaseModel):
 
 class ProtocolRequest(BaseModel):
     protocol: str = 'awg'
+
+
+class ContainerToggleRequest(ProtocolRequest):
+    # Stopping an exit node that entries route through needs an explicit yes
+    force: Optional[bool] = False
 
 
 class WgEasyPreviewRequest(BaseModel):
@@ -2207,6 +2274,10 @@ class UpdateUserRequest(BaseModel):
 
 
 
+class ExitNodesSettings(BaseModel):
+    default_exit_uid: str = ''
+
+
 class SaveSettingsRequest(BaseModel):
     appearance: AppearanceSettings
     sync: SyncSettings
@@ -2215,6 +2286,7 @@ class SaveSettingsRequest(BaseModel):
     ssl: SSLSettings
     auto_backup: AutoBackupSettings = AutoBackupSettings()
     self_service: SelfServiceSettings = SelfServiceSettings()
+    exit_nodes: ExitNodesSettings = ExitNodesSettings()
 
 
 class ToggleUserRequest(BaseModel):
@@ -2967,6 +3039,18 @@ async def api_delete_server(request: Request, server_id: int):
         if server_id >= len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
+        # Exit-node links: restore direct egress on entries routed through
+        # this server, and drop this server's own peers on the exits it used.
+        try:
+            if (server.get('protocols') or {}).get('exit'):
+                await exit_link_svc.detach_entries_for_exit(server.get('uid'), 'exit_server_deleted')
+            await exit_link_svc.forget_entry_peers(server)
+        except Exception as e:
+            logger.warning(f"exit-link cleanup before delete failed: {e}")
+        data = load_data()
+        if server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
         drop_ssh(server)
         data['servers'].pop(server_id)
         # Clean up connections for this server
@@ -3014,6 +3098,14 @@ async def api_clear_server(request: Request, server_id: int):
         data = load_data()
         if server_id >= len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        try:
+            if (server.get('protocols') or {}).get('exit'):
+                await exit_link_svc.detach_entries_for_exit(server.get('uid'), 'exit_cleared')
+            await exit_link_svc.forget_entry_peers(server)
+        except Exception as e:
+            logger.warning(f"exit-link cleanup before clear failed: {e}")
+        data = load_data()
         server = data['servers'][server_id]
         ssh = get_ssh(server)
         ssh.connect()
@@ -3150,6 +3242,12 @@ async def api_check_server(request: Request, server_id: int):
                 for key in ('domain', 'email', 'site_url'):
                     if db_proto.get(key) not in (None, ''):
                         merged[key] = db_proto[key]
+            if protocol_base(proto) == 'exit':
+                for key in ('subnet', 'public_key', 'obfuscation'):
+                    if db_proto.get(key) not in (None, ''):
+                        merged.setdefault(key, db_proto[key])
+            if protocol_base(proto) in AWG_PROTOCOLS and db_proto.get('exit_link'):
+                merged['exit_link'] = db_proto['exit_link']
             return merged
 
         def should_preserve_saved_protocol(proto, result=None, err=None):
@@ -3157,6 +3255,10 @@ async def api_check_server(request: Request, server_id: int):
             db_proto = server.get('protocols', {}).get(proto)
             if not db_proto:
                 return False
+            # An instance routed through an exit node keeps its record: the
+            # exit still holds its peer and the admin needs Unlink/Repair.
+            if db_proto.get('exit_link'):
+                return True
             # Additional AWG-family instances are only known by their saved
             # dynamic keys (awg__2/awg2__2/awg_legacy__2). Keep them unless
             # the user explicitly uninstalls them.
@@ -3172,6 +3274,12 @@ async def api_check_server(request: Request, server_id: int):
             try:
                 p_manager = get_protocol_manager(ssh, proto)
                 result = _manager_call(p_manager, 'get_server_status', proto)
+                db_proto = server.get('protocols', {}).get(proto, {}) or {}
+                if db_proto.get('exit_link') and result.get('container_running'):
+                    try:
+                        result['exit_link_status'] = AWGManager(ssh).exit_link_status(proto)
+                    except Exception as e:
+                        result['exit_link_status'] = {'up': False, 'error': str(e)}
                 return proto, merge_saved_protocol_status(proto, result), None
             except Exception as e:
                 return proto, merge_saved_protocol_status(proto, {}, str(e)), str(e)
@@ -3209,6 +3317,12 @@ async def api_check_server(request: Request, server_id: int):
                             'email': result.get('email'),
                             'site_url': result.get('site_url'),
                         })
+                    if protocol_base(proto) == 'exit':
+                        server['protocols'][proto].update({
+                            'subnet': result.get('subnet'),
+                            'public_key': result.get('public_key'),
+                            'obfuscation': result.get('obfuscation'),
+                        })
                     changed = True
             else:
                 if proto in server['protocols']:
@@ -3217,6 +3331,11 @@ async def api_check_server(request: Request, server_id: int):
                         status['protocols'][proto]['container_exists'] = True
                         status['protocols'][proto].setdefault('container_running', False)
                         status['protocols'][proto]['status_preserved'] = True
+                        link = (server['protocols'][proto] or {}).get('exit_link')
+                        if link and not err and not link.get('stale') and result and not result.get('container_exists'):
+                            # Container gone but the exit still has our peer
+                            link['stale'] = 'entry_container_missing'
+                            changed = True
                     else:
                         del server['protocols'][proto]
                         changed = True
@@ -3264,7 +3383,7 @@ def get_used_ports(ssh):
 # mapped to their transport. dns/adguard are skipped (internal bindings).
 INSTALL_PORT_TRANSPORT = {
     'awg': 'udp', 'awg2': 'udp', 'awg3': 'udp', 'awg_legacy': 'udp',
-    'wireguard': 'udp',
+    'wireguard': 'udp', 'exit': 'udp',
     'xray': 'tcp', 'telemt': 'tcp', 'socks5': 'tcp', 'nginx': 'tcp',
 }
 
@@ -3307,6 +3426,13 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
         else:
             install_protocol = req.protocol
         install_base = protocol_base(install_protocol)
+        # A reinstalled entry keeps its exit link and is re-linked below
+        previous_link = None
+        # Reinstalling an instance is not the same as adding one: an instance a
+        # user deliberately left unlinked must not be linked behind their back.
+        reinstall = install_protocol in (server.get('protocols') or {})
+        if install_base in AWG_PROTOCOLS:
+            previous_link = ((server.get('protocols') or {}).get(install_protocol) or {}).get('exit_link')
 
         awg_special_junk = awg_special_junk_from(req) if install_base in AWG_PROTOCOLS else None
         if awg_special_junk is not None:
@@ -3374,6 +3500,13 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
                 domain=req.nginx_domain,
                 email=req.nginx_email,
             )
+        elif install_base == 'exit':
+            result = manager.install_protocol(
+                protocol_type='exit',
+                port=req.port,
+                subnet=req.exit_subnet,
+                obfuscation=bool(req.exit_obfuscation),
+            )
         elif install_base in AWG_PROTOCOLS:
             result = manager.install_protocol(
                 install_protocol,
@@ -3412,10 +3545,18 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
             proto_record['domain'] = result.get('domain')
             proto_record['email'] = result.get('email')
             proto_record['site_url'] = result.get('site_url')
+        if install_base == 'exit':
+            # req.port may be empty: the manager applied the default
+            proto_record['port'] = result.get('port') or req.port
+            proto_record['subnet'] = result.get('subnet')
+            proto_record['public_key'] = result.get('public_key')
+            proto_record['obfuscation'] = result.get('obfuscation')
         proto_record['base_protocol'] = install_base
         proto_record['instance'] = protocol_instance(install_protocol)
         proto_record['display_name'] = protocol_display_name(install_protocol)
         proto_record['container_name'] = protocol_container_name(install_protocol)
+        if previous_link:
+            proto_record['exit_link'] = previous_link
         server['protocols'][install_protocol] = proto_record
         result['protocol'] = install_protocol
         result['base_protocol'] = install_base
@@ -3423,6 +3564,39 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
         result['container_name'] = proto_record['container_name']
         save_data(data)
         ssh.disconnect()
+
+        # A new AWG instance joins the default exit node, when one is set.
+        default_uid = ((data.get('settings', {}).get('exit_nodes') or {}).get('default_exit_uid') or '').strip()
+        if should_link_default_exit(default_uid, server.get('uid'), install_base in AWG_PROTOCOLS,
+                                    reinstall, previous_link):
+            try:
+                linked = await exit_link_svc.link(server_id, install_protocol, default_uid)
+                result.setdefault('log', []).append(
+                    f"Linked to the default exit node {linked['exit_link']['exit_name']}")
+            except Exception as e:
+                # the instance is installed either way; the link is an extra
+                logger.warning(f"default exit link after install failed: {e}")
+                result.setdefault('log', []).append(f"! Could not link to the default exit node: {e}")
+
+        # Exit-node links survive reinstalls: bring them back now.
+        if install_base == 'exit':
+            for item in await exit_link_svc.relink_entries_for_exit(server.get('uid')):
+                result.setdefault('log', []).append(
+                    f"Re-linked {item['name']}/{item['protocol']}" if item['status'] == 'success'
+                    else f"! Failed to re-link {item['name']}/{item['protocol']}: {item['error']}")
+        elif previous_link:
+            try:
+                await exit_link_svc.relink_entry(server_id, install_protocol)
+                result.setdefault('log', []).append(f"Re-linked to exit node {previous_link.get('exit_name')}")
+            except Exception as e:
+                logger.warning(f"re-link after reinstall failed: {e}")
+                fresh = load_data()
+                rec = (fresh['servers'][server_id].get('protocols') or {}).get(install_protocol) if server_id < len(fresh['servers']) else None
+                if rec and rec.get('exit_link'):
+                    rec['exit_link']['stale'] = 'relink_failed'
+                    save_data(fresh)
+                result.setdefault('log', []).append(
+                    f"! Could not re-link to exit node {previous_link.get('exit_name')}: {e}")
         return result
     except Exception as e:
         logger.exception("Error installing protocol")
@@ -3484,6 +3658,190 @@ async def api_socks5_update_credentials(request: Request, server_id: int, req: S
         return result
     except Exception as e:
         logger.exception("Error updating SOCKS5 credentials")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+def _exit_manager_for(ssh):
+    from managers.exit_manager import ExitManager
+    return ExitManager(ssh)
+
+
+@app.post('/api/servers/{server_id}/exit/peers', tags=["Protocols"])
+async def api_exit_peers(request: Request, server_id: int, req: ProtocolRequest):
+    """Exit node endpoint data (public key, port, transit subnet, obfuscation)
+    and its peers - the entry nodes linked to it - with live handshake and
+    transfer counters."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        ssh = get_ssh(data['servers'][server_id])
+        ssh.connect()
+        try:
+            manager = _exit_manager_for(ssh)
+            info = manager.get_info()
+            peers = manager.list_peers()
+        finally:
+            ssh.disconnect()
+        return {'status': 'success', 'info': info, 'peers': peers}
+    except Exception as e:
+        logger.exception("Error listing exit peers")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/exit/peers/add', tags=["Protocols"])
+async def api_exit_peer_add(request: Request, server_id: int, req: ExitPeerAddRequest):
+    """Register a peer on the exit node by hand (a node not managed by this
+    panel). Upserts by `peer_id`; returns the transit address, a fresh PSK and
+    the exit's endpoint data for the peer's own WireGuard config."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if not req.peer_id.strip() or not req.public_key.strip():
+        return JSONResponse({'error': 'peer_id and public_key are required'}, status_code=400)
+    try:
+        data = load_data()
+        if server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        ssh = get_ssh(data['servers'][server_id])
+        ssh.connect()
+        try:
+            manager = _exit_manager_for(ssh)
+            peer = manager.add_peer(req.peer_id.strip(), req.name.strip() or req.peer_id.strip(),
+                                    req.public_key.strip())
+        finally:
+            ssh.disconnect()
+        return {'status': 'success', 'peer': peer}
+    except ValueError as e:
+        return JSONResponse({'error': str(e)}, status_code=400)
+    except Exception as e:
+        logger.exception("Error adding exit peer")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/exit/peers/remove', tags=["Protocols"])
+async def api_exit_peer_remove(request: Request, server_id: int, req: ExitPeerRemoveRequest):
+    """Drop a peer from the exit node by public key or by peer id."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if not req.public_key.strip() and not req.peer_id.strip():
+        return JSONResponse({'error': 'public_key or peer_id is required'}, status_code=400)
+    try:
+        data = load_data()
+        if server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        ssh = get_ssh(data['servers'][server_id])
+        ssh.connect()
+        try:
+            manager = _exit_manager_for(ssh)
+            removed = manager.remove_peer(public_key=req.public_key.strip() or None,
+                                          peer_id=req.peer_id.strip() or None)
+        finally:
+            ssh.disconnect()
+        return {'status': 'success', 'removed': removed}
+    except Exception as e:
+        logger.exception("Error removing exit peer")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+def _exit_link_error(e: ExitLinkError):
+    return JSONResponse({'error': e.code, 'message': str(e)}, status_code=e.status_code)
+
+
+@app.get('/api/exit-nodes', tags=["Servers"])
+async def api_exit_nodes(request: Request):
+    """Servers with an installed exit node, from data.json (no SSH)."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    return {'status': 'success', 'exit_nodes': exit_link_svc.list_exit_nodes(load_data())}
+
+
+@app.post('/api/servers/{server_id}/exit-link', tags=["Protocols"])
+async def api_exit_link(request: Request, server_id: int, req: ExitLinkRequest):
+    """Route all clients of an AWG instance through an exit node (by its
+    server uid). Rolled back unless the exit answers within 15 s; `force`
+    keeps the link anyway."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        return await exit_link_svc.link(server_id, req.protocol, req.exit_uid.strip(), force=bool(req.force))
+    except ExitLinkError as e:
+        return _exit_link_error(e)
+    except Exception as e:
+        logger.exception("Error linking to exit node")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/exit-link/remove', tags=["Protocols"])
+async def api_exit_unlink(request: Request, server_id: int, req: ProtocolRequest):
+    """Restore direct egress for an AWG instance and drop its peer on the exit."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        return await exit_link_svc.unlink(server_id, req.protocol)
+    except ExitLinkError as e:
+        return _exit_link_error(e)
+    except Exception as e:
+        logger.exception("Error unlinking from exit node")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/exit-link/relink', tags=["Protocols"])
+async def api_exit_relink(request: Request, server_id: int, req: ProtocolRequest):
+    """Re-establish an existing link (after a reinstall or a stale state)."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        return await exit_link_svc.relink_entry(server_id, req.protocol)
+    except ExitLinkError as e:
+        return _exit_link_error(e)
+    except Exception as e:
+        logger.exception("Error re-linking to exit node")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/exit-link/dns', tags=["Protocols"])
+async def api_exit_link_dns(request: Request, server_id: int, req: ExitDnsRequest):
+    """Resolve client DNS at the exit node instead of this one (requires
+    AmneziaDNS on the exit)."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        return await exit_link_svc.set_dns_via_exit(server_id, req.protocol, req.enabled)
+    except ExitLinkError as e:
+        return _exit_link_error(e)
+    except Exception as e:
+        logger.exception("Error switching the DNS route of an exit link")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/exit-link/status', tags=["Protocols"])
+async def api_exit_link_status(request: Request, server_id: int, req: ProtocolRequest):
+    """Saved link plus live handshake/transfer, client MTU and IPv6 flags."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        return await exit_link_svc.status(server_id, req.protocol)
+    except ExitLinkError as e:
+        return _exit_link_error(e)
+    except Exception as e:
+        logger.exception("Error reading exit link status")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/exit-link/check-egress', tags=["Protocols"])
+async def api_exit_link_check_egress(request: Request, server_id: int, req: ProtocolRequest):
+    """Public IP the clients of this instance leave from, compared with the
+    exit node address (two HTTP probes from inside the container)."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        return await exit_link_svc.check_egress(server_id, req.protocol)
+    except ExitLinkError as e:
+        return _exit_link_error(e)
+    except Exception as e:
+        logger.exception("Error checking exit egress")
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
@@ -3570,10 +3928,18 @@ async def api_uninstall_protocol(request: Request, server_id: int, req: Protocol
         if server_id >= len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
+        base = protocol_base(req.protocol)
+        if base in AWG_PROTOCOLS and ((server.get('protocols') or {}).get(req.protocol) or {}).get('exit_link'):
+            # Drop our peer on the exit while the container still exists
+            try:
+                await exit_link_svc.unlink(server_id, req.protocol)
+            except Exception as e:
+                logger.warning(f"unlink before uninstall failed: {e}")
+            data = load_data()
+            server = data['servers'][server_id]
         ssh = get_ssh(server)
         ssh.connect()
         manager = get_protocol_manager(ssh, req.protocol)
-        base = protocol_base(req.protocol)
         if base in ('xray', 'wireguard'):
             manager.remove_container()
         else:
@@ -3582,6 +3948,14 @@ async def api_uninstall_protocol(request: Request, server_id: int, req: Protocol
             del server['protocols'][req.protocol]
             save_data(data)
         ssh.disconnect()
+        if base == 'exit':
+            detached = await exit_link_svc.detach_entries_for_exit(server.get('uid'), 'exit_uninstalled')
+            return {'status': 'success', 'detached': detached}
+        if base == 'dns':
+            # queries sent here through a link would go nowhere now
+            restored = await exit_link_svc.disable_dns_via_exit_for_exit(server.get('uid'))
+            if restored:
+                return {'status': 'success', 'dns_restored': restored}
         return {'status': 'success'}
     except Exception as e:
         logger.exception("Error uninstalling protocol")
@@ -3791,6 +4165,14 @@ async def api_protocol_backup_restore(request: Request, server_id: int, req: Bac
         result = BackupManager(ssh).restore_backup(req.protocol, container, filename)
         if result.get('status') == 'error':
             return JSONResponse({'error': result.get('message', 'Failed to restore backup')}, status_code=500)
+        ssh.disconnect()
+        ssh = None
+        # The archive owns the files an exit link lives in, so the restored
+        # container and data.json can now disagree. Never fails the restore.
+        try:
+            result.update(await exit_link_svc.reconcile_after_restore(server_id, req.protocol))
+        except Exception as e:
+            logger.warning(f"exit-link reconcile after restore failed: {e}")
         return result
     except Exception as e:
         logger.exception("Error restoring protocol backup")
@@ -3831,8 +4213,10 @@ async def api_protocol_backup_delete(request: Request, server_id: int, req: Back
 
 
 @app.post('/api/servers/{server_id}/container/toggle', tags=["Protocols"])
-async def api_container_toggle(request: Request, server_id: int, req: ProtocolRequest):
-    """Start or stop a protocol Docker container."""
+async def api_container_toggle(request: Request, server_id: int, req: ContainerToggleRequest):
+    """Start or stop a protocol Docker container. Stopping an exit node that
+    entries route through is refused (409 `exit_in_use`) unless `force` is
+    set - their clients would silently land on the kill-switch."""
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
@@ -3850,6 +4234,11 @@ async def api_container_toggle(request: Request, server_id: int, req: ProtocolRe
             f"docker inspect -f '{{{{.State.Running}}}}' {container} 2>/dev/null"
         )
         is_running = out.strip().lower() == 'true'
+        if is_running and protocol_base(req.protocol) == 'exit' and not req.force:
+            entries = exit_link_svc.linked_entries(data, server.get('uid'))
+            if entries:
+                ssh.disconnect()
+                return JSONResponse({'error': 'exit_in_use', 'entries': entries}, status_code=409)
         if is_running:
             ssh.run_sudo_command(f"docker stop {container}")
             action = 'stopped'
@@ -5141,6 +5530,15 @@ async def save_settings(request: Request, payload: SaveSettingsRequest):
     self_service = payload.self_service.dict()
     self_service['allowed_protocols'] = sanitize_allowed_protocols(self_service.get('allowed_protocols'))
     settings['self_service'] = self_service
+
+    warnings = []
+    default_exit_uid = (payload.exit_nodes.default_exit_uid or '').strip()
+    if default_exit_uid and not any(n['uid'] == default_exit_uid
+                                    for n in exit_link_svc.list_exit_nodes(data)):
+        # the node was uninstalled or deleted between opening and saving
+        default_exit_uid = ''
+        warnings.append('exit_default_cleared')
+    settings['exit_nodes'] = {'default_exit_uid': default_exit_uid}
     save_data(data)
     logger.info("Settings saved (including captcha, telegram and auto backup)")
 
@@ -5155,7 +5553,7 @@ async def save_settings(request: Request, payload: SaveSettingsRequest):
             logger.info("Stopping Telegram bot (settings save)...")
             asyncio.create_task(tg_bot.stop_bot())
 
-    return {"status": "success", "bot_running": tg_bot.is_running()}
+    return {"status": "success", "bot_running": tg_bot.is_running(), "warnings": warnings}
 
 
 @app.post('/api/settings/telegram/toggle', tags=["Settings"])

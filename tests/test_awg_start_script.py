@@ -40,9 +40,10 @@ class RecordingSSH:
 
 
 class GoldenBuilderTests(unittest.TestCase):
-    """The fixtures were captured from the pre-refactor code by running
-    install_protocol()/save_server_config() against a fake SSH, so equality
-    proves the builders reproduce the previous output byte for byte."""
+    """The fixtures pin the generated container files byte for byte, so they
+    change only on purpose (originally captured from the pre-builder code;
+    refreshed when the image gained iproute2/conntrack-tools and the start
+    script gained the entry-side exit-node block)."""
 
     def test_start_script_awg(self):
         self.assertEqual(AWGManager(None)._render_start_script('awg'), fixture('start_awg.sh'))

@@ -1,6 +1,6 @@
 # Amnezia Web Panel
 
-A modern, high-performance web interface for managing **AmneziaWG**, **Classic WireGuard**, **Xray (XTLS-Reality)**, **Telemt (Telegram MTProxy)**, **Cloudflare WARP**, **AmneziaDNS**, **AdGuard Home**, **SOCKS5**, and **NGINX + Let's Encrypt** services on remote Ubuntu servers — from a single dashboard. Designed to provide a premium user experience with robust administrative capabilities.
+A modern, high-performance web interface for managing **AmneziaWG**, **Classic WireGuard**, **Xray (XTLS-Reality)**, **Telemt (Telegram MTProxy)**, **Cloudflare WARP**, **AmneziaDNS**, **AdGuard Home**, **SOCKS5**, **NGINX + Let's Encrypt** and **exit nodes** (entry ≠ egress) services on remote Ubuntu servers — from a single dashboard. Designed to provide a premium user experience with robust administrative capabilities.
 
 > ### 🔄 Compatibility with Official Amnezia Client
 > 
@@ -65,6 +65,7 @@ Configuration panel for system parameters and preferences:
     *   **Xray (XTLS-Reality)**: Stealthy protocol that masks VPN traffic as standard HTTPS browsing. Pinned to **Xray-core v26.x**; transparently reads both the **panel layout** (`meta.json` + `clientsTable.json`) and the **native Amnezia client layout** (`xray_*.key` files + `clientsTable`), so a node first installed via the official mobile/desktop app can be attached to the panel without re-installation.
     *   **Telemt (Telegram MTProxy)**: High-performance Telegram MTProxy with TLS emulation and comprehensive management (quotas, IP limits, real-time session tracking). Robust install path that auto-configures Docker's official apt/yum repository when needed.
     *   **Cloudflare WARP**: Add and manage WARP-powered connectivity from the panel for routing and network flexibility.
+    *   **Exit nodes (entry ≠ egress)**: install the **Exit Node** service on the server that should be the egress (`amnezia-exit`, an AmneziaWG listener on `55520/udp` with a private transit subnet, optional obfuscation for hops crossing DPI), then link any AmneziaWG instance on another server to it from its card. The entry keeps its clients and their configs, SNATs them into its transit address and routes them through a second interface (`exit0`) inside the same container; a kill-switch is installed before the client tunnel comes up, so a dead exit blocks traffic instead of leaking the entry's IP. Links survive container restarts, server reorder and reinstalls of either side; the exit's Peers page shows handshake and transfer per entry. Open the transit UDP port for the entry nodes in the exit server's firewall. Settings can name a **default exit node**, which every AmneziaWG instance installed afterwards is linked to automatically. Restoring a protocol backup re-establishes the links the archive touched (and drops a link the panel does not track). Client DNS stays on the entry node by default; a switch on the link routes it through the exit instead, so a resolver never sees the entry's country (requires AmneziaDNS on the exit node). MTU chain: client 1376 → `exit0` 1420 → +60 bytes (IPv4 endpoint) ≤ 1500. IPv4 only for now: while linked, client IPv6 is refused rather than leaking.
 *   **🛠 Services**:
     *   **AmneziaDNS**: Internal DNS resolver on a private docker network (`amnezia-dns-net`, IP `172.29.172.254`) to prevent DNS leaks and blockings.
     *   **AdGuard Home**: DNS-based ad blocker with a web admin UI. Two install modes: **Replace AmneziaDNS** (takes its IP, all VPN clients use AdGuard immediately) or **Side-by-side** (parallel deployment on `172.29.172.253`, web UI accessible only over the VPN by default). Optional opt-in checkboxes to expose the web UI / DoT / DoH on the host.
@@ -306,7 +307,8 @@ web-panel/
 │   ├── telemt_manager.py     # Telegram MTProxy
 │   ├── dns_manager.py        # AmneziaDNS (Unbound)
 │   ├── adguard_manager.py    # AdGuard Home
-│   └── socks5_manager.py     # 3proxy-based SOCKS5
+│   ├── socks5_manager.py     # 3proxy-based SOCKS5
+│   └── exit_manager.py       # Exit-node transit endpoint (amnezia-exit)
 ├── static/                   # CSS / favicon / PWA icons / SW / vendored JS
 ├── templates/                # Jinja2 templates
 ├── translations/             # en / ru / fr / zh / fa

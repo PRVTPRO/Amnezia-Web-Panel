@@ -49,7 +49,7 @@ COPY forward-records.conf /opt/unbound/etc/unbound/forward-records.conf
             self.ssh.run_sudo_command(cmd)
 
             # Connect existing VPN containers to the DNS network
-            vpn_containers = ['amnezia-awg', 'amnezia-awg2', 'amnezia-awg-legacy', 'amnezia-xray', 'telemt']
+            vpn_containers = ['amnezia-awg', 'amnezia-awg2', 'amnezia-awg-legacy', 'amnezia-xray', 'telemt', 'amnezia-exit']
             for c in vpn_containers:
                 self.ssh.run_sudo_command(f"docker ps | grep -q {c} && docker network connect amnezia-dns-net {c} || true")
 
