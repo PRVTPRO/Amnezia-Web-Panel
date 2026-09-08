@@ -3686,8 +3686,9 @@ async def api_protocol_backup_download(request: Request, server_id: int, req: Ba
         ssh.connect()
         quoted_remote = shlex.quote(remote_path)
         quoted_tmp = shlex.quote(tmp_remote)
+        # `sudo <a> && <b>` elevates only `<a>`; the whole chain needs one shell
         _, err, code = ssh.run_sudo_command(
-            f"test -f {quoted_remote} && cp {quoted_remote} {quoted_tmp} && chmod 0644 {quoted_tmp}"
+            f"sh -c {shlex.quote(f'test -f {quoted_remote} && cp {quoted_remote} {quoted_tmp} && chmod 0644 {quoted_tmp}')}"
         )
         if code != 0:
             return JSONResponse({'error': err or 'Backup not found'}, status_code=404)
