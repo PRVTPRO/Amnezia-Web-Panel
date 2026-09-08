@@ -95,7 +95,7 @@ async def custom_redoc():
     return get_redoc_html(
         openapi_url=app.openapi_url or "/openapi.json",
         title=f"{app.title} — ReDoc",
-        redoc_js_url="https://cdn.jsdelivr.net/npm/redoc@2/bundles/redoc.standalone.js",
+        redoc_js_url="/static/vendor/redoc/redoc.standalone.js",
         with_google_fonts=False,
     )
 app.add_middleware(SessionMiddleware, secret_key=os.environ.get('SECRET_KEY', secrets.token_hex(32)))
