@@ -2671,7 +2671,7 @@ async def index(request: Request):
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url='/login', status_code=302)
-    if user['role'] == 'user':
+    if user['role'] not in ('admin', 'support'):
         return RedirectResponse(url='/my', status_code=302)
     data = load_data()
     return tpl(request, 'index.html', servers=data['servers'])
@@ -2761,6 +2761,10 @@ async def api_login(request: Request, req: LoginRequest):
         # Users without a password (role 'none', record-only) can never log in.
         if u['username'] == req.username and u.get('password_hash') and verify_password(req.password, u['password_hash']):
             lang = request.cookies.get('lang', 'ru')
+            if u.get('role') == 'none':
+                # Record-only account: even a password set later does not
+                # grant access until a real role is assigned.
+                return JSONResponse({'error': _t('invalid_login', lang)}, status_code=401)
             if not u.get('enabled', True):
                 return JSONResponse({'error': _t('account_disabled', lang)}, status_code=403)
             request.session['user_id'] = u['id']
@@ -4415,7 +4419,7 @@ async def api_get_connection_config(request: Request, server_id: int, req: Conne
         if server_id >= len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         # Users can only view their own connections
-        if user['role'] == 'user':
+        if user['role'] in ('user', 'none'):
             owned = any(
                 c for c in data.get('user_connections', [])
                 if c.get('client_id') == req.client_id and c.get('server_id') == server_id and c.get('user_id') == user['id']
@@ -4795,7 +4799,7 @@ async def api_get_user_connections(request: Request, user_id: str):
     if not user:
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     # Users can only see their own, admin/support can see all
-    if user['role'] == 'user' and user['id'] != user_id:
+    if user['role'] in ('user', 'none') and user['id'] != user_id:
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     data = load_data()
     conns = [c for c in data.get('user_connections', []) if c['user_id'] == user_id]
