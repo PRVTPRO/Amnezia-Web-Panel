@@ -1,19 +1,19 @@
 {% extends "base.html" %}
 
 {% block title_extra %} — {{ _('my_connections_title') }}{% endblock %}
+{% block page_class %}page page--my-connections{% endblock %}
 
 {% block content %}
 <section>
-    <div class="flex items-center justify-between"
-        style="margin-bottom: var(--space-lg); gap: var(--space-md); flex-wrap: wrap;">
-        <h1 class="section-title" style="margin-bottom:0; flex-shrink: 0;">
-            <span class="icon">🔗</span>
+    <div class="page-header">
+        <h1 class="section-title page-header__title">
+            <span class="icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></span>
             {{ _('my_connections_title') }}
         </h1>
 
-        <div id="selfServiceControls" class="hidden" style="display:flex; align-items:center; gap:var(--space-md); flex-shrink: 0;">
+        <div id="selfServiceControls" class="page-header__actions hidden">
             <span id="connectionsCounter" class="badge badge-info" style="font-size:0.85rem;"></span>
-            <button class="btn btn-primary" onclick="openCreateConnectionModal()" style="flex-shrink: 0;">
+            <button class="btn btn-primary" onclick="openCreateConnectionModal()">
                 <span>＋</span> {{ _('create_connection') }}
             </button>
         </div>
@@ -26,7 +26,7 @@
     </div>
 
     <div id="connectionsContainer" class="hidden">
-        <div id="connectionsGrid" style="display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-md);">
+        <div id="connectionsGrid" class="cards-grid-2">
             <!-- Connections will be loaded here via JS -->
         </div>
     </div>
@@ -216,27 +216,27 @@
         empty.classList.add('hidden');
 
         grid.innerHTML = allConnections.map(c => `
-            <div class="client-item" style="display: flex; align-items: center; padding: var(--space-md);">
-                <div class="client-avatar" style="width: 48px; height: 48px; display: flex; align-items: center; justify-content: center; background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; border-radius: var(--radius-md); font-size: 1.5rem; flex-shrink: 0;">🔗</div>
-                <div style="margin-left: var(--space-md); flex: 1; min-width: 0;">
+            <div class="client-item entity-card connection-card">
+                <div class="client-avatar">🔗</div>
+                <div class="entity-card-body">
                     <div class="client-name" style="margin-bottom: 4px;">${escapeHtml(c.name || _('my_connections_title'))}</div>
                     <div class="client-meta" style="display: flex; align-items: center; gap: var(--space-sm); flex-wrap: wrap;">
                         <span>🖥 ${escapeHtml(c.server_name || '—')}</span>
                         <span style="color: var(--text-muted);">${escapeHtml(getProtocolLabel(c.protocol, c.protocol_name))}</span>
                     </div>
                 </div>
+                <div class="client-actions entity-card-actions">
                 <button class="btn btn-secondary btn-sm btn-icon"
                     onclick="showMyConfig('${escapeJs(c.id)}', '${escapeJs(c.name || 'Connection')}', '${escapeJs(c.protocol)}')"
-                    title="${_('show_config')}"
-                    style="margin-left: var(--space-md); flex-shrink: 0; width: 40px; height: 40px; display: flex; align-items: center; justify-content: center;">
+                    title="${_('show_config')}">
                     📄
                 </button>
                 ${c.created_by === 'self_service'
                     ? `<button class="btn btn-danger btn-sm btn-icon"
                         onclick="deleteConnection('${escapeJs(c.id)}', '${escapeJs(c.name || 'Connection')}')"
-                        title="${_('delete_connection')}"
-                        style="margin-left: var(--space-sm); flex-shrink: 0; width: 40px; height: 40px; display: flex; align-items: center; justify-content: center;">🗑</button>`
+                        title="${_('delete_connection')}">${ICON_TRASH}</button>`
                     : ''}
+                </div>
             </div>
         `).join('');
     }
@@ -482,11 +482,11 @@
         const hint = document.getElementById('qrFormatHint');
         if (!named) {
             if (hint) hint.textContent = _('qr_format_wireguard_hint');
-            drawQr(currentQrConfig, 280);
+            drawQr(currentQrConfig, qrSize(document.getElementById('qrCode') || document.body, 280));
             return;
         }
         const paint = () => {
-            drawQr(currentQrChunks[qrFrame], 300);
+            drawQr(currentQrChunks[qrFrame], qrSize(document.getElementById('qrCode') || document.body, 300));
             if (hint) {
                 hint.textContent = currentQrChunks.length > 1
                     ? `${_('qr_format_amnezia_hint')} ${qrFrame + 1}/${currentQrChunks.length}`

@@ -463,5 +463,16 @@
   "wgeasy_confirm": "Import selected clients? The old wg-easy container will be stopped.",
   "wgeasy_importing": "Importing, this may take a few minutes...",
   "wgeasy_target_wg": "target: WireGuard (no obfuscation)",
-  "wgeasy_target_awg": "obfuscation detected → target: AmneziaWG 2.0"
+  "wgeasy_target_awg": "obfuscation detected → target: AmneziaWG 2.0",
+  "rename_instance": "Rename instance",
+  "instance_name": "Instance name",
+  "rename_instance_hint": "Leave empty to restore the default name.",
+  "no_expiry": "بدون انقضا",
+  "telemt_secret_label": "رمز (hex)",
+  "telemt_ad_tag_label": "تگ AD (hex)",
+  "telemt_max_conns_label": "حداکثر اتصالات TCP",
+  "telemt_quota_label": "سهمیه (بایت)",
+  "telemt_max_ips_label": "حداکثر IP یکتا",
+  "telemt_expiry_label": "انقضا (ISO 8601)",
+  "optional": "اختیاری"
 }

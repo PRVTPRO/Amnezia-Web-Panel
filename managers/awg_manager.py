@@ -674,12 +674,16 @@ fi
 # containers get no IPv6 route and dual-stack tunnels silently fall back
 # to IPv4-only. Also enable ip6tables (+experimental): without them Docker
 # sets no NAT66 for the fixed-cidr-v6 ULA subnet and v6 traffic blackholes.
-# daemon.json is merged (not overwritten), backed up, docker restarted
-# only when the file actually changed.
+# daemon.json is merged (not overwritten) and backed up. Docker is
+# restarted only when the file actually changed AND no amnezia-* or panel
+# containers are running - restarting the daemon mid-install kills every
+# container on the host (tunnels drop, a dockerized panel dies with its
+# own install request). Otherwise the restart is deferred and reported
+# as AWP_DOCKER_IPV6=pending so the install log can warn the admin.
 if ip -6 -o addr show scope global 2>/dev/null | grep -q inet6; then
   cp /etc/docker/daemon.json /etc/docker/daemon.json.bak.awp 2>/dev/null
-  python3 - <<'PYEOF' 2>/dev/null || (grep -q '"ipv6"' /etc/docker/daemon.json 2>/dev/null || (echo '{{"ipv6": true, "fixed-cidr-v6": "fd00:42::/64", "experimental": true, "ip6tables": true}}' > /etc/docker/daemon.json && systemctl restart docker))
-import json, os, subprocess
+  IPV6_CHANGED=$(python3 - <<'PYEOF' 2>/dev/null
+import json, os
 p = '/etc/docker/daemon.json'
 d = {{}}
 if os.path.exists(p):
@@ -693,14 +697,32 @@ if 'fixed-cidr-v6' not in d:
     d['fixed-cidr-v6'] = 'fd00:42::/64'; changed = True
 if changed:
     json.dump(d, open(p, 'w'), indent=2)
-    subprocess.run(['systemctl', 'restart', 'docker'], check=False)
+    print('yes')
 PYEOF
+)
+  if [ -z "$IPV6_CHANGED" ] && ! grep -q '"ipv6"' /etc/docker/daemon.json 2>/dev/null; then
+    echo '{{"ipv6": true, "fixed-cidr-v6": "fd00:42::/64", "experimental": true, "ip6tables": true}}' > /etc/docker/daemon.json
+    IPV6_CHANGED=yes
+  fi
+  if [ "$IPV6_CHANGED" = "yes" ]; then
+    if docker ps --format '{{{{.Names}}}}' 2>/dev/null | grep -qiE '^amnezia-|panel'; then
+      echo "AWP_DOCKER_IPV6=pending"
+    else
+      systemctl restart docker
+      echo "AWP_DOCKER_IPV6=restarted"
+    fi
+  else
+    echo "AWP_DOCKER_IPV6=ok"
+  fi
 fi
 """
         out, err, code = self.ssh.run_sudo_script(script)
         if code != 0:
             logger.warning(f"prepare_host warning: {err}")
-        return True
+        for line in (out or '').splitlines():
+            if line.startswith('AWP_DOCKER_IPV6='):
+                return line.split('=', 1)[1].strip()
+        return None
 
     # Kernel module version that supports AWG 3.1 features and stays
     # backward-compatible with AWG 2.0 configs.
@@ -724,45 +746,66 @@ fi
         """
         v = self.AWG_MODULE_VERSION
         script = f"""
-set -e
 if modinfo amneziawg >/dev/null 2>&1; then
-    echo "KERNEL_MODULE: already present ($(modinfo amneziawg | awk '/^version:/{{print $2; exit}}'))"
+    echo "KERNEL_MODULE: ok: already present ($(modinfo amneziawg | awk '/^version:/{{print $2; exit}}'))"
     exit 0
 fi
 if command -v mokutil >/dev/null 2>&1 && mokutil --sb-state 2>/dev/null | grep -qi 'enabled'; then
-    echo "KERNEL_MODULE: skipped (Secure Boot enabled)"
+    echo "KERNEL_MODULE: skipped: Secure Boot enabled (unsigned module would not load)"
     exit 0
 fi
+KVER=$(uname -r)
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq dkms "linux-headers-$(uname -r)" git make gcc
+if ! apt-get install -y -qq dkms "linux-headers-$KVER" git make gcc >/tmp/awg-kmod.log 2>&1; then
+    if ! apt-cache show "linux-headers-$KVER" >/dev/null 2>&1; then
+        echo "KERNEL_MODULE: failed: headers for the running kernel $KVER are no longer in the repos - upgrade the kernel (apt install linux-image-amd64) and reboot, then reinstall the protocol"
+    else
+        echo "KERNEL_MODULE: failed: cannot install build tools: $(tail -3 /tmp/awg-kmod.log | tr '\\n' ' ' | cut -c1-300)"
+    fi
+    exit 1
+fi
 rm -rf /tmp/awg-module
-git clone --depth 1 --branch v{v} {self.AWG_MODULE_REPO} /tmp/awg-module
+if ! git clone --depth 1 --branch v{v} {self.AWG_MODULE_REPO} /tmp/awg-module >>/tmp/awg-kmod.log 2>&1; then
+    echo "KERNEL_MODULE: failed: cannot clone the module repo (github.com unreachable?)"
+    exit 1
+fi
 cd /tmp/awg-module/src
 sed -i 's/^PACKAGE_VERSION=.*/PACKAGE_VERSION="{v}"/' dkms.conf
-dkms add .
-dkms build amneziawg/{v}
-dkms install amneziawg/{v}
-modprobe amneziawg
+if ! dkms add . >>/tmp/awg-kmod.log 2>&1; then
+    echo "KERNEL_MODULE: failed: dkms add failed: $(tail -3 /tmp/awg-kmod.log | tr '\\n' ' ' | cut -c1-300)"
+    exit 1
+fi
+if ! dkms build amneziawg/{v} >>/tmp/awg-kmod.log 2>&1; then
+    REASON=$(tail -5 /var/lib/dkms/amneziawg/{v}/build/make.log 2>/dev/null | tr '\\n' ' ' | cut -c1-300)
+    echo "KERNEL_MODULE: failed: dkms build failed: ${{REASON:-see /var/lib/dkms/amneziawg/{v}/build/make.log}}"
+    exit 1
+fi
+if ! dkms install amneziawg/{v} >>/tmp/awg-kmod.log 2>&1; then
+    echo "KERNEL_MODULE: failed: dkms install failed: $(tail -3 /tmp/awg-kmod.log | tr '\\n' ' ' | cut -c1-300)"
+    exit 1
+fi
+if ! modprobe amneziawg 2>/tmp/awg-kmod.log; then
+    echo "KERNEL_MODULE: failed: module built but modprobe failed: $(tail -2 /tmp/awg-kmod.log | tr '\\n' ' ' | cut -c1-200)"
+    exit 1
+fi
 cd / && rm -rf /tmp/awg-module
-echo "KERNEL_MODULE: installed {v}"
+echo "KERNEL_MODULE: ok: installed {v}"
 """
         try:
             out, err, code = self.ssh.run_sudo_script(script, timeout=600)
             marker = ''
             for line in (out or '').splitlines():
                 if line.startswith('KERNEL_MODULE:'):
-                    marker = line
+                    marker = line.split(':', 1)[1].strip()
                     logger.info(f"setup_kernel_module: {line}")
-            if code != 0:
-                logger.warning(f"setup_kernel_module failed, userspace fallback: {err}")
-                return 'failed'
-            if 'installed' in marker or 'already present' in marker:
-                return 'ok'
-            return 'skipped'
+            if not marker:
+                logger.warning(f"setup_kernel_module: no marker, userspace fallback: {err}")
+                return 'failed: no result (SSH or script error)'
+            return marker
         except Exception as err:
             logger.warning(f"setup_kernel_module warning (userspace fallback): {err}")
-            return 'failed'
+            return f'failed: {err}'
 
     def setup_firewall(self):
         """Setup host firewall (mirrors setup_host_firewall.sh).
@@ -916,18 +959,27 @@ done
 
         # Step 2: Prepare host
         results.append("Preparing host...")
-        self.prepare_host(protocol_type)
+        docker_ipv6 = self.prepare_host(protocol_type)
         results.append("Host prepared")
+        if docker_ipv6 == 'pending':
+            results.append(
+                "! Docker IPv6 was enabled in /etc/docker/daemon.json, but Docker "
+                "was NOT restarted because other containers are running. Tunnels "
+                "stay IPv4-only until you run: systemctl restart docker"
+            )
+        elif docker_ipv6 == 'restarted':
+            results.append("Docker restarted to apply IPv6 config")
 
         # Step 2.5: Kernel module (best effort, userspace fallback)
         results.append("Checking amneziawg kernel module...")
         km = self.setup_kernel_module()
-        if km == 'ok':
-            results.append("Kernel module ready")
-        elif km == 'skipped':
-            results.append("Kernel module skipped, userspace mode (amneziawg-go)")
+        if km.startswith('ok'):
+            detail = km.split(':', 1)[1].strip() if ':' in km else ''
+            results.append(f"Kernel module ready ({detail})" if detail else "Kernel module ready")
+        elif km.startswith('skipped'):
+            results.append(f"Kernel module skipped, userspace mode (amneziawg-go): {km.split(':', 1)[-1].strip()}")
         else:
-            results.append("Kernel module build failed, userspace mode (amneziawg-go)")
+            results.append(f"Kernel module failed, userspace mode (amneziawg-go): {km.split(':', 1)[-1].strip()}")
 
         # Step 3: Remove old container if exists
         if self.check_protocol_installed(protocol_type):
@@ -1607,14 +1659,55 @@ done < "$BW"
                     ips.append(match.group(1))
         return ips
 
+    def _get_reserved_ips(self, protocol_type):
+        """IPv4 addresses reserved in clientsTable by ANY client, disabled included.
+
+        A disabled client keeps its address, so allocation must never hand it
+        to someone else. Raises if the table cannot be read at all — silently
+        treating the reservation pool as empty would break that guarantee.
+        """
+        container_name = self._container_name(protocol_type)
+        clients_table_path = self._clients_table_path()
+        out, err, code = self.ssh.run_sudo_command(
+            f"docker exec -i {container_name} cat {clients_table_path} 2>/dev/null"
+        )
+        if code != 0:
+            # cat fails both when docker exec is broken and when the file
+            # simply does not exist yet (fresh instance). Fail loudly only
+            # for the former; an absent table means no reservations.
+            _, terr, tcode = self.ssh.run_sudo_command(
+                f"docker exec -i {container_name} true")
+            if tcode != 0:
+                raise RuntimeError(
+                    f"Cannot read clients table from {container_name}: {terr.strip() or err.strip()}")
+            return set()
+        if not out.strip():
+            return set()
+        try:
+            data = json.loads(out)
+        except json.JSONDecodeError:
+            raise RuntimeError(f"Clients table in {container_name} is not valid JSON")
+        entries = data if isinstance(data, list) else [
+            {'clientId': k, 'userData': v} for k, v in data.items()]
+        reserved = set()
+        for c in entries:
+            ud = c.get('userData') or {}
+            ip = self._extract_ipv4(ud.get('allowedIps') or ud.get('clientIp') or '')
+            if ip:
+                reserved.add(ip)
+        return reserved
+
     def _get_next_ip(self, protocol_type):
         """Return the first free IP in the subnet, filling gaps left by deleted clients.
 
         The old implementation took the last IP in file order and incremented it,
         which produced duplicate IPs when peers were not sorted by IP and never
         reused addresses freed by deleted clients.
+
+        Occupied = active config peers + reservations in clientsTable (disabled
+        clients keep their IPs; only deletion releases an address).
         """
-        used_ips = self._get_used_ips(protocol_type)
+        used_ips = set(self._get_used_ips(protocol_type)) | self._get_reserved_ips(protocol_type)
         base = self._get_subnet_base(protocol_type)
         parts = base.split('.')
         prefix = '.'.join(parts[:3])
@@ -2257,6 +2350,24 @@ PersistentKeepalive = 25
             ud = client.setdefault('userData', {})
             psk = ud.get('psk', '')
             client_ip = self._client_ip_from_userdata(ud)
+            if client_ip:
+                # A disabled client's address stays reserved in clientsTable.
+                # Refuse to re-enable when another client owns it now.
+                for other in clients_table:
+                    if other.get('clientId') == client_id:
+                        continue
+                    other_ip = self._extract_ipv4(
+                        (other.get('userData') or {}).get('allowedIps')
+                        or (other.get('userData') or {}).get('clientIp') or '')
+                    if other_ip == client_ip:
+                        raise RuntimeError(
+                            f"Cannot enable client: IP {client_ip} is already "
+                            f"reserved by another client. Resolve the conflict "
+                            f"(delete one of them) first.")
+                if client_ip in self._get_used_ips(protocol_type):
+                    raise RuntimeError(
+                        f"Cannot enable client: IP {client_ip} is already "
+                        f"present in the active server config")
             if not client_ip:
                 client_ip = self._get_next_ip(protocol_type)
                 logger.warning(

@@ -1,15 +1,19 @@
 {% extends "base.html" %}
 
+{% block page_class %}page page--servers{% endblock %}
+
 {% block content %}
 <section>
-    <div class="flex items-center justify-between" style="margin-bottom: var(--space-lg);">
-        <h1 class="section-title" style="margin-bottom:0;">
-            <span class="icon">🖥</span>
+    <div class="page-header">
+        <h1 class="section-title page-header__title">
+            <span class="icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="12" rx="2"/><line x1="7" y1="21" x2="17" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></span>
             {{ _('nav_servers') }}
         </h1>
-        <button class="btn btn-primary" onclick="openModal('addServerModal')">
-            <span>＋</span> {{ _('add_server') }}
-        </button>
+        <div class="page-header__actions">
+            <button class="btn btn-primary" onclick="openModal('addServerModal')">
+                <span>＋</span> {{ _('add_server') }}
+            </button>
+        </div>
     </div>
 
     {% if servers %}
@@ -53,16 +57,35 @@
             </div>
 
             <div class="server-actions">
-                <a href="/server/{{ loop.index0 }}" class="btn btn-secondary btn-sm" style="flex:1">
+                <span class="reorder-btns">
+                    <button type="button" class="btn btn-secondary btn-sm btn-icon" onclick="moveServer({{ loop.index0 }}, -1)"
+                        title="↑" aria-label="Move up">↑</button>
+                    <button type="button" class="btn btn-secondary btn-sm btn-icon" onclick="moveServer({{ loop.index0 }}, 1)"
+                        title="↓" aria-label="Move down">↓</button>
+                </span>
+                <a href="/server/{{ loop.index0 }}" class="btn btn-secondary btn-sm">
                     {{ _('manage') }}
                 </a>
                 <button class="btn btn-secondary btn-sm btn-icon" onclick="openEditServer(this)"
                     title="{{ _('edit') }}">
-                    ✏️
+                    <svg class="btn-icon-svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+                        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                        aria-hidden="true">
+                        <path d="M12 20h9" />
+                        <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                    </svg>
                 </button>
                 <button class="btn btn-danger btn-sm btn-icon" onclick="deleteServer({{ loop.index0 }})"
                     title="{{ _('delete') }}">
-                    🗑
+                    <svg class="btn-icon-svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+                        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                        aria-hidden="true">
+                        <path d="M3 6h18" />
+                        <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
+                        <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+                        <line x1="10" y1="11" x2="10" y2="17" />
+                        <line x1="14" y1="11" x2="14" y2="17" />
+                    </svg>
                 </button>
             </div>
         </div>
@@ -386,6 +409,36 @@
 
     let draggedCard = null;
 
+    async function persistServerOrder(grid) {
+        const newOrder = Array.from(grid.querySelectorAll('.server-card'))
+            .map(c => parseInt(c.dataset.idx, 10));
+        try {
+            await apiCall('/api/servers/reorder', 'POST', { order: newOrder });
+            showToast(_('servers_reordered'), 'success');
+            setTimeout(() => window.location.reload(), 400);
+        } catch (err) {
+            showToast(err.message, 'error');
+            window.location.reload();
+        }
+    }
+
+    async function moveServer(idx, delta) {
+        const grid = document.getElementById('serverGrid');
+        if (!grid) return;
+        const cards = Array.from(grid.querySelectorAll('.server-card'));
+        const from = cards.findIndex(c => parseInt(c.dataset.idx, 10) === idx);
+        if (from < 0) return;
+        const to = from + delta;
+        if (to < 0 || to >= cards.length) return;
+        const card = cards[from];
+        if (delta < 0) {
+            grid.insertBefore(card, cards[to]);
+        } else {
+            grid.insertBefore(card, cards[to].nextSibling);
+        }
+        await persistServerOrder(grid);
+    }
+
     function setupDragAndDrop() {
         const grid = document.getElementById('serverGrid');
         if (!grid) return;
@@ -441,20 +494,7 @@
             const insertAfter = (e.clientY - rect.top) > rect.height / 2;
             grid.insertBefore(draggedCard, insertAfter ? target.nextSibling : target);
 
-            const newOrder = Array.from(grid.querySelectorAll('.server-card'))
-                .map(c => parseInt(c.dataset.idx, 10));
-
-            try {
-                await apiCall('/api/servers/reorder', 'POST', { order: newOrder });
-                showToast(_('servers_reordered'), 'success');
-                // Reload so onclick indices and per-card data-idx attrs realign with
-                // the new server array — simpler and safer than rewriting every handler.
-                setTimeout(() => window.location.reload(), 400);
-            } catch (err) {
-                showToast(err.message, 'error');
-                // Rollback the visual move — backend rejected.
-                window.location.reload();
-            }
+            await persistServerOrder(grid);
         });
     }
 

@@ -3,18 +3,27 @@
 
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0f" id="metaThemeColor">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="{{ site_settings.title or 'Amnezia' }}">
     <title>{{ site_settings.title or 'Amnezia Panel' }} — {{ _('login') }}</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon-180.png">
+    <link rel="manifest" href="/manifest.webmanifest">
     <link rel="stylesheet" href="/static/css/style.css?v={{ static_v }}">
-    <script>!function () { var t = localStorage.getItem('theme') || 'dark'; document.documentElement.setAttribute('data-theme', t) }()</script>
+    <script>!function () { var t = localStorage.getItem('theme') || 'dark'; document.documentElement.setAttribute('data-theme', t); var m = document.querySelector('meta[name=theme-color]'); if (m) m.content = t === 'light' ? '#f5f5f7' : '#0a0a0f'; }()</script>
     <style>
         .login-wrapper {
             min-height: 100vh;
+            min-height: 100dvh;
             display: flex;
             align-items: center;
             justify-content: center;
             padding: var(--space-lg);
+            padding-top: calc(var(--space-lg) + env(safe-area-inset-top));
+            padding-bottom: calc(var(--space-lg) + env(safe-area-inset-bottom));
             background: var(--bg);
         }
 
@@ -72,18 +81,40 @@
         [dir="ltr"] .lang-check {
             margin-left: auto;
         }
+
+        .login-fixed-toggle {
+            position: fixed;
+            top: calc(20px + env(safe-area-inset-top));
+            z-index: 10;
+        }
+
+        .login-fixed-toggle.theme {
+            right: calc(20px + env(safe-area-inset-right));
+        }
+
+        .login-fixed-toggle.lang {
+            right: calc(65px + env(safe-area-inset-right));
+        }
+
+        [dir="rtl"] .login-fixed-toggle.theme {
+            right: auto;
+            left: calc(20px + env(safe-area-inset-left));
+        }
+
+        [dir="rtl"] .login-fixed-toggle.lang {
+            right: auto;
+            left: calc(65px + env(safe-area-inset-left));
+        }
     </style>
 </head>
 
 <body>
-    <button class="theme-toggle" onclick="openModal('langModal')" id="langToggle"
-        style="position:fixed; top:20px; {% if lang == 'fa' %}left:65px;{% else %}right:65px;{% endif %} z-index:10;"
+    <button class="theme-toggle login-fixed-toggle lang" onclick="openModal('langModal')" id="langToggle"
         title="{{ _('select_lang') }}">
         {% if lang == 'ru' %}🇷🇺{% elif lang == 'fr' %}🇫🇷{% elif lang == 'zh' %}🇨🇳{% elif lang == 'fa' %}🇮🇷{%
         else %}🇺🇸{% endif %}
     </button>
-    <button class="theme-toggle" onclick="toggleTheme()" id="themeToggle"
-        style="position:fixed; top:20px; {% if lang == 'fa' %}left:20px;{% else %}right:20px;{% endif %} z-index:10;"
+    <button class="theme-toggle login-fixed-toggle theme" onclick="toggleTheme()" id="themeToggle"
         title="{{ _('toggle_theme') }}">🌙</button>
 
     <div class="login-wrapper">
@@ -193,9 +224,15 @@
                 const next = current === 'dark' ? 'light' : 'dark';
                 document.documentElement.setAttribute('data-theme', next);
                 localStorage.setItem('theme', next);
+                const meta = document.getElementById('metaThemeColor') || document.querySelector('meta[name="theme-color"]');
+                if (meta) meta.content = next === 'light' ? '#f5f5f7' : '#0a0a0f';
                 updateUI();
             };
         })();
+
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/sw.js?v={{ static_v }}').catch(() => {});
+        }
 
         /* ===== Modal Management ===== */
         function openModal(id) {
