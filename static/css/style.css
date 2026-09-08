@@ -1390,6 +1390,11 @@ a:hover {
     opacity: 0.7;
 }
 
+/* Speed-limit badge stands out a bit from the other meta badges. */
+.traffic-badge.traffic-limit {
+    font-size: 1rem;
+}
+
 /* Whole client row while a toggle request is in flight. */
 .client-item.client-toggling {
     opacity: 0.5;
