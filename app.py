@@ -113,6 +113,9 @@ DATA_FILE = os.path.abspath(os.path.expanduser(
     os.environ.get('DATA_FILE') or os.path.join(application_path, 'data.json')
 ))
 CURRENT_VERSION = "v1.6.4"
+
+# Custom protocol instance names: the rename modal caps input at 64 chars.
+CUSTOM_PROTOCOL_NAME_MAX = 64
 BIN_DIR = os.environ.get('TUNNEL_BIN_DIR', os.path.join(application_path, 'bin'))
 TUNNEL_STATE_FILE = os.environ.get('TUNNEL_STATE_FILE', os.path.join(application_path, 'tunnels_state.json'))
 
@@ -3981,7 +3984,9 @@ async def api_rename_protocol(request: Request, server_id: int, req: RenameProto
         proto = req.protocol.strip()
         if proto not in server.get('protocols', {}):
             return JSONResponse({'error': 'Protocol not found'}, status_code=404)
-        name = req.name.strip()
+        # The modal caps input at 64 chars; the API has to cap it too, or a
+        # direct call parks an unbounded string in data.json forever.
+        name = req.name.strip()[:CUSTOM_PROTOCOL_NAME_MAX]
         if name:
             server['protocols'][proto]['custom_name'] = name
         else:
@@ -4049,19 +4054,6 @@ async def api_wgeasy_import(request: Request, server_id: int, req: WgEasyImportR
     except Exception as e:
         logger.exception("Error importing from wg-easy")
         return JSONResponse({'error': str(e), 'log': log}, status_code=500)
-        protocols = server.get('protocols') or {}
-        if req.protocol not in protocols:
-            return JSONResponse({'error': 'Protocol is not installed on this server'}, status_code=404)
-        name = req.name.strip()[:64]
-        if name:
-            protocols[req.protocol]['custom_name'] = name
-        else:
-            protocols[req.protocol].pop('custom_name', None)
-        save_data(data)
-        return {'status': 'success', 'custom_name': name}
-    except Exception as e:
-        logger.exception("Error renaming protocol instance")
-        return JSONResponse({'error': str(e)}, status_code=500)
 
 
 @app.post('/api/servers/{server_id}/server_config/save', tags=["Protocols"])

@@ -2079,7 +2079,8 @@
             showToast((_('error') || 'Error') + ': ' + err.message, 'error');
         } finally {
             btn.disabled = false;
-            btn.textContent = oldText;
+            // No oldText in this function: it never changes the label, and
+            // referencing an undeclared name threw a ReferenceError on every save.
         }
     }
 
