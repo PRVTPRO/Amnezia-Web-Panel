@@ -1373,6 +1373,16 @@ a:hover {
     }
 }
 
+/* Spinners are progress indicators, not decoration: keep them rotating even
+   when the user prefers reduced motion, otherwise a running operation looks
+   frozen. */
+@media (prefers-reduced-motion: reduce) {
+    .spinner,
+    .loading-spinner {
+        animation: spin 0.6s linear infinite !important;
+    }
+}
+
 .protocol-name {
     font-size: 1.1rem;
     font-weight: 700;
