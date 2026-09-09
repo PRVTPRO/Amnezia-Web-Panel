@@ -163,6 +163,13 @@ class SSHManager:
         with self._exec_lock:
             return self._run_command_locked(command, timeout, _retried)
 
+    @staticmethod
+    def _reason(exc):
+        """Text for an exception that often carries none: paramiko raises bare
+        EOFError/SSHException when the transport dies mid-command, and an empty
+        string travels all the way to the UI as "... failed: "."""
+        return str(exc).strip() or type(exc).__name__
+
     def _run_command_locked(self, command, timeout, _retried):
         self.ensure_connected()
 
@@ -178,10 +185,10 @@ class SSHManager:
                     self.connect()
                 except Exception as ce:
                     logger.error(f"reconnect failed: {ce}")
-                    return "", str(ce), -1
+                    return "", self._reason(ce), -1
                 return self.run_command(command, timeout=timeout, _retried=True)
             logger.error(f"exec failed after retry: {e}")
-            return "", str(e), -1
+            return "", self._reason(e), -1
 
         # Crucial: set timeout on the channel to prevent hanging indefinitely
         stdout.channel.settimeout(timeout)
@@ -193,7 +200,7 @@ class SSHManager:
             err = stderr.read().decode('utf-8', errors='replace').strip()
         except Exception as e:
             logger.error(f"Command timed out or failed to read: {e}")
-            out, err, exit_code = "", str(e), -1
+            out, err, exit_code = "", f"SSH connection lost while running the command ({self._reason(e)})", -1
 
         if exit_code != 0:
             logger.warning(f"Command exited with code {exit_code}: {err}")
