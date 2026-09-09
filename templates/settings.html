@@ -20,6 +20,7 @@
     <a href="#settings-import">{{ _('import_users_title') }}</a>
     <a href="#settings-backup">{{ _('backup_title') }}</a>
     <a href="#settings-tokens">{{ _('api_tokens_title') }}</a>
+    <a href="#settings-exit-nodes">{{ _('exit_defaults_title') }}</a>
     <a href="#settings-self-service">{{ _('self_service_title') }}</a>
     <a href="#settings-about">{{ _('about_title') }}</a>
 </nav>
@@ -442,6 +443,16 @@
             </div>
         </div>
 
+        <!-- BLOCK: Exit nodes -->
+        <div class="card" id="settings-exit-nodes" style="margin-top: var(--space-lg);">
+            <h3 class="card-title" style="margin-bottom: var(--space-lg);">🚪 {{ _('exit_defaults_title') }}</h3>
+            <div class="form-group">
+                <label class="form-label">{{ _('exit_default_node') }}</label>
+                <select class="form-input" id="exitDefaultNode"><option value="">{{ _('exit_default_none') }}</option></select>
+                <p class="form-hint">{{ _('exit_default_hint') }}</p>
+            </div>
+        </div>
+
         <!-- BLOCK: Self-Service -->
         <div class="card" id="settings-self-service" style="margin-top: var(--space-lg);">
             <h3 class="card-title" style="margin-bottom: var(--space-lg);"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="margin-right: 6px; vertical-align: -2px;"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>{{ _('self_service_title') }}</h3>
@@ -594,7 +605,7 @@
         let count = 0;
 
         for (const [key, info] of Object.entries(protocols)) {
-            if (info.installed) {
+            if (info.installed && key !== 'exit') {  // exit node has no client connections
                 const opt = document.createElement('option');
                 opt.value = key;
                 opt.textContent = key === 'awg' ? 'AmneziaWG' : (key === 'awg2' ? 'AmneziaWG 2.0' : (key === 'awg_legacy' ? 'AWG Legacy' : (key === 'xray' ? 'Xray' : key.toUpperCase())));
@@ -935,13 +946,17 @@
             allowed_protocols: Array.from(document.querySelectorAll('input[name="ss_proto"]:checked')).map(el => el.value),
         };
 
+        const exit_nodes = { default_exit_uid: document.getElementById('exitDefaultNode').value || '' };
+
         try {
             const res = await fetch('/api/settings/save', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ appearance, sync, captcha, telegram, ssl, auto_backup, self_service })
+                body: JSON.stringify({ appearance, sync, captcha, telegram, ssl, auto_backup, self_service, exit_nodes })
             });
             if (!res.ok) throw new Error(_('error'));
+            const saved = await res.json();
+            (saved.warnings || []).forEach(w => showToast(_(w), 'info'));
             showToast(_('settings_saved'), 'success');
             setTimeout(() => window.location.reload(), 1000);
         } catch (err) {
@@ -1156,9 +1171,27 @@
         }
     }
 
+    async function loadExitNodes() {
+        const select = document.getElementById('exitDefaultNode');
+        const current = {{ (settings.exit_nodes.default_exit_uid if settings.exit_nodes else '') | tojson }};
+        try {
+            const data = await (await fetch('/api/exit-nodes')).json();
+            (data.exit_nodes || []).forEach(node => {
+                const opt = document.createElement('option');
+                opt.value = node.uid;
+                opt.textContent = `${node.name} (${node.host}:${node.port || '?'})`;
+                if (node.uid === current) opt.selected = true;
+                select.appendChild(opt);
+            });
+        } catch (err) {
+            select.disabled = true;
+        }
+    }
+
     document.addEventListener('DOMContentLoaded', () => {
         loadTokens();
         loadTunnelStatus();
+        loadExitNodes();
         tunnelStatusTimer = setInterval(loadTunnelStatus, 10000);
     });
 </script>

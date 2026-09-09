@@ -130,6 +130,9 @@ class BackupManager:
         elif base == 'nginx':
             paths['host'] = ['/opt/amnezia/nginx']
             paths['container'] = ['/etc/nginx/conf.d', '/usr/share/nginx/html']
+        elif base == 'exit':
+            paths['host'] = [f'/opt/amnezia/{container_name}']
+            paths['container'] = ['/opt/amnezia/exit', '/opt/amnezia/start.sh']
         else:
             paths['host'] = [f'/opt/amnezia/{base}']
             paths['container'] = [f'/opt/amnezia/{base}']
@@ -283,8 +286,11 @@ printf '%s\n' "$archive"
         tmp_remote = f'/tmp/_amnz_validate_{safe_name}'
         quoted_remote = shlex.quote(remote_path)
         quoted_tmp = shlex.quote(tmp_remote)
+        # One privileged shell for the whole chain: `sudo <a> && <b>` elevates
+        # only `<a>`, so the copy out of the root-owned backup directory would
+        # fail with "Permission denied" on every non-root server.
         _, err, code = self.ssh.run_sudo_command(
-            f"test -f {quoted_remote} && cp {quoted_remote} {quoted_tmp} && chmod 0644 {quoted_tmp}"
+            f"sh -c {shlex.quote(f'test -f {quoted_remote} && cp {quoted_remote} {quoted_tmp} && chmod 0644 {quoted_tmp}')}"
         )
         if code != 0:
             return None, err or 'Backup not found'

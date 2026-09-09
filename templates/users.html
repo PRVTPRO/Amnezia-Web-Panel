@@ -629,7 +629,7 @@
         let count = 0;
 
         for (const [key, info] of Object.entries(protocols)) {
-            if (info.installed) {
+            if (info.installed && key !== 'exit') {  // exit node has no client connections
                 const opt = document.createElement('option');
                 opt.value = key;
                 opt.textContent = key === 'awg' ? 'AmneziaWG' : (key === 'awg2' ? 'AmneziaWG 2.0' : (key === 'awg_legacy' ? 'AWG Legacy' : (key === 'xray' ? 'Xray' : key.toUpperCase())));

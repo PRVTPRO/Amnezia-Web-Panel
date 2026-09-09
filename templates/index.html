@@ -44,7 +44,7 @@
                 <span class="badge badge-success">
                     <span class="badge-dot"></span>
                     {{ 'AWG' if proto_key == 'awg' else ('AWG-Legacy' if proto_key == 'awg_legacy' else ('Xray' if
-                    proto_key == 'xray' else proto_key | upper)) }}
+                    proto_key == 'xray' else ('Exit' if proto_key == 'exit' else proto_key | upper))) }}
                 </span>
                 {% endif %}
                 {% endfor %}
