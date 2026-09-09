@@ -130,6 +130,9 @@ class BackupManager:
         elif base == 'nginx':
             paths['host'] = ['/opt/amnezia/nginx']
             paths['container'] = ['/etc/nginx/conf.d', '/usr/share/nginx/html']
+        elif base == 'exit':
+            paths['host'] = [f'/opt/amnezia/{container_name}']
+            paths['container'] = ['/opt/amnezia/exit', '/opt/amnezia/start.sh']
         else:
             paths['host'] = [f'/opt/amnezia/{base}']
             paths['container'] = [f'/opt/amnezia/{base}']
