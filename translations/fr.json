@@ -557,5 +557,6 @@
   "role_none_badge": "Aucun rôle",
   "password_optional_no_role": "Aucun mot de passe requis pour le rôle « Aucun rôle »",
   "password_required_for_role": "Un mot de passe est requis pour le rôle sélectionné",
-  "username_empty": "Le nom d'utilisateur ne peut pas être vide"
+  "username_empty": "Le nom d'utilisateur ne peut pas être vide",
+  "invalid_role": "Rôle invalide"
 }

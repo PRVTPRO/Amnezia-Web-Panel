@@ -4955,7 +4955,7 @@ async def api_add_user(request: Request, req: AddUserRequest):
         if any(u['username'] == req.username for u in data.get('users', [])):
             return JSONResponse({'error': _t('user_exists', lang)}, status_code=400)
         if req.role not in ('admin', 'support', 'user', 'none'):
-            return JSONResponse({'error': 'Invalid role'}, status_code=400)
+            return JSONResponse({'error': _t('invalid_role', lang)}, status_code=400)
         if req.role != 'none' and not req.password:
             return JSONResponse({'error': _t('password_required_for_role', lang)}, status_code=400)
         new_user = {

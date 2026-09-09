@@ -590,5 +590,6 @@
   "role_none_badge": "Без роли",
   "password_optional_no_role": "Для роли «Без роли» пароль не нужен",
   "password_required_for_role": "Для выбранной роли пароль обязателен",
-  "username_empty": "Имя пользователя не может быть пустым"
+  "username_empty": "Имя пользователя не может быть пустым",
+  "invalid_role": "Недопустимая роль"
 }
