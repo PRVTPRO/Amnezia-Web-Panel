@@ -152,9 +152,10 @@ class AdguardManager:
     # ===================== INSTALL / REMOVE =====================
 
     def _ensure_network(self):
+        # Both halves need root: `sudo <ls> || <create>` would create unprivileged
         self.ssh.run_sudo_command(
-            f"docker network ls | grep -q {self.NETWORK_NAME} || "
-            f"docker network create --subnet {self.NETWORK_SUBNET} {self.NETWORK_NAME}"
+            f"sh -c 'docker network ls | grep -q {self.NETWORK_NAME} || "
+            f"docker network create --subnet {self.NETWORK_SUBNET} {self.NETWORK_NAME}'"
         )
 
     def install_protocol(
