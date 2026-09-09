@@ -2,7 +2,7 @@ FROM amneziavpn/amneziawg-go:latest
 
 LABEL maintainer="AmneziaVPN"
 
-RUN apk add --no-cache bash curl dumb-init iptables
+RUN apk add --no-cache bash curl dumb-init iptables iproute2 conntrack-tools
 RUN apk --update upgrade --no-cache
 
 RUN sed -i 's|if ! cmd ip link add "$INTERFACE" type amneziawg; then|if [ -n "$WG_FORCE_USERSPACE" ]; then cmd "${WG_QUICK_USERSPACE_IMPLEMENTATION:-amneziawg-go}" "$INTERFACE"; return 0; fi; if ! cmd ip link add "$INTERFACE" type amneziawg; then|' /usr/bin/awg-quick && grep -q WG_FORCE_USERSPACE /usr/bin/awg-quick

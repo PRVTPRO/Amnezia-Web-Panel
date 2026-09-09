@@ -1119,6 +1119,11 @@ a:hover {
     color: #c084fc;
 }
 
+.protocol-exit .protocol-icon {
+    background: linear-gradient(135deg, rgba(249, 115, 22, 0.2), rgba(234, 179, 8, 0.1));
+    color: #fb923c;
+}
+
 .protocol-nginx .protocol-icon {
     background: linear-gradient(135deg, rgba(14, 165, 233, 0.2), rgba(59, 130, 246, 0.1));
     color: #38bdf8;
