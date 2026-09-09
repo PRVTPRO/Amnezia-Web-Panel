@@ -679,6 +679,10 @@
             fetchExistingClients();
         }
         updateTelemtOptions('ucProtocol', 'ucTelemtOptions');
+        // The role select starts on "none", where the password is optional;
+        // without this the label claims it is required until the user touches
+        // the dropdown.
+        toggleNewUserPasswordReq();
     });
 
     function toggleNewUserPasswordReq() {

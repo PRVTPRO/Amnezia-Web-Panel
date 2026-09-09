@@ -3540,10 +3540,13 @@
                 protocol: proto, client_id: clientId, enable: enable,
             });
             showToast(enable ? _('connection_enabled') : _('connection_disabled'), 'success');
-            loadConnections();
+            await loadConnections();
         } catch (err) {
-            restore();
             showToast(_('error') + ': ' + err.message, 'error');
+        } finally {
+            // Also on success: if loadConnections() fails the row it was
+            // supposed to rebuild would stay disabled with a spinning bulb.
+            restore();
         }
     }
 

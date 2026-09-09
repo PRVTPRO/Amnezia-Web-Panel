@@ -433,9 +433,13 @@ tail -f /dev/null
         # Dockerfile included it; cheap no-op when tc already exists.
         body = "command -v tc >/dev/null 2>&1 || apk add --no-cache iproute2 >/dev/null 2>&1\n" + body
         self.ssh.upload_file(body, "/tmp/_wg_tc.sh")
+        # One `sh -c`: run_sudo_command only privileges the head of a chain,
+        # so `docker cp && docker exec` would run the exec unprivileged.
         self.ssh.run_sudo_command(
+            "sh -c '"
             f"docker cp /tmp/_wg_tc.sh {self.CONTAINER_NAME}:/tmp/_wg_tc.sh && "
-            f"docker exec {self.CONTAINER_NAME} bash /tmp/_wg_tc.sh",
+            f"docker exec {self.CONTAINER_NAME} bash /tmp/_wg_tc.sh"
+            "'",
             timeout=60
         )
         self.ssh.run_command("rm -f /tmp/_wg_tc.sh")
