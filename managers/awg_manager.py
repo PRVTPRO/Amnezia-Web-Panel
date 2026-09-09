@@ -101,6 +101,43 @@ AWG_QUICK_FORCE_USERSPACE_PATCH = (
     ' && grep -q WG_FORCE_USERSPACE /usr/bin/awg-quick\n'
 )
 
+# Entry side of an exit-node link: a second WireGuard interface inside the
+# protocol container plus policy routing that sends the client subnet through
+# it. State is file-driven - exit0.conf present means "linked" - so the same
+# shell block runs at container start and when the panel (un)links live.
+EXIT_DIR = '/opt/amnezia/awg/exit'
+EXIT_CONF = f'{EXIT_DIR}/exit0.conf'
+EXIT_KEY = f'{EXIT_DIR}/exit_private.key'
+EXIT_IFACE = 'exit0'
+EXIT_TABLE = 200
+EXIT_MTU = 1420
+EXIT_HANDSHAKE_UP_SECONDS = 300  # REJECT_AFTER_TIME (180) + keepalive slack; 180 itself flaps on idle links
+DNS_NET = '172.29.172.0/24'      # amnezia-dns-net: AmneziaDNS / AdGuard live here, reached via eth1
+ENTRY_PRIVATE_KEY_PLACEHOLDER = '__ENTRY_PRIVATE_KEY__'
+
+# Egress check: the container asks a public "what is my IP" service twice -
+# once bound to the tunnel gateway (that source address is what policy routing
+# sends through exit0, i.e. exactly the client path) and once unbound. Two
+# services, so a single one being down does not read as "no egress".
+EGRESS_CHECK_URLS = ('https://api.ipify.org', 'https://ifconfig.me/ip')
+EGRESS_CHECK_TIMEOUT = 8
+IPV4_RE = re.compile(r'^\d{1,3}(?:\.\d{1,3}){3}$')
+
+# Obfuscation keys carried on a transit link (exit node <-> entry node). S3/S4
+# pad every cookie/transport packet and would eat the MTU budget of a tunnel
+# inside a tunnel, so only the handshake-side keys are used on that hop.
+TRANSIT_PARAM_KEYS = (
+    ('junk_packet_count', 'Jc'),
+    ('junk_packet_min_size', 'Jmin'),
+    ('junk_packet_max_size', 'Jmax'),
+    ('init_packet_junk_size', 'S1'),
+    ('response_packet_junk_size', 'S2'),
+    ('init_packet_magic_header', 'H1'),
+    ('response_packet_magic_header', 'H2'),
+    ('underload_packet_magic_header', 'H3'),
+    ('transport_packet_magic_header', 'H4'),
+)
+
 # Runs inside the awg3 container before awg-quick. Creating a throwaway
 # interface both loads the module (a module present on disk but not yet loaded
 # would otherwise read as absent) and proves the container can reach it.
@@ -875,7 +912,7 @@ echo "HOST_CONNTRACK_COUNT=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/d
 echo "HOST_BACKLOG=$(sysctl -n net.core.netdev_max_backlog 2>/dev/null)"
 echo "HOST_SOMAXCONN=$(sysctl -n net.core.somaxconn 2>/dev/null)"
 echo "HOST_AWG_MODULE=$(modinfo amneziawg 2>/dev/null | awk '/^version:/{print $2; exit}')"
-for c in $(docker ps -a --format '{{.Names}}' | grep '^amnezia-awg' | sort); do
+for c in $(docker ps -a --format '{{.Names}}' | grep -E '^amnezia-(awg|exit)' | sort); do
   echo "CT_NAME=$c"
   if docker ps --format '{{.Names}}' | grep -qx "$c"; then
     echo "CT_RUNNING=1"
@@ -885,7 +922,10 @@ for c in $(docker ps -a --format '{{.Names}}' | grep '^amnezia-awg' | sort); do
   fi
 done
 """
-        out, err, code = self.ssh.run_sudo_command(script, timeout=60)
+        # A multi-line script has to go through run_sudo_script: `sudo <script>`
+        # only elevates its first line, so every `docker` call below would run
+        # unprivileged and the container list would silently come back empty.
+        out, err, code = self.ssh.run_sudo_script(script, timeout=60)
         info = {'host': {}, 'containers': []}
         if code != 0 or not out:
             return info
@@ -1221,7 +1261,7 @@ H4 = {awg_params['transport_packet_magic_header']}
             f"\n"
             f'LABEL maintainer="AmneziaVPN"\n'
             f"\n"
-            f"RUN apk add --no-cache bash curl dumb-init iptables\n"
+            f"RUN apk add --no-cache bash curl dumb-init iptables iproute2 conntrack-tools\n"
             f"RUN apk --update upgrade --no-cache\n"
             f"\n"
             f"{userspace_patch}"
@@ -1286,9 +1326,25 @@ H4 = {awg_params['transport_packet_magic_header']}
 {image}"""
 
     @staticmethod
-    def _start_script_body(config_path, quick_bin, userspace_guard, subnet_default, bwlimits_path):
+    def _mss_clamp_body(iface):
+        """Clamp TCP MSS on a transit link in both directions, so a tunnel
+        carried inside another tunnel never depends on PMTU discovery."""
+        return (
+            f"# Clamp TCP MSS on the transit link so entry->exit->internet never needs fragmentation\n"
+            f"iptables -t mangle -A FORWARD -i {iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true\n"
+            f"iptables -t mangle -A FORWARD -o {iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true\n"
+        )
+
+    @staticmethod
+    def _start_script_body(config_path, quick_bin, userspace_guard, subnet_default, bwlimits_path,
+                           extra_blocks=(), pre_blocks=()):
         """/opt/amnezia/start.sh of a protocol container: brings the tunnel
-        up, sets up forwarding/NAT and applies per-peer bandwidth limits."""
+        up, sets up forwarding/NAT and applies per-peer bandwidth limits.
+        `pre_blocks` go in before the tunnel comes up (the exit-node
+        kill-switch must exist before awg0 can forward anything),
+        `extra_blocks` are appended verbatim before the final `tail -f`."""
+        pre = ''.join(f"{block}\n" for block in pre_blocks)
+        extra = ''.join(f"{block}\n" for block in extra_blocks)
         return f"""#!/bin/bash
 echo "Container startup"
 
@@ -1303,7 +1359,7 @@ fi
 
 # IPv6 subnet, if the tunnel is dual-stack (second part of the Address line)
 SUBNET6=$(grep '^Address' {config_path} | head -1 | tr ',' '\n' | grep ':' | sed 's/^[^=]*=//' | tr -d ' ' | head -1)
-{userspace_guard}
+{pre}{userspace_guard}
 # kill daemons in case of restart
 {quick_bin} down {config_path} 2>/dev/null
 
@@ -1345,19 +1401,28 @@ if [ -f {bwlimits_path} ]; then
 )
 fi
 
-tail -f /dev/null
+{extra}tail -f /dev/null
 """
 
     def _render_start_script(self, protocol_type, config_path=None):
         """start.sh for one protocol instance. `config_path` overrides the
         default location - save_server_config passes the resolved path of an
-        existing container."""
+        existing container. The exit-node block is always emitted: it is
+        inert without exit0.conf and makes the container restart-safe for a
+        link written later."""
+        config_path = config_path or self._config_path(protocol_type)
+        quick_bin = self._quick_binary(protocol_type)
+        subnet_default = f"{AWG_DEFAULTS['subnet_ip']}/{AWG_DEFAULTS['subnet_cidr']}"
+        functions = self._exit_shell_functions(config_path, quick_bin, subnet_default)
         return self._start_script_body(
-            config_path or self._config_path(protocol_type),
-            self._quick_binary(protocol_type),
+            config_path,
+            quick_bin,
             self._userspace_guard(protocol_type),
-            f"{AWG_DEFAULTS['subnet_ip']}/{AWG_DEFAULTS['subnet_cidr']}",
+            subnet_default,
             self._bwlimits_path(),
+            pre_blocks=(functions + '[ -f "$EXIT_CONF" ] && x_killswitch_on\n',),
+            extra_blocks=('# ---- Exit-node link: bring it up now that the client tunnel exists ----\n'
+                          'if [ -f "$EXIT_CONF" ]; then x_link_up || echo "! exit link not applied, clients stay on the kill-switch"; fi\n',),
         )
 
     def _write_start_script(self, protocol_type, config_path=None):
@@ -1373,6 +1438,349 @@ tail -f /dev/null
         self._write_start_script(protocol_type)
         self.ssh.run_sudo_command(f"docker restart {self._container_name(protocol_type)}")
         time.sleep(5)
+
+    # ===================== EXIT-NODE LINK (ENTRY SIDE) =====================
+
+    _EXIT_SHELL_TEMPLATE = """# ---- Exit-node link (panel-managed; driven by __EXIT_CONF__) ----
+EXIT_CONF=__EXIT_CONF__
+EXIT_IF=__EXIT_IF__
+EXIT_TABLE=__EXIT_TABLE__
+EXIT_PREF=__EXIT_TABLE__      # slot 0: 190/191 exceptions, catch-all at the table number
+DNS_NET=__DNS_NET__
+X_CONF=__CONF__
+X_QUICK=__QUICK__
+X_IFACE=$(basename $X_CONF .conf)
+X_SUBNET=$(grep '^Address' $X_CONF | head -1 | cut -d'=' -f2 | cut -d',' -f1 | tr -d ' ')
+[ -n "$X_SUBNET" ] || X_SUBNET=__SUBNET_DEFAULT__
+X_SUBNET6=$(grep '^Address' $X_CONF | head -1 | tr ',' '\\n' | grep ':' | sed 's/^[^=]*=//' | tr -d ' ' | head -1)
+
+x_rule()    { ip "$1" rule show 2>/dev/null | grep -q "^$2:" || ip "$1" rule add pref "$2" "${@:3}"; }
+x_unrule()  { while ip "$1" rule del pref "$2" 2>/dev/null; do :; done; }
+x_ipt_add() { iptables -t "$1" -C "${@:2}" 2>/dev/null || iptables -t "$1" -A "${@:2}"; }
+x_ipt_del() { while iptables -t "$1" -D "${@:2}" 2>/dev/null; do :; done; }
+
+x_killswitch_on() {
+  # Everything from the client subnet is answered by the exit table. Until
+  # exit0 is up that table holds only a blackhole, so nothing falls through
+  # to eth0 - this runs before the client tunnel comes up on purpose.
+  ip -4 route replace blackhole default metric 1000 table $EXIT_TABLE
+  x_rule -4 190 from $X_SUBNET to $X_SUBNET lookup main
+  if grep -qs '^# DnsViaExit = on' "$EXIT_CONF"; then x_unrule -4 191
+  else x_rule -4 191 from $X_SUBNET to $DNS_NET lookup main; fi
+  x_rule -4 $EXIT_PREF from $X_SUBNET lookup $EXIT_TABLE
+  if [ -n "$X_SUBNET6" ]; then
+    # No IPv6 path through the exit yet: refuse fast instead of leaking via eth0
+    ip -6 route replace unreachable default table $EXIT_TABLE
+    x_rule -6 190 from $X_SUBNET6 to $X_SUBNET6 lookup main
+    x_rule -6 $EXIT_PREF from $X_SUBNET6 lookup $EXIT_TABLE
+  fi
+}
+x_killswitch_off() {
+  for p in 190 191 $EXIT_PREF; do x_unrule -4 $p; x_unrule -6 $p; done
+  ip -4 route flush table $EXIT_TABLE 2>/dev/null
+  ip -6 route flush table $EXIT_TABLE 2>/dev/null
+}
+x_link_up() {
+  $X_QUICK down $EXIT_CONF 2>/dev/null
+  if ! $X_QUICK up $EXIT_CONF; then
+    echo "! $EXIT_IF failed to start; clients stay on the kill-switch until the link is repaired or removed"
+    return 3
+  fi
+  # Loose reverse-path check on the link only: containers inherit rp_filter
+  # from the host, and per-client exit tables (later) can make the reverse
+  # lookup resolve to another exitN.
+  sysctl -w net.ipv4.conf.$EXIT_IF.rp_filter=2 >/dev/null 2>&1 || true
+  ip -4 route replace default dev $EXIT_IF table $EXIT_TABLE
+  x_ipt_add filter FORWARD -i $X_IFACE -o $EXIT_IF -s $X_SUBNET -j ACCEPT
+  # SNAT clients into this node's transit address: the exit sees one /32 per entry
+  x_ipt_add nat POSTROUTING -s $X_SUBNET -o $EXIT_IF -j MASQUERADE
+  x_ipt_add mangle FORWARD -o $EXIT_IF -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+  x_ipt_add mangle FORWARD -i $EXIT_IF -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+  # NAT is decided once per flow: flows opened before the link were SNATed to
+  # eth0 and would leave exit0 with the wrong source. Drop them so they reopen.
+  if command -v conntrack >/dev/null 2>&1; then conntrack -D -s $X_SUBNET >/dev/null 2>&1
+  else echo "! conntrack-tools missing: client flows opened before the link keep leaving via eth0 until they end"; fi
+  # Never report success while clients could still leave via eth0
+  if ! ip -4 rule show | grep -q "^$EXIT_PREF:" \\
+     || ! ip -4 route show table $EXIT_TABLE | grep -q "^default dev $EXIT_IF" \\
+     || ! iptables -t nat -C POSTROUTING -s $X_SUBNET -o $EXIT_IF -j MASQUERADE 2>/dev/null; then
+    echo "! FATAL: policy routing for $EXIT_IF is not in place"
+    return 3
+  fi
+  echo "exit link up: $(ip -4 -o addr show dev $EXIT_IF | awk '{print $4}') -> table $EXIT_TABLE"
+}
+x_link_down() {
+  # Take the interface down first: MASQUERADE forgets the flows NATed through
+  # it (device notifier) and the table keeps blackholing until the rules go.
+  [ -f "$EXIT_CONF" ] && $X_QUICK down $EXIT_CONF 2>/dev/null
+  ip link del $EXIT_IF 2>/dev/null
+  x_ipt_del filter FORWARD -i $X_IFACE -o $EXIT_IF -s $X_SUBNET -j ACCEPT
+  x_ipt_del nat POSTROUTING -s $X_SUBNET -o $EXIT_IF -j MASQUERADE
+  x_ipt_del mangle FORWARD -o $EXIT_IF -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+  x_ipt_del mangle FORWARD -i $EXIT_IF -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+}
+x_exit_sync() {
+  if [ -f "$EXIT_CONF" ]; then x_killswitch_on && x_link_up
+  else x_link_down; x_killswitch_off; fi
+}
+"""
+
+    @staticmethod
+    def _exit_shell_functions(config_path, quick_bin, subnet_default):
+        """Shell functions of the entry side of an exit-node link (no
+        side effects by themselves): kill-switch, link up/down and the sync
+        entry point used both by start.sh and by the live apply."""
+        return (AWGManager._EXIT_SHELL_TEMPLATE
+                .replace('__EXIT_CONF__', EXIT_CONF)
+                .replace('__EXIT_IF__', EXIT_IFACE)
+                .replace('__EXIT_TABLE__', str(EXIT_TABLE))
+                .replace('__DNS_NET__', DNS_NET)
+                .replace('__CONF__', config_path)
+                .replace('__QUICK__', quick_bin)
+                .replace('__SUBNET_DEFAULT__', subnet_default))
+
+    @staticmethod
+    def _exit_conf_body(link):
+        """exit0.conf of the entry side. The private key is substituted
+        inside the container (it never leaves it); `Table = off` keeps
+        awg-quick from touching the routing - the shell block owns it."""
+        lines = [
+            '[Interface]',
+            '# Managed by Amnezia Web Panel - exit node link',
+            f"# ExitUid = {link.get('exit_uid', '')}",
+            f"# ExitName = {link.get('exit_name', '')}",
+            f"# Obfuscation = {'on' if link.get('obfuscation') else 'off'}",
+            f"# DnsViaExit = {'on' if link.get('dns_via_exit') else 'off'}",
+            f"PrivateKey = {ENTRY_PRIVATE_KEY_PLACEHOLDER}",
+            f"Address = {link['transit_ip']}/{link.get('subnet_cidr', 24)}",
+            f"MTU = {EXIT_MTU}",
+            'Table = off',
+        ]
+        if link.get('obfuscation'):
+            params = link.get('awg_params') or {}
+            lines += [f"{config_key} = {params[param_key]}"
+                      for param_key, config_key in TRANSIT_PARAM_KEYS if params.get(param_key)]
+        lines += [
+            '',
+            '[Peer]',
+            f"PublicKey = {link['exit_public_key']}",
+            f"PresharedKey = {link['psk']}",
+            'AllowedIPs = 0.0.0.0/0',
+            f"Endpoint = {link['endpoint_host']}:{link['endpoint_port']}",
+            'PersistentKeepalive = 25',
+        ]
+        return '\n'.join(lines) + '\n'
+
+    def exit_prepare_keys(self, protocol_type):
+        """Create the entry-side key pair inside the container (kept if it
+        exists) and return the public key."""
+        container_name = self._container_name(protocol_type)
+        wg_bin = self._wg_binary(protocol_type)
+        out, err, code = self.ssh.run_sudo_command(
+            f"docker exec -i {container_name} bash -c 'umask 077; mkdir -p {EXIT_DIR}; "
+            f"[ -s {EXIT_KEY} ] || {wg_bin} genkey > {EXIT_KEY}; {wg_bin} pubkey < {EXIT_KEY}'"
+        )
+        if code != 0 or not out.strip():
+            raise RuntimeError(f"Failed to prepare the exit link key: {err or out}")
+        return out.strip()
+
+    def _exit_apply(self, protocol_type, teardown=False):
+        """Run the exit block live inside the container (same snippet as in
+        start.sh). Raises when the link could not be brought up, so a caller
+        never records a link whose clients would still leave via eth0."""
+        container_name = self._container_name(protocol_type)
+        config_path = self._resolve_config_path(protocol_type)
+        functions = self._exit_shell_functions(
+            config_path, self._quick_binary(protocol_type),
+            f"{AWG_DEFAULTS['subnet_ip']}/{AWG_DEFAULTS['subnet_cidr']}")
+        action = ('x_link_down\nx_killswitch_off\nrm -f "$EXIT_CONF"\n' if teardown
+                  else 'x_exit_sync\n')
+        # One docker step per sudo call: the sudo prefix covers only the first
+        # command of a `&&` chain, the rest would run unprivileged.
+        self.ssh.upload_file(functions + action, "/tmp/_amnz_exit.sh")
+        out, err, code = self.ssh.run_sudo_command(
+            f"docker cp /tmp/_amnz_exit.sh {container_name}:/tmp/_amnz_exit.sh")
+        if code != 0:
+            self.ssh.run_command("rm -f /tmp/_amnz_exit.sh")
+            raise RuntimeError(f"exit link apply failed: {err or out or f'SSH exit code {code}'}")
+        out, err, code = self.ssh.run_sudo_command(
+            f"docker exec {container_name} bash /tmp/_amnz_exit.sh", timeout=60)
+        self.ssh.run_command("rm -f /tmp/_amnz_exit.sh")
+        if code != 0:
+            raise RuntimeError(f"exit link apply failed: {out or err or f'SSH exit code {code}'}")
+        return out
+
+    def exit_link(self, protocol_type, link):
+        """Write exit0.conf into the container, refresh start.sh (no restart)
+        and bring the link up live. `link` carries transit_ip, subnet_cidr,
+        exit_public_key, psk, endpoint_host, endpoint_port, obfuscation,
+        awg_params, exit_uid, exit_name, dns_via_exit."""
+        container_name = self._container_name(protocol_type)
+        self.ssh.upload_file(self._exit_conf_body(link), "/tmp/_amnz_exit0.conf")
+        # One docker step per sudo call (the sudo prefix covers only the first
+        # command of a `&&` chain).
+        steps = (
+            f"docker exec -i {container_name} mkdir -p {EXIT_DIR}",
+            f"docker cp /tmp/_amnz_exit0.conf {container_name}:{EXIT_CONF}",
+            f"docker exec -i {container_name} bash -c 'k=$(cat {EXIT_KEY}) && "
+            f"sed -i \"s|{ENTRY_PRIVATE_KEY_PLACEHOLDER}|$k|\" {EXIT_CONF} && chmod 600 {EXIT_CONF}'",
+        )
+        try:
+            for step in steps:
+                out, err, code = self.ssh.run_sudo_command(step)
+                if code != 0:
+                    raise RuntimeError(f"Failed to write exit0.conf: {err or out or f'SSH exit code {code}'}")
+        finally:
+            self.ssh.run_command("rm -f /tmp/_amnz_exit0.conf")
+        # Resolved path: an older legacy install may keep its config at awg0.conf.
+        self._write_start_script(protocol_type, config_path=self._resolve_config_path(protocol_type))
+        return self._exit_apply(protocol_type)
+
+    def exit_set_dns_via_exit(self, protocol_type, enabled):
+        """Flip the DnsViaExit marker in exit0.conf and re-apply the block.
+        With it on, the exception that keeps client DNS on this node is not
+        installed, so DNS queries follow the client subnet through the link
+        and are answered by the AmneziaDNS of the exit node. Re-applying
+        recreates exit0, so flows opened before the change reopen."""
+        container_name = self._container_name(protocol_type)
+        value = 'on' if enabled else 'off'
+        out, err, code = self.ssh.run_sudo_command(
+            f"docker exec -i {container_name} sh -c 'test -f {EXIT_CONF} || exit 9; "
+            f"sed -i \"s|^# DnsViaExit = .*|# DnsViaExit = {value}|\" {EXIT_CONF}'")
+        if code == 9:
+            raise RuntimeError('This instance has no exit link file')
+        if code != 0:
+            raise RuntimeError(f"Failed to update the DNS route of the link: {err or out}")
+        return self._exit_apply(protocol_type)
+
+    def exit_unlink(self, protocol_type):
+        """Tear the link down live and delete exit0.conf; the key pair stays
+        so a re-link reuses the public key already known to the exit."""
+        return self._exit_apply(protocol_type, teardown=True)
+
+    def exit_link_info(self, protocol_type):
+        """What the container believes it is linked to, or None. Reads only
+        the panel metadata, the address and the endpoint - never the key."""
+        container_name = self._container_name(protocol_type)
+        out, err, code = self.ssh.run_sudo_command(
+            f"docker exec -i {container_name} sh -c 'test -f {EXIT_CONF} || exit 9; "
+            f"grep -E \"^# (ExitUid|ExitName|Obfuscation|DnsViaExit) =|^Address|^Endpoint\" {EXIT_CONF}'"
+        )
+        if code != 0:
+            return None
+        info = {}
+        for line in out.split('\n'):
+            stripped = line.strip().lstrip('#').strip()
+            if '=' not in stripped:
+                continue
+            key, _, value = stripped.partition('=')
+            info[key.strip()] = value.strip()
+        return {
+            'exit_uid': info.get('ExitUid', ''),
+            'exit_name': info.get('ExitName', ''),
+            'obfuscation': info.get('Obfuscation') == 'on',
+            'dns_via_exit': info.get('DnsViaExit') == 'on',
+            'address': info.get('Address', ''),
+            'endpoint': info.get('Endpoint', ''),
+        }
+
+    @staticmethod
+    def _parse_wg_peer_lists(text):
+        """Parse `wg show <if> latest-handshakes; ---; transfer; ---; endpoints`
+        (tab-separated, one peer per line) into per-peer dicts. `dump` is
+        avoided on purpose: its first line carries the interface private key."""
+        sections = [s.strip() for s in text.split('---')]
+        sections += [''] * (3 - len(sections))
+        peers = {}
+
+        def rows(section):
+            for line in section.split('\n'):
+                parts = line.strip().split('\t')
+                if len(parts) >= 2 and parts[0]:
+                    yield parts
+
+        for parts in rows(sections[0]):
+            try:
+                peers.setdefault(parts[0], {})['latest_handshake'] = int(parts[1])
+            except ValueError:
+                peers.setdefault(parts[0], {})['latest_handshake'] = 0
+        for parts in rows(sections[1]):
+            peer = peers.setdefault(parts[0], {})
+            try:
+                peer['rx_bytes'] = int(parts[1])
+                peer['tx_bytes'] = int(parts[2]) if len(parts) > 2 else 0
+            except ValueError:
+                peer['rx_bytes'], peer['tx_bytes'] = 0, 0
+        for parts in rows(sections[2]):
+            peers.setdefault(parts[0], {})['endpoint'] = '' if parts[1] == '(none)' else parts[1]
+        return peers
+
+    def exit_link_status(self, protocol_type, now=None):
+        """Live state of the link: None when the container has no link file,
+        otherwise up/handshake age/transfer/endpoint of the exit peer."""
+        container_name = self._container_name(protocol_type)
+        wg_bin = self._wg_binary(protocol_type)
+        out, err, code = self.ssh.run_sudo_command(
+            f"docker exec -i {container_name} sh -c 'test -f {EXIT_CONF} || exit 9; "
+            f"{wg_bin} show {EXIT_IFACE} latest-handshakes; echo ---; "
+            f"{wg_bin} show {EXIT_IFACE} transfer; echo ---; {wg_bin} show {EXIT_IFACE} endpoints'"
+        )
+        if code == 9:
+            return None
+        if code != 0:
+            return {'up': False, 'handshake_age': None, 'rx_bytes': 0, 'tx_bytes': 0,
+                    'endpoint': '', 'error': (err or out).strip()}
+        peers = self._parse_wg_peer_lists(out)
+        peer = next(iter(peers.values()), {})
+        handshake = peer.get('latest_handshake', 0)
+        age = int((now or time.time()) - handshake) if handshake else None
+        return {
+            'up': age is not None and 0 <= age < EXIT_HANDSHAKE_UP_SECONDS,
+            'handshake_age': age,
+            'rx_bytes': peer.get('rx_bytes', 0),
+            'tx_bytes': peer.get('tx_bytes', 0),
+            'endpoint': peer.get('endpoint', ''),
+        }
+
+    @staticmethod
+    def _egress_probe_script(subnet_ip):
+        """POSIX sh (single-quoted into `docker exec sh -c`, so no quotes of
+        its own) printing the client-path egress IP, `---`, and the container's
+        own egress IP."""
+        urls = ' '.join(EGRESS_CHECK_URLS)
+        probe = (
+            'x_ip() { for u in %s; do '
+            'r=$(curl -fsS -4 --max-time %d "$@" "$u" 2>/dev/null | tr -d "[:space:]"); '
+            'case "$r" in ""|*[!0-9.]*) ;; *) echo "$r"; return 0;; esac; '
+            'done; echo ""; }' % (urls, EGRESS_CHECK_TIMEOUT)
+        )
+        return f'{probe}; x_ip --interface {subnet_ip}; echo ---; x_ip'
+
+    @staticmethod
+    def _first_ipv4(text):
+        """First line of `text` that is a bare IPv4 address, or ''."""
+        for line in (text or '').split('\n'):
+            line = line.strip()
+            if IPV4_RE.match(line):
+                return line
+        return ''
+
+    def exit_check_egress(self, protocol_type):
+        """Which public IP the clients of this instance leave from, and which
+        one this node leaves from. The client probe is bound to the tunnel
+        gateway address, so it takes the client path (ip rule -> table 200 ->
+        exit0) instead of the container's default route; when no link is up it
+        simply reports the node's own address twice."""
+        container_name = self._container_name(protocol_type)
+        script = self._egress_probe_script(self._get_subnet_ip(protocol_type))
+        # both probes may fall through every URL before giving up
+        timeout = EGRESS_CHECK_TIMEOUT * len(EGRESS_CHECK_URLS) * 2 + 20
+        out, err, code = self.ssh.run_sudo_command(
+            f"docker exec -i {container_name} sh -c '{script}'", timeout=timeout)
+        if code != 0:
+            raise RuntimeError(f"Egress check failed: {(err or out).strip()}")
+        via, _, direct = out.partition('---')
+        return {'via_exit': self._first_ipv4(via), 'direct': self._first_ipv4(direct)}
 
     def remove_container(self, protocol_type):
         """Remove AWG container (mirrors remove_container.sh)."""
@@ -2559,11 +2967,15 @@ AllowedIPs = {allowed_ips}
     def get_awg_settings(self, protocol_type):
         """Client-facing AWG settings currently stored in the server config."""
         params = self._get_awg_params_from_config(protocol_type)
+        link_info = self.exit_link_info(protocol_type)
         settings = {
             'mtu': self._get_mtu(protocol_type),
             'dns': self._get_dns(protocol_type),
             'default_i1': AWG_DEFAULT_I1,
             'supports_special_junk': self._base_protocol(protocol_type) != self.AWG_LEGACY,
+            # an instance behind an exit link cannot carry more than the link
+            'exit_linked': bool(link_info),
+            'exit_mtu': EXIT_MTU,
         }
         for key in SPECIAL_JUNK_KEYS:
             settings[key] = params.get(key, '')

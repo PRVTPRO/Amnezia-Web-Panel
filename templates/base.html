@@ -316,10 +316,21 @@
                 throw new Error('Session expired');
             }
 
-            const data = await res.json();
+            // Not res.json(): a proxy error page, a restart mid-request or a
+            // handler that died before it could answer all arrive as HTML or
+            // plain text, and the parse error alone ("unexpected character at
+            // line 1 column 1") tells the user nothing about what happened.
+            const text = await res.text();
+            let data;
+            try {
+                data = text ? JSON.parse(text) : {};
+            } catch (parseError) {
+                const detail = (text || res.statusText || '').replace(/<[^>]*>/g, ' ').trim().slice(0, 120);
+                throw new Error(`HTTP ${res.status}${detail ? ': ' + detail : ''}`);
+            }
 
             if (!res.ok) {
-                const err = new Error(data.error || 'Unknown error');
+                const err = new Error(data.error || data.detail || `HTTP ${res.status}`);
                 err.payload = data;  // keep extra fields (e.g. import log)
                 throw err;
             }

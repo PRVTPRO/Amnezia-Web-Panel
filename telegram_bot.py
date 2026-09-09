@@ -36,10 +36,11 @@ _pending_inputs = {}
 _EXTRA_PROTOCOL_DISPLAY_NAMES = {
     "dns": "AmneziaDNS",
     "socks5": "SOCKS5",
+    "exit": "Exit Node",
     "adguard": "AdGuard Home",
     "nginx": "NGINX",
 }
-SERVICE_PROTOCOLS = {"dns", "adguard", "socks5", "nginx"}
+SERVICE_PROTOCOLS = {"dns", "adguard", "socks5", "nginx", "exit"}
 
 TG_TRANSLATIONS = {
     "en": {
@@ -654,6 +655,7 @@ def _get_ssh_and_manager(server: dict, proto: str):
     from managers.socks5_manager import Socks5Manager
     from managers.adguard_manager import AdguardManager
     from managers.nginx_manager import NginxManager
+    from managers.exit_manager import ExitManager
 
     ssh = SSHManager(
         server["host"],
@@ -677,6 +679,8 @@ def _get_ssh_and_manager(server: dict, proto: str):
         manager = AdguardManager(ssh)
     elif base == "nginx":
         manager = NginxManager(ssh, proto)
+    elif base == "exit":
+        manager = ExitManager(ssh, proto)
     else:
         manager = AWGManager(ssh)
     return ssh, manager
@@ -1036,7 +1040,11 @@ async def _admin_protocol_detail(api: TelegramAPI, chat_id: int, message_id: int
         f"{_tt(lang, 'servers_title')}: <b>{_e(server.get('name') or server.get('host'))}</b>",
         f"{_tt(lang, 'protocol_status')}: <b>{_protocol_status_text(info, lang)}</b>",
     ]
-    for key in ("port", "container_name", "domain", "site_url", "web_port", "mode"):
+    exit_link = info.get("exit_link") or {}
+    if exit_link:
+        lines.append(f"exit: <code>{_e(exit_link.get('exit_name'))}</code>"
+                     + (f" ({_e(exit_link.get('stale'))})" if exit_link.get("stale") else ""))
+    for key in ("port", "container_name", "domain", "site_url", "web_port", "mode", "subnet", "peers_count"):
         if info.get(key) not in (None, ""):
             lines.append(f"{_e(key)}: <code>{_e(info.get(key))}</code>")
     if info.get("status_error"):

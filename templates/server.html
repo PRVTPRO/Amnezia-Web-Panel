@@ -468,6 +468,31 @@
     </div>
 
 
+    <!-- Exit Node Card -->
+    <div class="card card-hover protocol-card protocol-exit" id="proto-exit">
+        <div class="protocol-card-head">
+            <div class="protocol-icon">🚪</div>
+            <div class="protocol-name">Exit Node</div>
+        </div>
+        <div class="flex gap-sm protocol-ctrl" id="exit-ctrl" style="display:none!important;"></div>
+        <div class="protocol-desc">
+            {{ _('exit_desc') }}
+        </div>
+        <div class="protocol-status" id="exit-status">
+            <span class="badge badge-warn"><span class="badge-dot"></span> {{ _('not_checked') }}</span>
+        </div>
+        <div id="exit-info" class="hidden">
+            <div class="protocol-info" id="exit-info-grid"></div>
+        </div>
+        <div class="flex gap-sm" id="exit-actions">
+            <button class="btn btn-primary btn-sm" onclick="openInstallModal('exit')" id="exit-install-btn"
+                style="flex:1">
+                {{ _('install') }}
+            </button>
+        </div>
+    </div>
+
+
     <!-- NGINX Card -->
     <div class="card card-hover protocol-card protocol-nginx" id="proto-nginx">
         <div class="protocol-card-head">
@@ -740,6 +765,20 @@
                 </div>
             </div>
 
+            <div id="exitOptions"
+                style="display:none; padding: var(--space-md); background: rgba(0,0,0,0.03); border-radius: var(--radius-md); margin-bottom: var(--space-md);">
+                <div class="form-group">
+                    <label class="form-label">{{ _('exit_subnet') }}</label>
+                    <input class="form-input" type="text" id="installExitSubnet" value="10.9.0.0/24" spellcheck="false">
+                    <div class="form-hint">{{ _('exit_subnet_hint') }}</div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" style="display:flex; align-items:center; gap:var(--space-sm);">
+                        <input type="checkbox" id="installExitObfuscation"> {{ _('exit_obfuscation') }}
+                    </label>
+                    <div class="form-hint">{{ _('exit_obfuscation_hint') }}</div>
+                </div>
+            </div>
             <div id="socks5Options"
                 style="display:none; padding: var(--space-md); background: rgba(0,0,0,0.03); border-radius: var(--radius-md); margin-bottom: var(--space-md);">
                 <div class="form-group">
@@ -853,6 +892,7 @@
                 <label class="form-label">{{ _('awg_mtu') }}</label>
                 <input class="form-input" type="number" id="awgSetMtu" min="576" max="65535">
                 <div class="form-hint">{{ _('awg_mtu_hint') }}</div>
+                <div class="form-hint hidden" id="awgSetMtuExitHint"></div>
             </div>
             <div class="form-group">
                 <label class="form-label">DNS 1</label>
@@ -882,6 +922,57 @@
             <button class="btn btn-primary" onclick="saveAwgSettings()" id="awgSaveBtn">
                 <span id="awgSaveBtnText">{{ _('save') }}</span>
                 <div class="spinner hidden" id="awgSaveSpinner"></div>
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- ===== Exit Node: peers ===== -->
+<div class="modal-backdrop" id="exitPeersModal">
+    <div class="modal" style="max-width:760px;">
+        <div class="modal-header">
+            <h2 class="modal-title">{{ _('exit_peers_title') }}</h2>
+            <button class="modal-close" onclick="closeModal('exitPeersModal')">×</button>
+        </div>
+        <div id="exitPeersInfo" class="form-hint" style="margin-bottom:var(--space-md);"></div>
+        <div id="exitPeersList"></div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="showExitPeers(currentExitPeersProto)">{{ _('refresh') }}</button>
+            <button class="btn btn-primary" onclick="closeModal('exitPeersModal')">{{ _('cancel') }}</button>
+        </div>
+    </div>
+</div>
+
+<!-- ===== Exit Node: link an AWG instance ===== -->
+<div class="modal-backdrop" id="exitLinkModal">
+    <div class="modal" style="max-width:560px;">
+        <div class="modal-header">
+            <h2 class="modal-title" id="exitLinkTitle">{{ _('exit_link_title') }}</h2>
+            <button class="modal-close" onclick="closeModal('exitLinkModal')">×</button>
+        </div>
+        <div class="form-hint" style="margin-bottom:var(--space-md);">{{ _('exit_link_desc') }}</div>
+        <div id="exitLinkState" style="margin-bottom:var(--space-md);"></div>
+        <div id="exitLinkEgress"></div>
+        <div id="exitLinkWarnings"></div>
+        <div class="form-group">
+            <label class="form-label">{{ _('exit_link_select') }}</label>
+            <select class="form-input" id="exitLinkSelect"></select>
+            <div class="form-hint" id="exitLinkSelectHint"></div>
+        </div>
+        <div class="form-group hidden" id="exitDnsGroup">
+            <label class="form-label" style="display:flex; align-items:center; gap:var(--space-sm);">
+                <input type="checkbox" id="exitDnsViaExit" onchange="saveExitDns(this.checked)"> {{ _('exit_dns_via_exit') }}
+            </label>
+            <div class="form-hint">{{ _('exit_dns_via_exit_hint') }}</div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="closeModal('exitLinkModal')">{{ _('cancel') }}</button>
+            <button class="btn btn-secondary hidden" onclick="checkExitEgress()" id="exitEgressBtn">{{ _('exit_egress_check') }}</button>
+            <button class="btn btn-secondary hidden" onclick="repairExitLink()" id="exitRepairBtn">{{ _('exit_link_repair') }}</button>
+            <button class="btn btn-danger hidden" onclick="removeExitLink()" id="exitUnlinkBtn">{{ _('exit_unlink_btn') }}</button>
+            <button class="btn btn-primary" onclick="saveExitLink(false)" id="exitLinkBtn">
+                <span id="exitLinkBtnText">{{ _('exit_link_btn') }}</span>
+                <div class="spinner hidden" id="exitLinkSpinner"></div>
             </button>
         </div>
     </div>
@@ -1161,6 +1252,7 @@
 <script src="/static/vendor/codemirror/mode/htmlmixed/htmlmixed.min.js"></script>
 <script>
     const SERVER_ID = {{ server_id }};
+    document.body.dataset.serverUid = {{ (server.uid or '') | tojson }};
     const SERVER_HOST = "{{ server.host }}";
     const CUSTOM_PROTO_NAMES = {
         {%- for proto, info in (server.get('protocols') or {}).items() if info.get('custom_name') %}
@@ -1178,6 +1270,7 @@
         { proto: 'dns', category: 'services', icon: '🔍', title: 'AmneziaDNS', descKey: 'dns_desc' },
         { proto: 'adguard', category: 'services', icon: '🛡️', title: 'AdGuard Home', descKey: 'adguard_desc' },
         { proto: 'socks5', category: 'services', icon: '🧦', title: 'SOCKS5 Proxy', descKey: 'socks5_desc' },
+        { proto: 'exit', category: 'services', icon: '🚪', title: 'Exit Node', descKey: 'exit_desc', badge: 'NEW' },
         { proto: 'nginx', category: 'web_servers', icon: '🌐', title: 'NGINX', descKey: 'nginx_desc' },
     ];
     const MARKETPLACE_CATEGORIES = [
@@ -1248,7 +1341,7 @@
     // ---- Used-port awareness for the install modal ----
     // Fetches real listening ports from the server (not just same-family
     // protocol records) so the suggested port is actually free.
-    const UDP_INSTALL_PROTOS = new Set(['awg', 'awg2', 'awg3', 'awg_legacy', 'wireguard']);
+    const UDP_INSTALL_PROTOS = new Set(['awg', 'awg2', 'awg3', 'awg_legacy', 'wireguard', 'exit']);
     const SKIP_PORT_CHECK = new Set(['dns', 'adguard']); // internal bindings
     window.usedPorts = { ts: 0, udp: {}, tcp: {} };
 
@@ -1502,6 +1595,7 @@
             case 'socks5': title = 'SOCKS5 Proxy'; break;
             case 'adguard': title = 'AdGuard Home'; break;
             case 'nginx': title = 'NGINX'; break;
+            case 'exit': title = 'Exit Node'; break;
             default: title = proto;
         }
         return idx > 1 ? `${title} #${idx}` : title;
@@ -1701,7 +1795,7 @@
 
     // Services that don't have per-user "connections" — they expose a single
     // shared endpoint (DNS/proxy/admin UI) rather than per-client configs.
-    const SERVICE_PROTOS = ['dns', 'socks5', 'adguard', 'nginx'];
+    const SERVICE_PROTOS = ['dns', 'socks5', 'adguard', 'nginx', 'exit'];
 
     function buildServiceInfoGrid(proto, info) {
         // Custom info-grid markup for non-VPN services. Returns HTML for the grid body.
@@ -1727,6 +1821,16 @@
                 <div class="protocol-info-item"><span class="protocol-info-label">${_('adguard_mode')}</span><span class="protocol-info-value">${mode}</span></div>
                 <div class="protocol-info-item"><span class="protocol-info-label">${_('adguard_internal_ip')}</span><span class="protocol-info-value">${ip}</span></div>
                 <div class="protocol-info-item"><span class="protocol-info-label">${_('adguard_web_ui')}</span><span class="protocol-info-value"><a href="${url}" target="_blank" rel="noopener">${url}</a></span></div>
+            `;
+        }
+        if (base === 'exit') {
+            const key = info.public_key ? `<span title="${escapeHtml(info.public_key)}">${escapeHtml(info.public_key.slice(0, 12))}…</span>` : '—';
+            return `
+                <div class="protocol-info-item"><span class="protocol-info-label">${_('port')}</span><span class="protocol-info-value">${info.port || '—'}/UDP</span></div>
+                <div class="protocol-info-item"><span class="protocol-info-label">${_('exit_subnet')}</span><span class="protocol-info-value">${escapeHtml(info.subnet || '—')}</span></div>
+                <div class="protocol-info-item"><span class="protocol-info-label">${_('exit_peers')}</span><span class="protocol-info-value">${info.peers_count ?? 0}</span></div>
+                <div class="protocol-info-item"><span class="protocol-info-label">${_('exit_obfuscation_short')}</span><span class="protocol-info-value">${info.obfuscation ? _('on') : _('off')}</span></div>
+                <div class="protocol-info-item"><span class="protocol-info-label">${_('exit_public_key')}</span><span class="protocol-info-value">${key}</span></div>
             `;
         }
         if (base === 'nginx') {
@@ -1803,6 +1907,9 @@
                 if (!isService && info.clients_count !== undefined) {
                     grid += `<div class="protocol-info-item"><span class="protocol-info-label">${_('connections')}</span><span class="protocol-info-value">${info.clients_count}</span></div>`;
                 }
+                if (!isService && info.exit_link) {
+                    grid += `<div class="protocol-info-item"><span class="protocol-info-label">${_('exit_link_via')}</span><span class="protocol-info-value">${escapeHtml(info.exit_link.exit_name || '')} ${exitStatusBadge(info.exit_link_status, info.exit_link)}</span></div>`;
+                }
                 infoGrid.innerHTML = grid;
             }
             if (protoBase(proto) === 'socks5') {
@@ -1833,6 +1940,12 @@
                     <button class="btn btn-secondary btn-sm" onclick="showProtocolBackups('${proto}')" style="flex:1">${_('backup')}</button>
                     <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')">${_('uninstall')}</button>
                 `;
+            } else if (protoBase(proto) === 'exit') {
+                actionsEl.innerHTML = `
+                    <button class="btn btn-secondary btn-sm" onclick="showExitPeers('${proto}')" style="flex:1">${_('exit_peers')}</button>
+                    <button class="btn btn-secondary btn-sm" onclick="showProtocolBackups('${proto}')">${_('backup')}</button>
+                    <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')">${_('uninstall')}</button>
+                `;
             } else {
                 actionsEl.innerHTML = `
                     <button class="btn btn-secondary btn-sm" onclick="selectProtocolForConns('${proto}')" style="flex:1">${_('connections')}</button>
@@ -1859,8 +1972,12 @@
                     const awgBtn = AWG_PROTOCOLS.includes(protoBase(proto))
                         ? `<button class="btn btn-secondary btn-sm" onclick="openAwgSettings('${proto}')" title="${_('awg_settings_title')}">${_('awg_settings_btn')}</button>`
                         : '';
+                    const exitBtn = AWG_PROTOCOLS.includes(protoBase(proto))
+                        ? `<button class="btn btn-secondary btn-sm" onclick="openExitLinkModal('${proto}')" title="${_('exit_link_title')}">🚪${info.exit_link ? ' ' + escapeHtml(info.exit_link.exit_name || '') : ''}</button>`
+                        : '';
                     ctrlEl.innerHTML = `
                         ${awgBtn}
+                        ${exitBtn}
                         <button class="btn btn-secondary btn-sm" onclick="showServerConfig('${proto}')" title="${_('server_config')}">${_('config_btn')}</button>
                         <button class="btn btn-danger btn-sm" onclick="toggleContainer('${proto}', true)" title="${_('stop_container_confirm').replace('{}', '')}">${_('stop_btn')}</button>
                     `;
@@ -1935,7 +2052,15 @@
         if (!confirm(`${isRunning ? _('stop_container_confirm') : _('start_container_confirm')}`.replace('{}', name))) return;
         try {
             showToast(`${action} ${name}...`, 'info');
-            const res = await apiCall(`/api/servers/${SERVER_ID}/container/toggle`, 'POST', { protocol: proto });
+            let res;
+            try {
+                res = await apiCall(`/api/servers/${SERVER_ID}/container/toggle`, 'POST', { protocol: proto });
+            } catch (err) {
+                if (err.message !== 'exit_in_use') throw err;
+                // Entry nodes route through this exit: their clients land on the kill-switch
+                if (!confirm(_('exit_stop_confirm'))) return;
+                res = await apiCall(`/api/servers/${SERVER_ID}/container/toggle`, 'POST', { protocol: proto, force: true });
+            }
             showToast(`${name} ${res.action === 'stopped' ? _('stopped') : _('started')}`, 'success');
             // Recheck after a short delay
             setTimeout(() => checkServer(), 1500);
@@ -2079,7 +2204,8 @@
             showToast((_('error') || 'Error') + ': ' + err.message, 'error');
         } finally {
             btn.disabled = false;
-            btn.textContent = oldText;
+            // No oldText in this function: it never changes the label, and
+            // referencing an undeclared name threw a ReferenceError on every save.
         }
     }
 
@@ -2257,12 +2383,14 @@
         const adguardOpts = document.getElementById('adguardOptions');
         const nginxOpts = document.getElementById('nginxOptions');
         const awgOpts = document.getElementById('awgOptions');
+        const exitOpts = document.getElementById('exitOptions');
 
         telemtOpts.style.display = 'none';
         socks5Opts.style.display = 'none';
         adguardOpts.style.display = 'none';
         nginxOpts.style.display = 'none';
         awgOpts.style.display = 'none';
+        exitOpts.style.display = 'none';
 
         if (base === 'dns') {
             portLabel.textContent = _('port') + ' (Internal)';
@@ -2299,6 +2427,12 @@
             portHint.textContent = _('nginx_port_hint');
             nginxOpts.style.display = 'block';
             updateNginxDnsHint();
+        } else if (base === 'exit') {
+            portLabel.textContent = _('port') + ' (UDP)';
+            portInput.value = '55520';
+            portInput.disabled = false;
+            portHint.textContent = _('exit_port_hint');
+            exitOpts.style.display = 'block';
         } else {
             portLabel.textContent = _('port') + ' (UDP)';
             portInput.value = currentInstallAnother ? nextSuggestedPort(currentInstallProto, 55424) : '55424';
@@ -2385,6 +2519,9 @@
             } else if (protoBase(currentInstallProto) === 'nginx') {
                 params.nginx_domain = document.getElementById('installNginxDomain').value.trim();
                 params.nginx_email = document.getElementById('installNginxEmail').value.trim();
+            } else if (protoBase(currentInstallProto) === 'exit') {
+                params.exit_subnet = document.getElementById('installExitSubnet').value.trim();
+                params.exit_obfuscation = document.getElementById('installExitObfuscation').checked;
             } else if (AWG_PROTOCOLS.includes(protoBase(currentInstallProto))) {
                 params.awg_mtu = document.getElementById('installAwgMtu').value.trim();
                 params.awg_dns1 = document.getElementById('installAwgDns1').value.trim();
@@ -2569,11 +2706,20 @@
     async function restoreProtocolBackup(proto, filename) {
         if (!confirm(_('restore_confirm_protocol'))) return;
         try {
-            await apiCall(`/api/servers/${SERVER_ID}/backups/restore`, 'POST', {
+            const res = await apiCall(`/api/servers/${SERVER_ID}/backups/restore`, 'POST', {
                 protocol: proto,
                 filename: filename
             });
             showToast(_('restore_success'), 'success');
+            // an archive can carry a different exit-link state than the panel has
+            const relinked = (res.exit_entries_relinked || []).filter(e => e.status === 'success').length;
+            const failed = (res.exit_entries_relinked || []).filter(e => e.status !== 'success').length;
+            if (relinked) showToast(_('exit_restore_entries_relinked').replace('{n}', relinked), 'info');
+            if (failed) showToast(_('exit_restore_entries_failed').replace('{n}', failed), 'error');
+            if (res.exit_link_restored === 'relinked') showToast(_('exit_restore_relinked'), 'info');
+            if (res.exit_link_restored === 'stale') showToast(_('exit_restore_stale'), 'error');
+            if (res.exit_link_restored === 'removed') showToast(_('exit_restore_removed'), 'info');
+            if (res.exit_link_restored === 'orphan') showToast(_('exit_restore_orphan'), 'error');
             await loadProtocolBackups();
             if (typeof loadConnections === 'function') {
                 await loadConnections();
@@ -2618,6 +2764,13 @@
             document.getElementById('awgSetMtu').value = data.mtu || '1376';
             document.getElementById('awgSetDns1').value = data.dns1 || '';
             document.getElementById('awgSetDns2').value = data.dns2 || '';
+            const exitHint = document.getElementById('awgSetMtuExitHint');
+            exitHint.classList.toggle('hidden', !data.exit_linked);
+            if (data.exit_linked) {
+                const over = Number(data.mtu) > Number(data.exit_mtu);
+                exitHint.textContent = _('awg_mtu_exit_hint').replace('{exit_mtu}', data.exit_mtu);
+                exitHint.style.color = over ? 'var(--danger, #f87171)' : '';
+            }
             const junkGroup = document.getElementById('awgSetJunkGroup');
             junkGroup.style.display = data.supports_special_junk ? '' : 'none';
             SPECIAL_JUNK_KEYS.forEach(key => {
@@ -2659,6 +2812,220 @@
             text.textContent = _('save');
             spinner.classList.add('hidden');
         }
+    }
+
+    // ========== Exit node ==========
+    let currentExitPeersProto = 'exit';
+    let currentExitLinkProto = null;
+    let currentExitLinkState = null;
+    const EXIT_LINK_ERROR_KEYS = ['exit_no_handshake', 'exit_mtu_too_big', 'exit_self', 'exit_legacy_obfuscation',
+        'exit_not_found', 'exit_apply_failed', 'exit_in_use', 'exit_egress_failed', 'exit_dns_needs_dns',
+        'not_linked'];
+
+    function exitStatusBadge(status, link) {
+        const badge = (cls, text, title = '') => `<span class="badge ${cls}" title="${escapeHtml(title)}"><span class="badge-dot"></span> ${escapeHtml(text)}</span>`;
+        if (link && link.stale) return badge('badge-danger', _('exit_status_down'), _('exit_link_stale'));
+        if (!status) return badge('badge-secondary', _('exit_status_down'));
+        if (status.error) return badge('badge-danger', _('exit_status_down'), status.error);
+        const age = status.handshake_age;
+        const ago = (age === null || age === undefined) ? '' : ' · ' + _('exit_handshake_ago').replace('{s}', age);
+        if (status.up) return badge('badge-success', _('exit_status_up') + ago, `${formatBytes(status.rx_bytes || 0)} ↓ ${formatBytes(status.tx_bytes || 0)} ↑`);
+        return badge('badge-warn', _('exit_status_stale') + ago);
+    }
+
+    function exitLinkErrorText(err) {
+        return EXIT_LINK_ERROR_KEYS.includes(err.message) ? _(err.message) : err.message;
+    }
+
+    async function showExitPeers(proto = 'exit') {
+        currentExitPeersProto = proto || 'exit';
+        const list = document.getElementById('exitPeersList');
+        const infoEl = document.getElementById('exitPeersInfo');
+        list.innerHTML = `<div class="empty-state">${_('loading')}</div>`;
+        openModal('exitPeersModal');
+        try {
+            const data = await apiCall(`/api/servers/${SERVER_ID}/exit/peers`, 'POST', { protocol: currentExitPeersProto });
+            const info = data.info || {};
+            infoEl.textContent = `${_('port')}: ${info.port || '—'}/UDP · ${_('exit_subnet')}: ${info.subnet || '—'} · ${_('exit_obfuscation_short')}: ${info.obfuscation ? _('on') : _('off')}`;
+            const e = escapeHtml;
+            if (!data.peers || !data.peers.length) {
+                list.innerHTML = `<div class="empty-state">${_('exit_no_peers')}</div>`;
+                return;
+            }
+            list.innerHTML = `<div class="table-wrap"><table class="table"><thead><tr>
+                <th>${_('exit_peer_name')}</th><th>${_('exit_transit_ip')}</th><th>${_('exit_public_key')}</th><th>${_('exit_handshake')}</th><th>${_('exit_transfer')}</th><th></th>
+                </tr></thead><tbody>` + data.peers.map(p => `<tr${p.external ? ' style="opacity:.7"' : ''}>
+                <td>${e(p.name || p.peer_id || '—')}${p.external ? ` <span class="badge badge-warn">${_('exit_peer_external')}</span>` : ''}</td>
+                <td>${e(p.transit_ip || '—')}</td>
+                <td><code title="${e(p.public_key)}">${e((p.public_key || '').slice(0, 12))}…</code></td>
+                <td>${e(p.latest_handshake || '—')}</td>
+                <td>${e(p.rx || '0 B')} ↓ ${e(p.tx || '0 B')} ↑</td>
+                <td><button class="btn btn-danger btn-sm" data-key="${e(p.public_key)}" onclick="removeExitPeer(this.dataset.key)">${_('uninstall')}</button></td>
+                </tr>`).join('') + `</tbody></table></div>`;
+        } catch (err) {
+            list.innerHTML = `<div class="empty-state">${_('error')}: ${escapeHtml(err.message)}</div>`;
+        }
+    }
+
+    async function removeExitPeer(publicKey) {
+        if (!confirm(_('exit_peer_remove_confirm'))) return;
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/exit/peers/remove`, 'POST', { protocol: currentExitPeersProto, public_key: publicKey });
+            showToast(_('exit_peer_removed'), 'success');
+            showExitPeers(currentExitPeersProto);
+        } catch (err) {
+            showToast(_('error') + ': ' + err.message, 'error');
+        }
+    }
+
+    function renderExitLinkState(state) {
+        const el = document.getElementById('exitLinkState');
+        const warn = document.getElementById('exitLinkWarnings');
+        const link = state.exit_link;
+        const unlinkBtn = document.getElementById('exitUnlinkBtn');
+        const repairBtn = document.getElementById('exitRepairBtn');
+        unlinkBtn.classList.toggle('hidden', !link);
+        document.getElementById('exitEgressBtn').classList.toggle('hidden', !link);
+        document.getElementById('exitDnsGroup').classList.toggle('hidden', !link);
+        document.getElementById('exitDnsViaExit').checked = !!(link && link.dns_via_exit);
+        repairBtn.classList.toggle('hidden', !(link && (link.stale || !(state.exit_link_status && state.exit_link_status.up))));
+        if (!link) {
+            el.innerHTML = `<div class="form-hint">${_('exit_link_none')}</div>`;
+        } else {
+            el.innerHTML = `<div>${escapeHtml(_('exit_link_current').replace('{name}', link.exit_name || '').replace('{ip}', link.transit_ip || ''))} ${exitStatusBadge(state.exit_link_status, link)}</div>`
+                + (link.stale ? `<div class="form-hint" style="color:var(--danger, #f87171)">${_('exit_link_stale')}</div>` : '');
+        }
+        let warnings = '';
+        if (state.ipv6) warnings += `<div class="form-hint">⚠ ${_('exit_link_ipv6_warning')}</div>`;
+        if (state.mtu && state.exit_mtu && state.mtu > state.exit_mtu) {
+            warnings += `<div class="form-hint" style="color:var(--danger, #f87171)">⚠ ${_('exit_link_mtu_warning').replace('{mtu}', state.mtu).replace('{exit_mtu}', state.exit_mtu)}</div>`;
+        }
+        warn.innerHTML = warnings;
+    }
+
+    async function openExitLinkModal(proto) {
+        currentExitLinkProto = proto;
+        document.getElementById('exitLinkTitle').textContent = `${_('exit_link_title')} — ${getProtoTitle(proto)}`;
+        const select = document.getElementById('exitLinkSelect');
+        const hint = document.getElementById('exitLinkSelectHint');
+        select.innerHTML = '';
+        hint.textContent = '';
+        document.getElementById('exitLinkState').innerHTML = `<div class="form-hint">${_('loading')}</div>`;
+        document.getElementById('exitLinkWarnings').innerHTML = '';
+        document.getElementById('exitLinkEgress').innerHTML = '';
+        // hidden until the state says this instance is linked
+        document.getElementById('exitEgressBtn').classList.add('hidden');
+        openModal('exitLinkModal');
+        try {
+            const [nodes, state] = await Promise.all([
+                apiCall('/api/exit-nodes'),
+                apiCall(`/api/servers/${SERVER_ID}/exit-link/status`, 'POST', { protocol: proto }),
+            ]);
+            currentExitLinkState = state;
+            const own = document.body.dataset.serverUid || '';
+            const candidates = (nodes.exit_nodes || []).filter(n => n.uid !== own);
+            if (!candidates.length) {
+                hint.textContent = _('exit_no_exit_nodes');
+            }
+            const legacy = protoBase(proto) === 'awg_legacy';
+            candidates.forEach(n => {
+                const opt = document.createElement('option');
+                opt.value = n.uid;
+                opt.textContent = `${n.name} (${n.host}:${n.port || '?'})${n.obfuscation ? ' [AWG]' : ''}`;
+                if (legacy && n.obfuscation) { opt.disabled = true; opt.title = _('exit_legacy_obfuscation'); }
+                if (state.exit_link && state.exit_link.exit_uid === n.uid) opt.selected = true;
+                select.appendChild(opt);
+            });
+            document.getElementById('exitLinkBtn').disabled = !candidates.length;
+            renderExitLinkState(state);
+        } catch (err) {
+            document.getElementById('exitLinkState').innerHTML = `<div class="form-hint">${_('error')}: ${escapeHtml(err.message)}</div>`;
+        }
+    }
+
+    async function exitLinkRequest(path, body, successKey) {
+        const btn = document.getElementById('exitLinkBtn');
+        const spinner = document.getElementById('exitLinkSpinner');
+        btn.disabled = true;
+        spinner.classList.remove('hidden');
+        try {
+            const res = await apiCall(`/api/servers/${SERVER_ID}/exit-link${path}`, 'POST', body);
+            (res.warnings || []).forEach(w => showToast(_(w), 'info'));
+            showToast(_(successKey), 'success');
+            closeModal('exitLinkModal');
+            setTimeout(() => checkServer(), 500);
+            return res;
+        } catch (err) {
+            const text = exitLinkErrorText(err);
+            if (err.message === 'exit_no_handshake' || err.message === 'exit_mtu_too_big') {
+                if (confirm(`${text}\n\n${_('exit_link_force')}?`)) {
+                    return exitLinkRequest(path, { ...body, force: true }, successKey);
+                }
+            } else {
+                showToast(_('error') + ': ' + text, 'error');
+            }
+        } finally {
+            btn.disabled = false;
+            spinner.classList.add('hidden');
+        }
+    }
+
+    async function saveExitLink(force = false) {
+        const uid = document.getElementById('exitLinkSelect').value;
+        if (!uid) return;
+        if (currentExitLinkState && currentExitLinkState.ipv6 && !confirm(_('exit_link_ipv6_confirm'))) return;
+        await exitLinkRequest('', { protocol: currentExitLinkProto, exit_uid: uid, force }, 'exit_link_saved');
+    }
+
+    async function removeExitLink() {
+        if (!confirm(_('exit_unlink_confirm'))) return;
+        await exitLinkRequest('/remove', { protocol: currentExitLinkProto }, 'exit_unlinked');
+    }
+
+    async function checkExitEgress() {
+        const box = document.getElementById('exitLinkEgress');
+        const btn = document.getElementById('exitEgressBtn');
+        box.innerHTML = `<div class="form-hint">${_('exit_egress_checking')}</div>`;
+        btn.disabled = true;
+        try {
+            const r = await apiCall(`/api/servers/${SERVER_ID}/exit-link/check-egress`, 'POST', { protocol: currentExitLinkProto });
+            const via = escapeHtml(r.via_exit || '');
+            let text, color;
+            if (!r.via_exit) {
+                text = _('exit_egress_unknown'); color = 'var(--danger, #f87171)';
+            } else if (r.leaks) {
+                text = _('exit_egress_direct').replace('{ip}', via); color = 'var(--danger, #f87171)';
+            } else if (r.matches) {
+                text = _('exit_egress_match').replace('{ip}', via).replace('{name}', escapeHtml(r.exit_name || '')); color = 'var(--success, #4ade80)';
+            } else {
+                text = _('exit_egress_mismatch').replace('{ip}', via).replace('{expected}', escapeHtml(r.expected_ip || r.expected || '')); color = 'var(--warning, #fbbf24)';
+            }
+            box.innerHTML = `<div class="form-hint" style="color:${color}">${text}</div>`;
+        } catch (err) {
+            box.innerHTML = `<div class="form-hint" style="color:var(--danger, #f87171)">${_('error')}: ${escapeHtml(exitLinkErrorText(err))}</div>`;
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    async function saveExitDns(enabled) {
+        const box = document.getElementById('exitDnsViaExit');
+        box.disabled = true;
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/exit-link/dns`, 'POST',
+                          { protocol: currentExitLinkProto, enabled: !!enabled });
+            showToast(_(enabled ? 'exit_dns_via_exit_on' : 'exit_dns_via_exit_off'), 'success');
+            if (currentExitLinkState && currentExitLinkState.exit_link) currentExitLinkState.exit_link.dns_via_exit = !!enabled;
+        } catch (err) {
+            box.checked = !enabled;
+            showToast(_('error') + ': ' + exitLinkErrorText(err), 'error');
+        } finally {
+            box.disabled = false;
+        }
+    }
+
+    async function repairExitLink() {
+        await exitLinkRequest('/relink', { protocol: currentExitLinkProto }, 'exit_link_saved');
     }
 
     async function openSocks5Settings(proto = 'socks5') {
