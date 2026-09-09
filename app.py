@@ -120,14 +120,21 @@ app.add_middleware(SessionMiddleware, secret_key=os.environ.get('SECRET_KEY', se
 
 # Mount static files & templates
 class CachedStaticFiles(StaticFiles):
-    """Static assets are fingerprinted with ?v=<static mtime> (see
-    static_version()), so a redeploy changes the URL and busts the cache.
-    That lets us hand the browser a long 180-day cache lifetime."""
+    """Static assets that carry ?v=<static mtime> (see static_version()) change
+    their URL on every redeploy, so they can be cached for 180 days. Assets
+    referenced without that query - the favicon, the icons, qrcode.min.js,
+    searchable-select.js, the vendored CodeMirror and ReDoc bundles - keep the
+    same URL forever, so an immutable lifetime would freeze them in the
+    browser until it expires. Those get an hour and a revalidation instead."""
 
     async def get_response(self, path, scope):
         response = await super().get_response(path, scope)
         if response.status_code == 200:
-            response.headers['Cache-Control'] = 'public, max-age=15552000, immutable'
+            query = urllib.parse.parse_qsl(scope.get('query_string', b'').decode('latin-1'))
+            fingerprinted = any(key == 'v' for key, _value in query)
+            response.headers['Cache-Control'] = (
+                'public, max-age=15552000, immutable' if fingerprinted
+                else 'public, max-age=3600, must-revalidate')
         return response
 
 app.mount("/static", CachedStaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
@@ -4353,31 +4360,6 @@ async def api_host_tuning(request: Request, server_id: int):
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
-@app.post('/api/servers/{server_id}/protocol/rename', tags=["Protocols"])
-async def api_rename_protocol(request: Request, server_id: int, req: RenameProtocolRequest):
-    """Set or clear a custom display name for an installed protocol instance."""
-    if not _check_admin(request):
-        return JSONResponse({'error': 'Forbidden'}, status_code=403)
-    try:
-        data = load_data()
-        if server_id >= len(data['servers']):
-            return JSONResponse({'error': 'Server not found'}, status_code=404)
-        server = data['servers'][server_id]
-        protocols = server.get('protocols') or {}
-        if req.protocol not in protocols:
-            return JSONResponse({'error': 'Protocol is not installed on this server'}, status_code=404)
-        name = req.name.strip()[:64]
-        if name:
-            protocols[req.protocol]['custom_name'] = name
-        else:
-            protocols[req.protocol].pop('custom_name', None)
-        save_data(data)
-        return {'status': 'success', 'custom_name': name}
-    except Exception as e:
-        logger.exception("Error renaming protocol instance")
-        return JSONResponse({'error': str(e)}, status_code=500)
-
-
 @app.post('/api/servers/{server_id}/wgeasy/preview', tags=["Protocols"])
 async def api_wgeasy_preview(request: Request, server_id: int, req: WgEasyPreviewRequest):
     """Fetch the client list from a wg-easy / amnezia-wg-easy panel running on
@@ -4973,7 +4955,7 @@ async def api_add_user(request: Request, req: AddUserRequest):
         if any(u['username'] == req.username for u in data.get('users', [])):
             return JSONResponse({'error': _t('user_exists', lang)}, status_code=400)
         if req.role not in ('admin', 'support', 'user', 'none'):
-            return JSONResponse({'error': 'Invalid role'}, status_code=400)
+            return JSONResponse({'error': _t('invalid_role', lang)}, status_code=400)
         if req.role != 'none' and not req.password:
             return JSONResponse({'error': _t('password_required_for_role', lang)}, status_code=400)
         new_user = {
@@ -5061,10 +5043,10 @@ async def api_update_user(request: Request, user_id: str, req: UpdateUserRequest
             
         if req.username is not None:
             new_name = req.username.strip()
+            lang = request.cookies.get('lang', 'ru')
             if not new_name:
-                return JSONResponse({'error': 'Username must not be empty'}, status_code=400)
+                return JSONResponse({'error': _t('username_empty', lang)}, status_code=400)
             if any(u['username'] == new_name and u['id'] != user_id for u in data.get('users', [])):
-                lang = request.cookies.get('lang', 'ru')
                 return JSONResponse({'error': _t('user_exists', lang)}, status_code=400)
             user['username'] = new_name
         if req.telegramId is not None:

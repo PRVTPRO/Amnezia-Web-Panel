@@ -27,7 +27,7 @@ HOST_AWG_MODULE=3.1.20260812
 CT_NAME=amnezia-awg2
 CT_RUNNING=1
 CTK_net.core.rmem_max=26214400
-CT_NAME=amnezia-awg3
+CT_NAME=amnezia-exit
 CT_RUNNING=0
 """
 
@@ -41,12 +41,12 @@ class HostTuningTests(unittest.TestCase):
         self.assertEqual([kind for kind, _ in ssh.calls], ['script'])
         script = ssh.calls[0][1]
         self.assertIn('HOST_AWG_MODULE=', script)
-        self.assertIn("grep '^amnezia-awg'", script)
+        self.assertIn("grep -E '^amnezia-(awg|exit)'", script)
 
         self.assertEqual(info['host']['cc'], 'bbr')
         self.assertEqual(info['host']['awg_module'], '3.1.20260812')
         self.assertEqual([(c['name'], c['running']) for c in info['containers']],
-                         [('amnezia-awg2', True), ('amnezia-awg3', False)])
+                         [('amnezia-awg2', True), ('amnezia-exit', False)])
         self.assertEqual(info['containers'][0]['ct'], {'net.core.rmem_max': '26214400'})
 
     def test_empty_output_is_not_an_error(self):

@@ -556,5 +556,7 @@
   "role_none_desc": "بدون نقش — فقط رکورد، بدون امکان ورود",
   "role_none_badge": "بدون نقش",
   "password_optional_no_role": "برای نقش «بدون نقش» رمز عبور لازم نیست",
-  "password_required_for_role": "برای نقش انتخاب‌شده رمز عبور الزامی است"
+  "password_required_for_role": "برای نقش انتخاب‌شده رمز عبور الزامی است",
+  "username_empty": "نام کاربری نمی‌تواند خالی باشد",
+  "invalid_role": "نقش نامعتبر"
 }

@@ -2164,7 +2164,9 @@
             showToast((_('error') || 'Error') + ': ' + err.message, 'error');
         } finally {
             btn.disabled = false;
-            btn.innerHTML = '{{ _("save") }}';
+            // textContent + the runtime helper: a locale whose "save" carries
+            // a quote would break a server-rendered JS string literal.
+            btn.textContent = _('save') || 'Save';
             document.getElementById('renameProtoInput').disabled = false;
         }
     }
@@ -2208,47 +2210,6 @@
         } finally {
             btn.disabled = false;
             btn.textContent = oldText;
-        }
-    }
-
-    // ---------- rename protocol instance ----------
-    let renameProtoTarget = null;
-
-    // Pencils live inside .protocol-name and are (re)built on every status
-    // refresh, so one delegated listener covers static and cloned cards.
-    document.addEventListener('click', (e) => {
-        const el = e.target.closest('.proto-rename');
-        if (el && el.dataset.proto) openRenameProtocol(el.dataset.proto);
-    });
-
-    function openRenameProtocol(proto) {
-        renameProtoTarget = proto;
-        document.getElementById('renameProtoInput').value = CUSTOM_PROTO_NAMES[proto] || getProtoTitle(proto);
-        openModal('renameProtoModal');
-    }
-
-    async function saveRenameProtocol() {
-        const proto = renameProtoTarget;
-        if (!proto) return;
-        const name = document.getElementById('renameProtoInput').value.trim();
-        const btn = document.getElementById('renameProtoSaveBtn');
-        btn.disabled = true;
-        try {
-            await apiCall(`/api/servers/${SERVER_ID}/protocol/rename`, 'POST', { protocol: proto, name });
-            if (name) {
-                CUSTOM_PROTO_NAMES[proto] = name;
-            } else {
-                delete CUSTOM_PROTO_NAMES[proto];
-            }
-            closeModal('renameProtoModal');
-            showToast(_('success') || 'Saved', 'success');
-            setTimeout(() => location.reload(), 800);
-        } catch (err) {
-            showToast((_('error') || 'Error') + ': ' + err.message, 'error');
-        } finally {
-            btn.disabled = false;
-            // No oldText in this function: it never changes the label, and
-            // referencing an undeclared name threw a ReferenceError on every save.
         }
     }
 
@@ -3581,10 +3542,13 @@
                 protocol: proto, client_id: clientId, enable: enable,
             });
             showToast(enable ? _('connection_enabled') : _('connection_disabled'), 'success');
-            loadConnections();
+            await loadConnections();
         } catch (err) {
-            restore();
             showToast(_('error') + ': ' + err.message, 'error');
+        } finally {
+            // Also on success: if loadConnections() fails the row it was
+            // supposed to rebuild would stay disabled with a spinning bulb.
+            restore();
         }
     }
 

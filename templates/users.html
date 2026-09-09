@@ -69,7 +69,7 @@
             <div class="form-group">
                 <label class="form-label" id="newPasswordLabel">{{ _('password_label') }}</label>
                 <input class="form-input" type="password" id="newPassword" placeholder="••••••••">
-                <div class="form-hint">{{ _('password_optional_no_role') }}</div>
+                <div class="form-hint" id="newPasswordHint">{{ _('password_optional_no_role') }}</div>
             </div>
 
             <div class="form-group">
@@ -612,6 +612,10 @@
     document.addEventListener('DOMContentLoaded', () => {
         setupDateTimeFields();
         refreshUsersList();
+        // The role select starts on "none", where the password is optional;
+        // without this the label claims it is required until the select fires
+        // a change event.
+        toggleNewUserPasswordReq();
     });
 
     function updateProtocols(serverId, selectId, groupId = null) {
@@ -687,6 +691,9 @@
         input.required = needsPass;
         document.getElementById('newPasswordLabel').textContent =
             needsPass ? _('password_label') : _('password_label') + ' (' + _('optional') + ')';
+        // The hint only holds for "none"; leaving it up next to a required
+        // field makes the form contradict itself.
+        document.getElementById('newPasswordHint').style.display = needsPass ? 'none' : '';
     }
 
     async function addUser(e) {

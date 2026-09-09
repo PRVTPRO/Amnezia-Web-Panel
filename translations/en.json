@@ -589,5 +589,7 @@
   "role_none_desc": "No role — record only, cannot log in",
   "role_none_badge": "No role",
   "password_optional_no_role": "No password needed for the “No role” role",
-  "password_required_for_role": "A password is required for the selected role"
+  "password_required_for_role": "A password is required for the selected role",
+  "username_empty": "Username must not be empty",
+  "invalid_role": "Invalid role"
 }

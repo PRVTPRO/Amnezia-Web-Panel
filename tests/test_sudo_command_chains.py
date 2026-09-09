@@ -11,6 +11,7 @@ import unittest
 from managers.backup_manager import BackupManager
 from managers.adguard_manager import AdguardManager
 from managers.dns_manager import DNSManager
+from managers.wireguard_manager import WireGuardManager
 
 
 class RecordingSSH:
@@ -28,6 +29,9 @@ class RecordingSSH:
         return ('Docker version 27.0.3' if 'docker --version' in command else ''), '', 0
 
     def write_file(self, path, content):
+        pass
+
+    def upload_file(self, content, path):
         pass
 
 
@@ -81,6 +85,18 @@ class SudoChainTests(unittest.TestCase):
         ssh = RecordingSSH(code=0)
         AdguardManager(ssh)._ensure_network()
         self.assertTrue(chain_is_wrapped(ssh.commands[0]), ssh.commands[0])
+
+    def test_wireguard_bw_limits_run_the_chain_in_one_shell(self):
+        ssh = RecordingSSH(code=0)
+        manager = WireGuardManager(ssh)
+        manager.check_container_running = lambda: True
+        manager._apply_bw_limits([
+            {'userData': {'maxSpeed': 10, 'clientIp': '10.8.2.2'}},
+        ])
+        execs = [c for c in ssh.commands if 'docker exec' in c and '_wg_tc.sh' in c]
+        self.assertTrue(execs, ssh.commands)
+        for cmd in execs:
+            self.assertTrue(chain_is_wrapped(cmd), cmd)
 
     def test_helper_flags_a_bare_chain(self):
         self.assertFalse(chain_is_wrapped("test -f a && cp a b"))
