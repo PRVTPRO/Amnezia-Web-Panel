@@ -885,7 +885,10 @@ for c in $(docker ps -a --format '{{.Names}}' | grep '^amnezia-awg' | sort); do
   fi
 done
 """
-        out, err, code = self.ssh.run_sudo_command(script, timeout=60)
+        # A multi-line script has to go through run_sudo_script: `sudo <script>`
+        # only elevates its first line, so every `docker` call below would run
+        # unprivileged and the container list would silently come back empty.
+        out, err, code = self.ssh.run_sudo_script(script, timeout=60)
         info = {'host': {}, 'containers': []}
         if code != 0 or not out:
             return info
