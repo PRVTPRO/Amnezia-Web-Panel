@@ -1575,7 +1575,7 @@
         const loading = document.getElementById('installedAppsLoading');
         if (loading) loading.classList.toggle('hidden', !installedAppsLoading);
         if (grid) grid.classList.toggle('apps-pending', installedAppsLoading);
-          applyCustomTitles();
+        applyCustomTitles();
     }
 
     function getProtoTitle(proto) {
@@ -2124,6 +2124,49 @@
         }
         if (!(t.containers || []).length) html += `<div style="opacity:.6;margin-top:8px;">No AWG containers</div>`;
         el.innerHTML = html;
+    }
+
+    // ---------- rename protocol instance ----------
+    let renameProtoTarget = null;
+
+    // Pencils live inside .protocol-name and are (re)built on every status
+    // refresh, so one delegated listener covers static and cloned cards.
+    document.addEventListener('click', (e) => {
+        const el = e.target.closest('.proto-rename');
+        if (el && el.dataset.proto) openRenameProtocol(el.dataset.proto);
+    });
+
+    function openRenameProtocol(proto) {
+        renameProtoTarget = proto;
+        document.getElementById('renameProtoInput').value = CUSTOM_PROTO_NAMES[proto] || getProtoTitle(proto);
+        openModal('renameProtoModal');
+    }
+
+    async function saveRenameProtocol() {
+        const proto = renameProtoTarget;
+        if (!proto) return;
+        const name = document.getElementById('renameProtoInput').value.trim();
+        const btn = document.getElementById('renameProtoSaveBtn');
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner" style="display:inline-block;width:14px;height:14px;vertical-align:-2px;border:2px solid rgba(255,255,255,0.25);border-top-color:#fff;border-radius:50%;animation:spin 0.6s linear infinite;"></span>';
+        document.getElementById('renameProtoInput').disabled = true;
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/protocol/rename`, 'POST', { protocol: proto, name });
+            if (name) {
+                CUSTOM_PROTO_NAMES[proto] = name;
+            } else {
+                delete CUSTOM_PROTO_NAMES[proto];
+            }
+            closeModal('renameProtoModal');
+            showToast(_('success') || 'Saved', 'success');
+            setTimeout(() => location.reload(), 800);
+        } catch (err) {
+            showToast((_('error') || 'Error') + ': ' + err.message, 'error');
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = '{{ _("save") }}';
+            document.getElementById('renameProtoInput').disabled = false;
+        }
     }
 
     // ---------- wg-easy import ----------
@@ -3152,9 +3195,9 @@
                     `<button class="btn btn-secondary btn-sm btn-icon conn-warning-clear" onclick="clearConnWarnings('${escapeJs(client.clientId)}')" title="${_('clear_warnings')}" style="margin-top:4px;">${ICON_TRASH}</button></div>`;
                 }
 
-                // Per-peer bandwidth limit badge (AWG): ∞ by default, ⚡X Mbps when set
+                // Per-peer bandwidth limit badge (AWG): ⚡∞ by default, 🐢 X Mbps when a limit is set
                 const maxSpeed = parseFloat(userData.maxSpeed || 0) || 0;
-                if (proto.startsWith('awg')) metaHtml += `<span class="traffic-badge" title="${_('max_speed')}">⚡${maxSpeed > 0 ? maxSpeed + ' Mbps' : '<span style="font-size:1.25em; line-height:0;">∞</span>'}</span>`;
+                if (proto.startsWith('awg') || protoBase(proto) === 'wireguard') metaHtml += `<span class="traffic-badge traffic-limit" title="${_('max_speed')}">${maxSpeed > 0 ? '🐢 ' + maxSpeed + ' Mbps' : '⚡<span style="font-size:1.25em; line-height:0;">∞</span>'}</span>`;
 
                 if (proto === 'telemt') {
                     if (userData.total_octets) metaHtml += `<span class="traffic-badge">📊 ${formatBytes(userData.total_octets)}</span>`;
@@ -3178,7 +3221,8 @@
                 if (!enabled) metaHtml += `<span class="badge badge-danger" style="font-size:0.65rem">${_('stop')}</span>`;
 
                 const disabledStyle = enabled ? '' : 'opacity:0.5;';
-                const toggleIcon = enabled ? '🔵' : '⚫';
+                // 💡 is used for both states; the "off" look lives in CSS (.peer-toggle-off)
+                const toggleClass = enabled ? 'peer-toggle' : 'peer-toggle peer-toggle-off';
                 const toggleTitle = enabled ? _('stop') : _('starting');
                 // Show config button for all WireGuard-based clients.
                 // If clientPrivateKey is missing (created via native app), we show a warning instead.
@@ -3198,7 +3242,7 @@
                             <button class="btn btn-secondary btn-sm btn-icon" onclick="startRenameConnection('${escapeJs(client.clientId)}', this)" title="${_('rename')}">${ICON_PENCIL}</button>
                             <button class="btn btn-secondary btn-sm btn-icon" onclick="showConnectionConfig('${escapeJs(client.clientId)}', '${escapeJs(name)}', ${!!userData.clientPrivateKey || proto === 'xray' || proto === 'telemt'})" title="${_('config')}">📄</button>
                             ${proto === 'telemt' ? `<button class="btn btn-secondary btn-sm btn-icon" onclick="editConnection('${escapeJs(client.clientId)}')" title="${_('edit')}">⚙️</button>` : ''}
-                            <button class="btn btn-secondary btn-sm btn-icon" onclick="toggleConnection('${escapeJs(client.clientId)}', ${!enabled})" title="${toggleTitle}">${toggleIcon}</button>
+                            <button class="btn btn-secondary btn-sm btn-icon ${toggleClass}" onclick="toggleConnection('${escapeJs(client.clientId)}', ${!enabled}, this)" title="${toggleTitle}">💡</button>
                             <button class="btn btn-danger btn-sm btn-icon" onclick="removeConnection('${escapeJs(client.clientId)}')" title="${_('delete')}">${ICON_TRASH}</button>
                         </div>
                     </div>
@@ -3354,7 +3398,7 @@
         clone.querySelectorAll('.client-ip').forEach(el => el.remove());
         const oldName = clone.textContent.trim();
         const proto = document.getElementById('connProtoSelect').value;
-        const isAwg = proto.startsWith('awg');
+        const isAwg = proto.startsWith('awg') || protoBase(proto) === 'wireguard';
         const curSpeed = item.dataset.maxspeed || '0';
         nameEl.innerHTML = `
             <span class="rename-editor" style="display:inline-flex;gap:12px;align-items:flex-end;flex-wrap:wrap;width:100%;">
@@ -3510,9 +3554,27 @@
         }
     }
 
-    async function toggleConnection(clientId, enable) {
+    async function toggleConnection(clientId, enable, btn) {
         const proto = document.getElementById('connProtoSelect').value;
         const action = enable ? _('enable_connection_progress') : _('disable_connection_progress');
+        // Lock the whole client row and swap the bulb for a spinner until done
+        const row = btn ? btn.closest('.client-item') : null;
+        let originalContent = null;
+        if (row) {
+            row.classList.add('client-toggling');
+            row.querySelectorAll('button').forEach(b => b.disabled = true);
+        }
+        if (btn) {
+            originalContent = btn.innerHTML;
+            btn.innerHTML = '<span class="spinner"></span>';
+        }
+        const restore = () => {
+            if (row) {
+                row.classList.remove('client-toggling');
+                row.querySelectorAll('button').forEach(b => b.disabled = false);
+            }
+            if (btn && originalContent !== null) btn.innerHTML = originalContent;
+        };
         try {
             showToast(action, 'info');
             await apiCall(`/api/servers/${SERVER_ID}/connections/toggle`, 'POST', {
@@ -3521,6 +3583,7 @@
             showToast(enable ? _('connection_enabled') : _('connection_disabled'), 'success');
             loadConnections();
         } catch (err) {
+            restore();
             showToast(_('error') + ': ' + err.message, 'error');
         }
     }

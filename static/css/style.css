@@ -457,9 +457,10 @@ a:hover {
     width: 16px;
     height: 16px;
     border: 2px solid rgba(255, 255, 255, 0.2);
-    border-top-color: #fff;
+    border-top-color: #1c1c30;
     border-radius: 50%;
     animation: spin 0.6s linear infinite;
+    color: #fff;
 }
 
 /* ===== Cards ===== */
@@ -1378,6 +1379,33 @@ a:hover {
     }
 }
 
+/* Spinners are progress indicators, not decoration: keep them rotating even
+   when the user prefers reduced motion, otherwise a running operation looks
+   frozen. */
+@media (prefers-reduced-motion: reduce) {
+    .spinner,
+    .loading-spinner {
+        animation: spin 0.6s linear infinite !important;
+    }
+}
+
+/* Peer on/off toggle: a bulb for both states, "off" is a greyed-out bulb. */
+.peer-toggle.peer-toggle-off {
+    filter: grayscale(100%) brightness(1.2);
+    opacity: 0.7;
+}
+
+/* Speed-limit badge stands out a bit from the other meta badges. */
+.traffic-badge.traffic-limit {
+    font-size: 1rem;
+}
+
+/* Whole client row while a toggle request is in flight. */
+.client-item.client-toggling {
+    opacity: 0.5;
+    transition: opacity var(--transition-base);
+}
+
 .protocol-name {
     font-size: 1.1rem;
     font-weight: 700;
@@ -1573,7 +1601,6 @@ a:hover {
     flex-shrink: 0;
     margin-left: var(--space-md);
     flex-wrap: wrap;
-    max-width: 140px;
 }
 
 /* Normalized entity cards used by Users and My Connections only. */

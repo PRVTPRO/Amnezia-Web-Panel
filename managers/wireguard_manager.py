@@ -58,6 +58,7 @@ class WireGuardManager:
     CONFIG_PATH = '/opt/amnezia/wireguard/wg0.conf'
     KEY_DIR = '/opt/amnezia/wireguard'
     CLIENTS_TABLE_PATH = '/opt/amnezia/wireguard/clientsTable'
+    BWLIMITS_PATH = '/opt/amnezia/wireguard/bwlimits'
     INTERFACE = 'wg0'
 
     def __init__(self, ssh_manager):
@@ -176,7 +177,7 @@ iptables -C FORWARD -j DOCKER-USER 2>/dev/null || iptables -A FORWARD -j DOCKER-
             f"\n"
             f'LABEL maintainer="AmneziaVPN"\n'
             f"\n"
-            f"RUN apk add --no-cache curl wireguard-tools dumb-init iptables bash\n"
+            f"RUN apk add --no-cache curl wireguard-tools dumb-init iptables bash iproute2\n"
             f"RUN apk --update upgrade --no-cache\n"
             f"\n"
             f"RUN mkdir -p /opt/amnezia\n"
@@ -323,6 +324,29 @@ iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT
 iptables -t nat -A POSTROUTING -s {subnet_ip}/{subnet_cidr} -o eth0 -j MASQUERADE
 iptables -t nat -A POSTROUTING -s {subnet_ip}/{subnet_cidr} -o eth1 -j MASQUERADE
 
+# Re-apply per-peer bandwidth limits (flat file written by the panel)
+if [ -f {self.BWLIMITS_PATH} ]; then
+    command -v tc >/dev/null 2>&1 || apk add --no-cache iproute2 >/dev/null 2>&1
+    BW={self.BWLIMITS_PATH}
+    IFACE={self.INTERFACE}
+    tc qdisc del dev $IFACE root 2>/dev/null
+    tc qdisc del dev $IFACE ingress 2>/dev/null
+    tc qdisc add dev $IFACE root handle 1: htb default 0 2>/dev/null
+    tc qdisc add dev $IFACE handle ffff: ingress 2>/dev/null
+    i=0
+    while read -r ip4 ip6 mbps; do
+      [ -z "$ip4" ] && continue
+      [ -z "$mbps" ] && continue
+      kbit=$(echo "$mbps" | awk '{{printf "%d", $1*1000}}')
+      [ "$kbit" -gt 0 ] 2>/dev/null || continue
+      i=$((i+1))
+      cid=$((100+i))
+      tc class add dev $IFACE parent 1: classid 1:$cid htb rate ${{kbit}}kbit ceil ${{kbit}}kbit 2>/dev/null
+      tc filter add dev $IFACE parent 1: protocol ip u32 match ip dst $ip4/32 flowid 1:$cid 2>/dev/null
+      tc filter add dev $IFACE parent ffff: protocol ip u32 match ip src $ip4/32 police rate ${{kbit}}kbit burst 64k drop 2>/dev/null
+    done < "$BW"
+fi
+
 tail -f /dev/null
 """
         self.ssh.upload_file(start_script, "/tmp/_wg_start.sh")
@@ -366,6 +390,76 @@ tail -f /dev/null
             f"docker cp /tmp/_wg_clients.json {self.CONTAINER_NAME}:{self.CLIENTS_TABLE_PATH}"
         )
         self.ssh.run_command("rm -f /tmp/_wg_clients.json")
+
+        # Keep per-peer bandwidth limits in sync (best effort)
+        try:
+            self._apply_bw_limits(clients_table)
+        except Exception as err:
+            logger.warning(f"apply bw limits warning: {err}")
+
+    # ===================== BANDWIDTH LIMITS =====================
+
+    def _apply_bw_limits(self, clients_table):
+        """Write the flat bwlimits file into the container and apply via tc.
+
+        Same mechanism as AWGManager: HTB on egress + ingress policer per
+        peer IPv4. Older containers without iproute2 get it installed on
+        the fly (apk), so no image rebuild is required.
+        """
+        lines = []
+        for client in clients_table:
+            ud = client.get('userData', {}) or {}
+            try:
+                mbps = float(ud.get('maxSpeed') or 0)
+            except (TypeError, ValueError):
+                continue
+            if mbps <= 0:
+                continue
+            ip4 = ud.get('clientIp') or ''
+            if not ip4:
+                continue
+            lines.append(f"{ip4} - {mbps:g}")
+        content = "\n".join(lines) + ("\n" if lines else "")
+        self.ssh.upload_file(content, "/tmp/_wg_bwlimits")
+        self.ssh.run_sudo_command(
+            f"docker cp /tmp/_wg_bwlimits {self.CONTAINER_NAME}:{self.BWLIMITS_PATH}"
+        )
+        self.ssh.run_command("rm -f /tmp/_wg_bwlimits")
+        if not self.check_container_running():
+            return
+        from managers.awg_manager import AWGManager
+        body = AWGManager._tc_apply_body(self.BWLIMITS_PATH, self.CONFIG_PATH)
+        # Install iproute2 on the fly for containers built before the
+        # Dockerfile included it; cheap no-op when tc already exists.
+        body = "command -v tc >/dev/null 2>&1 || apk add --no-cache iproute2 >/dev/null 2>&1\n" + body
+        self.ssh.upload_file(body, "/tmp/_wg_tc.sh")
+        self.ssh.run_sudo_command(
+            f"docker cp /tmp/_wg_tc.sh {self.CONTAINER_NAME}:/tmp/_wg_tc.sh && "
+            f"docker exec {self.CONTAINER_NAME} bash /tmp/_wg_tc.sh",
+            timeout=60
+        )
+        self.ssh.run_command("rm -f /tmp/_wg_tc.sh")
+
+    def set_speed_limit(self, client_id, max_speed):
+        """Set per-peer bandwidth limit in Mbit/s (0 = unlimited).
+
+        Persisted in clientsTable (userData.maxSpeed); _save_clients_table
+        applies it via tc and the start script re-applies it on boot.
+        """
+        mbps = round(float(max_speed), 1)
+        if mbps < 0:
+            raise RuntimeError('max_speed must be >= 0')
+        clients_table = self._get_clients_table()
+        client = next((c for c in clients_table if c.get('clientId') == client_id), None)
+        if client is None:
+            raise RuntimeError('Client not found')
+        ud = client.setdefault('userData', {})
+        if mbps == 0:
+            ud.pop('maxSpeed', None)
+        else:
+            ud['maxSpeed'] = mbps
+        self._save_clients_table(clients_table)
+        return {'status': 'success', 'max_speed': mbps}
 
     def _get_server_config(self):
         """Get the server WireGuard config."""

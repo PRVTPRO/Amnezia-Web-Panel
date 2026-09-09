@@ -119,7 +119,18 @@ async def custom_redoc():
 app.add_middleware(SessionMiddleware, secret_key=os.environ.get('SECRET_KEY', secrets.token_hex(32)))
 
 # Mount static files & templates
-app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
+class CachedStaticFiles(StaticFiles):
+    """Static assets are fingerprinted with ?v=<static mtime> (see
+    static_version()), so a redeploy changes the URL and busts the cache.
+    That lets us hand the browser a long 180-day cache lifetime."""
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        if response.status_code == 200:
+            response.headers['Cache-Control'] = 'public, max-age=15552000, immutable'
+        return response
+
+app.mount("/static", CachedStaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
 templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "templates"))
 
 if getattr(sys, 'frozen', False):
@@ -4331,6 +4342,31 @@ async def api_host_tuning(request: Request, server_id: int):
         return info
     except Exception as e:
         logger.exception("Error getting host tuning info")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/protocol/rename', tags=["Protocols"])
+async def api_rename_protocol(request: Request, server_id: int, req: RenameProtocolRequest):
+    """Set or clear a custom display name for an installed protocol instance."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        protocols = server.get('protocols') or {}
+        if req.protocol not in protocols:
+            return JSONResponse({'error': 'Protocol is not installed on this server'}, status_code=404)
+        name = req.name.strip()[:64]
+        if name:
+            protocols[req.protocol]['custom_name'] = name
+        else:
+            protocols[req.protocol].pop('custom_name', None)
+        save_data(data)
+        return {'status': 'success', 'custom_name': name}
+    except Exception as e:
+        logger.exception("Error renaming protocol instance")
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
