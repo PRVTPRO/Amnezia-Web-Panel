@@ -291,7 +291,7 @@
   "download_backup": "下载 data.json",
   "restore_backup": "从文件恢复",
   "restore_confirm": "您确定吗？当前数据将被覆盖，应用程序将重新启动。",
-  "restore_success": "恢复成功！正在重启...",
+  "restore_success": "备份恢复成功！",
   "auto_backup_title": "Auto backup",
   "enable_auto_backup": "启用服务器自动备份",
   "auto_backup_interval_label": "创建间隔",
@@ -524,7 +524,6 @@
   "off": "off",
   "restore": "恢复",
   "restore_confirm_protocol": "您确定吗？当前协议配置将被此备份覆盖。",
-  "restore_success": "备份恢复成功！",
   "delete_backup_confirm": "从服务器删除此备份？此操作无法撤销。",
   "backup_deleted": "备份已删除",
   "upload_backup": "上传",
@@ -553,5 +552,9 @@
   "telemt_quota_label": "配额 (字节)",
   "telemt_max_ips_label": "最大唯一 IP 数",
   "telemt_expiry_label": "到期时间 (ISO 8601)",
-  "optional": "可选"
+  "optional": "可选",
+  "role_none_desc": "无角色 — 仅记录，无法登录",
+  "role_none_badge": "无角色",
+  "password_optional_no_role": "“无角色”角色无需密码",
+  "password_required_for_role": "所选角色必须设置密码"
 }

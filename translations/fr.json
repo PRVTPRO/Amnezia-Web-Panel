@@ -291,7 +291,7 @@
   "download_backup": "Télécharger data.json",
   "restore_backup": "Restaurer depuis un fichier",
   "restore_confirm": "Êtes-vous sûr ? Les données actuelles seront écrasées et l'application redémarrera.",
-  "restore_success": "Restauration réussie ! Redémarrage...",
+  "restore_success": "Sauvegarde restaurée avec succès !",
   "auto_backup_title": "Auto backup",
   "enable_auto_backup": "Activer les sauvegardes automatiques des serveurs",
   "auto_backup_interval_label": "Intervalle de création",
@@ -524,7 +524,6 @@
   "off": "off",
   "restore": "Restaurer",
   "restore_confirm_protocol": "Êtes-vous sûr ? La configuration actuelle du protocole sera écrasée par cette sauvegarde.",
-  "restore_success": "Sauvegarde restaurée avec succès !",
   "delete_backup_confirm": "Supprimer cette sauvegarde du serveur ? Cette action est irréversible.",
   "backup_deleted": "Sauvegarde supprimée",
   "upload_backup": "Téléverser",
@@ -553,5 +552,9 @@
   "telemt_quota_label": "Quota (octets)",
   "telemt_max_ips_label": "IP uniques max",
   "telemt_expiry_label": "Expiration (ISO 8601)",
-  "optional": "Facultatif"
+  "optional": "Facultatif",
+  "role_none_desc": "Aucun rôle — simple fiche, connexion impossible",
+  "role_none_badge": "Aucun rôle",
+  "password_optional_no_role": "Aucun mot de passe requis pour le rôle « Aucun rôle »",
+  "password_required_for_role": "Un mot de passe est requis pour le rôle sélectionné"
 }

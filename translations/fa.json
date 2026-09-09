@@ -291,7 +291,7 @@
   "download_backup": "دانلود data.json",
   "restore_backup": "بازیابی از فایل",
   "restore_confirm": "آیا مطمئن هستید؟ داده‌های فعلی بازنویسی می‌شوند و برنامه دوباره راه‌اندازی خواهد شد.",
-  "restore_success": "بازیابی موفق بود! در حال راهاندازی مجدد...",
+  "restore_success": "بازیابی پشتیبان با موفقیت انجام شد!",
   "auto_backup_title": "Auto backup",
   "enable_auto_backup": "فعالسازی پشتیبانگیری خودکار سرورها",
   "auto_backup_interval_label": "فاصله زمانی ایجاد",
@@ -524,7 +524,6 @@
   "off": "off",
   "restore": "بازیابی",
   "restore_confirm_protocol": "آیا مطمئن هستید؟ پیکربندی فعلی پروتکل با این پشتیبان جایگزین خواهد شد.",
-  "restore_success": "بازیابی پشتیبان با موفقیت انجام شد!",
   "delete_backup_confirm": "این پشتیبان از سرور حذف شود؟ این عمل قابل بازگشت نیست.",
   "backup_deleted": "پشتیبان حذف شد",
   "upload_backup": "بارگذاری",
@@ -553,5 +552,9 @@
   "telemt_quota_label": "سهمیه (بایت)",
   "telemt_max_ips_label": "حداکثر IP یکتا",
   "telemt_expiry_label": "انقضا (ISO 8601)",
-  "optional": "اختیاری"
+  "optional": "اختیاری",
+  "role_none_desc": "بدون نقش — فقط رکورد، بدون امکان ورود",
+  "role_none_badge": "بدون نقش",
+  "password_optional_no_role": "برای نقش «بدون نقش» رمز عبور لازم نیست",
+  "password_required_for_role": "برای نقش انتخاب‌شده رمز عبور الزامی است"
 }
