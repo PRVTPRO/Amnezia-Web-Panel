@@ -24,7 +24,8 @@ import struct
 import zlib
 from datetime import datetime, timedelta
 import io
-from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse, StreamingResponse, FileResponse
+from fastapi.responses import (JSONResponse, RedirectResponse, HTMLResponse, StreamingResponse,
+                               FileResponse, PlainTextResponse)
 from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -83,6 +84,22 @@ app = FastAPI(
     # serve our own /redoc just below, pinned to the stable v2 bundle.
     redoc_url=None,
 )
+
+
+@app.exception_handler(Exception)
+async def api_json_error_handler(request: Request, exc: Exception):
+    """Answer /api/* with JSON even when a handler blew up.
+
+    Without this Starlette returns a plain-text "Internal Server Error", and
+    every caller that does `await res.json()` fails with a parse error that
+    says nothing about what went wrong ("JSON.parse: unexpected character at
+    line 1 column 1"). Pages keep the plain-text response - a browser showing
+    an error page is fine.
+    """
+    logger.exception(f"Unhandled error on {request.method} {request.url.path}")
+    if request.url.path.startswith('/api/'):
+        return JSONResponse({'error': 'Internal server error'}, status_code=500)
+    return PlainTextResponse('Internal Server Error', status_code=500)
 
 
 @app.get("/redoc", include_in_schema=False)
