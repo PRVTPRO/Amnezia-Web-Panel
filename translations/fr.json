@@ -556,5 +556,6 @@
   "role_none_desc": "Aucun rôle — simple fiche, connexion impossible",
   "role_none_badge": "Aucun rôle",
   "password_optional_no_role": "Aucun mot de passe requis pour le rôle « Aucun rôle »",
-  "password_required_for_role": "Un mot de passe est requis pour le rôle sélectionné"
+  "password_required_for_role": "Un mot de passe est requis pour le rôle sélectionné",
+  "username_empty": "Le nom d'utilisateur ne peut pas être vide"
 }

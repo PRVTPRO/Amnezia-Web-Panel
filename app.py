@@ -5043,10 +5043,10 @@ async def api_update_user(request: Request, user_id: str, req: UpdateUserRequest
             
         if req.username is not None:
             new_name = req.username.strip()
+            lang = request.cookies.get('lang', 'ru')
             if not new_name:
-                return JSONResponse({'error': 'Username must not be empty'}, status_code=400)
+                return JSONResponse({'error': _t('username_empty', lang)}, status_code=400)
             if any(u['username'] == new_name and u['id'] != user_id for u in data.get('users', [])):
-                lang = request.cookies.get('lang', 'ru')
                 return JSONResponse({'error': _t('user_exists', lang)}, status_code=400)
             user['username'] = new_name
         if req.telegramId is not None:
