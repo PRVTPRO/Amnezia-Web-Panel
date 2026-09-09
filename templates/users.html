@@ -69,7 +69,7 @@
             <div class="form-group">
                 <label class="form-label" id="newPasswordLabel">{{ _('password_label') }}</label>
                 <input class="form-input" type="password" id="newPassword" placeholder="••••••••">
-                <div class="form-hint">{{ _('password_optional_no_role') }}</div>
+                <div class="form-hint" id="newPasswordHint">{{ _('password_optional_no_role') }}</div>
             </div>
 
             <div class="form-group">
@@ -691,6 +691,9 @@
         input.required = needsPass;
         document.getElementById('newPasswordLabel').textContent =
             needsPass ? _('password_label') : _('password_label') + ' (' + _('optional') + ')';
+        // The hint only holds for "none"; leaving it up next to a required
+        // field makes the form contradict itself.
+        document.getElementById('newPasswordHint').style.display = needsPass ? 'none' : '';
     }
 
     async function addUser(e) {

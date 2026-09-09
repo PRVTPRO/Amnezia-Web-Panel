@@ -31,6 +31,11 @@ class StaticCacheTests(unittest.TestCase):
         self.assertNotIn('immutable', cache_control)
         self.assertIn('must-revalidate', cache_control)
 
+    def test_another_query_is_not_mistaken_for_a_version(self):
+        res = self.client.get('/static/js/qrcode.min.js?rev=1')
+        self.assertEqual(res.status_code, 200)
+        self.assertNotIn('immutable', res.headers['cache-control'])
+
 
 if __name__ == '__main__':
     unittest.main()

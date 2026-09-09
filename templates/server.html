@@ -2164,7 +2164,9 @@
             showToast((_('error') || 'Error') + ': ' + err.message, 'error');
         } finally {
             btn.disabled = false;
-            btn.innerHTML = '{{ _("save") }}';
+            // textContent + the runtime helper: a locale whose "save" carries
+            // a quote would break a server-rendered JS string literal.
+            btn.textContent = _('save') || 'Save';
             document.getElementById('renameProtoInput').disabled = false;
         }
     }

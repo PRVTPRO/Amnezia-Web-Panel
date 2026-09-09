@@ -130,7 +130,8 @@ class CachedStaticFiles(StaticFiles):
     async def get_response(self, path, scope):
         response = await super().get_response(path, scope)
         if response.status_code == 200:
-            fingerprinted = b'v=' in scope.get('query_string', b'')
+            query = urllib.parse.parse_qsl(scope.get('query_string', b'').decode('latin-1'))
+            fingerprinted = any(key == 'v' for key, _value in query)
             response.headers['Cache-Control'] = (
                 'public, max-age=15552000, immutable' if fingerprinted
                 else 'public, max-age=3600, must-revalidate')
