@@ -1,5 +1,6 @@
 """Regression guards for the server-detail page's inline JavaScript and modal markup."""
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -10,6 +11,7 @@ SERVER_TEMPLATE = ROOT / "templates" / "server.html"
 
 
 class TestServerTemplateIntegrity(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('node'), 'node is not installed')
     def test_rendered_inline_scripts_have_valid_javascript(self):
         """A JS parse error prevents checkServer() from clearing the loading state."""
         import app

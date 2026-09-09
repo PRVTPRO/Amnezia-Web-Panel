@@ -13,11 +13,17 @@
 const VERSION = new URL(self.location).searchParams.get('v') || 'dev';
 const CACHE = `awp-static-${VERSION}`;
 
+// Every entry has to match the URL the templates actually request, because
+// both fetch branches below match on the exact URL. style.css is requested as
+// ?v={{ static_v }} and the worker itself is registered with the same value,
+// so that one keeps the query; the favicon and the two vendored scripts are
+// requested without it. Freshness still comes from CACHE being named after
+// VERSION - a new version starts an empty cache.
 const PRECACHE = [
   `/static/css/style.css?v=${VERSION}`,
-  `/static/favicon.svg?v=${VERSION}`,
-  `/static/js/qrcode.min.js?v=${VERSION}`,
-  `/static/js/searchable-select.js?v=${VERSION}`,
+  `/static/favicon.svg`,
+  `/static/js/qrcode.min.js`,
+  `/static/js/searchable-select.js`,
   `/static/icons/icon-192.png`,
   `/static/icons/icon-512.png`,
   `/static/icons/maskable-192.png`,
