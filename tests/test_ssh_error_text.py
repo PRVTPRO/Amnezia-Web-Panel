@@ -1,15 +1,14 @@
 """An SSH failure must say what happened.
 
 Paramiko raises bare `EOFError()` / `SSHException()` when the transport dies
-mid-command, and `str(exc)` on those is an empty string. That empty string is
-what the managers interpolate into their failure messages - there are ~30
-`{err}` sites across managers/ - so a dropped connection surfaced as
-"Failed to configure container: " with nothing after the colon.
+mid-command; `str(exc)` on those is an empty string, which used to travel all
+the way to the UI as "exit link apply failed: " with nothing after the colon.
 """
 
 import unittest
 from unittest import mock
 
+from managers.awg_manager import AWGManager
 from managers.ssh_manager import SSHManager
 
 
@@ -45,6 +44,37 @@ class ReasonTests(unittest.TestCase):
         self.assertEqual((out, code), ('', -1))
         self.assertIn('SSH connection lost', err)
         self.assertIn('EOFError', err)
+
+
+class ExitLinkMessageTests(unittest.TestCase):
+    """The exit-link paths must not raise a message that ends at the colon."""
+
+    class SSH:
+        def __init__(self):
+            self.uploads = {}
+
+        def upload_file(self, content, path):
+            self.uploads[path] = content
+
+        def run_command(self, command, timeout=60):
+            return '', '', 0
+
+        def run_sudo_command(self, command, timeout=60):
+            if 'for p in ' in command:
+                return '/opt/amnezia/awg/awg0.conf\n', '', 0
+            return '', '', -1        # dropped connection: no output at all
+
+    def test_apply_and_write_report_the_exit_code(self):
+        manager = AWGManager(self.SSH())
+        with self.assertRaises(RuntimeError) as ctx:
+            manager.exit_unlink('awg2')
+        self.assertIn('SSH exit code -1', str(ctx.exception))
+
+        with self.assertRaises(RuntimeError) as ctx:
+            manager.exit_link('awg2', {'transit_ip': '10.9.0.7', 'subnet_cidr': '24', 'exit_public_key': 'K',
+                                       'psk': 'P', 'endpoint_host': '203.0.113.5', 'endpoint_port': '55520',
+                                       'obfuscation': False, 'awg_params': {}})
+        self.assertIn('SSH exit code -1', str(ctx.exception))
 
 
 if __name__ == '__main__':

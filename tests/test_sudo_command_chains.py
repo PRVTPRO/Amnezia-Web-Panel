@@ -78,8 +78,8 @@ class SudoChainTests(unittest.TestCase):
         self.assertTrue(connects, ssh.commands)
         for cmd in connects:
             self.assertTrue(chain_is_wrapped(cmd), cmd)
-        # a representative container is among the ones attached
-        self.assertTrue(any('amnezia-awg2' in c for c in connects), connects)
+        # the exit-node container is among the ones attached
+        self.assertTrue(any('amnezia-exit' in c for c in connects))
 
     def test_adguard_network_creation_runs_the_chain_in_one_shell(self):
         ssh = RecordingSSH(code=0)
