@@ -2624,10 +2624,8 @@ AllowedIPs = {allowed_ips}
                     continue
                 config_lines.append(f"{config_key} = {val}")
 
-        # Route ::/0 only when the client actually holds an IPv6 address:
-        # claiming the IPv6 default route on an IPv4-only tunnel blackholes
-        # the client's own native IPv6.
-        peer_allowed_ips = "0.0.0.0/0, ::/0" if client_ipv6 else "0.0.0.0/0"
+        # Route ::/0 always, for Split Tunneling:
+        peer_allowed_ips = "0.0.0.0/0, ::/0"
 
         client_config = "[Interface]\n" + "\n".join(config_lines) + f"""
 
@@ -2720,8 +2718,8 @@ PersistentKeepalive = 25
                     continue
                 config_lines.append(f"{config_key} = {val}")
 
-        # See the client-creation path: ::/0 only on dual-stack tunnels.
-        peer_allowed_ips = "0.0.0.0/0, ::/0" if client_ipv6 else "0.0.0.0/0"
+        # Always ::/0 for Split Tunneling.
+        peer_allowed_ips = "0.0.0.0/0, ::/0"
 
         config = "[Interface]\n" + "\n".join(config_lines) + f"""
 
