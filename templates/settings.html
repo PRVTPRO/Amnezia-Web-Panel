@@ -18,6 +18,7 @@
     <a href="#settings-mail">{{ _('mail_title') }}</a>
     <a href="#settings-tunnels">{{ _('tunnels_title') }}</a>
     <a href="#settings-ssl">{{ _('ssl_title') }}</a>
+    <a href="#settings-duckdns">{{ _('duckdns_title') }}</a>
     <a href="#settings-import">{{ _('import_users_title') }}</a>
     <a href="#settings-backup">{{ _('backup_title') }}</a>
     <a href="#settings-tokens">{{ _('api_tokens_title') }}</a>
@@ -330,6 +331,39 @@
                     <p class="form-hint">{{ _('ssl_hint') }}</p>
                 </div>
             </form>
+        </div>
+
+        <!-- BLOCK 2b: DuckDNS domain -->
+        <div class="card" id="settings-duckdns">
+            <h3 class="card-title" style="margin-bottom: var(--space-lg);"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="margin-right: 6px; vertical-align: -2px;"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>{{ _('duckdns_title') }}</h3>
+            <ol style="margin: 0 0 var(--space-md) 1.2em; padding: 0; color: var(--text-muted); font-size: 13px; line-height: 1.7;">
+                <li>{{ _('duckdns_step1') }}</li>
+                <li>{{ _('duckdns_step2') }}</li>
+                <li>{{ _('duckdns_step3') }}</li>
+            </ol>
+            <div class="form-group">
+                <label class="form-label">{{ _('duckdns_domain_label') }}</label>
+                <input type="text" class="form-input" id="duckdns_domain" value="{{ settings.get('duckdns', {}).get('domain', '') }}" placeholder="example.duckdns.org">
+            </div>
+            <div class="form-group" style="margin-top: var(--space-md);">
+                <label class="form-label">{{ _('duckdns_token_label') }}</label>
+                <input type="password" class="form-input" id="duckdns_token" value="" autocomplete="off" placeholder="{% if settings.get('duckdns', {}).get('token') %}{{ _('duckdns_token_saved') }}{% else %}xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx{% endif %}">
+                <p class="form-hint">{{ _('duckdns_token_hint') }}</p>
+            </div>
+            <div class="form-group" style="margin-top: var(--space-md);">
+                <label class="form-label">
+                    <input type="checkbox" id="duckdns_enabled" {% if settings.get('duckdns', {}).get('enabled') %}checked{% endif %}>
+                    {{ _('duckdns_enable_label') }}
+                </label>
+                <p class="form-hint">{{ _('duckdns_enable_hint') }}</p>
+            </div>
+            <div style="display: flex; align-items: center; gap: var(--space-sm); margin-top: var(--space-md);">
+                <button type="button" class="btn btn-primary btn-sm" id="duckdnsApplyBtn" onclick="applyDuckDNS()">
+                    <span id="duckdnsApplyText">{{ _('duckdns_apply_btn') }}</span>
+                    <span id="duckdnsApplySpinner" class="spinner hidden"></span>
+                </button>
+            </div>
+            <p id="duckdnsStatus" class="form-hint" style="margin-top: var(--space-sm); word-break: break-all;"></p>
         </div>
     </div>
 
@@ -1060,6 +1094,46 @@
             showToast(_('settings_saved'), 'success');
             setTimeout(() => window.location.reload(), 1000);
         } catch (err) {
+            showToast(err.message, 'error');
+        } finally {
+            btn.disabled = false;
+            spinner.classList.add('hidden');
+        }
+    }
+
+    async function applyDuckDNS() {
+        const btn = document.getElementById('duckdnsApplyBtn');
+        const spinner = document.getElementById('duckdnsApplySpinner');
+        const status = document.getElementById('duckdnsStatus');
+        btn.disabled = true;
+        spinner.classList.remove('hidden');
+        status.textContent = _('duckdns_applying');
+        try {
+            const res = await fetch('/api/settings/duckdns/apply', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    enabled: document.getElementById('duckdns_enabled').checked,
+                    domain: document.getElementById('duckdns_domain').value.trim(),
+                    token: document.getElementById('duckdns_token').value.trim()
+                })
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                status.textContent = _(data.error || 'error') + (data.detail ? '\n' + data.detail : '');
+                showToast(_(data.error || 'error'), 'error');
+                return;
+            }
+            if (data.restarting) {
+                status.textContent = _('duckdns_success_restarting') + ' https://' + data.domain + ':' + (document.getElementById('panel_port').value || 5000);
+            } else if (data.restart_required) {
+                status.textContent = _('duckdns_success_restart_required');
+            } else {
+                status.textContent = _('duckdns_saved');
+            }
+            showToast(_('settings_saved'), 'success');
+        } catch (err) {
+            status.textContent = err.message;
             showToast(err.message, 'error');
         } finally {
             btn.disabled = false;

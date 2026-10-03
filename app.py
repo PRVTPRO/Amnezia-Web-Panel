@@ -2382,6 +2382,12 @@ class SSLSettings(BaseModel):
     key_text: str = ''
     panel_port: int = 5000
 
+class DuckDNSApplyRequest(BaseModel):
+    enabled: bool = False
+    domain: str = ''
+    # Empty keeps the stored token: the settings page never echoes it back.
+    token: str = ''
+
 class TelegramSettings(BaseModel):
     token: str = ''
     enabled: bool = False
@@ -2566,6 +2572,7 @@ def _start_conn_monitor():
 @app.on_event("startup")
 async def startup():
     _start_conn_monitor()
+    _start_duckdns_monitor()
     data = load_data()
     changed = False
     if not data.get('users'):
@@ -6124,6 +6131,163 @@ def save_settings(request: Request, payload: SaveSettingsRequest):
             asyncio.create_task(tg_bot.stop_bot())
 
     return {"status": "success", "bot_running": tg_bot.is_running(), "warnings": warnings}
+
+
+# ----- DuckDNS: free domain + one-click auto-renewed Let's Encrypt cert -----
+
+DUCKDNS_CERT_DIR = '/etc/amnezia'
+DUCKDNS_UPDATE_INTERVAL = 600
+
+
+def _duckdns_normalize_domain(domain):
+    """Accept 'example' or 'example.duckdns.org', return the full domain."""
+    d = (domain or '').strip().lower().rstrip('.')
+    if d.endswith('.duckdns.org'):
+        d = d[:-len('.duckdns.org')]
+    if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,61}[a-z0-9]|[a-z0-9]', d or ''):
+        return ''
+    return f"{d}.duckdns.org"
+
+
+def _duckdns_update_ip(domain, token):
+    """Point the duckdns domain at this server's public IP.
+
+    An empty ip= makes duckdns use the caller's address, which is exactly
+    the panel server. Returns (ok, detail)."""
+    subdomain = domain[:-len('.duckdns.org')]
+    url = ('https://www.duckdns.org/update?domains=%s&token=%s&ip='
+           % (urllib.parse.quote(subdomain), urllib.parse.quote(token)))
+    try:
+        with urllib.request.urlopen(url, timeout=15) as resp:
+            body = resp.read().decode('utf-8', 'replace').strip()
+    except Exception as e:
+        return False, str(e)
+    return (body.upper().startswith('OK'), body)
+
+
+def _duckdns_issue_cert(domain, token):
+    """Issue a Let's Encrypt cert via acme.sh DNS-01 (duckdns plugin) and
+    install it where the panel ssl settings expect. acme.sh drops its own
+    cron entry, so renewal (and the panel restart via --reloadcmd under
+    systemd) is automatic from then on. Returns (ok, log_tail)."""
+    if os.name == 'nt':
+        return False, 'DuckDNS auto-cert is supported on Linux panel hosts only'
+    acme = os.path.expanduser('~/.acme.sh/acme.sh')
+    logs = []
+    if not os.path.exists(acme):
+        inst = subprocess.run(
+            'curl -s https://get.acme.sh | sh -s email=admin@%s' % domain,
+            shell=True, capture_output=True, text=True, timeout=300)
+        logs.append(((inst.stdout or '') + (inst.stderr or ''))[-2000:])
+        if not os.path.exists(acme):
+            return False, 'acme.sh install failed:\n' + '\n'.join(logs)
+    env = dict(os.environ, DuckDNS_Token=token)
+    issue = subprocess.run(
+        [acme, '--issue', '--dns', 'dns_duckdns', '-d', domain,
+         '--server', 'letsencrypt'],
+        capture_output=True, text=True, timeout=300, env=env)
+    logs.append(((issue.stdout or '') + (issue.stderr or ''))[-4000:])
+    # rc 2 = "Skip, next renewal time" (a valid cert already exists) — fine,
+    # --install-cert below will still export it to the panel paths.
+    if issue.returncode not in (0, 2):
+        return False, 'certificate issue failed:\n' + '\n'.join(logs)
+    os.makedirs(DUCKDNS_CERT_DIR, exist_ok=True)
+    key_file = os.path.join(DUCKDNS_CERT_DIR, 'duckdns.key.pem')
+    cert_file = os.path.join(DUCKDNS_CERT_DIR, 'duckdns.cert.pem')
+    cmd = [acme, '--install-cert', '-d', domain,
+           '--key-file', key_file, '--fullchain-file', cert_file]
+    if os.environ.get('INVOCATION_ID'):
+        # renewed/installed cert -> restart the panel so uvicorn picks it up.
+        # Delayed AND detached: a plain 'systemctl restart' here would kill
+        # the very HTTP request that is running this install-cert (observed
+        # on the first apply: files installed, child SIGTERMed, 502).
+        cmd += ['--reloadcmd',
+                "sh -c '(sleep 5 && systemctl restart amnezia-panel) >/dev/null 2>&1 &'"]
+    install = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=env)
+    logs.append(((install.stdout or '') + (install.stderr or ''))[-2000:])
+    if install.returncode != 0 or not (os.path.exists(key_file) and os.path.exists(cert_file)):
+        return False, 'certificate install failed:\n' + '\n'.join(logs)
+    return True, '\n'.join(logs)
+
+
+@app.post('/api/settings/duckdns/apply', tags=["Settings"])
+def api_duckdns_apply(request: Request, payload: DuckDNSApplyRequest):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    data = load_data()
+    settings = data.setdefault('settings', {})
+    stored = settings.get('duckdns', {}) or {}
+    domain = _duckdns_normalize_domain(payload.domain) or stored.get('domain', '')
+    token = payload.token.strip() or stored.get('token', '')
+    if payload.enabled and (not domain or not token):
+        return JSONResponse({'error': 'duckdns_domain_token_required'}, status_code=400)
+    settings['duckdns'] = {
+        'enabled': bool(payload.enabled),
+        'domain': domain,
+        'token': token,
+    }
+    result = {'status': 'success', 'domain': domain}
+    if payload.enabled:
+        ok, detail = _duckdns_update_ip(domain, token)
+        result['ip_update'] = {'ok': ok, 'detail': detail}
+        if not ok:
+            save_data(data)
+            return JSONResponse(
+                {'error': 'duckdns_ip_update_failed', 'detail': detail},
+                status_code=502)
+        ok, log = _duckdns_issue_cert(domain, token)
+        if not ok:
+            save_data(data)
+            return JSONResponse(
+                {'error': 'duckdns_cert_failed', 'detail': log[-3000:]},
+                status_code=502)
+        # The duckdns card drives the SAME ssl config as the manual card:
+        # issued paths are written into settings['ssl'].
+        ssl_conf = settings.setdefault('ssl', {})
+        ssl_conf.update({
+            'enabled': True,
+            'domain': domain,
+            'cert_path': os.path.join(DUCKDNS_CERT_DIR, 'duckdns.cert.pem'),
+            'key_path': os.path.join(DUCKDNS_CERT_DIR, 'duckdns.key.pem'),
+            'cert_text': '',
+            'key_text': '',
+        })
+        if os.environ.get('INVOCATION_ID'):
+            # install-cert's detached reloadcmd restarts the panel in ~5s,
+            # switching it to HTTPS on its own
+            result['restarting'] = True
+        else:
+            result['restart_required'] = True
+    save_data(data)
+    logger.info(f"DuckDNS settings applied: enabled={payload.enabled} domain={domain}")
+    return result
+
+
+_duckdns_monitor_started = False
+
+
+def _duckdns_monitor_loop():
+    """Keep the duckdns record pointed at this server's current public IP."""
+    while True:
+        try:
+            d = load_data().get('settings', {}).get('duckdns', {}) or {}
+            if d.get('enabled') and d.get('domain') and d.get('token'):
+                ok, detail = _duckdns_update_ip(d['domain'], d['token'])
+                if not ok:
+                    logger.warning(f"duckdns monitor: ip update failed: {detail}")
+        except Exception as e:
+            logger.warning(f"duckdns monitor loop: {e}")
+        time.sleep(DUCKDNS_UPDATE_INTERVAL)
+
+
+def _start_duckdns_monitor():
+    global _duckdns_monitor_started
+    if _duckdns_monitor_started:
+        return
+    _duckdns_monitor_started = True
+    threading.Thread(target=_duckdns_monitor_loop, daemon=True,
+                     name='duckdns-monitor').start()
+    logger.info(f"DuckDNS monitor started (every {DUCKDNS_UPDATE_INTERVAL}s)")
 
 
 @app.post('/api/settings/telegram/toggle', tags=["Settings"])
