@@ -166,3 +166,8 @@
 - Фикс (78510c0, кандидат в апстрим): в installProtocol catch → isNetworkAbort(err) (TypeError / Failed to fetch / NetworkError / Load failed) → строка в лог «соединение прервано, проверяю статус…» + waitForInstallVisible: поллинг POST /api/servers/{id}/check каждые 10с до 10 мин, успех = protocols[proto].container_exists || installed. Подтверждение → обычный success-путь (toast + checkServer). Новый ключ install_conn_interrupted во всех 5 локалях (вставлен после install_starting).
 - Заодно обезврежена time-bomb в наших же тестах: test_rkn_scan_flags FlagsEndpointTests использовал хардкод '2026-10-04T10:00:00+00:00' — 13.10 он вышел из окна 24ч → 2 стабильных падения events24 0!=1. Теперь timestamp = now-1h. УРОК: в тестах никогда фиксированные «недавние» даты — только now±delta.
 - Тесты 499/499 OK (skip playwright). Ветка deploy/v170 = форк 78510c0.
+
+## 14.10 00:05 — PR #210 в апстрим: фронт переживает обрыв fetch при установке
+- Ветка fix/install-network-abort (f0b830c) от upstream/main (v1.7.4!) — только templates/server.html + install_conn_interrupted в 5 локалях (+50 строк). Наш RKN-функционал и правка test_rkn_scan_flags в апстрим НЕ идут (тест — часть нашей фичи; в форке это всё уже в deploy/v170 = 78510c0 + 7d72b84).
+- Логика: catch в installProtocol → isNetworkAbort (TypeError / Failed to fetch / NetworkError / Load failed) → поллинг /check каждые 10с до 10 мин → protocols[proto].container_exists||installed → success-путь. HTTP-ошибки панели (4xx/5xx) — по-старому, мгновенный фейл.
+- ВАЖНО: upstream/main ушёл вперёд — тег v1.7.4. Наш deploy/v170 основан на v1.7.3 → при следующем мерже апстрима ждать конфликтов/новшеств; переписать эту запись после апгрейда.
