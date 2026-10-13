@@ -2705,6 +2705,31 @@
         openModal('installModal');
     }
 
+    // A network abort ("Failed to fetch") only says the browser-to-panel
+    // connection died — e.g. a from-scratch Xray build keeps the request
+    // busy for minutes and a proxy/VPN hop in between times out. The server
+    // side keeps installing; decide from the live status, not from the
+    // dead fetch.
+    function isNetworkAbort(err) {
+        return err instanceof TypeError || /Failed to fetch|NetworkError|Load failed/i.test(err && err.message || '');
+    }
+
+    // Poll /check until the just-installed protocol shows up on the server
+    // (or give up after ~10 minutes). Returns true when the install
+    // evidently completed despite the aborted fetch.
+    async function waitForInstallVisible(protocol, timeoutMs = 600000, intervalMs = 10000) {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+            await new Promise(r => setTimeout(r, intervalMs));
+            try {
+                const data = await apiCall(`/api/servers/${SERVER_ID}/check`, 'POST');
+                const info = (data.protocols || {})[protocol];
+                if (info && (info.container_exists || info.installed)) return true;
+            } catch (_) { /* panel or network not reachable yet — keep polling */ }
+        }
+        return false;
+    }
+
     async function installProtocol() {
         const port = document.getElementById('installPort').value;
         const btn = document.getElementById('installBtn');
@@ -2792,6 +2817,26 @@
         } catch (err) {
             clearInterval(progressInterval);
             fillEl.style.width = '100%';
+            // Connection died mid-install: the server side may still complete
+            // fine. Poll for the protocol instead of declaring failure.
+            if (isNetworkAbort(err)) {
+                const waitDiv = document.createElement('div');
+                waitDiv.className = 'log-line info';
+                waitDiv.textContent = `… ${_('install_conn_interrupted')}`;
+                logEl.appendChild(waitDiv);
+                logEl.scrollTop = logEl.scrollHeight;
+                if (await waitForInstallVisible(currentInstallProto)) {
+                    const okDiv = document.createElement('div');
+                    okDiv.className = 'log-line success';
+                    okDiv.textContent = `✓ ${_('install_success')}`;
+                    logEl.appendChild(okDiv);
+                    logEl.scrollTop = logEl.scrollHeight;
+                    showToast(_('install_success'), 'success');
+                    document.getElementById('installDone').style.display = '';
+                    setTimeout(() => checkServer(), 800);
+                    return;
+                }
+            }
             fillEl.style.background = 'linear-gradient(135deg, #ef4444, #dc2626)';
             // textContent, not innerHTML: build logs can contain sequences
             // that parse as HTML and silently swallow the rest of the error.

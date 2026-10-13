@@ -391,6 +391,7 @@
   "warp_status_service_unavailable": "سرویس Cloudflare WARP در دسترس نیست. مطمئن شوید warp-svc در حال اجراست.",
   "warp_status_error": "Cloudflare WARP خطایی برگرداند.",
   "install_starting": "در حال آغاز نصب...",
+  "install_conn_interrupted": "اتصال قطع شد، اما نصب روی سرور همچنان ادامه دارد. در حال بررسی وضعیت...",
   "server_check_complete": "بررسی تکمیل شد",
   "server_connection_error": "خطای اتصال",
   "connections_load_error": "خطا در بارگذاری اتصال‌ها",

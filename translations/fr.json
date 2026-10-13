@@ -391,6 +391,7 @@
   "warp_status_service_unavailable": "Le service Cloudflare WARP n’est pas disponible. Vérifiez que warp-svc est en cours d’exécution.",
   "warp_status_error": "Cloudflare WARP a renvoyé une erreur.",
   "install_starting": "Démarrage de l’installation...",
+  "install_conn_interrupted": "Connexion perdue, mais l’installation continue sur le serveur. Vérification du statut...",
   "server_check_complete": "Vérification terminée",
   "server_connection_error": "Erreur de connexion",
   "connections_load_error": "Erreur lors du chargement des connexions",

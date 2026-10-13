@@ -441,6 +441,7 @@
   "warp_status_service_unavailable": "Сервис Cloudflare WARP недоступен. Убедитесь, что warp-svc запущен.",
   "warp_status_error": "Cloudflare WARP вернул ошибку.",
   "install_starting": "Начинаем установку...",
+  "install_conn_interrupted": "Соединение прервано, но установка на сервере продолжается. Проверяю статус…",
   "server_check_complete": "Проверка завершена",
   "server_connection_error": "Ошибка подключения",
   "connections_load_error": "Ошибка загрузки подключений",

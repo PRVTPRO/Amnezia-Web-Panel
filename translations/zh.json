@@ -391,6 +391,7 @@
   "warp_status_service_unavailable": "Cloudflare WARP 服务不可用。请确保 warp-svc 正在运行。",
   "warp_status_error": "Cloudflare WARP 返回了错误。",
   "install_starting": "正在开始安装...",
+  "install_conn_interrupted": "连接中断，但服务器上的安装仍在继续。正在检查状态...",
   "server_check_complete": "检查完成",
   "server_connection_error": "连接错误",
   "connections_load_error": "加载连接时出错",

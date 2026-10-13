@@ -89,8 +89,9 @@ class FlagsEndpointTests(unittest.TestCase):
     def setUp(self):
         self.panel = isolated_panel()
         self.request = SimpleNamespace(session={'user_id': 'admin'}, headers={})
+        recent = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)).isoformat()
         self.servers = [
-            {'name': 'A', 'protocols': {}, '_canned_out': canned_output(['2026-10-04T10:00:00+00:00'])},
+            {'name': 'A', 'protocols': {}, '_canned_out': canned_output([recent])},
             {'name': 'B', 'protocols': {}, '_canned_out': '===LOG===\n'},
         ]
         self.panel['load_data'] = Mock(return_value={'servers': self.servers,
