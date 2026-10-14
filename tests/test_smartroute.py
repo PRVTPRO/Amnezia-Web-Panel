@@ -8,10 +8,12 @@ import unittest
 
 from managers.smartroute_manager import (
     CONTAINER_APPLY_SCRIPT, CONTAINER_DISABLE_SCRIPT, CONTAINER_ENABLE_SCRIPT,
-    SMARTR_ACCT_CHAIN, SMARTR_INSTANCES, SMARTR_MIN_PREFIXES, SMARTR_TABLE,
-    SmartRouteManager, SmartRouteError, build_install_script,
-    build_remove_script, build_update_script, normalize_cidrs,
-    parse_acct_counters, parse_ripe_delegated, render_container_script,
+    SMARTR_ACCT_CHAIN, SMARTR_ACCT_CHAIN_IN,
+    SMARTR_INSTANCES, SMARTR_MIN_PREFIXES, SMARTR_TABLE,
+    SmartRouteManager, SmartRouteError, SOURCES_V4, SOURCES_V6,
+    build_install_script, build_remove_script, build_update_script,
+    normalize_cidrs, parse_acct_counters, parse_ripe_delegated,
+    render_container_script,
 )
 
 
@@ -29,6 +31,9 @@ class FakeSSH:
             return ('Chain SMARTR_ACCT (1 references)\n'
                     '    10     1000 RETURN  all -- * exit0 10.8.0.0/24  0.0.0.0/0\n'
                     '     5      500 RETURN  all -- * eth0 10.8.0.0/24  0.0.0.0/0\n'
+                    'Chain SMARTR_ACCT_IN (1 references)\n'
+                    '     3      300 RETURN  all -- exit0 * 0.0.0.0/0  10.8.0.0/24\n'
+                    '     2      200 RETURN  all -- eth0 * 0.0.0.0/0  10.8.0.0/24\n'
                     '---\n37\n'), '', 0
         return '', '', 0
 
@@ -47,6 +52,9 @@ class FakeSSH:
             return ('Chain SMARTR_ACCT (1 references)\n'
                     '    10     1000 RETURN  all -- * exit0 10.8.0.0/24  0.0.0.0/0\n'
                     '     5      500 RETURN  all -- * eth0  10.8.0.0/24  0.0.0.0/0\n'
+                    'Chain SMARTR_ACCT_IN (1 references)\n'
+                    '     3      300 RETURN  all -- exit0 * 0.0.0.0/0  10.8.0.0/24\n'
+                    '     2      200 RETURN  all -- eth0 * 0.0.0.0/0  10.8.0.0/24\n'
                     '---\n37\n'), '', 0
         return '', '', 0
 
@@ -97,19 +105,49 @@ class NormalizeCidrsTests(unittest.TestCase):
 
 
 class AcctParsingTests(unittest.TestCase):
-    def test_rows_mapped_by_out_iface(self):
+    def test_rows_mapped_by_iface_direction(self):
         text = ('Chain SMARTR_ACCT (1 references)\n'
                 '    10     1000 RETURN  all -- * exit0 10.8.0.0/24  0.0.0.0/0\n'
-                '     5      500 RETURN  all -- * eth0 10.8.0.0/24  0.0.0.0/0\n')
+                '     5      500 RETURN  all -- * eth0 10.8.0.0/24  0.0.0.0/0\n'
+                'Chain SMARTR_ACCT_IN (1 references)\n'
+                '     3      300 RETURN  all -- exit0 * 0.0.0.0/0  10.8.0.0/24\n'
+                '     2      200 RETURN  all -- eth0 * 0.0.0.0/0  10.8.0.0/24\n')
         out = parse_acct_counters(text)
-        self.assertEqual(out['via_exit_bytes'], 1000)
-        self.assertEqual(out['direct_bytes'], 500)
-        self.assertEqual(out['via_exit_pkts'], 10)
+        # totals = egress + ingress per path
+        self.assertEqual(out['via_exit'], {'pkts': 13, 'bytes': 1300})
+        self.assertEqual(out['direct'], {'pkts': 7, 'bytes': 700})
+        # direction split
+        self.assertEqual(out['via_exit_out'], {'pkts': 10, 'bytes': 1000})
+        self.assertEqual(out['via_exit_in'], {'pkts': 3, 'bytes': 300})
+        self.assertEqual(out['direct_out'], {'pkts': 5, 'bytes': 500})
+        self.assertEqual(out['direct_in'], {'pkts': 2, 'bytes': 200})
 
     def test_missing_chain_is_zero(self):
         out = parse_acct_counters('')
-        self.assertEqual(out['via_exit_bytes'], 0)
-        self.assertEqual(out['direct_bytes'], 0)
+        for key in ('via_exit', 'direct', 'via_exit_out', 'direct_out',
+                    'via_exit_in', 'direct_in'):
+            self.assertEqual(out[key], {'pkts': 0, 'bytes': 0}, key)
+
+
+class RipeHeredocRegressionTests(unittest.TestCase):
+    """Bug 1 regression: the python heredoc embedded in the update script
+    must join CIDRs with REAL newlines, not literal backslash-n."""
+
+    def test_embedded_parser_outputs_one_cidr_per_line(self):
+        import subprocess
+        import sys
+        from managers.smartroute_manager import _RIPE_PARSE_PY
+        proc = subprocess.run([sys.executable, '-c', _RIPE_PARSE_PY, 'ipv4'],
+                              input=RIPE_SAMPLE.encode(), capture_output=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+        lines = proc.stdout.decode().splitlines()
+        self.assertGreater(len(lines), 1, 'RIPE output must be multi-line')
+        self.assertIn('83.172.0.0/15', lines)
+        self.assertIn('91.200.0.0/21', lines)
+
+    def test_update_script_carries_working_newline_join(self):
+        # the generated update script must contain print("\n".join(...))
+        self.assertIn('print("\\n".join(sorted(out)))', build_update_script())
 
 
 class UpdateScriptTests(unittest.TestCase):
@@ -121,6 +159,13 @@ class UpdateScriptTests(unittest.TestCase):
         self.assertIn('ipdeny.com', self.script)
         self.assertIn('herrbischoff', self.script)
         self.assertIn('delegated-ripencc-latest', self.script)
+
+    def test_v6_first_source_is_a_real_v6_zone(self):
+        # bug 2 regression: the first v6 source must be an IPv6 list, not the
+        # v4 zone (it would always yield 0 prefixes and waste a fetch)
+        self.assertIn('/ipv6/', SOURCES_V6[0])
+        self.assertNotEqual(SOURCES_V6[0], SOURCES_V4[0])
+        self.assertTrue(all('/ipv6/' in u or 'delegated' in u for u in SOURCES_V6))
 
     def test_guard_applies_to_file_not_zeroing(self):
         # a failed fetch must keep the old file: no truncate/write on failure
@@ -152,6 +197,9 @@ class InstallRemoveScriptTests(unittest.TestCase):
                        'RandomizedDelaySec=900', 'Persistent=true'):
             self.assertIn(needle, script)
         self.assertIn('smartroute-update.sh', script)  # first run at install
+        # first run is background: worst-case fallback walk exceeds any SSH timeout
+        self.assertIn('nohup', script)
+        self.assertIn('running in background', script)
 
     def test_remove_cleans_all(self):
         script = build_remove_script()
@@ -159,6 +207,7 @@ class InstallRemoveScriptTests(unittest.TestCase):
                        'rm -rf /etc/smartroute',
                        'route del throw',
                        'iptables -t mangle -D POSTROUTING',
+                       'iptables -t mangle -D PREROUTING',
                        'systemctl daemon-reload'):
             self.assertIn(needle, script)
         # no blanket table flush anywhere
@@ -179,8 +228,10 @@ class InstallRemoveScriptTests(unittest.TestCase):
             CONTAINER_ENABLE_SCRIPT, config_path='/opt/amnezia/awg/awg0.conf',
             subnet_default='10.8.0.0/24')
         self.assertNotIn('__TABLE__', rendered)
+        self.assertNotIn('__CHAIN_IN__', rendered)
         self.assertIn(str(SMARTR_TABLE), rendered)
         self.assertIn(SMARTR_ACCT_CHAIN, rendered)
+        self.assertIn(SMARTR_ACCT_CHAIN_IN, rendered)
         self.assertIn('/opt/amnezia/awg/awg0.conf', rendered)
 
 
@@ -210,9 +261,11 @@ class ManagerFlowTests(unittest.TestCase):
         self.assertIn(f'{SMARTR_INSTANCES}/amnezia-awg2', cmds)
         self.assertIn('docker cp /tmp/_smartr_c.sh amnezia-awg2', cmds)
         self.assertIn('docker exec amnezia-awg2 bash /tmp/_smartr_c.sh', cmds)
-        # accounting chain setup inside the container script
+        # accounting chain setup inside the container script (egress + ingress)
         uploaded = '\n'.join(c for _, c in self.ssh.uploads)
         self.assertIn(f'iptables -t mangle -A $CH -s "$X_SUBNET" -o exit0', uploaded)
+        self.assertIn('iptables -t mangle -A $CHI -i exit0 -d "$X_SUBNET"', uploaded)
+        self.assertIn('iptables -t mangle -A PREROUTING -j $CHI', uploaded)
         self.assertIn('conntrack -D -s "$X_SUBNET"', uploaded)
 
     def test_disable_removes_marker_and_tears_down(self):
@@ -237,8 +290,11 @@ class ManagerFlowTests(unittest.TestCase):
 
     def test_counters_read(self):
         out = self.mgr.instance_counters('amnezia-awg2', '/opt/amnezia/awg/awg0.conf', '10.8.0.0/24')
-        self.assertEqual(out['via_exit_bytes'], 1000)
-        self.assertEqual(out['direct_bytes'], 500)
+        # totals (egress 10/1000 + ingress 3/300) and direction split
+        self.assertEqual(out['via_exit'], {'pkts': 13, 'bytes': 1300})
+        self.assertEqual(out['direct'], {'pkts': 7, 'bytes': 700})
+        self.assertEqual(out['via_exit_in'], {'pkts': 3, 'bytes': 300})
+        self.assertEqual(out['direct_out'], {'pkts': 5, 'bytes': 500})
         self.assertEqual(out['throw_routes'], 37)
 
 

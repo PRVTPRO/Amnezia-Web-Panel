@@ -3438,10 +3438,15 @@
         }
         const direct = sr.direct || {};
         const viaExit = sr.via_exit || {};
-        box.innerHTML = `
-            <div class="form-hint">${_('smartroute_counters_direct')}: ${formatBytes(direct.bytes || 0)} (${direct.pkts || 0} pkt)</div>
-            <div class="form-hint">${_('smartroute_counters_exit')}: ${formatBytes(viaExit.bytes || 0)} (${viaExit.pkts || 0} pkt)</div>
-        `;
+        const directOut = sr.direct_out || {};
+        const directIn = sr.direct_in || {};
+        const viaExitOut = sr.via_exit_out || {};
+        const viaExitIn = sr.via_exit_in || {};
+        const row = (label, tot, up, down) =>
+            `<div class="form-hint">${label}: ${formatBytes(tot.bytes || 0)} (${tot.pkts || 0} pkt) ` +
+            `↑ ${formatBytes(up.bytes || 0)} · ↓ ${formatBytes(down.bytes || 0)}</div>`;
+        box.innerHTML = row(_('smartroute_counters_direct'), direct, directOut, directIn)
+            + row(_('smartroute_counters_exit'), viaExit, viaExitOut, viaExitIn);
     }
 
     async function saveSmartRouteSplit(enabled) {

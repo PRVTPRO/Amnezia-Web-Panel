@@ -92,8 +92,13 @@ class FakeSRM:
         FakeSRM.calls.append(('refresh_instance', container))
 
     def instance_counters(self, container, config_path, subnet_default):
-        return {'direct': {'pkts': 10, 'bytes': 1000},
-                'via_exit': {'pkts': 5, 'bytes': 500}, 'throw_routes': 37}
+        return {'via_exit': {'pkts': 13, 'bytes': 1300},
+                'direct': {'pkts': 7, 'bytes': 700},
+                'via_exit_out': {'pkts': 10, 'bytes': 1000},
+                'direct_out': {'pkts': 5, 'bytes': 500},
+                'via_exit_in': {'pkts': 3, 'bytes': 300},
+                'direct_in': {'pkts': 2, 'bytes': 200},
+                'throw_routes': 37}
 
 
 class SmartRouteServiceTest(unittest.IsolatedAsyncioTestCase):
@@ -305,7 +310,8 @@ class SmartRouteServiceTest(unittest.IsolatedAsyncioTestCase):
     async def test_counters_reads_acct_chain(self):
         out = await self.svc.counters(0, 'awg2')
         self.assertTrue(out['enabled'])
-        self.assertEqual(out['direct']['pkts'], 10)
+        self.assertEqual(out['direct'], {'pkts': 7, 'bytes': 700})
+        self.assertEqual(out['via_exit_in'], {'pkts': 3, 'bytes': 300})
         self.assertEqual(out['throw_routes'], 37)
 
 

@@ -34,6 +34,7 @@ SMARTR_MIN_PREFIXES = 100
 SMARTR_TABLE = 200          # == awg_manager.EXIT_TABLE
 SMARTR_EXIT_IF = 'exit0'    # == awg_manager.EXIT_IFACE
 SMARTR_ACCT_CHAIN = 'SMARTR_ACCT'
+SMARTR_ACCT_CHAIN_IN = f'{SMARTR_ACCT_CHAIN}_IN'
 
 # Prioritized sources with fallback. RIPE delegated covers both families in
 # one file and is parsed (start+count -> CIDR), the others are plain lists.
@@ -43,17 +44,19 @@ SOURCES_V4 = [
     'https://ftp.ripe.net/pub/stats/ripencc/delegated-ripencc-latest',
 ]
 SOURCES_V6 = [
-    'https://www.ipdeny.com/ipblocks/data/aggregated/ru-aggregated.zone',
+    'https://www.ipdeny.com/ipv6/ipaddresses/aggregated/ru-aggregated.zone',
     'https://raw.githubusercontent.com/herrbischoff/country-ip-blocks/master/ipv6/ru.cidr',
     'https://ftp.ripe.net/pub/stats/ripencc/delegated-ripencc-latest',
 ]
 
 _CIDR_V4_RE = re.compile(r'^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$')
 
-# Formats of `iptables -t mangle -L SMARTR_ACCT -vnx` data rows:
-#   " 123 456 RETURN all -- * exit0 10.8.0.0/24 0.0.0.0/0"
-# fields[0]=pkts fields[1]=bytes fields[6]=out-iface (with -x, no unit suffixes)
-_ACCT_ROW_RE = re.compile(r'^\s*(\d+)\s+(\d+)\s+RETURN\s+\S+\s+\S+\s+\S+\s+(\S+)')
+# Formats of `iptables -t mangle -L SMARTR_ACCT[_IN] -vnx` data rows:
+#   " 123 456 RETURN all -- * exit0 10.8.0.0/24 0.0.0.0/0"   (egress: out-iface)
+#   " 123 456 RETURN all -- exit0 * 0.0.0.0/0 10.8.0.0/24"   (ingress: in-iface)
+# fields[0]=pkts fields[1]=bytes fields[5]=in-iface fields[6]=out-iface
+_ACCT_ROW_RE = re.compile(
+    r'^\s*(\d+)\s+(\d+)\s+RETURN\s+\S+\s+\S+\s+(\S+)\s+(\S+)')
 
 
 # ======================== Pure parsing helpers ========================
@@ -106,21 +109,34 @@ def normalize_cidrs(lines, family='ipv4'):
 
 
 def parse_acct_counters(text):
-    """`iptables -t mangle -L SMARTR_ACCT -vnx` -> {'via_exit': B, 'direct': B}.
+    """`iptables -t mangle -L SMARTR_ACCT[_IN] -vnx` -> counter dict.
 
-    Rows are matched by out-interface (exit0 vs eth0); anything else in the
-    chain (nothing should be) is ignored. Missing chain -> zeros.
+    Egress rows carry the path in the OUT-iface (chain on POSTROUTING),
+    ingress rows in the IN-iface (chain on PREROUTING). Anything else in
+    the chains (nothing should be) is ignored. Missing chains -> zeros.
+
+    Returns {'via_exit': {pkts, bytes}, 'direct': {pkts, bytes},      # totals
+            'via_exit_out'/'direct_out', 'via_exit_in'/'direct_in'}   # split
     """
-    out = {'via_exit_bytes': 0, 'direct_bytes': 0, 'via_exit_pkts': 0, 'direct_pkts': 0}
+    def bucket():
+        return {'pkts': 0, 'bytes': 0}
+
+    out = {k: bucket() for k in (
+        'via_exit', 'direct', 'via_exit_out', 'direct_out', 'via_exit_in', 'direct_in')}
     for line in (text or '').splitlines():
         m = _ACCT_ROW_RE.match(line)
         if not m:
             continue
-        pkts, bytez, iface = int(m.group(1)), int(m.group(2)), m.group(3)
-        if iface == SMARTR_EXIT_IF:
-            out['via_exit_pkts'], out['via_exit_bytes'] = pkts, bytez
-        elif iface == 'eth0':
-            out['direct_pkts'], out['direct_bytes'] = pkts, bytez
+        pkts, bytez, in_if, out_if = int(m.group(1)), int(m.group(2)), m.group(3), m.group(4)
+        if out_if in (SMARTR_EXIT_IF, 'eth0'):      # egress row
+            path, direction = ('via_exit' if out_if == SMARTR_EXIT_IF else 'direct'), 'out'
+        elif in_if in (SMARTR_EXIT_IF, 'eth0'):     # ingress row
+            path, direction = ('via_exit' if in_if == SMARTR_EXIT_IF else 'direct'), 'in'
+        else:
+            continue
+        for key in (path, f'{path}_{direction}'):
+            out[key]['pkts'] += pkts
+            out[key]['bytes'] += bytez
     return out
 
 
@@ -149,11 +165,19 @@ CONTAINER_ENABLE_SCRIPT = CONTAINER_APPLY_SCRIPT + """
 X_SUBNET=$(grep '^Address' __CONF__ | head -1 | cut -d= -f2 | cut -d, -f1 | tr -d ' ')
 [ -n "$X_SUBNET" ] || X_SUBNET=__SUBNET_DEFAULT__
 CH=__CHAIN__
+CHI=__CHAIN_IN__
+# egress: client -> internet (upload per path)
 iptables -t mangle -N $CH 2>/dev/null || true
 iptables -t mangle -F $CH
 iptables -t mangle -A $CH -s "$X_SUBNET" -o __EXIT_IF__ -j RETURN
 iptables -t mangle -A $CH -s "$X_SUBNET" -o eth0 -j RETURN
 iptables -t mangle -C POSTROUTING -j $CH 2>/dev/null || iptables -t mangle -A POSTROUTING -j $CH
+# ingress: internet -> client (download per path)
+iptables -t mangle -N $CHI 2>/dev/null || true
+iptables -t mangle -F $CHI
+iptables -t mangle -A $CHI -i __EXIT_IF__ -d "$X_SUBNET" -j RETURN
+iptables -t mangle -A $CHI -i eth0 -d "$X_SUBNET" -j RETURN
+iptables -t mangle -C PREROUTING -j $CHI 2>/dev/null || iptables -t mangle -A PREROUTING -j $CHI
 if command -v conntrack >/dev/null 2>&1; then conntrack -D -s "$X_SUBNET" >/dev/null 2>&1
 else echo "! conntrack-tools missing: flows opened before the change keep their old path until they end"; fi
 echo "smartroute: accounting on for $X_SUBNET"
@@ -169,9 +193,13 @@ X_SUBNET=$(grep '^Address' __CONF__ | head -1 | cut -d= -f2 | cut -d, -f1 | tr -
 ip -4 route show table $TABLE | awk '$1==\"throw\"{print \"route del throw \"$2\" table '$TABLE'\"}' > /tmp/smartr_del.batch
 [ -s /tmp/smartr_del.batch ] && ip -4 -batch /tmp/smartr_del.batch 2>/dev/null
 CH=__CHAIN__
+CHI=__CHAIN_IN__
 iptables -t mangle -D POSTROUTING -j $CH 2>/dev/null || true
 iptables -t mangle -F $CH 2>/dev/null || true
 iptables -t mangle -X $CH 2>/dev/null || true
+iptables -t mangle -D PREROUTING -j $CHI 2>/dev/null || true
+iptables -t mangle -F $CHI 2>/dev/null || true
+iptables -t mangle -X $CHI 2>/dev/null || true
 if [ -n "$X_SUBNET" ] && command -v conntrack >/dev/null 2>&1; then conntrack -D -s "$X_SUBNET" >/dev/null 2>&1; fi
 echo "smartroute: split off, $(ip -4 route show table $TABLE | grep -c '^throw') throw routes left"
 """
@@ -195,7 +223,7 @@ for line in sys.stdin:
             out.add(str(ipaddress.IPv6Network(p[3] + "/" + p[4])))
     except Exception:
         continue
-print("\\\\n".join(sorted(out)))
+print("\\n".join(sorted(out)))
 '''
 
 
@@ -353,8 +381,11 @@ cat > /etc/systemd/system/smartroute.timer <<'SMARPTMR'
 systemctl daemon-reload
 systemctl enable --now smartroute.timer >/dev/null 2>&1
 systemctl enable smartroute.service >/dev/null 2>&1
-{SMARTR_BIN}
-echo "smartroute: installed"
+# First list download runs in the background: the source fallback can take
+# up to ~12 min (3 sources x 2 families), far beyond any SSH timeout. The
+# timer (OnBootSec=2min) is the safety net; status.json reports progress.
+nohup {SMARTR_BIN} > /var/log/smartroute-install.log 2>&1 &
+echo "smartroute: installed, first list download running in background"
 '''
 
 
@@ -388,6 +419,7 @@ def render_container_script(template, *, config_path, subnet_default):
     return (template
             .replace('__TABLE__', str(SMARTR_TABLE))
             .replace('__CHAIN__', SMARTR_ACCT_CHAIN)
+            .replace('__CHAIN_IN__', SMARTR_ACCT_CHAIN_IN)
             .replace('__CONF__', config_path)
             .replace('__SUBNET_DEFAULT__', subnet_default)
             .replace('__EXIT_IF__', SMARTR_EXIT_IF))
@@ -527,9 +559,10 @@ class SmartRouteManager:
         return self._container_run(container, script)
 
     def instance_counters(self, container, config_path, subnet_default):
-        """Read-only probe: accounting chain counters + throw route count."""
+        """Read-only probe: accounting chains (egress + ingress) + throw count."""
         script = render_container_script(
             'iptables -t mangle -L __CHAIN__ -vnx 2>/dev/null\n'
+            'iptables -t mangle -L __CHAIN_IN__ -vnx 2>/dev/null\n'
             'echo ---\n'
             'ip -4 route show table __TABLE__ | grep -c "^throw"\n',
             config_path=config_path, subnet_default=subnet_default)
