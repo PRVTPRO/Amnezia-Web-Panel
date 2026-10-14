@@ -207,3 +207,13 @@
 - exit-link/status теперь включает payload['smartroute'] = counters(...) best-effort (try/except → None), чтобы карточка инстанса показывала счётчики без лишнего запроса.
 - Полный прогон: 545 тестов OK (489 базовых + 24 менеджер + 22 сервис).
 - Следующая итерация: UI (карточка магазина/модалка/флажок в exitLinkModal/счётчики/бейдж smart_route_lost), ключи в 5 локалях.
+
+## 14.10 17:55 — Smart Route: итерация 4, UI (9a2ebf3, deploy/v170)
+- Маркетплейс: карточка Smart Route (🧭, services, NEW) — special-case в renderMarketplace: статус из smartRouteStatus.installed, кнопка «Открыть» → smartRouteModal (НЕ installFromMarketplace, т.к. это host-приложение, а не протокол).
+- Модалка smartRouteModal: install/remove (confirm с текстом про откат), «Обновить сейчас», статус списков (v4/v6 префиксы, источник, обновлено, следующий запуск, ошибка), редактор своих подсетей (textarea, по CIDR на строку), серверный DNS-via-exit тоггл, список сплит-инстансов.
+- exitLinkModal: флажок Smart Route (показывается только у связанного инстанса; disabled + подсказка «сначала установите из магазина», пока приложение не стоит), счётчики напрямую/через выход (formatBytes) из payload smartroute exit-link/status, warning-бейдж при smart_route_lost. Статус приложения подтягивается в openExitLinkModal третьим запросом (best-effort .catch(null)).
+- Ошибки API переводятся через smartrouteErrorText (коды: app_not_installed, not_linked, protocol_not_awg, invalid_cidr, server_not_found).
+- Локали: 36 ключей smartroute_* + коды ошибок во всех 5 файлах. Тест паритета SmartRouteUiWiringTests (3 теста) в test_server_page.py.
+- ОПАСНОЕ МЕСТО: глобальная sed-замена err.message затронула 2 чужих обработчика (toggleRknBlock/clearRknScans) — отловлено диффом, откачено. УРОК: sed по шаблону «(err.message || err)» без привязки к функции опасен — такая строка встречается в чужом коде.
+- Полный прогон: 548 тестов OK (489 базовых + 24 + 22 + 3 UI + прочее).
+- Осталось: боевая проверка на стенде MAMKAM→SERVERA (команды владельцу по одной).
