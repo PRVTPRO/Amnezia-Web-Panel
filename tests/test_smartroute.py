@@ -130,24 +130,50 @@ class AcctParsingTests(unittest.TestCase):
 
 
 class RipeHeredocRegressionTests(unittest.TestCase):
-    """Bug 1 regression: the python heredoc embedded in the update script
-    must join CIDRs with REAL newlines, not literal backslash-n."""
+    """Bug 1 regression: the python parser embedded in the update script must
+    join CIDRs with REAL newlines (escape fix) and read the delegated file
+    from argv[2] - `python3 - <heredoc` would consume stdin as the program
+    and parse nothing (live-found on MAMKAM: output was a single empty line).
+    The test mirrors the real ripe_parse invocation: program file + data path.
+    """
 
-    def test_embedded_parser_outputs_one_cidr_per_line(self):
+    def _run_embedded_parser(self, family='ipv4'):
         import subprocess
         import sys
+        import tempfile
+        import os
         from managers.smartroute_manager import _RIPE_PARSE_PY
-        proc = subprocess.run([sys.executable, '-c', _RIPE_PARSE_PY, 'ipv4'],
-                              input=RIPE_SAMPLE.encode(), capture_output=True)
+        with tempfile.TemporaryDirectory() as td:
+            prog = os.path.join(td, 'ripe_parse.py')
+            data = os.path.join(td, 'delegated')
+            with open(prog, 'w', encoding='utf-8') as f:
+                f.write(_RIPE_PARSE_PY)
+            with open(data, 'w', encoding='utf-8') as f:
+                f.write(RIPE_SAMPLE)
+            return subprocess.run([sys.executable, prog, family, data],
+                                  capture_output=True)
+
+    def test_embedded_parser_outputs_one_cidr_per_line(self):
+        proc = self._run_embedded_parser()
         self.assertEqual(proc.returncode, 0, proc.stderr.decode())
         lines = proc.stdout.decode().splitlines()
         self.assertGreater(len(lines), 1, 'RIPE output must be multi-line')
         self.assertIn('83.172.0.0/15', lines)
         self.assertIn('91.200.0.0/21', lines)
 
+    def test_embedded_parser_ipv6(self):
+        proc = self._run_embedded_parser('ipv6')
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+        self.assertIn('2001:1b00::/32', proc.stdout.decode().splitlines())
+
     def test_update_script_carries_working_newline_join(self):
         # the generated update script must contain print("\n".join(...))
         self.assertIn('print("\\n".join(sorted(out)))', build_update_script())
+
+    def test_update_script_ripe_parse_uses_file_program_and_stdin_path(self):
+        script = build_update_script()
+        self.assertIn('python3 "$prog" "$1" /dev/stdin', script)
+        self.assertNotIn('python3 - "$1" <<', script)
 
 
 class UpdateScriptTests(unittest.TestCase):

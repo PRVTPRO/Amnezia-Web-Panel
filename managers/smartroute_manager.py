@@ -204,25 +204,29 @@ if [ -n "$X_SUBNET" ] && command -v conntrack >/dev/null 2>&1; then conntrack -D
 echo "smartroute: split off, $(ip -4 route show table $TABLE | grep -c '^throw') throw routes left"
 """
 
+# NB: the parser reads the delegated file from argv[2], NOT stdin - `python3
+# -` would consume the whole heredoc as the program and leave sys.stdin at
+# EOF, silently yielding zero CIDRs.
 _RIPE_PARSE_PY = '''import sys, ipaddress
-family = sys.argv[1]
+family, src = sys.argv[1], sys.argv[2]
 out = set()
-for line in sys.stdin:
-    line = line.strip()
-    if not line or line.startswith("#"):
-        continue
-    p = line.split("|")
-    if len(p) < 7 or p[1] != "RU" or p[2] != family or p[6] not in ("allocated", "assigned"):
-        continue
-    try:
-        if family == "ipv4":
-            first = ipaddress.IPv4Address(p[3])
-            last = first + int(p[4]) - 1
-            out.update(str(n) for n in ipaddress.summarize_address_range(first, last))
-        else:
-            out.add(str(ipaddress.IPv6Network(p[3] + "/" + p[4])))
-    except Exception:
-        continue
+with open(src, encoding="utf-8", errors="replace") as fh:
+    for line in fh:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        p = line.split("|")
+        if len(p) < 7 or p[1] != "RU" or p[2] != family or p[6] not in ("allocated", "assigned"):
+            continue
+        try:
+            if family == "ipv4":
+                first = ipaddress.IPv4Address(p[3])
+                last = first + int(p[4]) - 1
+                out.update(str(n) for n in ipaddress.summarize_address_range(first, last))
+            else:
+                out.add(str(ipaddress.IPv6Network(p[3] + "/" + p[4])))
+        except Exception:
+            continue
 print("\\n".join(sorted(out)))
 '''
 
@@ -249,8 +253,12 @@ LOCK_FILE="/run/smartroute.lock"
 log() {{ echo "$(date '+%F %T') $1"; }}
 
 ripe_parse() {{ # $1 = family; reads stdin (delegated file), prints CIDRs
-python3 - "$1" <<'PYEOF'
+  local prog
+  prog=$(mktemp)
+  cat > "$prog" <<'PYEOF'
 {_RIPE_PARSE_PY}PYEOF
+  python3 "$prog" "$1" /dev/stdin
+  rm -f "$prog"
 }}
 
 fetch_family() {{ # $1 = v4|v6, $2 = family; prints "tmpfile source count" or fails
