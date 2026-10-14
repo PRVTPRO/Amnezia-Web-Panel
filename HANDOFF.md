@@ -200,3 +200,10 @@
 - Свои подсети: валидация normalize_cidrs до SSH; хранение в server['smartroute']['own_subnets']; после сохранения — refresh_instance во все сплит-контейнеры (новые подсети действуют сразу).
 - tests/test_smartroute_service.py — 22 теста на изолированном сервисе (FakeAWG + FakeSRM с классовым журналом вызовов, in-memory data.json): порядок disable→uninstall при удалении, переживание сбоя отката, гейты app_not_installed/not_linked/protocol_not_awg, идемпотентность, снятие бейджа, массовый DNS, счётчики. Зелёные.
 - Следующая итерация: app.py (сервис-экземпляр + 6 эндпоинтов + smartroute-счётчики в ответе exit-link/status), UI, локали, полный прогон.
+
+## 14.10 17:05 — Smart Route: итерация 3, эндпоинты панели (667e8e0, deploy/v170)
+- app.py: smartroute_svc рядом с exit_link_svc; apply_dns_via_exit=lambda → exit_link_svc.set_dns_via_exit (DNS остаётся одним механизмом, pref 191).
+- Эндпоинты (все _check_admin): POST /api/servers/{sid}/smartroute/{install,uninstall,update,own-subnets,split,dns}, GET /api/servers/{sid}/smartroute/status. Ошибки SmartRouteError → {error: code, message} со status_code (образец _exit_link_error).
+- exit-link/status теперь включает payload['smartroute'] = counters(...) best-effort (try/except → None), чтобы карточка инстанса показывала счётчики без лишнего запроса.
+- Полный прогон: 545 тестов OK (489 базовых + 24 менеджер + 22 сервис).
+- Следующая итерация: UI (карточка магазина/модалка/флажок в exitLinkModal/счётчики/бейдж smart_route_lost), ключи в 5 локалях.
