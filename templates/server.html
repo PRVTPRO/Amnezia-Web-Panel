@@ -1039,6 +1039,13 @@
             </label>
             <div class="form-hint">{{ _('exit_dns_via_exit_hint') }}</div>
         </div>
+        <div class="form-group hidden" id="smartRouteGroup">
+            <label class="form-label" style="display:flex; align-items:center; gap:var(--space-sm);">
+                <input type="checkbox" id="smartRouteToggle" onchange="saveSmartRouteSplit(this.checked)"> {{ _('smartroute_toggle') }}
+            </label>
+            <div class="form-hint" id="smartRouteHint">{{ _('smartroute_toggle_hint') }}</div>
+            <div id="smartRouteCounters" style="margin-top:var(--space-sm);"></div>
+        </div>
         <div class="modal-footer">
             <button class="btn btn-secondary" onclick="closeModal('exitLinkModal')">{{ _('cancel') }}</button>
             <button class="btn btn-secondary hidden" onclick="checkExitEgress()" id="exitEgressBtn">{{ _('exit_egress_check') }}</button>
@@ -1048,6 +1055,45 @@
                 <span id="exitLinkBtnText">{{ _('exit_link_btn') }}</span>
                 <div class="spinner hidden" id="exitLinkSpinner"></div>
             </button>
+        </div>
+    </div>
+</div>
+
+<!-- ===== Smart Route Modal ===== -->
+<div class="modal-backdrop" id="smartRouteModal">
+    <div class="modal" style="max-width:560px;">
+        <div class="modal-header">
+            <h2 class="modal-title">{{ _('smartroute_title') }}</h2>
+            <button class="modal-close" onclick="closeModal('smartRouteModal')">×</button>
+        </div>
+        <div class="form-hint" style="margin-bottom:var(--space-md);">{{ _('smartroute_desc') }}</div>
+        <div id="smartRouteState" style="margin-bottom:var(--space-md);"></div>
+        <div class="form-group hidden" id="smartRouteLists">
+            <div class="form-hint" id="smartRouteListsInfo"></div>
+            <div class="form-hint" id="smartRouteListsError" style="color:var(--danger, #f87171);"></div>
+        </div>
+        <div class="form-group hidden" id="smartRouteOwnGroup">
+            <label class="form-label">{{ _('smartroute_own_subnets') }}</label>
+            <textarea class="form-input" id="smartRouteOwnSubnets" rows="3"
+                      placeholder="192.168.0.0/16"></textarea>
+            <div class="form-hint">{{ _('smartroute_own_subnets_hint') }}</div>
+        </div>
+        <div class="form-group hidden" id="smartRouteDnsGroup">
+            <label class="form-label" style="display:flex; align-items:center; gap:var(--space-sm);">
+                <input type="checkbox" id="smartRouteDnsViaExit" onchange="saveSmartRouteDns(this.checked)"> {{ _('smartroute_dns_via_exit') }}
+            </label>
+            <div class="form-hint">{{ _('smartroute_dns_hint') }}</div>
+        </div>
+        <div class="form-group hidden" id="smartRouteSplitsGroup">
+            <label class="form-label">{{ _('smartroute_split_instances') }}</label>
+            <div class="form-hint" id="smartRouteSplits"></div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary hidden" onclick="updateSmartRouteLists()" id="smartRouteUpdateBtn">{{ _('smartroute_update_now') }}</button>
+            <button class="btn btn-danger hidden" onclick="uninstallSmartRoute()" id="smartRouteUninstallBtn">{{ _('smartroute_uninstall') }}</button>
+            <button class="btn btn-primary hidden" onclick="installSmartRoute()" id="smartRouteInstallBtn">{{ _('smartroute_install') }}</button>
+            <button class="btn btn-secondary" onclick="closeModal('smartRouteModal')">{{ _('cancel') }}</button>
+            <button class="btn btn-primary hidden" onclick="saveSmartRouteOwnSubnets()" id="smartRouteOwnSaveBtn">{{ _('save') }}</button>
         </div>
     </div>
 </div>
@@ -1362,6 +1408,7 @@
         { proto: 'adguard', category: 'services', icon: '🛡️', title: 'AdGuard Home', descKey: 'adguard_desc' },
         { proto: 'socks5', category: 'services', icon: '🧦', title: 'SOCKS5 Proxy', descKey: 'socks5_desc' },
         { proto: 'exit', category: 'services', icon: '🚪', title: 'Exit Node', descKey: 'exit_desc', badge: 'NEW' },
+        { proto: 'smartroute', category: 'services', icon: '🧭', title: 'Smart Route', descKey: 'smartroute_desc', badge: 'NEW' },
         { proto: 'nginx', category: 'web_servers', icon: '🌐', title: 'NGINX', descKey: 'nginx_desc' },
     ];
     const MARKETPLACE_CATEGORIES = [
@@ -1380,6 +1427,8 @@
     let installedAppsLoading = true;
     let currentSocks5Proto = 'socks5';
     let currentAwgProto = 'awg2';
+    // Smart Route app state (GET /api/servers/{id}/smartroute/status); null = not loaded.
+    let smartRouteStatus = null;
 
     const AWG_PROTOCOLS = ['awg', 'awg2', 'awg3', 'awg_legacy'];
     // Protocols that hand out a client config or link, and therefore have an
@@ -1630,8 +1679,17 @@
                     <div class="marketplace-category-title"><span>${cat.icon}</span> ${_(cat.titleKey)}</div>
                     <div class="marketplace-grid">
                         ${apps.map(app => {
-                            const installed = baseInstalled(app.proto);
+                            const isSmart = app.proto === 'smartroute';
+                            const installed = isSmart ? !!(smartRouteStatus && smartRouteStatus.installed) : baseInstalled(app.proto);
                             const canInstallAnother = installed && isMultiInstanceBase(app.proto);
+                            const action = isSmart
+                                ? `onclick="openSmartRouteModal()"`
+                                : (installed && !canInstallAnother ? 'disabled' : `onclick="installFromMarketplace('${app.proto}', ${canInstallAnother ? 'true' : 'false'})"`);
+                            const statusBadge = isSmart
+                                ? (installed
+                                    ? `<span class="badge badge-success"><span class="badge-dot"></span> ${_('installed')}</span>`
+                                    : `<span class="badge badge-warn"><span class="badge-dot"></span> ${_('not_installed')}</span>`)
+                                : marketplaceAppStatus(app.proto);
                             return `
                                 <div class="marketplace-app-card">
                                     <div class="marketplace-app-top">
@@ -1639,13 +1697,13 @@
                                             <div class="protocol-icon" style="width:38px;height:38px;font-size:1.2rem;">${app.icon}</div>
                                             <div>
                                                 <div class="marketplace-app-title">${app.title} ${app.badge ? `<span class="badge badge-info" style="font-size:0.65rem;">${app.badge}</span>` : ''}</div>
-                                                ${marketplaceAppStatus(app.proto)}
+                                                ${statusBadge}
                                             </div>
                                         </div>
                                     </div>
                                     <div class="marketplace-app-desc">${_(app.descKey)}</div>
-                                    <button class="btn ${installed && !canInstallAnother ? 'btn-secondary' : 'btn-primary'} btn-sm" ${installed && !canInstallAnother ? 'disabled' : `onclick="installFromMarketplace('${app.proto}', ${canInstallAnother ? 'true' : 'false'})"`}>
-                                        ${canInstallAnother ? _('install_another') : (installed ? _('installed') : _('install'))}
+                                    <button class="btn ${installed && !canInstallAnother ? 'btn-secondary' : 'btn-primary'} btn-sm" ${action}>
+                                        ${isSmart ? _('smartroute_open') : (canInstallAnother ? _('install_another') : (installed ? _('installed') : _('install')))}
                                     </button>
                                 </div>
                             `;
@@ -3206,6 +3264,20 @@
         document.getElementById('exitEgressBtn').classList.toggle('hidden', !link);
         document.getElementById('exitDnsGroup').classList.toggle('hidden', !link);
         document.getElementById('exitDnsViaExit').checked = !!(link && link.dns_via_exit);
+        // Smart Route split toggle: only meaningful for a linked instance.
+        const srGroup = document.getElementById('smartRouteGroup');
+        const srToggle = document.getElementById('smartRouteToggle');
+        const srHint = document.getElementById('smartRouteHint');
+        srGroup.classList.toggle('hidden', !link);
+        if (link) {
+            const srInstalled = !!(smartRouteStatus && smartRouteStatus.installed);
+            srToggle.disabled = !srInstalled;
+            srToggle.checked = !!link.smart_route;
+            srHint.textContent = srInstalled ? _('smartroute_toggle_hint') : _('smartroute_toggle_install_first');
+            renderSmartRouteCounters(state.smartroute);
+        } else {
+            document.getElementById('smartRouteCounters').innerHTML = '';
+        }
         repairBtn.classList.toggle('hidden', !(link && (link.stale || !(state.exit_link_status && state.exit_link_status.up))));
         if (!link) {
             el.innerHTML = `<div class="form-hint">${_('exit_link_none')}</div>`;
@@ -3215,6 +3287,9 @@
         }
         let warnings = '';
         if (state.ipv6) warnings += `<div class="form-hint">⚠ ${_('exit_link_ipv6_warning')}</div>`;
+        if (link && link.smart_route_lost) {
+            warnings += `<div class="form-hint" style="color:var(--warning, #fbbf24)">⚠ ${_('smartroute_lost')}</div>`;
+        }
         if (state.mtu && state.exit_mtu && state.mtu > state.exit_mtu) {
             warnings += `<div class="form-hint" style="color:var(--danger, #f87171)">⚠ ${_('exit_link_mtu_warning').replace('{mtu}', state.mtu).replace('{exit_mtu}', state.exit_mtu)}</div>`;
         }
@@ -3235,10 +3310,12 @@
         document.getElementById('exitEgressBtn').classList.add('hidden');
         openModal('exitLinkModal');
         try {
-            const [nodes, state] = await Promise.all([
+            const [nodes, state, srStatus] = await Promise.all([
                 apiCall('/api/exit-nodes'),
                 apiCall(`/api/servers/${SERVER_ID}/exit-link/status`, 'POST', { protocol: proto }),
+                apiCall(`/api/servers/${SERVER_ID}/smartroute/status`).catch(() => null),
             ]);
+            smartRouteStatus = srStatus;
             currentExitLinkState = state;
             const own = document.body.dataset.serverUid || '';
             const candidates = (nodes.exit_nodes || []).filter(n => n.uid !== own);
@@ -3344,6 +3421,180 @@
 
     async function repairExitLink() {
         await exitLinkRequest('/relink', { protocol: currentExitLinkProto }, 'exit_link_saved');
+    }
+
+    const SMARTR_ERROR_KEYS = ['app_not_installed', 'not_linked', 'protocol_not_awg', 'invalid_cidr', 'server_not_found'];
+
+    function smartrouteErrorText(err) {
+        return SMARTR_ERROR_KEYS.includes(err.message) ? _(err.message) : err.message;
+    }
+
+    function renderSmartRouteCounters(sr) {
+        const box = document.getElementById('smartRouteCounters');
+        if (!box) return;
+        if (!sr || !sr.enabled) {
+            box.innerHTML = '';
+            return;
+        }
+        const direct = sr.direct || {};
+        const viaExit = sr.via_exit || {};
+        box.innerHTML = `
+            <div class="form-hint">${_('smartroute_counters_direct')}: ${formatBytes(direct.bytes || 0)} (${direct.pkts || 0} pkt)</div>
+            <div class="form-hint">${_('smartroute_counters_exit')}: ${formatBytes(viaExit.bytes || 0)} (${viaExit.pkts || 0} pkt)</div>
+        `;
+    }
+
+    async function saveSmartRouteSplit(enabled) {
+        const box = document.getElementById('smartRouteToggle');
+        box.disabled = true;
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/smartroute/split`, 'POST',
+                          { protocol: currentExitLinkProto, enabled: !!enabled });
+            showToast(_(enabled ? 'smartroute_split_on' : 'smartroute_split_off'), 'success');
+            if (currentExitLinkState && currentExitLinkState.exit_link) {
+                currentExitLinkState.exit_link.smart_route = !!enabled;
+                currentExitLinkState.exit_link.smart_route_lost = false;
+            }
+            const state = await apiCall(`/api/servers/${SERVER_ID}/exit-link/status`, 'POST',
+                                        { protocol: currentExitLinkProto });
+            currentExitLinkState = state;
+            renderExitLinkState(state);
+        } catch (err) {
+            box.checked = !enabled;
+            showToast(_('error') + ': ' + smartrouteErrorText(err), 'error');
+        } finally {
+            box.disabled = !(smartRouteStatus && smartRouteStatus.installed);
+        }
+    }
+
+    async function loadSmartRouteStatus() {
+        try {
+            smartRouteStatus = await apiCall(`/api/servers/${SERVER_ID}/smartroute/status`);
+        } catch (err) {
+            smartRouteStatus = null;
+            throw err;
+        }
+        return smartRouteStatus;
+    }
+
+    function renderSmartRouteModal(status) {
+        const installed = !!(status && status.installed);
+        const state = document.getElementById('smartRouteState');
+        document.getElementById('smartRouteInstallBtn').classList.toggle('hidden', installed);
+        document.getElementById('smartRouteUninstallBtn').classList.toggle('hidden', !installed);
+        document.getElementById('smartRouteUpdateBtn').classList.toggle('hidden', !installed);
+        document.getElementById('smartRouteOwnSaveBtn').classList.toggle('hidden', !installed);
+        document.getElementById('smartRouteOwnGroup').classList.toggle('hidden', !installed);
+        document.getElementById('smartRouteDnsGroup').classList.toggle('hidden', !installed);
+        document.getElementById('smartRouteSplitsGroup').classList.toggle('hidden', !installed);
+        document.getElementById('smartRouteLists').classList.toggle('hidden', !installed);
+        if (!installed) {
+            state.innerHTML = `<span class="badge badge-warn"><span class="badge-dot"></span> ${_('not_installed')}</span>`;
+            return;
+        }
+        state.innerHTML = `<span class="badge badge-success"><span class="badge-dot"></span> ${_('installed')}</span>`;
+        const host = status.host || {};
+        const rows = [
+            `${_('smartroute_prefixes_v4')}: ${host.prefixes_v4 != null ? host.prefixes_v4 : '—'}`,
+            `${_('smartroute_prefixes_v6')}: ${host.prefixes_v6 != null ? host.prefixes_v6 : '—'}`,
+        ];
+        if (host.source_v4) rows.push(`${_('smartroute_source')}: ${escapeHtml(host.source_v4)}`);
+        if (host.updated_at) rows.push(`${_('smartroute_updated')}: ${escapeHtml(host.updated_at)}`);
+        if (host.next_update) rows.push(`${_('smartroute_next_update')}: ${escapeHtml(host.next_update)}`);
+        document.getElementById('smartRouteListsInfo').innerHTML = rows.map(r => `<div>${r}</div>`).join('');
+        document.getElementById('smartRouteListsError').textContent = host.error || '';
+        document.getElementById('smartRouteOwnSubnets').value = (status.own_subnets || []).join('\n');
+        document.getElementById('smartRouteDnsViaExit').checked = !!status.dns_via_exit;
+        const splits = status.split_instances || [];
+        document.getElementById('smartRouteSplits').textContent = splits.length
+            ? splits.map(getProtoTitle).join(', ')
+            : _('smartroute_split_none');
+    }
+
+    async function openSmartRouteModal() {
+        closeModal('marketplaceModal');
+        const state = document.getElementById('smartRouteState');
+        state.innerHTML = `<div class="form-hint">${_('loading')}</div>`;
+        openModal('smartRouteModal');
+        try {
+            renderSmartRouteModal(await loadSmartRouteStatus());
+        } catch (err) {
+            state.innerHTML = `<div class="form-hint">${_('error')}: ${escapeHtml(smartrouteErrorText(err))}</div>`;
+        }
+    }
+
+    async function installSmartRoute() {
+        const btn = document.getElementById('smartRouteInstallBtn');
+        btn.disabled = true;
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/smartroute/install`, 'POST');
+            showToast(_('smartroute_installed_toast'), 'success');
+            renderSmartRouteModal(await loadSmartRouteStatus());
+        } catch (err) {
+            showToast(_('error') + ': ' + smartrouteErrorText(err), 'error');
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    async function uninstallSmartRoute() {
+        if (!confirm(_('smartroute_uninstall_confirm'))) return;
+        const btn = document.getElementById('smartRouteUninstallBtn');
+        btn.disabled = true;
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/smartroute/uninstall`, 'POST');
+            showToast(_('smartroute_uninstalled_toast'), 'success');
+            renderSmartRouteModal(await loadSmartRouteStatus());
+        } catch (err) {
+            showToast(_('error') + ': ' + smartrouteErrorText(err), 'error');
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    async function updateSmartRouteLists() {
+        const btn = document.getElementById('smartRouteUpdateBtn');
+        btn.disabled = true;
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/smartroute/update`, 'POST');
+            showToast(_('smartroute_update_done'), 'success');
+            renderSmartRouteModal(await loadSmartRouteStatus());
+        } catch (err) {
+            showToast(_('error') + ': ' + smartrouteErrorText(err), 'error');
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    async function saveSmartRouteOwnSubnets() {
+        const raw = document.getElementById('smartRouteOwnSubnets').value || '';
+        const cidrs = raw.split('\n').map(s => s.trim()).filter(Boolean);
+        const btn = document.getElementById('smartRouteOwnSaveBtn');
+        btn.disabled = true;
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/smartroute/own-subnets`, 'POST', { cidrs });
+            showToast(_('smartroute_own_subnets_saved'), 'success');
+            renderSmartRouteModal(await loadSmartRouteStatus());
+        } catch (err) {
+            showToast(_('error') + ': ' + smartrouteErrorText(err), 'error');
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    async function saveSmartRouteDns(enabled) {
+        const box = document.getElementById('smartRouteDnsViaExit');
+        box.disabled = true;
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/smartroute/dns`, 'POST', { enabled: !!enabled });
+            showToast(_(enabled ? 'smartroute_dns_on' : 'smartroute_dns_off'), 'success');
+            if (smartRouteStatus) smartRouteStatus.dns_via_exit = !!enabled;
+        } catch (err) {
+            box.checked = !enabled;
+            showToast(_('error') + ': ' + smartrouteErrorText(err), 'error');
+        } finally {
+            box.disabled = false;
+        }
     }
 
     async function openSocks5Settings(proto = 'socks5') {
