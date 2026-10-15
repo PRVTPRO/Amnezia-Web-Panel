@@ -181,7 +181,7 @@ else:
 DATA_FILE = os.path.abspath(os.path.expanduser(
     os.environ.get('DATA_FILE') or os.path.join(application_path, 'data.json')
 ))
-CURRENT_VERSION = "v1.7.3"
+CURRENT_VERSION = "v1.7.5"
 
 # Custom protocol instance names: the rename modal caps input at 64 chars.
 CUSTOM_PROTOCOL_NAME_MAX = 64
@@ -2499,7 +2499,7 @@ class UpdateUserRequest(BaseModel):
     telegramId: Optional[str] = None
     email: Optional[str] = None
     description: Optional[str] = None
-    traffic_limit: Optional[float] = 0
+    traffic_limit: Optional[float] = None
     traffic_reset_strategy: Optional[str] = None
     expiration_date: Optional[str] = None
     password: Optional[str] = None
@@ -5803,48 +5803,57 @@ async def api_update_user(request: Request, user_id: str, req: UpdateUserRequest
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
-        data = load_data()
-        user = next((u for u in data['users'] if u['id'] == user_id), None)
-        if not user:
-            return JSONResponse({'error': 'User not found'}, status_code=404)
-            
-        if req.username is not None:
-            new_name = req.username.strip()
-            lang = request.cookies.get('lang', 'ru')
-            if not new_name:
-                return JSONResponse({'error': _t('username_empty', lang)}, status_code=400)
-            if any(u['username'] == new_name and u['id'] != user_id for u in data.get('users', [])):
-                return JSONResponse({'error': _t('user_exists', lang)}, status_code=400)
-            user['username'] = new_name
-        if req.telegramId is not None:
-            try:
-                user['telegramId'] = _normalize_telegram_id(req.telegramId)
-            except ValueError as exc:
-                return JSONResponse({'error': str(exc)}, status_code=400)
-        if req.email is not None: user['email'] = req.email
-        if req.description is not None: user['description'] = req.description
-        if req.traffic_limit is not None: 
-            new_limit = int(req.traffic_limit * 1024**3)
-            user['traffic_limit'] = new_limit
-        
-        if req.traffic_reset_strategy is not None:
-            user['traffic_reset_strategy'] = req.traffic_reset_strategy
-            user['last_reset_at'] = datetime.now().isoformat()
-            
-        req_fields = getattr(req, 'model_fields_set', getattr(req, '__fields_set__', set()))
-        if 'expiration_date' in req_fields:
-            user['expiration_date'] = req.expiration_date or None
+        async with DATA_LOCK:
+            data = load_data()
+            user = next((u for u in data['users'] if u['id'] == user_id), None)
+            if not user:
+                return JSONResponse({'error': 'User not found'}, status_code=404)
 
-        if req.password:
-            user['password_hash'] = hash_password(req.password)
-            
-        save_data(data)
-        
-        # Auto re-enable if traffic limit increased beyond usage
-        if req.traffic_limit is not None:
-            if new_limit > 0 and user.get('traffic_used', 0) < new_limit and not user.get('enabled', True):
-                await perform_toggle_user(data, user_id, True)
-                save_data(data)
+            if req.username is not None:
+                new_name = req.username.strip()
+                lang = request.cookies.get('lang', 'ru')
+                if not new_name:
+                    return JSONResponse({'error': _t('username_empty', lang)}, status_code=400)
+                if any(u['username'] == new_name and u['id'] != user_id for u in data.get('users', [])):
+                    return JSONResponse({'error': _t('user_exists', lang)}, status_code=400)
+                user['username'] = new_name
+            if req.telegramId is not None:
+                try:
+                    user['telegramId'] = _normalize_telegram_id(req.telegramId)
+                except ValueError as exc:
+                    return JSONResponse({'error': str(exc)}, status_code=400)
+            if req.email is not None: user['email'] = req.email
+            if req.description is not None: user['description'] = req.description
+            if req.traffic_limit is not None:
+                new_limit = int(req.traffic_limit * 1024**3)
+                user['traffic_limit'] = new_limit
+
+            if req.traffic_reset_strategy is not None:
+                user['traffic_reset_strategy'] = req.traffic_reset_strategy
+                user['last_reset_at'] = datetime.now().isoformat()
+
+            req_fields = getattr(req, 'model_fields_set', getattr(req, '__fields_set__', set()))
+            if 'expiration_date' in req_fields:
+                user['expiration_date'] = req.expiration_date or None
+
+            if req.password:
+                user['password_hash'] = hash_password(req.password)
+
+            # Persist the complete local intent before SSH can yield. Never write
+            # this snapshot again after SSH: traffic accounting and other requests
+            # may have saved newer fields while the network operation was pending.
+            auto_reenable = (
+                req.traffic_limit is not None
+                and new_limit > 0
+                and user.get('traffic_used', 0) < new_limit
+                and not user.get('enabled', True)
+            )
+            if auto_reenable:
+                user['enabled'] = True
+            save_data(data)
+
+        if auto_reenable:
+            await perform_toggle_user(data, user_id, True)
 
         return {'status': 'success'}
     except Exception as e:
@@ -5878,11 +5887,16 @@ async def api_toggle_user(request: Request, user_id: str, req: ToggleUserRequest
     if not cur or cur['role'] != 'admin':
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
-        data = load_data()
-        success = await perform_toggle_user(data, user_id, req.enabled)
-        if not success:
-            return JSONResponse({'error': 'User not found'}, status_code=404)
-        save_data(data)
+        async with DATA_LOCK:
+            data = load_data()
+            user = next((u for u in data['users'] if u['id'] == user_id), None)
+            if not user:
+                return JSONResponse({'error': 'User not found'}, status_code=404)
+            user['enabled'] = req.enabled
+            save_data(data)
+        # SSH only propagates the committed intent; it must not save an old
+        # full-data snapshot when it completes.
+        await perform_toggle_user(data, user_id, req.enabled)
         return {'status': 'success', 'enabled': req.enabled}
     except Exception as e:
         logger.exception("Error toggling user")

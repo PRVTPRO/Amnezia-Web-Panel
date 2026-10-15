@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from managers.telemt_manager import TelemtManager
 
@@ -118,6 +119,73 @@ class TelemtManagerClientTest(unittest.TestCase):
 
         self.assertEqual(first['client_id'], 'hello_1')
         self.assertEqual(second['client_id'], 'hello_2')
+
+    def test_add_client_faketls_fallback_keeps_raw_secret_in_config(self):
+        ssh, manager = self.make_manager()
+        secret = 'ab' * 16
+        result = manager.add_client(
+            'telemt', 'alice', host='vpn.example.test', port='8443', secret=secret)
+        expected = ('tg://proxy?server=vpn.example.test&port=8443&secret=ee'
+                    + secret + 'petrovich.ru'.encode('utf-8').hex())
+        self.assertEqual(result['config'], expected)
+        self.assertEqual(result['vpn_link'], expected)
+        self.assertIn(f'alice = "{secret}"', ssh.config)
+
+    def test_add_client_last_resort_fallback_uses_faketls(self):
+        _, manager = self.make_manager()
+        secret = 'ab' * 16
+        with patch.object(manager, 'get_client_config', return_value='Not found'):
+            result = manager.add_client('telemt', 'alice', host='h', port='443', secret=secret)
+        self.assertEqual(result['config'], 'tg://proxy?server=h&port=443&secret=ee'
+                         + secret + 'petrovich.ru'.encode('utf-8').hex())
+
+    def test_get_client_config_fallback_uses_public_port(self):
+        _, manager = self.make_manager()
+        link = manager.get_client_config(
+            'telemt', 'hello', host='vpn.example.test', port='8443', public_port='443')
+        self.assertEqual(link, 'tg://proxy?server=vpn.example.test&port=443&secret=ee'
+                         + '0' * 32 + 'petrovich.ru'.encode('utf-8').hex())
+
+    def test_get_client_config_without_faketls_keeps_raw_secret(self):
+        _, manager = self.make_manager(BASE_CONFIG.replace('tls_emulation = true',
+                                                          'tls_emulation = false'))
+        self.assertEqual(manager.get_client_config('telemt', 'hello', 'h', '443'),
+                         'tg://proxy?server=h&port=443&secret=' + '0' * 32)
+
+    def test_get_client_config_api_without_links_uses_faketls_fallback(self):
+        _, manager = self.make_manager()
+        manager._api_request = lambda *a, **k: {'ok': True, 'data': [] if a[1] == '/v1/users' else {}}
+        self.assertEqual(manager.get_client_config('telemt', 'hello', 'h', '443'),
+                         'tg://proxy?server=h&port=443&secret=ee'
+                         + '0' * 32 + 'petrovich.ru'.encode('utf-8').hex())
+
+    def test_get_client_config_unknown_client_is_not_found(self):
+        _, manager = self.make_manager()
+        self.assertEqual(manager.get_client_config('telemt', 'missing', 'h', '443'), 'Not found')
+
+    def test_get_client_config_missing_faketls_domain_reports_error(self):
+        for domain_line in ('', 'tls_domain = ""'):
+            with self.subTest(domain_line=domain_line):
+                _, manager = self.make_manager(BASE_CONFIG.replace(
+                    'tls_domain = "petrovich.ru"', domain_line))
+                with self.assertRaisesRegex(RuntimeError, 'tls_domain is missing'):
+                    manager.get_client_config('telemt', 'hello', 'h', '443')
+
+    def test_get_client_config_prefers_api_link(self):
+        _, manager = self.make_manager()
+        api_link = 'tg://proxy?server=api.example.test&port=443&secret=ee' + 'ab' * 16
+        manager._api_request = lambda *a, **k: {
+            'ok': True, 'data': {'links': {'tls': [api_link], 'classic': ['other']}}}
+        with patch.object(manager, '_get_server_config', side_effect=AssertionError):
+            self.assertEqual(manager.get_client_config('telemt', 'hello', 'h', '8443'), api_link)
+
+    def test_fallback_uses_selected_instance_domain(self):
+        ssh = FakeSSH(BASE_CONFIG.replace('petrovich.ru', 'example.com'))
+        manager = TelemtManager(ssh, protocol='telemt__2')
+        manager._api_request = lambda *a, **k: None
+        link = manager.get_client_config('telemt__2', 'hello', 'h', '443')
+        self.assertEqual(link, 'tg://proxy?server=h&port=443&secret=ee'
+                         + '0' * 32 + '6578616d706c652e636f6d')
 
 
 if __name__ == '__main__':

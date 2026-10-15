@@ -443,7 +443,7 @@ docker compose version
         
         # Extreme fallback if API is slow or 404
         if link == "Not found":
-            link = f"tg://proxy?server={host}&port={port}&secret={secret}"
+            link = self._build_client_link(secret, host, port, config_text)
         
         return {
             "client_id": username,
@@ -642,6 +642,16 @@ docker compose version
         self.ssh.run_sudo_command(f"docker kill -s HUP {self.container_name} || docker restart {self.container_name}")
         return {'status': 'success', 'name': new_username, 'client_id': new_username}
 
+    def _build_client_link(self, secret, host, port, config_text):
+        """Build a fallback link using this instance's FakeTLS settings."""
+        params = self._parse_telemt_params(config_text)
+        if params.get('tls_emulation'):
+            domain = params.get('tls_domain', '').strip()
+            if not domain:
+                raise RuntimeError('Telemt FakeTLS is enabled but tls_domain is missing')
+            secret = 'ee' + secret + domain.encode('utf-8').hex()
+        return f"tg://proxy?server={host}&port={port}&secret={secret}"
+
     def get_client_config(self, protocol_type, client_id, host='', port='', public_port=None):
         resp = self._api_request("GET", f"/v1/users/{client_id}")
         if resp and resp.get('ok'):
@@ -655,5 +665,7 @@ docker compose version
         c = next((c for c in clients if c['clientId'] == client_id), None)
         if c:
             secret = c.get('userData', {}).get('token', '')
-            if secret: return f"tg://proxy?server={host}&port={public_port or port}&secret={secret}"
+            if secret:
+                return self._build_client_link(
+                    secret, host, public_port or port, self._get_server_config())
         return "Not found"

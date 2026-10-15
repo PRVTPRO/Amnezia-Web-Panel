@@ -2428,9 +2428,7 @@ done < "$BW"
         for line in config.split('\n'):
             line = line.strip()
             if line.startswith('AllowedIPs'):
-                match = re.search(r'(\d+\.\d+\.\d+\.\d+)', line)
-                if match:
-                    ips.append(match.group(1))
+                ips.extend(self._ipv4_addresses(line.split('=', 1)[-1]))
             elif line.startswith('Address'):
                 match = re.search(r'(\d+\.\d+\.\d+\.\d+)', line)
                 if match:
@@ -2470,9 +2468,7 @@ done < "$BW"
         reserved = set()
         for c in entries:
             ud = c.get('userData') or {}
-            ip = self._extract_ipv4(ud.get('allowedIps') or ud.get('clientIp') or '')
-            if ip:
-                reserved.add(ip)
+            reserved.update(self._client_ipv4_addresses(ud))
         return reserved
 
     def _get_next_ip(self, protocol_type):
@@ -2560,13 +2556,27 @@ done < "$BW"
         match = re.search(r'(\d+\.\d+\.\d+\.\d+)', str(value))
         return match.group(1) if match else ''
 
+    @staticmethod
+    def _ipv4_addresses(value):
+        """Read IPv4 addresses from native string/list and panel address fields."""
+        addresses = set()
+        for token in re.findall(r'(?<![\w.])\d+\.\d+\.\d+\.\d+(?![\w.])', str(value or '')):
+            try:
+                addresses.add(str(ipaddress.IPv4Address(token)))
+            except ipaddress.AddressValueError:
+                continue
+        return addresses
+
+    def _client_ipv4_addresses(self, user_data):
+        addresses = set()
+        for key in ('clientIp', 'allowedIps', 'allowed_ip', 'allowed_ips'):
+            addresses.update(self._ipv4_addresses(user_data.get(key)))
+        return addresses
+
     def _client_ip_from_userdata(self, user_data):
-        """Return a valid client IP from stored userData, tolerating native Amnezia records."""
-        return (
-            self._extract_ipv4(user_data.get('clientIp'))
-            or self._extract_ipv4(user_data.get('allowedIps'))
-            or self._extract_ipv4(user_data.get('allowed_ip'))
-        )
+        """Return the saved address only when the record is unambiguous."""
+        addresses = self._client_ipv4_addresses(user_data)
+        return next(iter(addresses)) if len(addresses) == 1 else ''
 
     def _parse_peers_from_config(self, protocol_type):
         """Parse [Peer] sections from WireGuard server config and return dict of pubkey -> {allowedIps}."""
@@ -3001,10 +3011,12 @@ AllowedIPs = {allowed_ips}
                     continue
                 config_lines.append(f"{config_key} = {val}")
 
-        # Route ::/0 only when the client actually holds an IPv6 address:
-        # claiming the IPv6 default route on an IPv4-only tunnel blackholes
-        # the client's own native IPv6.
-        peer_allowed_ips = "0.0.0.0/0, ::/0" if client_ipv6 else "0.0.0.0/0"
+        # Always advertise both default routes in the *client* config.
+        # AmneziaVPN treats AllowedIPs without ::/0 as a non-full-tunnel
+        # server and disables split tunneling in the UI (#158/#193).
+        # This does not assign the client an IPv6 address or enable AWG_IPV6;
+        # server-side peer AllowedIPs stay IPv4-only unless client_ipv6 is set.
+        peer_allowed_ips = "0.0.0.0/0, ::/0"
 
         client_config = "[Interface]\n" + "\n".join(config_lines) + f"""
 
@@ -3104,8 +3116,8 @@ PersistentKeepalive = 25
                     continue
                 config_lines.append(f"{config_key} = {val}")
 
-        # See the client-creation path: ::/0 only on dual-stack tunnels.
-        peer_allowed_ips = "0.0.0.0/0, ::/0" if client_ipv6 else "0.0.0.0/0"
+        # See the client-creation path: always include ::/0 for Amnezia split tunneling.
+        peer_allowed_ips = "0.0.0.0/0, ::/0"
 
         config = "[Interface]\n" + "\n".join(config_lines) + f"""
 
@@ -3128,9 +3140,7 @@ PersistentKeepalive = 25
         table_changed = False
 
         if enable:
-            # Re-add peer to server config. Native Amnezia clients may not have
-            # userData.clientIp in clientsTable, so recover it from allowedIps
-            # before falling back to a new free address.
+            # Restore native addresses without silently replacing issued configs.
             client = None
             for c in clients_table:
                 if c.get('clientId') == client_id:
@@ -3141,32 +3151,32 @@ PersistentKeepalive = 25
 
             ud = client.setdefault('userData', {})
             psk = ud.get('psk', '')
-            client_ip = self._client_ip_from_userdata(ud)
-            if client_ip:
-                # A disabled client's address stays reserved in clientsTable.
-                # Refuse to re-enable when another client owns it now.
-                for other in clients_table:
-                    if other.get('clientId') == client_id:
-                        continue
-                    other_ip = self._extract_ipv4(
-                        (other.get('userData') or {}).get('allowedIps')
-                        or (other.get('userData') or {}).get('clientIp') or '')
-                    if other_ip == client_ip:
-                        raise RuntimeError(
-                            f"Cannot enable client: IP {client_ip} is already "
-                            f"reserved by another client. Resolve the conflict "
-                            f"(delete one of them) first.")
-                if client_ip in self._get_used_ips(protocol_type):
-                    raise RuntimeError(
-                        f"Cannot enable client: IP {client_ip} is already "
-                        f"present in the active server config")
+            addresses = self._client_ipv4_addresses(ud)
+            if len(addresses) > 1:
+                raise RuntimeError('Cannot enable client: IP address is ambiguous; resolve it manually')
+            client_ip = next(iter(addresses)) if addresses else ''
             if not client_ip:
+                if not ud.get('clientPrivateKey') or any(
+                        ud.get(k) for k in ('clientIp', 'allowedIps', 'allowed_ip', 'allowed_ips')):
+                    raise RuntimeError('Cannot enable client: IP address is unavailable; cannot safely reassign it')
+                # Legacy panel clients can still receive a new configuration.
                 client_ip = self._get_next_ip(protocol_type)
-                logger.warning(
-                    "Client %s had no saved AWG IP/AllowedIPs; assigning next free IP %s",
-                    client_id,
-                    client_ip,
-                )
+
+            # Validate before any config, metadata, or live-interface mutation.
+            # A fresh read reduces stale-cache conflicts, but is not a transaction
+            # with the official app or another panel process.
+            self._invalidate_config_cache(protocol_type)
+            for other in clients_table:
+                if other.get('clientId') == client_id:
+                    continue
+                if client_ip in self._client_ipv4_addresses(other.get('userData') or {}):
+                    raise RuntimeError(
+                        f'Cannot enable client: IP {client_ip} is occupied by another reservation; '
+                        'resolve the conflict manually')
+            if client_ip in self._get_used_ips(protocol_type):
+                raise RuntimeError(
+                    f'Cannot enable client: IP {client_ip} is occupied in the active server config; '
+                    'resolve the conflict manually')
 
             ud['clientIp'] = client_ip
             client_ipv6 = ud.get('clientIpv6', '') or self._get_client_ipv6(protocol_type, client_ip)
@@ -3176,22 +3186,22 @@ PersistentKeepalive = 25
                 ud['clientIpv6'] = client_ipv6
             table_changed = True
 
-            if not psk:
+            if 'psk' not in ud:
+                if not ud.get('clientPrivateKey'):
+                    raise RuntimeError(
+                        'Cannot enable client: preshared key (PSK) is unknown; '
+                        'restore the original key or explicitly record no PSK')
+                # Only legacy panel-generated clients used the global PSK.
                 psk = self._get_server_psk(protocol_type)
                 ud['psk'] = psk
                 table_changed = True
 
-            peer_section = f"""
-[Peer]
-PublicKey = {client_id}
-PresharedKey = {psk}
-AllowedIPs = {allowed_ips}
-
-"""
-            escaped_peer = peer_section.replace("'", "'\\''")
-            self.ssh.run_sudo_command(
-                f"docker exec -i {container_name} bash -c 'echo \"{escaped_peer}\" >> {config_path}'"
+            psk_line = f'PresharedKey = {psk}\n' if psk else ''
+            peer_section = (
+                f'\n[Peer]\nPublicKey = {client_id}\n'
+                f'{psk_line}AllowedIPs = {allowed_ips}\n\n'
             )
+            self._insert_peer_sorted(protocol_type, peer_section)
             self._invalidate_config_cache(protocol_type)
         else:
             # Remove peer from server config, but first persist its current
@@ -3221,9 +3231,16 @@ AllowedIPs = {allowed_ips}
                 ud['clientIp'] = client_ip
                 ud['allowedIps'] = allowed_ips or f'{client_ip}/32'
                 table_changed = True
-            if not ud.get('psk'):
-                ud['psk'] = self._get_server_psk(protocol_type)
-                table_changed = True
+            for block in config.split('[Peer]')[1:]:
+                key = re.search(r'^\s*PublicKey\s*=\s*(\S+)', block, re.MULTILINE)
+                if key and key.group(1) == client_id:
+                    saved_psk = re.search(
+                        r'^[ \t]*PresharedKey[ \t]*=[ \t]*([^\s#]+)', block, re.MULTILINE)
+                    # An observed peer without a PSK is known no-PSK mode,
+                    # not missing metadata eligible for the global fallback.
+                    ud['psk'] = saved_psk.group(1) if saved_psk else ''
+                    table_changed = True
+                    break
 
             sections = config.split('[')
             new_sections = []
