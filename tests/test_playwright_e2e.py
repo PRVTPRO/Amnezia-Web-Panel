@@ -63,12 +63,16 @@ class TestDashboard:
         expect(page).to_have_url(f"{BASE_URL}/login")
 
 class TestAPI:
-    def test_openapi_json_available(self, page: Page):
+    def test_openapi_json_requires_auth(self, page: Page):
+        # The API schema maps every endpoint; anonymous visitors must not
+        # get it (docs_auth_middleware).
         response = page.request.get(f"{BASE_URL}/openapi.json")
-        assert response.status == 200
-        body = response.json()
-        assert "paths" in body
-        assert "info" in body
+        assert response.status == 403
+
+    def test_docs_redirects_anonymous_to_login(self, page: Page):
+        response = page.request.get(f"{BASE_URL}/docs", max_redirects=0)
+        assert response.status in (302, 307)
+        assert "/login" in response.headers.get("location", "")
 
     def test_static_files_served(self, page: Page):
         response = page.request.get(f"{BASE_URL}/static/js/searchable-select.js")

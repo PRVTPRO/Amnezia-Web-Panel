@@ -126,7 +126,6 @@ async def custom_redoc():
         redoc_js_url="/static/vendor/redoc/redoc.standalone.js",
         with_google_fonts=False,
     )
-app.add_middleware(SessionMiddleware, secret_key=os.environ.get('SECRET_KEY', secrets.token_hex(32)))
 
 
 @app.middleware("http")
@@ -149,7 +148,28 @@ async def robots_txt():
     robots.txt is only a hint and gets ignored by some bots)."""
     return PlainTextResponse("User-agent: *\nDisallow: /\n")
 
-# Mount static files & templates
+DOCS_PATHS = ('/docs', '/redoc', '/openapi.json')
+
+
+@app.middleware("http")
+async def docs_auth_middleware(request, call_next):
+    """Serve the API schema only to authenticated admins.
+
+    The OpenAPI document is a ready-made map of every endpoint and
+    parameter of the panel; leaving it open to anonymous visitors hands
+    scanners the feature list for free. Session cookie or admin Bearer
+    token both count.
+    """
+    if request.url.path in DOCS_PATHS and not _check_admin(request):
+        if request.url.path == '/openapi.json':
+            return JSONResponse({'error': 'Forbidden'}, status_code=403)
+        return RedirectResponse('/login')
+    return await call_next(request)
+
+# Sessions must wrap every other middleware: docs_auth_middleware above
+# reads request.session, so SessionMiddleware has to sit outside it.
+app.add_middleware(SessionMiddleware, secret_key=os.environ.get('SECRET_KEY', secrets.token_hex(32)))
+
 class CachedStaticFiles(StaticFiles):
     """Static assets that carry ?v=<static mtime> (see static_version()) change
     their URL on every redeploy, so they can be cached for 180 days. Assets
