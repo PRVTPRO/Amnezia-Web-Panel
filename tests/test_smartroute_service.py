@@ -37,6 +37,8 @@ def make_data(installed=True):
 class FakeAWG:
     def __init__(self):
         self.exit_applies = []
+        self.dns_lines = {}   # protocol -> current DNS line (None = unset)
+        self.dns_writes = []  # (protocol, dns) log
 
     def _container_name(self, protocol):
         return f'amnezia-{protocol}'
@@ -46,6 +48,16 @@ class FakeAWG:
 
     def _exit_apply(self, protocol, teardown=False):
         self.exit_applies.append(protocol)
+
+    def _read_config_key(self, protocol_type, key):
+        assert key == 'DNS', key
+        return self.dns_lines.get(protocol_type)
+
+    def update_awg_settings(self, protocol_type, mtu=None, dns=None,
+                            special_junk=None, dns6=None):
+        self.dns_writes.append((protocol_type, dns))
+        self.dns_lines[protocol_type] = dns or None
+        return {'mtu': mtu, 'dns': self.dns_lines.get(protocol_type)}
 
 
 class FakeSRM:
@@ -313,6 +325,120 @@ class SmartRouteServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out['direct'], {'pkts': 7, 'bytes': 700})
         self.assertEqual(out['via_exit_in'], {'pkts': 3, 'bytes': 300})
         self.assertEqual(out['throw_routes'], 37)
+
+    # ----- global pause/resume (card toggle) -----
+
+    async def test_set_enabled_requires_installed(self):
+        self.store['data']['servers'][0]['smartroute']['installed'] = False
+        with self.assertRaises(SmartRouteError) as ctx:
+            await self.svc.set_enabled(0, False)
+        self.assertEqual(ctx.exception.code, 'app_not_installed')
+        self.assertEqual(ctx.exception.status_code, 409)
+
+    async def test_set_enabled_idempotent(self):
+        out = await self.svc.set_enabled(0, True)
+        self.assertTrue(out.get('unchanged'))
+        self.assertNotIn(('disable_instance', 'amnezia-awg2',
+                          '/opt/amnezia/awg/awg2/wg0.conf', SUBNET_DEFAULT),
+                         FakeSRM.calls)
+
+    async def test_set_enabled_pause_rolls_instances_back(self):
+        out = await self.svc.set_enabled(0, False)
+        self.assertFalse(out['enabled'])
+        self.assertEqual(out['applied'], ['awg2'])
+        self.assertIn(('disable_instance', 'amnezia-awg2',
+                       '/opt/amnezia/awg/awg2/wg0.conf', SUBNET_DEFAULT),
+                      FakeSRM.calls)
+        # preference is kept so a resume restores it
+        self.assertTrue(self.store['data']['servers'][0]['protocols']['awg2']['exit_link']['smart_route'])
+        self.assertFalse(self.store['data']['servers'][0]['smartroute']['enabled'])
+
+    async def test_set_enabled_resume_reapplies(self):
+        self.store['data']['servers'][0]['smartroute']['enabled'] = False
+        out = await self.svc.set_enabled(0, True)
+        self.assertTrue(out['enabled'])
+        self.assertIn(('enable_instance', 'amnezia-awg2',
+                       '/opt/amnezia/awg/awg2/wg0.conf', SUBNET_DEFAULT),
+                      FakeSRM.calls)
+
+    async def test_set_enabled_partial_failure_reported(self):
+        def flaky(self_, container, config_path, subnet_default):
+            raise RuntimeError('docker exec failed')
+        with mock.patch.object(FakeSRM, 'disable_instance', flaky):
+            out = await self.svc.set_enabled(0, False)
+        self.assertEqual(out['status'], 'success')
+        self.assertEqual(out['applied'], [])
+        self.assertEqual(len(out['failed']), 1)
+        # the flag still flips — the instance can be fixed and re-resumed
+        self.assertFalse(self.store['data']['servers'][0]['smartroute']['enabled'])
+
+    async def test_status_reports_enabled_and_dns_pair(self):
+        out = await self.svc.status(0)
+        self.assertTrue(out['enabled'])
+        self.assertEqual(out['direct_dns'], '77.88.8.8')
+        self.assertEqual(out['exit_dns'], '1.1.1.1')
+
+    async def test_set_split_blocked_while_paused(self):
+        self.store['data']['servers'][0]['smartroute']['enabled'] = False
+        with self.assertRaises(SmartRouteError) as ctx:
+            await self.svc.set_split(0, 'awg', True)
+        self.assertEqual(ctx.exception.code, 'smartroute_paused')
+        self.assertEqual(ctx.exception.status_code, 409)
+
+    # ----- resolver pair (client-config DNS) -----
+
+    async def test_set_split_enable_writes_dns_pair_and_remembers_prev(self):
+        self.awg.dns_lines['awg'] = '172.29.172.254, 1.0.0.1'
+        await self.svc.set_split(0, 'awg', True)
+        self.assertIn(('awg', '77.88.8.8, 1.1.1.1'), self.awg.dns_writes)
+        link = self.store['data']['servers'][0]['protocols']['awg']['exit_link']
+        self.assertEqual(link['smart_route_prev_dns'], '172.29.172.254, 1.0.0.1')
+
+    async def test_set_split_disable_restores_prev_dns(self):
+        link = self.store['data']['servers'][0]['protocols']['awg2']['exit_link']
+        link['smart_route'] = False
+        self.awg.dns_lines['awg2'] = '172.29.172.254, 1.0.0.1'
+        await self.svc.set_split(0, 'awg2', True)   # remembers prev + writes pair
+        await self.svc.set_split(0, 'awg2', False)  # restores
+        self.assertIn(('awg2', '172.29.172.254, 1.0.0.1'), self.awg.dns_writes)
+        self.assertNotIn('smart_route_prev_dns', link)
+
+    async def test_pause_and_resume_keep_dns_pair(self):
+        self.awg.dns_writes.clear()
+        await self.svc.set_enabled(0, False)
+        await self.svc.set_enabled(0, True)
+        # resume re-applies the resolver pair; pause does not restore DNS
+        self.assertIn(('awg2', '77.88.8.8, 1.1.1.1'), self.awg.dns_writes)
+        self.assertEqual(self.awg.dns_writes, [('awg2', '77.88.8.8, 1.1.1.1')])
+        self.assertTrue(self.store['data']['servers'][0]['protocols']['awg2']['exit_link']['smart_route'])
+
+    async def test_uninstall_restores_prev_dns(self):
+        link = self.store['data']['servers'][0]['protocols']['awg2']['exit_link']
+        link['smart_route'] = False
+        self.awg.dns_lines['awg2'] = '172.29.172.254, 1.0.0.1'
+        await self.svc.set_split(0, 'awg2', True)
+        await self.svc.uninstall(0)
+        self.assertIn(('awg2', '172.29.172.254, 1.0.0.1'), self.awg.dns_writes)
+
+    async def test_set_dns_servers_validates(self):
+        with self.assertRaises(SmartRouteError) as ctx:
+            await self.svc.set_dns_servers(0, 'dns.yandex', '1.1.1.1')
+        self.assertEqual(ctx.exception.code, 'invalid_dns')
+        with self.assertRaises(SmartRouteError):
+            await self.svc.set_dns_servers(0, '77.88.8.8', '::1')
+
+    async def test_set_dns_servers_stores_and_applies_to_splits(self):
+        out = await self.svc.set_dns_servers(0, '77.88.8.1', '9.9.9.9')
+        self.assertEqual(out['direct_dns'], '77.88.8.1')
+        sm = self.store['data']['servers'][0]['smartroute']
+        self.assertEqual((sm['direct_dns'], sm['exit_dns']), ('77.88.8.1', '9.9.9.9'))
+        self.assertIn(('awg2', '77.88.8.1, 9.9.9.9'), self.awg.dns_writes)
+
+    async def test_set_dns_servers_requires_installed(self):
+        self.store['data']['servers'][0]['smartroute']['installed'] = False
+        with self.assertRaises(SmartRouteError) as ctx:
+            await self.svc.set_dns_servers(0, '77.88.8.8', '1.1.1.1')
+        self.assertEqual(ctx.exception.code, 'app_not_installed')
 
 
 if __name__ == '__main__':

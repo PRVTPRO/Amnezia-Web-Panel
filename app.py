@@ -2284,6 +2284,15 @@ class SmartRouteDnsRequest(BaseModel):
     enabled: bool = False
 
 
+class SmartRouteEnableRequest(BaseModel):
+    enabled: bool = True
+
+
+class SmartRouteDnsServersRequest(BaseModel):
+    direct: str = '77.88.8.8'
+    exit: str = '1.1.1.1'
+
+
 class Socks5SettingsRequest(BaseModel):
     protocol: str = 'socks5'
     port: Optional[int] = None
@@ -4451,6 +4460,43 @@ async def api_smartroute_dns(request: Request, server_id: int,
         return _smartroute_error(e)
     except Exception as e:
         logger.exception("Error switching Smart Route DNS")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/smartroute/enable', tags=["Protocols"])
+async def api_smartroute_enable(request: Request, server_id: int,
+                                req: SmartRouteEnableRequest):
+    """Global pause/resume of Smart Route on the server (card toggle).
+
+    Pausing rolls the split routing out of every split instance (traffic
+    returns to the exit node); resuming re-applies it. Lists, timer and
+    per-instance preferences are preserved."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        return await smartroute_svc.set_enabled(server_id, req.enabled)
+    except SmartRouteError as e:
+        return _smartroute_error(e)
+    except Exception as e:
+        logger.exception("Error toggling Smart Route globally")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/smartroute/dns-servers', tags=["Protocols"])
+async def api_smartroute_dns_servers(request: Request, server_id: int,
+                                     req: SmartRouteDnsServersRequest):
+    """Resolver pair for split instances: the direct resolver is expected to
+    be a RU IP (routed directly), the exit resolver a foreign one (routed
+    through the exit node). Stored server-wide and pushed into every split
+    instance's client-config DNS line."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        return await smartroute_svc.set_dns_servers(server_id, req.direct, req.exit)
+    except SmartRouteError as e:
+        return _smartroute_error(e)
+    except Exception as e:
+        logger.exception("Error saving Smart Route DNS pair")
         return JSONResponse({'error': str(e)}, status_code=500)
 
 

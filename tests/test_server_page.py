@@ -122,12 +122,32 @@ class SmartRouteUiWiringTests(unittest.TestCase):
     def test_translations_carry_smartroute_keys_in_all_languages(self):
         keys = set(re.findall(r"_\('(smartroute_[a-z0-9_]+)'\)", self.page))
         keys |= set(re.findall(r"\{\{ _\('(smartroute_[a-z0-9_]+)'\) \}\}", self.page))
-        keys |= {'app_not_installed', 'protocol_not_awg', 'invalid_cidr', 'server_not_found'}
+        keys |= {'app_not_installed', 'protocol_not_awg', 'invalid_cidr', 'invalid_dns',
+                 'smartroute_paused', 'server_not_found'}
         self.assertGreater(len(keys), 25)
         for lang in ('en', 'ru', 'fr', 'fa', 'zh'):
             data = json.loads(read('translations', f'{lang}.json'))
             missing = sorted(k for k in keys if k not in data)
             self.assertEqual(missing, [], f'{lang}: {missing}')
+
+    def test_server_page_card_with_global_toggle(self):
+        self.assertIn('id="proto-smartroute"', self.page)
+        self.assertIn('smartroute/enable', self.page)
+        self.assertIn('function toggleSmartRoute(', self.page)
+        self.assertIn('function renderSmartRouteCard(', self.page)
+        self.assertIn('smartroute-toggle-btn', self.page)
+        # the card must not be shown via the container-status path
+        self.assertIn("if (app.proto === 'smartroute') return;", self.page)
+
+    def test_card_dns_pair_inputs(self):
+        self.assertIn('id="smartroute-direct-dns"', self.page)
+        self.assertIn('id="smartroute-exit-dns"', self.page)
+        self.assertIn('smartroute/dns-servers', self.page)
+        self.assertIn('function saveSmartRouteDnsServers(', self.page)
+
+    def test_exit_modal_respects_global_pause(self):
+        self.assertIn('smartroute_paused_hint', self.page)
+        self.assertIn('srGloballyOn', self.page)
 
 
 if __name__ == '__main__':
