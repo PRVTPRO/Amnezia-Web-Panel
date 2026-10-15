@@ -255,6 +255,10 @@ def normalize_special_junk(values):
 CONN_WARN_THRESHOLD = 900    # simultaneous connections per peer that trigger a warning
 CONN_WARN_COOLDOWN = 3600    # min seconds between two recorded warnings for the same peer
 CONN_WARN_MAX_EVENTS = 5     # how many recent warnings are kept per peer
+# Conntrack entries outlive the VPN session by hours/days (TCP ESTABLISHED
+# timeout), so a peer that disconnected keeps "owning" its old flows in the
+# table. Counts are only trusted for peers whose handshake is fresh.
+CONN_LIVE_HANDSHAKE_SECONDS = 300
 
 
 def generate_wg_keypair():
@@ -2744,7 +2748,54 @@ done < "$BW"
                     counts[ip] = int(cnt_s)
             except ValueError:
                 continue
-        return counts
+
+        # Conntack keeps flows for hours/days after the peer disconnects, so
+        # a raw per-IP count attributes stale entries to offline peers and
+        # floods the UI with phantom warnings. Only peers with a fresh
+        # handshake can actually be opening connections right now.
+        live_ips = self._connected_peer_ips(protocol_type)
+        if live_ips is None:
+            return {}
+        return {ip: cnt for ip, cnt in counts.items() if ip in live_ips}
+
+    @staticmethod
+    def _parse_handshake_age(text):
+        """'1 minute, 51 seconds ago' -> 111. None when there was no handshake."""
+        if not text or 'ago' not in text:
+            return None
+        total = 0
+        for value, unit in re.findall(r'(\d+)\s+(second|minute|hour|day)', text):
+            total += int(value) * {'second': 1, 'minute': 60,
+                                   'hour': 3600, 'day': 86400}[unit]
+        return total
+
+    def _connected_peer_ips(self, protocol_type):
+        """IPs of peers whose latest handshake is recent (awg show, in-container).
+
+        Returns a set of IPv4 addresses, or None when liveness cannot be
+        determined (tool missing, empty output) so callers skip counting
+        instead of trusting stale data.
+        """
+        container = self._container_name(protocol_type)
+        out, err, code = self.ssh.run_sudo_command(
+            f'docker exec -i {container} sh -c "awg show 2>/dev/null || wg show 2>/dev/null"'
+        )
+        if code != 0 or not out.strip():
+            return None
+        live = set()
+        current_ip = None
+        for line in out.split('\n'):
+            line = line.strip()
+            if line.startswith('peer:'):
+                current_ip = None
+            elif line.startswith('allowed ips:'):
+                first = line.split(':', 1)[1].split(',')[0].strip()
+                current_ip = first.split('/')[0].strip()
+            elif line.startswith('latest handshake:') and current_ip:
+                age = self._parse_handshake_age(line.split(':', 1)[1].strip())
+                if age is not None and age <= CONN_LIVE_HANDSHAKE_SECONDS:
+                    live.add(current_ip)
+        return live
 
     def _conn_counts_path(self):
         """Path inside container with the latest per-IP connection counts."""
