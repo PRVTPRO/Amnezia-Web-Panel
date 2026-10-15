@@ -17,6 +17,8 @@ import ipaddress
 import logging
 import re
 import time
+import functools
+import threading
 from base64 import b64encode, b64decode
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives import serialization
@@ -259,6 +261,36 @@ CONN_WARN_MAX_EVENTS = 5     # how many recent warnings are kept per peer
 # timeout), so a peer that disconnected keeps "owning" its old flows in the
 # table. Counts are only trusted for peers whose handshake is fresh.
 CONN_LIVE_HANDSHAKE_SECONDS = 300
+
+
+# ----- clientsTable mutation serialization -----
+# Every mutating op does read-table -> modify -> save-table. Uvicorn serves
+# requests concurrently (blocking manager calls run in a thread pool), and
+# the prefetched batch cache can hand out a table snapshot taken seconds
+# earlier. Two overlapping ops then overwrite each other: the last save
+# wins with a stale snapshot, silently dropping rows added by the other op.
+# A dropped row resurfaces as a synthesized 'External (native app)' entry
+# (the config carries no names), which is how peer names were lost. The
+# lock is keyed by server host + container so unrelated servers/instances
+# never block each other.
+_TABLE_LOCKS = {}
+_TABLE_LOCKS_GUARD = threading.Lock()
+
+
+def _clients_table_lock(host, container_name):
+    with _TABLE_LOCKS_GUARD:
+        return _TABLE_LOCKS.setdefault((host, container_name), threading.Lock())
+
+
+def _serialized_table_write(method):
+    """Hold the per-container table lock for the whole read-modify-write."""
+    @functools.wraps(method)
+    def wrapper(self, protocol_type, *args, **kwargs):
+        host = getattr(self.ssh, 'host', '') or 'unknown'
+        container = self._container_name(protocol_type)
+        with _clients_table_lock(host, container):
+            return method(self, protocol_type, *args, **kwargs)
+    return wrapper
 
 
 def generate_wg_keypair():
@@ -2275,6 +2307,7 @@ done < "$BW"
             )
             self.ssh.run_command("rm -f /tmp/_amnz_tc.sh")
 
+    @_serialized_table_write
     def set_speed_limit(self, protocol_type, client_id, max_speed):
         """Set per-peer bandwidth limit in Mbit/s (0 = unlimited).
 
@@ -2948,6 +2981,7 @@ done < "$BW"
 
         return result
 
+    @_serialized_table_write
     def add_client(self, protocol_type, client_name, server_host, port, public_port=None):
         """
         Add a new client/peer to the AWG config.
@@ -3181,6 +3215,7 @@ PersistentKeepalive = 25
 """
         return config
 
+    @_serialized_table_write
     def toggle_client(self, protocol_type, client_id, enable):
         """Enable or disable a client by adding/removing their [Peer] from server config."""
         container_name = self._container_name(protocol_type)
@@ -3369,6 +3404,7 @@ PersistentKeepalive = 25
         if table_changed:
             self._save_clients_table(protocol_type, clients_table)
 
+    @_serialized_table_write
     def remove_client(self, protocol_type, client_id):
         """Remove a client from AWG config (mirrors revokeWireGuard)."""
         container_name = self._container_name(protocol_type)
@@ -3611,6 +3647,7 @@ PersistentKeepalive = 25
             return str(user_data['mtu'])
         return self._read_config_key(protocol_type, 'MTU') or AWG_DEFAULTS['mtu']
 
+    @_serialized_table_write
     def save_client_config(self, protocol_type, client_id, config_text):
         """Persist a manually edited client config. Stored verbatim in
         clientsTable (userData.customConfig) and returned by get_client_config
@@ -3639,6 +3676,7 @@ PersistentKeepalive = 25
         self._save_clients_table(protocol_type, clients_table)
         return {'status': 'success'}
 
+    @_serialized_table_write
     def rename_client(self, protocol_type, client_id, new_name):
         """Rename a client. The name lives only in the clientsTable
         (userData.clientName); keys, IPs and the WireGuard config itself

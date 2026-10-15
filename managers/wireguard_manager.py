@@ -13,11 +13,35 @@ import re
 import secrets
 import logging
 import time
+import functools
+import threading
 from base64 import b64encode
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 
 logger = logging.getLogger(__name__)
+
+# clientsTable read-modify-write ops must not overlap: uvicorn runs them in a
+# thread pool, and without serialization the last save wins with a stale
+# snapshot, silently dropping rows added by a concurrent op. The lost row
+# resurfaces as 'External (native app)' (the config stores no names).
+_WG_TABLE_LOCKS = {}
+_WG_TABLE_LOCKS_GUARD = threading.Lock()
+
+
+def _wg_clients_table_lock(host, container_name):
+    with _WG_TABLE_LOCKS_GUARD:
+        return _WG_TABLE_LOCKS.setdefault((host, container_name), threading.Lock())
+
+
+def _serialized_table_write(method):
+    """Hold the per-container table lock for the whole read-modify-write."""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        host = getattr(self.ssh, 'host', '') or 'unknown'
+        with _wg_clients_table_lock(host, self.CONTAINER_NAME):
+            return method(self, *args, **kwargs)
+    return wrapper
 
 WG_DEFAULTS = {
     'port': '51820',
@@ -455,6 +479,7 @@ tail -f /dev/null
         )
         self.ssh.run_command("rm -f /tmp/_wg_tc.sh")
 
+    @_serialized_table_write
     def set_speed_limit(self, client_id, max_speed):
         """Set per-peer bandwidth limit in Mbit/s (0 = unlimited).
 
@@ -794,6 +819,7 @@ tail -f /dev/null
 
         return clients_table
 
+    @_serialized_table_write
     def add_client(self, client_name, server_host, public_port=None):
         """
         Add a new client/peer to the WireGuard config.
@@ -917,6 +943,7 @@ PersistentKeepalive = 25
 """
         return config
 
+    @_serialized_table_write
     def toggle_client(self, client_id, enable):
         """Enable or disable a client by adding/removing their [Peer] from server config."""
         if enable:
@@ -1032,6 +1059,7 @@ AllowedIPs = {client_ip}/32
                 break
         self._save_clients_table(clients_table)
 
+    @_serialized_table_write
     def remove_client(self, client_id):
         """Remove a client from WireGuard config."""
         config = self._get_server_config()
@@ -1093,6 +1121,7 @@ AllowedIPs = {client_ip}/32
             dns1 = '172.29.172.254'
         return f"{dns1}, {dns2}"
 
+    @_serialized_table_write
     def save_client_config(self, client_id, config_text):
         """Persist a manually edited client config in clientsTable
         (userData.customConfig + userData.dns override)."""
@@ -1114,6 +1143,7 @@ AllowedIPs = {client_ip}/32
         self._save_clients_table(clients_table)
         return {'status': 'success'}
 
+    @_serialized_table_write
     def rename_client(self, client_id, new_name):
         """Rename a client. The name lives only in the clientsTable
         (userData.clientName); keys, IPs and the WireGuard config itself
