@@ -130,6 +130,19 @@ class RknBlockUiWiringTests(unittest.TestCase):
         self.assertNotIn('/rkn_block`', self.page)
         self.assertNotIn('function toggleRknBlock(', self.page)
 
+    def test_rknblock_options_ui(self):
+        # options button + modal + API wiring
+        self.assertIn('rknblock-options-btn', self.page)
+        self.assertIn('id="rknOptionsModal"', self.page)
+        self.assertIn('function openRknOptionsModal(', self.page)
+        self.assertIn('function saveRknOptions(', self.page)
+        self.assertIn('/rknblock/options', self.page)
+        for flag in ('BlockIn', 'BlockOut', 'LogIn', 'LogOut'):
+            self.assertIn(f'id="rknOpt{flag}"', self.page)
+        # rainbow icon on the card and in the marketplace list
+        self.assertIn('<div class="protocol-icon">🌈</div>', self.page)
+        self.assertIn("icon: '🌈'", self.page)
+
     def test_rknblock_translations_in_all_languages(self):
         keys = set(re.findall(r"_\('(rknblock_[a-z0-9_]+)'\)", self.page))
         keys |= set(re.findall(r"\{\{ _\('(rknblock_[a-z0-9_]+)'\) \}\}", self.page))

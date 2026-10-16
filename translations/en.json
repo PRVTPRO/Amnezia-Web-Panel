@@ -751,5 +751,19 @@
   "rknblock_step_download": "Downloading blocking scripts",
   "rknblock_step_sets": "Creating ipset sets (C24Be)",
   "rknblock_step_rules": "Applying firewall rules",
-  "rknblock_step_agent": "Starting the scan-collection agent"
+  "rknblock_step_agent": "Starting the scan-collection agent",
+  "rknblock_options": "Options",
+  "rknblock_options_title": "RKN / VK blocking options",
+  "rknblock_options_hint": "Four independent contour switches. Changes apply immediately and persist on the server.",
+  "rknblock_opt_block_in": "Block inbound (server is being scanned)",
+  "rknblock_opt_block_out": "Block outbound (clients visiting)",
+  "rknblock_opt_log_in": "Log scans",
+  "rknblock_opt_log_out": "Log outbound",
+  "rknblock_opts_saved": "Options saved",
+  "rkn_block_base_updated": "Base updated",
+  "rknblock_base_unknown": "base update time unknown",
+  "rknblock_disabled_short": "disabled",
+  "rknblock_opt_block_in_short": "inbound",
+  "rknblock_opt_block_out_short": "outbound",
+  "rknblock_opt_log_off_short": "logging"
 }

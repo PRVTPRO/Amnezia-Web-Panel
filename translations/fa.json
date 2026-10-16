@@ -751,5 +751,19 @@
   "rknblock_step_download": "دریافت اسکریپت‌های مسدودسازی",
   "rknblock_step_sets": "ایجاد مجموعه‌های ipset (C24Be)",
   "rknblock_step_rules": "اعمال قوانین فایروال",
-  "rknblock_step_agent": "راه‌اندازی ایجنت جمع‌آوری اسکن"
+  "rknblock_step_agent": "راه‌اندازی ایجنت جمع‌آوری اسکن",
+  "rknblock_options": "گزینه‌ها",
+  "rknblock_options_title": "گزینه‌های مسدودسازی RKN / VK",
+  "rknblock_options_hint": "چهار کلید مستقل مسدودسازی. تغییرات بلافاصله اعمال و روی سرور ذخیره می‌شوند.",
+  "rknblock_opt_block_in": "مسدودسازی ورودی (سرور اسکن می‌شود)",
+  "rknblock_opt_block_out": "مسدودسازی خروجی (بازدید کاربران)",
+  "rknblock_opt_log_in": "ثبت اسکن‌ها",
+  "rknblock_opt_log_out": "ثبت خروجی‌ها",
+  "rknblock_opts_saved": "گزینه‌ها ذخیره شد",
+  "rkn_block_base_updated": "پایگاه به‌روز شد",
+  "rknblock_base_unknown": "زمان به‌روزرسانی پایگاه نامشخص است",
+  "rknblock_disabled_short": "خاموش",
+  "rknblock_opt_block_in_short": "ورودی",
+  "rknblock_opt_block_out_short": "خروجی",
+  "rknblock_opt_log_off_short": "ثبت رویداد"
 }

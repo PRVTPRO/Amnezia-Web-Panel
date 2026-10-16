@@ -751,5 +751,19 @@
   "rknblock_step_download": "下载拦截脚本",
   "rknblock_step_sets": "创建 ipset 集合 (C24Be)",
   "rknblock_step_rules": "应用防火墙规则",
-  "rknblock_step_agent": "启动扫描收集代理"
+  "rknblock_step_agent": "启动扫描收集代理",
+  "rknblock_options": "参数",
+  "rknblock_options_title": "RKN / VK 拦截选项",
+  "rknblock_options_hint": "四个独立的拦截开关。更改立即生效并保存在服务器上。",
+  "rknblock_opt_block_in": "拦截入站（服务器被扫描）",
+  "rknblock_opt_block_out": "拦截出站（客户端访问）",
+  "rknblock_opt_log_in": "记录扫描",
+  "rknblock_opt_log_out": "记录出站",
+  "rknblock_opts_saved": "参数已保存",
+  "rkn_block_base_updated": "库已更新",
+  "rknblock_base_unknown": "库更新时间未知",
+  "rknblock_disabled_short": "已关闭",
+  "rknblock_opt_block_in_short": "入站",
+  "rknblock_opt_block_out_short": "出站",
+  "rknblock_opt_log_off_short": "日志"
 }
