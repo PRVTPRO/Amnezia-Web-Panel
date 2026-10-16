@@ -104,8 +104,11 @@ class RknBlockUiWiringTests(unittest.TestCase):
     def setUp(self):
         self.page = read('templates', 'server.html')
 
-    def test_marketplace_card_present(self):
+    def test_marketplace_card_and_modal(self):
         self.assertRegex(self.page, r"\{ proto: 'rknblock', category: 'services'")
+        # host-level app installs directly, never through the AWG installer
+        self.assertNotIn("installFromMarketplace('rknblock'", self.page)
+        self.assertIn("installRknBlock()", self.page)
 
     def test_rknblock_card_as_marketplace_app(self):
         self.assertIn('id="proto-rknblock"', self.page)

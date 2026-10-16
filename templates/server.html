@@ -1662,7 +1662,7 @@
                                 : baseInstalled(app.proto);
                             const canInstallAnother = installed && isMultiInstanceBase(app.proto);
                             const action = isRkn
-                                ? (installed ? 'disabled' : `onclick="installFromMarketplace('rknblock', false)"`)
+                                ? (installed ? 'disabled' : `onclick="closeModal('marketplaceModal'); installRknBlock()"`)
                                 : (installed && !canInstallAnother ? 'disabled' : `onclick="installFromMarketplace('${app.proto}', ${canInstallAnother ? 'true' : 'false'})"`);
                             const statusBadge = isRkn
                                 ? (installed
@@ -4362,7 +4362,7 @@
 
     async function installRknBlock() {
         const btn = document.getElementById('rknblock-install-btn');
-        btn.disabled = true;
+        if (btn) btn.disabled = true;
         try {
             await apiCall(`/api/servers/${SERVER_ID}/rknblock/install`, 'POST');
             showToast(_('rknblock_installed_toast'), 'success');
@@ -4372,7 +4372,7 @@
         } catch (err) {
             showToast(_('error') + ': ' + (err.message || err), 'error');
         } finally {
-            btn.disabled = false;
+            if (btn) btn.disabled = false;
         }
     }
 
