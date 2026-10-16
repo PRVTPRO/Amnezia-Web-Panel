@@ -4785,17 +4785,58 @@
         openModal('rknScansModal');
     }
 
+    // Host-level install with the same progress UX as protocol installs:
+    // the shared installModal switches to progress-only mode (form hidden).
     async function installRknBlock() {
+        closeModal('marketplaceModal');
         const btn = document.getElementById('rknblock-install-btn');
         if (btn) btn.disabled = true;
+        const titleEl = document.getElementById('installModalTitle');
+        if (titleEl) titleEl.textContent = 'RKN Block (C24Be)';
+        document.getElementById('installForm').classList.add('hidden');
+        document.getElementById('installDone').style.display = 'none';
+        const progressDiv = document.getElementById('installProgress');
+        progressDiv.classList.remove('hidden');
+        const logEl = document.getElementById('installLog');
+        const fillEl = document.getElementById('installProgressFill');
+        fillEl.style.width = '10%';
+        fillEl.style.background = '';
+        logEl.innerHTML = `<div class="log-line info">${_('install_starting')}</div>`;
+        openModal('installModal');
+        const steps = [
+            { pct: 25, msg: _('rknblock_step_download') },
+            { pct: 45, msg: _('rknblock_step_sets') },
+            { pct: 65, msg: _('rknblock_step_rules') },
+            { pct: 85, msg: _('rknblock_step_agent') },
+        ];
+        let stepIdx = 0;
+        const progressInterval = setInterval(() => {
+            if (stepIdx < steps.length) {
+                fillEl.style.width = steps[stepIdx].pct + '%';
+                logEl.innerHTML += `<div class="log-line info">${steps[stepIdx].msg}</div>`;
+                logEl.scrollTop = logEl.scrollHeight;
+                stepIdx++;
+            }
+        }, 1500);
         try {
             await apiCall(`/api/servers/${SERVER_ID}/rknblock/install`, 'POST');
+            clearInterval(progressInterval);
+            fillEl.style.width = '100%';
+            fillEl.style.background = 'var(--success, #4ade80)';
+            logEl.innerHTML += `<div class="log-line success">✓ ${_('rknblock_installed_toast')}</div>`;
+            logEl.scrollTop = logEl.scrollHeight;
             showToast(_('rknblock_installed_toast'), 'success');
             await loadRknBlock();
             applyInstalledAppsVisibility();
             renderMarketplace();
+            document.getElementById('installDone').style.display = '';
         } catch (err) {
+            clearInterval(progressInterval);
+            fillEl.style.background = 'var(--danger, #f85149)';
+            logEl.innerHTML += `<div class="log-line error">${_('error')}: ${escapeHtml(err.message || err)}</div>`;
+            logEl.scrollTop = logEl.scrollHeight;
             showToast(_('error') + ': ' + (err.message || err), 'error');
+            document.getElementById('installDone').style.display = '';
         } finally {
             if (btn) btn.disabled = false;
         }

@@ -794,5 +794,9 @@
   "invalid_cidr": "Invalid CIDR in the list",
   "server_not_found": "Server not found",
   "rkn_scans_title": "Scan events (C24Be)",
-  "rkn_scans_more": "details"
+  "rkn_scans_more": "details",
+  "rknblock_step_download": "Downloading blocking scripts",
+  "rknblock_step_sets": "Creating ipset sets (C24Be)",
+  "rknblock_step_rules": "Applying firewall rules",
+  "rknblock_step_agent": "Starting the scan-collection agent"
 }
