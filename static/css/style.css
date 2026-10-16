@@ -677,6 +677,7 @@ a:hover {
     justify-content: center;
     font-size: 1.4rem;
     flex-shrink: 0;
+    color: #fff;
     box-shadow: 0 2px 12px rgba(139, 92, 246, 0.2);
 }
 
@@ -2912,4 +2913,11 @@ body,
         min-width: 0;
         margin: 0;
     }
+}
+
+/* RKN Block installed actions: 2x2 grid of buttons */
+#rknblock-installed-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
 }

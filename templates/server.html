@@ -547,7 +547,7 @@
                 {{ _('install') }}
             </button>
         </div>
-        <div class="flex gap-sm" id="rknblock-installed-actions" style="display:none;">
+        <div id="rknblock-installed-actions" style="display:none;">
             <button class="btn btn-secondary btn-sm" onclick="toggleRknBlockApp(false)" id="rknblock-toggle-btn"
                 style="flex:1">
                 {{ _('rknblock_stop') }}
@@ -4776,14 +4776,10 @@
         if (flags.block_in === 'off') flagBits.push(_('rknblock_opt_block_in_short'));
         if (flags.block_out === 'off') flagBits.push(_('rknblock_opt_block_out_short'));
         if (flags.log_in === 'off' || flags.log_out === 'off') flagBits.push(_('rknblock_opt_log_off_short'));
-        const lastUp = d.last_update
-            ? new Date(d.last_update).toLocaleString()
-            : _('rknblock_base_unknown');
         grid.innerHTML = `
             <div class="text-sm">${_('rkn_block_agent')}: ${escapeHtml(d.agent_state)} •
                 ${_('rkn_block_lists')}: ${_('rkn_block_in_short')} ${inN}, ${_('rkn_block_out_short')} ${outN}` +
-                (setsEmpty ? ` ⚠️ ${_('rkn_block_sets_empty')}` : '') + `</div>
-            <div class="text-sm text-muted">${_('rkn_block_base_updated')}: ${escapeHtml(lastUp)}` +
+                (setsEmpty ? ` ⚠️ ${_('rkn_block_sets_empty')}` : '') +
                 (flagBits.length ? ` • ⚠️ ${_('rknblock_disabled_short')}: ${escapeHtml(flagBits.join(', '))}` : '') + `</div>`;
         infoEl.classList.remove('hidden');
         if (location.hash === '#proto-rknblock') {

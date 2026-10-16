@@ -807,8 +807,6 @@
   "rknblock_opt_log_in": "Логировать сканирования",
   "rknblock_opt_log_out": "Логировать исходящие",
   "rknblock_opts_saved": "Параметры сохранены",
-  "rkn_block_base_updated": "База обновлена",
-  "rknblock_base_unknown": "дата обновления базы неизвестна",
   "rknblock_disabled_short": "выключено",
   "rknblock_opt_block_in_short": "входящие",
   "rknblock_opt_block_out_short": "исходящие",
