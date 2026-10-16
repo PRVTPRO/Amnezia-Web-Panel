@@ -747,5 +747,9 @@
   "invalid_cidr": "列表中存在无效 CIDR",
   "server_not_found": "未找到服务器",
   "rkn_scans_title": "扫描事件 (C24Be)",
-  "rkn_scans_more": "详情"
+  "rkn_scans_more": "详情",
+  "rknblock_step_download": "下载拦截脚本",
+  "rknblock_step_sets": "创建 ipset 集合 (C24Be)",
+  "rknblock_step_rules": "应用防火墙规则",
+  "rknblock_step_agent": "启动扫描收集代理"
 }

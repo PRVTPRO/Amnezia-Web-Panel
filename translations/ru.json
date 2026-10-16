@@ -747,5 +747,9 @@
   "invalid_cidr": "Некорректный CIDR в списке",
   "server_not_found": "Сервер не найден",
   "rkn_scans_title": "Сканирования (C24Be)",
-  "rkn_scans_more": "подробнее"
+  "rkn_scans_more": "подробнее",
+  "rknblock_step_download": "Загрузка скриптов блокировки",
+  "rknblock_step_sets": "Создание ipset-наборов (C24Be)",
+  "rknblock_step_rules": "Установка правил файрвола",
+  "rknblock_step_agent": "Запуск агента сбора сканирований"
 }

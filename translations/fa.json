@@ -747,5 +747,9 @@
   "invalid_cidr": "CIDR نامعتبر در لیست",
   "server_not_found": "سرور یافت نشد",
   "rkn_scans_title": "رویدادهای اسکن (C24Be)",
-  "rkn_scans_more": "جزئیات"
+  "rkn_scans_more": "جزئیات",
+  "rknblock_step_download": "دریافت اسکریپت‌های مسدودسازی",
+  "rknblock_step_sets": "ایجاد مجموعه‌های ipset (C24Be)",
+  "rknblock_step_rules": "اعمال قوانین فایروال",
+  "rknblock_step_agent": "راه‌اندازی ایجنت جمع‌آوری اسکن"
 }

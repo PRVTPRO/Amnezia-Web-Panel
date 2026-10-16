@@ -747,5 +747,9 @@
   "invalid_cidr": "CIDR invalide dans la liste",
   "server_not_found": "Serveur introuvable",
   "rkn_scans_title": "Événements de scan (C24Be)",
-  "rkn_scans_more": "détails"
+  "rkn_scans_more": "détails",
+  "rknblock_step_download": "Téléchargement des scripts de blocage",
+  "rknblock_step_sets": "Création des ensembles ipset (C24Be)",
+  "rknblock_step_rules": "Application des règles du pare-feu",
+  "rknblock_step_agent": "Démarrage de l'agent de collecte des scans"
 }
