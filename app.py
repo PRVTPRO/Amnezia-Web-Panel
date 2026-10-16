@@ -3457,13 +3457,15 @@ def api_server_stats(request: Request, server_id: int):
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
+RKN_RAW_BASE = ('https://raw.githubusercontent.com/PRVTPRO/Amnezia-Web-Panel/'
+                'main/scripts/rknblock')
+
 RKN_INSTALL_CMD = (
-    'curl -fsSL https://raw.githubusercontent.com/leonidorlov-hash/amnezia-blocker/main/install-rkn-extra.sh '
+    f'curl -fsSL {RKN_RAW_BASE}/install-rkn-extra.sh '
     '-o /tmp/rkn-install.sh && bash /tmp/rkn-install.sh'
 )
 
-RKN_SCRIPT_URL = ('https://raw.githubusercontent.com/leonidorlov-hash/amnezia-blocker/'
-                  'main/rkn-extra-block.sh')
+RKN_SCRIPT_URL = f'{RKN_RAW_BASE}/rkn-extra-block.sh'
 
 
 def _rkn_run_cmd(subcommand):

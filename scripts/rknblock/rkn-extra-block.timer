@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily RKN extra block list update (C24Be/AS_Network_List)
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=2h
+Persistent=true
+Unit=rkn-extra-block.service
+
+[Install]
+WantedBy=timers.target
