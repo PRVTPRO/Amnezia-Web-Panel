@@ -727,7 +727,7 @@
   "rkn_block_in_short": "entr. :",
   "rkn_block_out_short": "sort. :",
   "rkn_block_legend": "entr. : sous-réseaux RKN/état — connexions entrantes bloquées. sort. : réseaux VK/Max/OK — trafic sortant vers eux bloqué.",
-  "rknblock_desc": "Blocks RKN and VK/Max/OK subnets from the C24Be lists: incoming scans dropped, outbound traffic to them rejected. Scan sightings show right in the card badge.",
+  "rknblock_desc": "Blocks RKN and VK/Max/OK subnets from the C24Be lists: incoming scans dropped, outbound traffic to them rejected. Full scan details open in a popup when you click the red badge.",
   "rknblock_stop": "Stop",
   "rknblock_start": "Start",
   "rknblock_update": "Update lists",
@@ -745,5 +745,7 @@
   "app_not_installed": "Installez d'abord Smart Route depuis la boutique",
   "protocol_not_awg": "Seules les instances AmneziaWG prennent en charge Smart Route",
   "invalid_cidr": "CIDR invalide dans la liste",
-  "server_not_found": "Serveur introuvable"
+  "server_not_found": "Serveur introuvable",
+  "rkn_scans_title": "Événements de scan (C24Be)",
+  "rkn_scans_more": "détails"
 }
