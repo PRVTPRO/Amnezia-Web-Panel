@@ -727,7 +727,7 @@
   "rkn_block_in_short": "ورودی:",
   "rkn_block_out_short": "خروجی:",
   "rkn_block_legend": "ورودی: زیرشبکه‌های RKN/دولتی — اتصالات ورودی مسدود. خروجی: شبکه‌های VK/Max/OK — ترافیک خروجی به سمت آن‌ها مسدود.",
-  "rknblock_desc": "Blocks RKN and VK/Max/OK subnets from the C24Be lists: incoming scans dropped, outbound traffic to them rejected. Scan sightings show right in the card badge.",
+  "rknblock_desc": "Blocks RKN and VK/Max/OK subnets from the C24Be lists: incoming scans dropped, outbound traffic to them rejected. Full scan details open in a popup when you click the red badge.",
   "rknblock_stop": "Stop",
   "rknblock_start": "Start",
   "rknblock_update": "Update lists",
@@ -792,5 +792,7 @@
   "app_not_installed": "ابتدا Smart Route را از فروشگاه نصب کنید",
   "protocol_not_awg": "فقط نمونه‌های AmneziaWG از Smart Route پشتیبانی می‌کنند",
   "invalid_cidr": "CIDR نامعتبر در لیست",
-  "server_not_found": "سرور یافت نشد"
+  "server_not_found": "سرور یافت نشد",
+  "rkn_scans_title": "رویدادهای اسکن (C24Be)",
+  "rkn_scans_more": "جزئیات"
 }

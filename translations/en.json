@@ -727,7 +727,7 @@
   "rkn_block_in_short": "in:",
   "rkn_block_out_short": "out:",
   "rkn_block_legend": "in: RKN/gov subnets — incoming connections blocked. out: VK/Max/OK networks — outbound traffic to them blocked.",
-  "rknblock_desc": "Blocks RKN and VK/Max/OK subnets from the C24Be lists: incoming scans dropped, outbound traffic to them rejected. Scan sightings show right in the card badge.",
+  "rknblock_desc": "Blocks RKN and VK/Max/OK subnets from the C24Be lists: incoming scans dropped, outbound traffic to them rejected. Full scan details open in a popup when you click the red badge.",
   "rknblock_stop": "Stop",
   "rknblock_start": "Start",
   "rknblock_update": "Update lists",
@@ -792,5 +792,7 @@
   "app_not_installed": "Install Smart Route from the marketplace first",
   "protocol_not_awg": "Only AmneziaWG instances support Smart Route",
   "invalid_cidr": "Invalid CIDR in the list",
-  "server_not_found": "Server not found"
+  "server_not_found": "Server not found",
+  "rkn_scans_title": "Scan events (C24Be)",
+  "rkn_scans_more": "details"
 }
