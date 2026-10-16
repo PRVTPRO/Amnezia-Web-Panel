@@ -3501,12 +3501,14 @@ RKN_SCRIPT_URL = ('https://raw.githubusercontent.com/leonidorlov-hash/amnezia-bl
 
 
 def _rkn_run_cmd(subcommand):
-    """Fetch the current script to /tmp and run a subcommand with it.
+    """Fetch the current script to /tmp, refresh the host copy, run a subcommand.
 
-    Server-side copies may predate `uninstall`; always driving a fresh copy
-    keeps every server able to run every subcommand regardless of version.
+    Server-side copies may predate newer subcommands (`uninstall`, `set`);
+    always driving a fresh copy keeps every server able to run every
+    subcommand regardless of the version it was installed with.
     """
     return (f'curl -fsSL {RKN_SCRIPT_URL} -o /tmp/rkn-extra-block-run.sh '
+            f'&& install -m 0755 /tmp/rkn-extra-block-run.sh /usr/local/sbin/rkn-extra-block '
             f'&& bash /tmp/rkn-extra-block-run.sh {subcommand}; '
             f'rc=$?; rm -f /tmp/rkn-extra-block-run.sh; exit $rc')
 
@@ -3543,7 +3545,10 @@ async def api_rknblock_install(request: Request, server_id: int):
     err = await _rkn_ssh_run(server, RKN_INSTALL_CMD, 420)
     if err is not None:
         return err
-    server['rknblock'] = {'installed': True, 'enabled': True}
+    rec = dict(_rkn_record(server))
+    rec['installed'] = True
+    rec['enabled'] = True
+    server['rknblock'] = rec
     save_data(data)
     RKN_FLAG_CACHE.pop(server_id, None)
     return {'status': 'success', 'installed': True, 'enabled': True}
@@ -3585,7 +3590,10 @@ async def api_rknblock_enable(request: Request, server_id: int, req: RknBlockEna
     err = await _rkn_ssh_run(server, _rkn_run_cmd('on' if req.enabled else 'off'), 180)
     if err is not None:
         return err
-    server['rknblock'] = {'installed': True, 'enabled': bool(req.enabled)}
+    rec = dict(_rkn_record(server))
+    rec['installed'] = True
+    rec['enabled'] = bool(req.enabled)
+    server['rknblock'] = rec
     save_data(data)
     RKN_FLAG_CACHE.pop(server_id, None)
     return {'status': 'success', 'enabled': bool(req.enabled)}
@@ -3609,7 +3617,42 @@ async def api_rknblock_update(request: Request, server_id: int):
     return {'status': 'success', 'updated': True}
 
 
-RKN_SCAN_SSH_CMD = ("rkn-extra-block status 2>/dev/null | head -6; "
+RKN_OPTION_FLAGS = ('block_in', 'block_out', 'log_in', 'log_out')
+
+
+class RknBlockOptionsRequest(BaseModel):
+    block_in: bool = True
+    block_out: bool = True
+    log_in: bool = True
+    log_out: bool = True
+
+
+@app.post('/api/servers/{server_id}/rknblock/options', tags=["Servers"])
+async def api_rknblock_options(request: Request, server_id: int, req: RknBlockOptionsRequest):
+    """Set per-direction block/log flags on the host contour (chains rebuilt only)."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    data = load_data()
+    if server_id >= len(data['servers']):
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    server = data['servers'][server_id]
+    if not _rkn_record(server).get('installed'):
+        return JSONResponse({'error': 'App is not installed'}, status_code=409)
+    values = req.model_dump()
+    pairs = ' '.join(f'{k}={"on" if values[k] else "off"}' for k in RKN_OPTION_FLAGS)
+    err = await _rkn_ssh_run(server, _rkn_run_cmd(f'set {pairs}'), 120)
+    if err is not None:
+        return err
+    rec = dict(_rkn_record(server))
+    rec['installed'] = True
+    rec['flags'] = values
+    server['rknblock'] = rec
+    save_data(data)
+    RKN_FLAG_CACHE.pop(server_id, None)
+    return {'status': 'success', 'flags': values}
+
+
+RKN_SCAN_SSH_CMD = ("rkn-extra-block status 2>/dev/null | head -10; "
                       "echo '===LOG==='; tail -n 2000 /var/log/rkn-scans.json 2>/dev/null")
 
 
@@ -3628,6 +3671,19 @@ def _parse_rkn_scan_output(out, flag_enabled):
     counts = re.findall(r'v[46]=(\d+)', status_part)
     if len(counts) >= 4:
         sets = dict(zip(('in4', 'in6', 'out4', 'out6'), (int(c) for c in counts[:4])))
+    # Флаги направлений из строки "flags: block_in=on block_out=on log_in=on log_out=on"
+    flags = {}
+    m = re.search(r'flags:\s*([^\n]+)', status_part)
+    if m:
+        for kv in m.group(1).split():
+            if '=' in kv:
+                k, v = kv.split('=', 1)
+                flags[k.strip()] = v.strip()
+    # Дата последнего обновления баз из строки "last_update: 2026-10-16T12:00:00Z"
+    last_update = None
+    m = re.search(r'last_update:\s*(\S+)', status_part)
+    if m and m.group(1) != '—':
+        last_update = m.group(1)
     events = []
     for line in (log_part or '').splitlines():
         line = line.strip()
@@ -3665,6 +3721,8 @@ def _parse_rkn_scan_output(out, flag_enabled):
         'flag_enabled': bool(flag_enabled),
         'agent_state': agent_state,
         'sets': sets,
+        'flags': flags,
+        'last_update': last_update,
         'total_events': len(events),
         'last_24h': last_24h,
         'last_event': last_ts.isoformat() if last_ts else None,

@@ -84,6 +84,21 @@ class ParseTests(unittest.TestCase):
         d = self.parse(out, False)
         self.assertEqual(d['total_events'], 1)
 
+    def test_flags_and_last_update_are_parsed(self):
+        out = (STATUS_ON + '\n'
+               '  flags: block_in=on block_out=off log_in=on log_out=off\n'
+               '  last_update: 2026-10-16T12:00:00Z\n'
+               '  правила: iptables INPUT/OUTPUT/FORWARD — вешаются\n===LOG===\n')
+        d = self.parse(out, True)
+        self.assertEqual(d['flags'], {'block_in': 'on', 'block_out': 'off',
+                                      'log_in': 'on', 'log_out': 'off'})
+        self.assertEqual(d['last_update'], '2026-10-16T12:00:00Z')
+
+    def test_flags_default_empty_without_status_lines(self):
+        d = self.parse(STATUS_ON + '\n===LOG===\n', True)
+        self.assertEqual(d['flags'], {})
+        self.assertIsNone(d['last_update'])
+
 
 class FlagsEndpointTests(unittest.TestCase):
     def setUp(self):

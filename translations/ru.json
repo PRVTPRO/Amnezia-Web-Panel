@@ -798,5 +798,19 @@
   "rknblock_step_download": "Загрузка скриптов блокировки",
   "rknblock_step_sets": "Создание ipset-наборов (C24Be)",
   "rknblock_step_rules": "Установка правил файрвола",
-  "rknblock_step_agent": "Запуск агента сбора сканирований"
+  "rknblock_step_agent": "Запуск агента сбора сканирований",
+  "rknblock_options": "Параметры",
+  "rknblock_options_title": "Параметры блокировки RKN / VK",
+  "rknblock_options_hint": "Четыре независимых переключателя контура блокировки. Изменения применяются сразу и сохраняются на сервере.",
+  "rknblock_opt_block_in": "Блокировать входящие (сервер сканируют)",
+  "rknblock_opt_block_out": "Блокировать исходящие (клиенты заходят)",
+  "rknblock_opt_log_in": "Логировать сканирования",
+  "rknblock_opt_log_out": "Логировать исходящие",
+  "rknblock_opts_saved": "Параметры сохранены",
+  "rkn_block_base_updated": "База обновлена",
+  "rknblock_base_unknown": "дата обновления базы неизвестна",
+  "rknblock_disabled_short": "выключено",
+  "rknblock_opt_block_in_short": "входящие",
+  "rknblock_opt_block_out_short": "исходящие",
+  "rknblock_opt_log_off_short": "логирование"
 }
