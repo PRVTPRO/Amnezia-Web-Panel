@@ -8,6 +8,8 @@ from managers.awg_manager import (
     AWG3_USERSPACE_GUARD,
     AWG_QUICK_FORCE_USERSPACE_PATCH,
     AWGManager,
+    first_free_subnet_index,
+    parse_subnet_indexes,
 )
 
 FIXTURES = os.path.join(os.path.dirname(__file__), 'fixtures')
@@ -34,6 +36,8 @@ class RecordingSSH:
         self.commands.append(command)
         if 'for p in ' in command:  # _resolve_config_path probe
             return self.resolved_config_path + '\n', '', 0
+        if 'test -f' in command:  # _config_exists probe: config missing by default
+            return '', '', 1
         return '', '', 0
 
     resolved_config_path = ''
@@ -156,6 +160,91 @@ class StartScriptDeliveryTests(unittest.TestCase):
         self.assertEqual(script, manager._render_start_script('awg_legacy', '/opt/amnezia/awg/awg0.conf'))
         self.assertIn('docker cp /tmp/_amnz_edit_config.conf amnezia-awg-legacy:/opt/amnezia/awg/awg0.conf', ssh.commands)
         self.assertEqual(ssh.commands[-1], 'docker restart amnezia-awg-legacy')
+
+
+class SubnetIndexTests(unittest.TestCase):
+    """Unique-subnet allocation for fresh AWG installs: every new instance
+    must get its own 10.8.N.0/24 (fd42:8:N::/64), not the shared default."""
+
+    def test_parse_collects_v4_and_v6_indexes(self):
+        used = parse_subnet_indexes([
+            '10.8.1.1/24',
+            '10.8.3.1/24, fd42:8:3::1/64',
+            'fd42:8:2::1/64',
+            'not-an-address',
+            '10.9.5.1/24',  # outside the 10.8.N scheme: ignored
+        ])
+        self.assertEqual(used, {1, 2, 3})
+
+    def test_parse_empty_and_garbage(self):
+        self.assertEqual(parse_subnet_indexes([]), set())
+        self.assertEqual(parse_subnet_indexes(['', 'Address = garbage']), set())
+
+    def test_first_free_picks_smallest_gap(self):
+        self.assertEqual(first_free_subnet_index(set()), 1)
+        self.assertEqual(first_free_subnet_index({1}), 2)
+        self.assertEqual(first_free_subnet_index({1, 2, 3}), 4)
+        self.assertEqual(first_free_subnet_index({1, 3, 4}), 2)
+
+    def test_configure_container_picks_free_subnet_on_fresh_install(self):
+        ssh = RecordingSSH()
+        mgr = AWGManager(ssh)
+        ssh.resolved_config_path = '/opt/amnezia/awg/awg0.conf'
+        orig_run = ssh.run_sudo_command
+
+        def run(command, timeout=60):
+            out, err, code = orig_run(command, timeout)
+            if 'for c in ' in command:  # _used_subnet_indexes host scan
+                return ('Address = 10.8.1.1/24\n'
+                        'Address = 10.8.3.1/24, fd42:8:3::1/64\n', '', 0)
+            return out, err, code
+
+        ssh.run_sudo_command = run
+        mgr._configure_container(
+            'awg3', '55424', {'junk_packet_count': '3', 'junk_packet_min_size': '10',
+                              'junk_packet_max_size': '30', 'init_packet_junk_size': '15',
+                              'response_packet_junk_size': '18',
+                              'cookie_reply_packet_junk_size': '20',
+                              'transport_packet_junk_size': '23',
+                              'init_packet_magic_header': '1',
+                              'response_packet_magic_header': '2',
+                              'underload_packet_magic_header': '3',
+                              'transport_packet_magic_header': '4'},
+            ipv6=True)
+
+        bodies = [c for c in ssh.commands if 'Address = 10.8.' in c]
+        self.assertEqual(len(bodies), 1)
+        self.assertIn('Address = 10.8.2.1/24, fd42:8:2::1/64', bodies[0])
+
+    def test_configure_container_keeps_existing_subnet_on_retry(self):
+        ssh = RecordingSSH()
+        mgr = AWGManager(ssh)
+        ssh.resolved_config_path = '/opt/amnezia/awg/awg0.conf'
+        # Config already present (install retry): existing subnet wins, no
+        # re-allocation against other containers.
+        orig_run = ssh.run_sudo_command
+
+        def run(command, timeout=60):
+            out, err, code = orig_run(command, timeout)
+            if 'test -f' in command:
+                return '', '', 0
+            return out, err, code
+
+        ssh.run_sudo_command = run
+        mgr._configure_container(
+            'awg3', '55424', {'junk_packet_count': '3', 'junk_packet_min_size': '10',
+                              'junk_packet_max_size': '30', 'init_packet_junk_size': '15',
+                              'response_packet_junk_size': '18',
+                              'cookie_reply_packet_junk_size': '20',
+                              'transport_packet_junk_size': '23',
+                              'init_packet_magic_header': '1',
+                              'response_packet_magic_header': '2',
+                              'underload_packet_magic_header': '3',
+                              'transport_packet_magic_header': '4'},
+            ipv6=True)
+        bodies = [c for c in ssh.commands if 'Address = 10.8.' in c]
+        self.assertEqual(len(bodies), 1)
+        self.assertIn('Address = 10.8.1.1/24, fd42:8:1::1/64', bodies[0])
 
 
 if __name__ == '__main__':

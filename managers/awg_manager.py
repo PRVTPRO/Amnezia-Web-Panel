@@ -59,6 +59,39 @@ AWG_DEFAULTS = {
     'underload_packet_magic_header': '1766607858',
 }
 
+def parse_subnet_indexes(address_lines):
+    """Subnet indexes (N in 10.8.N.x / fd42:8:N::) already used on a host.
+
+    `address_lines` are Address lines ("Address = ..." or a bare value) from
+    the server configs of all awg/wireguard containers on the host. Both the
+    IPv4 and the IPv6 form encode the same index, so either is enough to
+    mark N as taken.
+    """
+    used = set()
+    for line in address_lines:
+        line = line.strip()
+        if line.lower().startswith('address'):
+            _, _, line = line.partition('=')
+        for part in line.split(','):
+            addr = part.strip().split('/')[0].strip()
+            if not addr:
+                continue
+            m = re.match(r'^10\.8\.(\d+)\.\d+$', addr)
+            if not m:
+                m = re.match(r'^fd42:8:([0-9a-f]+)::', addr)
+            if m:
+                used.add(int(m.group(1), 16))
+    return used
+
+
+def first_free_subnet_index(used):
+    """Smallest subnet index >= 1 not present in `used`."""
+    n = 1
+    while n in used:
+        n += 1
+    return n
+
+
 # AWG 3.1 parameters: (internal key, config key).
 # HeaderProtectionKey/ContentPaddingAddition and the timings came with 3.0,
 # RandomTrailers/DisableCookies with 3.1. Ranges use the "min-max" form.
@@ -570,6 +603,31 @@ class AWGManager:
     def _clients_table_path(self):
         """Path to the clients table file inside container."""
         return '/opt/amnezia/awg/clientsTable'
+
+    def _used_subnet_indexes(self):
+        """Subnet indexes (N of 10.8.N.0/24) taken by the other awg/wireguard
+        containers on this host. Best effort: on any SSH failure returns an
+        empty set, which falls back to the default subnet (index 1)."""
+        cmd = (
+            "for c in $(docker ps -a --format '{{.Names}}' "
+            "| grep -E '^amnezia-(awg|wireguard)'); do "
+            "docker exec \"$c\" sh -c "
+            "'grep -h -m1 \"^Address\" "
+            "/opt/amnezia/awg/awg0.conf /opt/amnezia/awg/wg0.conf "
+            "/opt/amnezia/wireguard/wg0.conf 2>/dev/null' 2>/dev/null; "
+            "done"
+        )
+        out, _, code = self.ssh.run_sudo_command(cmd, timeout=60)
+        if code != 0 or not out:
+            return set()
+        return parse_subnet_indexes(out.splitlines())
+
+    def _config_exists(self, protocol_type):
+        container_name = self._container_name(protocol_type)
+        config_path = self._config_path(protocol_type)
+        _, _, code = self.ssh.run_sudo_command(
+            f"docker exec -i {container_name} test -f {config_path}")
+        return code == 0
 
     def _get_subnet_ip(self, protocol_type):
         """Get the subnet IP (gateway) from server config, or fallback to default."""
@@ -1398,6 +1456,20 @@ done
 
         subnet_ip = self._get_subnet_ip(protocol_type)
         subnet_cidr = self._get_subnet_cidr(protocol_type)
+        ipv6_gateway = AWG_DEFAULTS['subnet_ipv6_ip']
+        if not self._config_exists(protocol_type):
+            # Fresh install (no server config yet): every instance would
+            # otherwise fall back to the same default 10.8.1.0/24 and start
+            # handing out client IPs that another instance on this host
+            # already gave out. Pick a subnet index no other awg/wireguard
+            # container uses, for IPv6 as well (fd42:8:N::/64).
+            try:
+                subnet_index = first_free_subnet_index(self._used_subnet_indexes())
+            except Exception:
+                subnet_index = 1
+            subnet_ip = f"10.8.{subnet_index}.1"
+            subnet_cidr = AWG_DEFAULTS['subnet_cidr']
+            ipv6_gateway = f"fd42:8:{subnet_index}::1"
 
         # AWG 3.1 parameters are written only when the protocol asks for them,
         # so awg/awg2 installations keep byte-identical configs.
@@ -1428,7 +1500,7 @@ done
 
         address_line = f"{subnet_ip}/{subnet_cidr}"
         if ipv6:
-            address_line += f", {AWG_DEFAULTS['subnet_ipv6_ip']}/{AWG_DEFAULTS['subnet_ipv6_cidr']}"     
+            address_line += f", {ipv6_gateway}/{AWG_DEFAULTS['subnet_ipv6_cidr']}"     
         
         # Build the server config generation script
         if self._base_protocol(protocol_type) in (self.AWG, self.AWG2, self.AWG3):
