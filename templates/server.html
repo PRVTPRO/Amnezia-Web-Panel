@@ -4327,19 +4327,19 @@
 
         // Info grid: lists, per-org/port breakdown, recent sightings.
         const orgRows = (d.by_org || []).map(([org, n]) =>
-            `<tr><td style="padding:2px 12px 2px 0;">${esc(org)}</td><td>${n}</td></tr>`).join('');
+            `<tr><td style="padding:2px 12px 2px 0;">${escapeHtml(org)}</td><td>${n}</td></tr>`).join('');
         const dptRows = (d.by_dpt || []).map(([p, n]) =>
             `<tr><td style="padding:2px 12px 2px 0;">${svcName(p)}</td><td>${n}</td></tr>`).join('');
         const dir = d.by_dir || {};
         const recentRows = (d.recent || []).map(ev => {
             const t = ev.t ? new Date(ev.t).toLocaleString() : '';
-            return `<tr><td style="padding:2px 12px 2px 0;">${esc(t)}</td>` +
-                `<td style="padding:2px 12px 2px 0;">${esc(ev.ip || '')}</td>` +
-                `<td style="padding:2px 12px 2px 0;">${esc(ev.org || '?')}</td>` +
+            return `<tr><td style="padding:2px 12px 2px 0;">${escapeHtml(t)}</td>` +
+                `<td style="padding:2px 12px 2px 0;">${escapeHtml(ev.ip || '')}</td>` +
+                `<td style="padding:2px 12px 2px 0;">${escapeHtml(ev.org || '?')}</td>` +
                 `<td>${svcName(ev.dpt)}</td></tr>`;
         }).join('');
         grid.innerHTML = `
-            <div class="text-sm">${_('rkn_block_agent')}: ${esc(d.agent_state)} •
+            <div class="text-sm">${_('rkn_block_agent')}: ${escapeHtml(d.agent_state)} •
                 ${_('rkn_block_lists')}: ${_('rkn_block_in_short')} ${inN}, ${_('rkn_block_out_short')} ${outN}` +
                 (setsEmpty ? ` ⚠️ ${_('rkn_block_sets_empty')}` : '') + `</div>
             ${orgRows || dptRows ? `
@@ -4349,7 +4349,7 @@
             </div>` : `<div class="text-muted text-sm mt-sm">${_('rkn_block_none')}</div>`}
             <div class="text-muted text-sm mt-sm">${_('rkn_block_dirs')}: in ${dir.in || 0} / out ${dir.out || 0}
                 • ${_('rkn_block_total')}: ${d.total_events}
-                ${d.last_event ? ' • ' + esc(d.last_event) : ''}</div>
+                ${d.last_event ? ' • ' + escapeHtml(d.last_event) : ''}</div>
             ${recentRows ? `<div class="mt-sm"><div class="text-muted">${_('rkn_block_recent')}</div>
                 <table>${recentRows}</table></div>` : ''}`;
         infoEl.classList.remove('hidden');
