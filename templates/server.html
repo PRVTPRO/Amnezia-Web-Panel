@@ -513,17 +513,6 @@
         </div>
         <div id="smartroute-info" class="hidden">
             <div class="protocol-info" id="smartroute-info-grid"></div>
-            <div class="form-group" style="margin-bottom:var(--space-xs);">
-                <label class="form-label" style="margin-bottom:2px;">{{ _('smartroute_direct_dns') }}</label>
-                <input class="form-input" id="smartroute-direct-dns" placeholder="77.88.8.8" style="padding:6px 10px;">
-            </div>
-            <div class="form-group" style="margin-bottom:var(--space-xs);">
-                <label class="form-label" style="margin-bottom:2px;">{{ _('smartroute_exit_dns') }}</label>
-                <input class="form-input" id="smartroute-exit-dns" placeholder="1.1.1.1" style="padding:6px 10px;">
-            </div>
-            <div class="form-hint" style="margin-bottom:var(--space-xs);">{{ _('smartroute_dns_pair_hint') }}</div>
-            <button class="btn btn-secondary btn-sm" onclick="saveSmartRouteDnsServers()"
-                id="smartroute-dns-save-btn" style="width:100%;">{{ _('save') }}</button>
         </div>
         <div class="flex gap-sm" id="smartroute-actions">
             <button class="btn btn-secondary btn-sm" onclick="openSmartRouteModal()" id="smartroute-settings-btn"
@@ -1145,6 +1134,15 @@
                 <input type="checkbox" id="smartRouteDnsViaExit" onchange="saveSmartRouteDns(this.checked)"> {{ _('smartroute_dns_via_exit') }}
             </label>
             <div class="form-hint">{{ _('smartroute_dns_hint') }}</div>
+        </div>
+        <div class="form-group hidden" id="smartRouteDnsServersGroup">
+            <label class="form-label" style="margin-bottom:2px;">{{ _('smartroute_direct_dns') }}</label>
+            <input class="form-input" id="smartroute-direct-dns" placeholder="77.88.8.8" style="padding:6px 10px;">
+            <label class="form-label" style="margin:var(--space-xs) 0 2px;">{{ _('smartroute_exit_dns') }}</label>
+            <input class="form-input" id="smartroute-exit-dns" placeholder="1.1.1.1" style="padding:6px 10px;">
+            <div class="form-hint" style="margin-top:var(--space-xs);">{{ _('smartroute_dns_pair_hint') }}</div>
+            <button class="btn btn-secondary btn-sm" onclick="saveSmartRouteDnsServers()"
+                id="smartroute-dns-save-btn" style="margin-top:var(--space-xs);">{{ _('save') }}</button>
         </div>
         <div class="form-group hidden" id="smartRouteSplitsGroup">
             <label class="form-label">{{ _('smartroute_split_instances') }}</label>
@@ -3567,10 +3565,6 @@
         if (host.error) rows.push(`<span style="color:var(--danger, #f87171)">${escapeHtml(host.error)}</span>`);
         const grid = document.getElementById('smartroute-info-grid');
         if (grid) grid.innerHTML = rows.map(r => `<div>${r}</div>`).join('');
-        const directInput = document.getElementById('smartroute-direct-dns');
-        const exitInput = document.getElementById('smartroute-exit-dns');
-        if (directInput && document.activeElement !== directInput) directInput.value = status.direct_dns || '77.88.8.8';
-        if (exitInput && document.activeElement !== exitInput) exitInput.value = status.exit_dns || '1.1.1.1';
         if (info) info.classList.remove('hidden');
     }
 
@@ -3676,6 +3670,7 @@
         document.getElementById('smartRouteOwnSaveBtn').classList.toggle('hidden', !installed);
         document.getElementById('smartRouteOwnGroup').classList.toggle('hidden', !installed);
         document.getElementById('smartRouteDnsGroup').classList.toggle('hidden', !installed);
+        document.getElementById('smartRouteDnsServersGroup').classList.toggle('hidden', !installed);
         document.getElementById('smartRouteSplitsGroup').classList.toggle('hidden', !installed);
         document.getElementById('smartRouteLists').classList.toggle('hidden', !installed);
         if (!installed) {
@@ -3695,6 +3690,8 @@
         document.getElementById('smartRouteListsError').textContent = host.error || '';
         document.getElementById('smartRouteOwnSubnets').value = (status.own_subnets || []).join('\n');
         document.getElementById('smartRouteDnsViaExit').checked = !!status.dns_via_exit;
+        document.getElementById('smartroute-direct-dns').value = status.direct_dns || '77.88.8.8';
+        document.getElementById('smartroute-exit-dns').value = status.exit_dns || '1.1.1.1';
         const splits = status.split_instances || [];
         document.getElementById('smartRouteSplits').textContent = splits.length
             ? splits.map(getProtoTitle).join(', ')
