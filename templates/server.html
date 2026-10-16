@@ -171,6 +171,7 @@
             </button>
         </div>
     </div>
+
     <div id="serverStatus" class="mt-md hidden">
         <div class="divider"></div>
         <div class="server-status-row">
@@ -493,6 +494,59 @@
             <button class="btn btn-primary btn-sm" onclick="openInstallModal('exit')" id="exit-install-btn"
                 style="flex:1">
                 {{ _('install') }}
+            </button>
+        </div>
+    </div>
+
+
+    <!-- RKN Block Card (host-level app, C24Be lists) -->
+    <div class="card card-hover protocol-card protocol-rknblock" id="proto-rknblock">
+        <div class="protocol-card-head">
+            <div class="protocol-icon">🛡</div>
+            <div class="protocol-name">{{ _('rkn_block_title') }}</div>
+        </div>
+        <div class="protocol-desc">
+            {{ _('rknblock_desc') }}
+        </div>
+        <div class="protocol-status" id="rknblock-status">
+            <span class="badge badge-warn"><span class="badge-dot"></span> {{ _('not_installed') }}</span>
+        </div>
+        <div id="rknblock-info" class="hidden">
+            <div class="protocol-info" id="rknblock-info-grid"></div>
+            <div class="mt-sm flex gap-sm" id="rknblock-scans-actions" style="display:none;">
+                <button class="btn btn-secondary btn-sm btn-icon" onclick="clearRknScans()"
+                    title="{{ _('rkn_block_clear') }}" id="rknClearBtn">
+                    <svg class="btn-icon-svg" width="14" height="14" viewBox="0 0 24 24" fill="none"
+                        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                        aria-hidden="true">
+                        <path d="M3 6h18"></path>
+                        <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path>
+                        <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path>
+                        <line x1="10" y1="11" x2="10" y2="17"></line>
+                        <line x1="14" y1="11" x2="14" y2="17"></line>
+                    </svg>
+                </button>
+                <span class="text-muted text-sm" id="rknblock-scans-hint"></span>
+            </div>
+        </div>
+        <div class="flex gap-sm" id="rknblock-actions">
+            <button class="btn btn-primary btn-sm" onclick="installRknBlock()" id="rknblock-install-btn"
+                style="flex:1">
+                {{ _('install') }}
+            </button>
+        </div>
+        <div class="flex gap-sm" id="rknblock-installed-actions" style="display:none;">
+            <button class="btn btn-secondary btn-sm" onclick="toggleRknBlockApp(false)" id="rknblock-toggle-btn"
+                style="flex:1">
+                {{ _('rknblock_stop') }}
+            </button>
+            <button class="btn btn-secondary btn-sm" onclick="updateRknBlockLists()" id="rknblock-update-btn"
+                style="flex:1">
+                {{ _('rknblock_update') }}
+            </button>
+            <button class="btn btn-danger btn-sm" onclick="uninstallRknBlock()" id="rknblock-uninstall-btn"
+                style="flex:1">
+                {{ _('rknblock_delete') }}
             </button>
         </div>
     </div>
@@ -1332,6 +1386,7 @@
         { proto: 'adguard', category: 'services', icon: '🛡️', title: 'AdGuard Home', descKey: 'adguard_desc' },
         { proto: 'socks5', category: 'services', icon: '🧦', title: 'SOCKS5 Proxy', descKey: 'socks5_desc' },
         { proto: 'exit', category: 'services', icon: '🚪', title: 'Exit Node', descKey: 'exit_desc', badge: 'NEW' },
+        { proto: 'rknblock', category: 'services', icon: '🛡', title: 'RKN Block (C24Be)', descKey: 'rknblock_desc' },
         { proto: 'nginx', category: 'web_servers', icon: '🌐', title: 'NGINX', descKey: 'nginx_desc' },
     ];
     const MARKETPLACE_CATEGORIES = [
@@ -1350,6 +1405,8 @@
     let installedAppsLoading = true;
     let currentSocks5Proto = 'socks5';
     let currentAwgProto = 'awg2';
+    // RKN Block app state (GET /api/servers/{id}/rkn_scans); null = not loaded.
+    let rknBlockStatus = null;
 
     const AWG_PROTOCOLS = ['awg', 'awg2', 'awg3', 'awg_legacy'];
     // Protocols that hand out a client config or link, and therefore have an
@@ -1600,8 +1657,18 @@
                     <div class="marketplace-category-title"><span>${cat.icon}</span> ${_(cat.titleKey)}</div>
                     <div class="marketplace-grid">
                         ${apps.map(app => {
-                            const installed = baseInstalled(app.proto);
+                            const isRkn = app.proto === 'rknblock';
+                            const installed = isRkn ? !!(rknBlockStatus && rknBlockStatus.installed)
+                                : baseInstalled(app.proto);
                             const canInstallAnother = installed && isMultiInstanceBase(app.proto);
+                            const action = isRkn
+                                ? (installed ? 'disabled' : `onclick="installFromMarketplace('rknblock', false)"`)
+                                : (installed && !canInstallAnother ? 'disabled' : `onclick="installFromMarketplace('${app.proto}', ${canInstallAnother ? 'true' : 'false'})"`);
+                            const statusBadge = isRkn
+                                ? (installed
+                                    ? `<span class="badge badge-success"><span class="badge-dot"></span> ${_('installed')}</span>`
+                                    : `<span class="badge badge-warn"><span class="badge-dot"></span> ${_('not_installed')}</span>`)
+                                : marketplaceAppStatus(app.proto);
                             return `
                                 <div class="marketplace-app-card">
                                     <div class="marketplace-app-top">
@@ -1670,12 +1737,26 @@
             // keep a deleted base card on screen as "not installed / install"
             // — a phantom instance right after uninstall. Extra instances
             // render their own dynamic cards (ensureProtocolCard) below.
+            // RKN Block is host-level (no container status): its card is
+            // driven by rknBlockStatus further below.
+            if (app.proto === 'rknblock') return;
             const installed = isAppInstalled((currentProtocolStatus || {})[app.proto]);
             if (card) {
                 card.classList.toggle('installed-app-hidden', !installed);
                 card.classList.toggle('installed-app-visible', installed);
             }
         });
+
+        // RKN Block card: host-level app, installed-state comes from the
+        // rkn_scans endpoint (server['rknblock']) rather than protocol check.
+        const rknInstalled = !!(rknBlockStatus && rknBlockStatus.installed);
+        const rknCard = document.getElementById('proto-rknblock');
+        if (rknCard) {
+            rknCard.classList.toggle('installed-app-hidden', !rknInstalled);
+            rknCard.classList.toggle('installed-app-visible', rknInstalled);
+        }
+        if (rknInstalled) installedCount++;
+        renderRknBlockCard();
 
         orderedProtocolEntries(currentProtocolStatus || {}).forEach(([proto, info]) => {
             if (protoInstance(proto) > 1) {
@@ -4171,6 +4252,187 @@
             window.location.href = '/';
         } catch (err) {
             showToast('Error: ' + err.message, 'error');
+        }
+    }
+
+    // ========== RKN extra block (C24Be lists) — raw prototype ==========
+    // Well-known destination ports: what service the scanner was poking.
+    const RKN_SVC_NAMES = {22: 'SSH', 23: 'Telnet', 25: 'SMTP', 53: 'DNS', 80: 'HTTP',
+        110: 'POP3', 111: 'RPC', 135: 'RPC', 139: 'SMB', 143: 'IMAP', 445: 'SMB',
+        873: 'rsync', 993: 'IMAPS', 995: 'POP3S', 1723: 'PPTP', 1900: 'UPnP',
+        3128: 'Proxy', 3306: 'MySQL', 3389: 'RDP', 5000: 'Panel', 5060: 'SIP',
+        5900: 'VNC', 6379: 'Redis', 8080: 'HTTP-alt', 8443: 'HTTPS-alt', 8888: 'HTTP-alt',
+        9200: 'Elastic', 11211: 'Memcached', 27017: 'MongoDB', 51820: 'WireGuard', 51821: 'AWG'};
+    function svcName(p) {
+        const n = parseInt(p, 10);
+        return p + (RKN_SVC_NAMES[n] ? ' (' + RKN_SVC_NAMES[n] + ')' : '');
+    }
+
+    async function loadRknBlock() {
+        try {
+            rknBlockStatus = await apiCall(`/api/servers/${SERVER_ID}/rkn_scans`, 'GET');
+        } catch (err) {
+            rknBlockStatus = null;
+            console.warn('RKN block load failed:', err);
+        }
+        renderRknBlockCard();
+        applyInstalledAppsVisibility();
+        return rknBlockStatus;
+    }
+
+    function renderRknBlockCard() {
+        const d = rknBlockStatus;
+        const statusEl = document.getElementById('rknblock-status');
+        if (!statusEl) return;
+        const card = document.getElementById('proto-rknblock');
+        const infoEl = document.getElementById('rknblock-info');
+        const grid = document.getElementById('rknblock-info-grid');
+        const installActions = document.getElementById('rknblock-actions');
+        const installedActions = document.getElementById('rknblock-installed-actions');
+        const toggleBtn = document.getElementById('rknblock-toggle-btn');
+        const scansBox = document.getElementById('rknblock-scans-actions');
+        const scansHint = document.getElementById('rknblock-scans-hint');
+        const installed = !!(d && d.installed);
+        installActions.style.display = installed ? 'none' : '';
+        installedActions.style.display = installed ? '' : 'none';
+        if (!installed) {
+            statusEl.innerHTML = `<span class="badge badge-warn"><span class="badge-dot"></span> ${_('not_installed')}</span>`;
+            infoEl.classList.add('hidden');
+            if (location.hash === '#proto-rknblock' && card) {
+                setTimeout(() => card.scrollIntoView({ behavior: 'smooth', block: 'center' }), 300);
+            }
+            return;
+        }
+        const agentAlive = d.agent_state !== 'unknown';
+        const running = agentAlive && d.enabled !== false;
+        const sets = d.sets || {};
+        const inN = (sets.in4 || 0) + (sets.in6 || 0);
+        const outN = (sets.out4 || 0) + (sets.out6 || 0);
+        const setsEmpty = [sets.in4, sets.in6, sets.out4, sets.out6].every(v => !v);
+
+        // Status badge + scan count straight in the badge row.
+        let badge = running
+            ? `<span class="badge badge-success"><span class="badge-dot"></span> ${_('rknblock_state_on')}</span>`
+            : (agentAlive
+                ? `<span class="badge badge-warn"><span class="badge-dot"></span> ${_('rknblock_state_off')}</span>`
+                : `<span class="badge badge-danger"><span class="badge-dot"></span> ${_('rknblock_state_unreachable')}</span>`);
+        if (d.last_24h > 0) {
+            badge += ` <button type="button" class="badge badge-danger" style="cursor:pointer; border:none;"
+                onclick="document.getElementById('rknblock-info').classList.toggle('hidden');
+                         document.getElementById('proto-rknblock').scrollIntoView({behavior:'smooth', block:'center'})"
+                title="${escapeHtml(_('rkn_block_recent'))}">⚠ ${_('rkn_scan_alert')} (${d.last_24h})</button>`;
+        }
+        statusEl.innerHTML = badge;
+        toggleBtn.textContent = running ? _('rknblock_stop') : _('rknblock_start');
+
+        // Info grid: lists, per-org/port breakdown, recent sightings.
+        const orgRows = (d.by_org || []).map(([org, n]) =>
+            `<tr><td style="padding:2px 12px 2px 0;">${esc(org)}</td><td>${n}</td></tr>`).join('');
+        const dptRows = (d.by_dpt || []).map(([p, n]) =>
+            `<tr><td style="padding:2px 12px 2px 0;">${svcName(p)}</td><td>${n}</td></tr>`).join('');
+        const dir = d.by_dir || {};
+        const recentRows = (d.recent || []).map(ev => {
+            const t = ev.t ? new Date(ev.t).toLocaleString() : '';
+            return `<tr><td style="padding:2px 12px 2px 0;">${esc(t)}</td>` +
+                `<td style="padding:2px 12px 2px 0;">${esc(ev.ip || '')}</td>` +
+                `<td style="padding:2px 12px 2px 0;">${esc(ev.org || '?')}</td>` +
+                `<td>${svcName(ev.dpt)}</td></tr>`;
+        }).join('');
+        grid.innerHTML = `
+            <div class="text-sm">${_('rkn_block_agent')}: ${esc(d.agent_state)} •
+                ${_('rkn_block_lists')}: ${_('rkn_block_in_short')} ${inN}, ${_('rkn_block_out_short')} ${outN}` +
+                (setsEmpty ? ` ⚠️ ${_('rkn_block_sets_empty')}` : '') + `</div>
+            ${orgRows || dptRows ? `
+            <div class="flex gap-md flex-wrap mt-sm">
+                ${orgRows ? `<div><div class="text-muted">${_('rkn_block_who')}</div><table>${orgRows}</table></div>` : ''}
+                ${dptRows ? `<div><div class="text-muted">${_('rkn_block_ports')}</div><table>${dptRows}</table></div>` : ''}
+            </div>` : `<div class="text-muted text-sm mt-sm">${_('rkn_block_none')}</div>`}
+            <div class="text-muted text-sm mt-sm">${_('rkn_block_dirs')}: in ${dir.in || 0} / out ${dir.out || 0}
+                • ${_('rkn_block_total')}: ${d.total_events}
+                ${d.last_event ? ' • ' + esc(d.last_event) : ''}</div>
+            ${recentRows ? `<div class="mt-sm"><div class="text-muted">${_('rkn_block_recent')}</div>
+                <table>${recentRows}</table></div>` : ''}`;
+        infoEl.classList.remove('hidden');
+        scansBox.style.display = (d.total_events > 0) ? '' : 'none';
+        scansHint.textContent = _('rkn_block_legend');
+        if (location.hash === '#proto-rknblock') {
+            setTimeout(() => card.scrollIntoView({ behavior: 'smooth', block: 'center' }), 300);
+        }
+    }
+
+    async function installRknBlock() {
+        const btn = document.getElementById('rknblock-install-btn');
+        btn.disabled = true;
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/rknblock/install`, 'POST');
+            showToast(_('rknblock_installed_toast'), 'success');
+            await loadRknBlock();
+            applyInstalledAppsVisibility();
+            renderMarketplace();
+        } catch (err) {
+            showToast(_('error') + ': ' + (err.message || err), 'error');
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    async function uninstallRknBlock() {
+        if (!confirm(_('rknblock_uninstall_confirm'))) return;
+        const btn = document.getElementById('rknblock-uninstall-btn');
+        btn.disabled = true;
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/rknblock/uninstall`, 'POST');
+            showToast(_('rknblock_uninstalled_toast'), 'success');
+            await loadRknBlock();
+            applyInstalledAppsVisibility();
+            renderMarketplace();
+        } catch (err) {
+            showToast(_('error') + ': ' + (err.message || err), 'error');
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    async function toggleRknBlockApp(enable) {
+        const btn = document.getElementById('rknblock-toggle-btn');
+        btn.disabled = true;
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/rknblock/enable`, 'POST', { enabled: !!enable });
+            showToast(_(enable ? 'rknblock_started_toast' : 'rknblock_stopped_toast'), 'success');
+            await loadRknBlock();
+        } catch (err) {
+            showToast(_('error') + ': ' + (err.message || err), 'error');
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    async function updateRknBlockLists() {
+        const btn = document.getElementById('rknblock-update-btn');
+        btn.disabled = true;
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/rknblock/update`, 'POST');
+            showToast(_('rknblock_updated_toast'), 'success');
+            await loadRknBlock();
+        } catch (err) {
+            showToast(_('error') + ': ' + (err.message || err), 'error');
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    async function clearRknScans() {
+        if (!confirm(_('rkn_block_clear_confirm'))) return;
+        const btn = document.getElementById('rknClearBtn');
+        btn.disabled = true;
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/rkn_scans/clear`, 'POST', {});
+            await loadRknBlock();
+            showToast(_('rkn_block_cleared'), 'success');
+        } catch (err) {
+            showToast(_('error') + ': ' + (err.message || err), 'error');
+        } finally {
+            btn.disabled = false;
         }
     }
 

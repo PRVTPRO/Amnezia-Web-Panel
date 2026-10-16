@@ -501,6 +501,24 @@
     document.addEventListener('DOMContentLoaded', () => {
         startAllPings();
         setupDragAndDrop();
+        loadRknScanFlags();
     });
+
+    // Red "scans detected" button per server card, fed from the cached flags endpoint.
+    async function loadRknScanFlags() {
+        try {
+            const flags = await apiCall('/api/servers/rkn_scan_flags', 'GET');
+            for (const [id, f] of Object.entries(flags)) {
+                if (!f || f.agent_state === 'unknown' || !f.events24) continue;
+                const el = document.getElementById('rkn-alert-' + id);
+                if (!el) continue;
+                el.innerHTML = `<button class="btn btn-danger btn-sm" style="width:100%; font-weight:700"
+                    onclick="location.href='/server/${id}#proto-rknblock'">⚠ {{ _('rkn_scan_alert') }} (${f.events24})</button>`;
+                el.style.display = '';
+            }
+        } catch (e) {
+            console.warn('rkn scan flags failed:', e);
+        }
+    }
 </script>
 {% endblock %}
