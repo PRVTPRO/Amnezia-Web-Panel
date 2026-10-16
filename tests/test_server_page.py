@@ -111,6 +111,9 @@ class SmartRouteUiWiringTests(unittest.TestCase):
         self.assertIn("onclick=\"openSmartRouteModal()\"", self.page)
         # the card button must not fall through to the protocol installer
         self.assertNotIn("installFromMarketplace('smartroute'", self.page)
+        # host-level apps install directly, never through the AWG installer
+        self.assertNotIn("installFromMarketplace('rknblock'", self.page)
+        self.assertIn("installRknBlock()", self.page)
 
     def test_exit_link_modal_wires_the_split_toggle(self):
         self.assertIn('id="smartRouteToggle"', self.page)
