@@ -97,5 +97,25 @@ class GeneratedDefaultsTests(unittest.TestCase):
                 self.assertGreaterEqual(mtu, MIN_CLIENT_MTU)
 
 
+class JunkPacketCountTests(unittest.TestCase):
+    """The official amneziawg-go README recommends Jc 4-12."""
+
+    def test_jc_stays_in_the_recommended_band(self):
+        for label, params in (
+            ('awg_legacy', generate_awg_params()),
+            ('awg2', generate_awg_params(use_ranges=True)),
+            ('awg3', generate_awg_params(awg3=True)),
+        ):
+            with self.subTest(label):
+                self.assertGreaterEqual(int(params['junk_packet_count']), 4)
+                self.assertLessEqual(int(params['junk_packet_count']), 12)
+
+    def test_jmin_jmax_stay_consistent(self):
+        params = generate_awg_params(awg3=True)
+        jmin = int(params['junk_packet_min_size'])
+        jmax = int(params['junk_packet_max_size'])
+        self.assertLessEqual(jmin, jmax)
+
+
 if __name__ == '__main__':
     unittest.main()

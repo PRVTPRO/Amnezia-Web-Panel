@@ -364,7 +364,10 @@ def generate_awg_params(use_ranges=False, awg3=False):
     """
     import random
 
-    jc = random.randint(1, 10)
+    # Official amneziawg-go README: "Jc: int, recommended range is 4-12".
+    # The native AmneziaVPN installer picks 4-6; stay within the documented
+    # band so fresh instances do not fall below the recommended floor.
+    jc = random.randint(4, 12)
     jmin = random.randint(5, 20)
     jmax = random.randint(jmin + 10, jmin + 50)
     # AWG 3.1 enables header protection, which puts a floor under the junk sizes.
