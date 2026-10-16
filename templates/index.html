@@ -515,7 +515,7 @@
                 const el = document.getElementById('rkn-alert-' + id);
                 if (!el) continue;
                 el.innerHTML = `<button class="btn btn-danger btn-sm" style="width:100%; font-weight:700"
-                    onclick="location.href='/server/${id}#rknBlockCard'">⚠ {{ _('rkn_scan_alert') }} (${f.events24})</button>`;
+                    onclick="location.href='/server/${id}#proto-rknblock'">⚠ {{ _('rkn_scan_alert') }} (${f.events24})</button>`;
                 el.style.display = '';
             }
         } catch (e) {

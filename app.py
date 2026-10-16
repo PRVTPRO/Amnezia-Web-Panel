@@ -312,6 +312,10 @@ def load_data():
         self_service.setdefault(key, value)
     for server in data.get('servers', []):
         server.setdefault('self_service_enabled', False)
+        # Legacy RKN toggle: the blocking contour is now a marketplace app
+        # (server['rknblock']). The old flag is dropped so every server shows
+        # "not installed" until the app is installed from the store.
+        server.pop('rkn_block_enabled', None)
     return data
 
 
@@ -2208,10 +2212,6 @@ class EditServerRequest(BaseModel):
     self_service_enabled: Optional[bool] = None
 
 
-class RknBlockRequest(BaseModel):
-    enabled: bool = False
-
-
 class ReorderServersRequest(BaseModel):
     # `order[i]` is the *old* server index now at position `i` in the new layout.
     order: List[int]
@@ -3496,39 +3496,117 @@ RKN_INSTALL_CMD = (
     '-o /tmp/rkn-install.sh && bash /tmp/rkn-install.sh'
 )
 
+RKN_SCRIPT_URL = ('https://raw.githubusercontent.com/leonidorlov-hash/amnezia-blocker/'
+                  'main/rkn-extra-block.sh')
 
-@app.post('/api/servers/{server_id}/rkn_block', tags=["Servers"])
-async def api_rkn_block(request: Request, server_id: int, req: RknBlockRequest):
-    """Toggle the C24Be-based RKN/VK network blocking on a managed server.
 
-    Enabling installs rkn-extra-block (ipset contours + hourly scan-stats
-    collector) from the amnezia-blocker repo over SSH; disabling removes the
-    iptables jumps (the install stays, re-enable is instant).
+def _rkn_run_cmd(subcommand):
+    """Fetch the current script to /tmp and run a subcommand with it.
+
+    Server-side copies may predate `uninstall`; always driving a fresh copy
+    keeps every server able to run every subcommand regardless of version.
     """
+    return (f'curl -fsSL {RKN_SCRIPT_URL} -o /tmp/rkn-extra-block-run.sh '
+            f'&& bash /tmp/rkn-extra-block-run.sh {subcommand}; '
+            f'rc=$?; rm -f /tmp/rkn-extra-block-run.sh; exit $rc')
+
+
+def _rkn_record(server):
+    return server.get('rknblock') or {}
+
+
+async def _rkn_ssh_run(server, cmd, timeout):
+    ssh = await asyncio.to_thread(get_ssh, server)
+    await asyncio.to_thread(ssh.connect)
+    try:
+        out, err, code = await asyncio.to_thread(ssh.run_sudo_command, cmd, timeout)
+    finally:
+        try:
+            ssh.disconnect()
+        except Exception:
+            pass
+    if code != 0:
+        return JSONResponse({'error': f'command failed: {(err or out or "").strip()[-500:]}'},
+                            status_code=500)
+    return None
+
+
+@app.post('/api/servers/{server_id}/rknblock/install', tags=["Servers"])
+async def api_rknblock_install(request: Request, server_id: int):
+    """Install the RKN/VK network blocking app (rkn-extra-block contour)."""
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     data = load_data()
     if server_id >= len(data['servers']):
         return JSONResponse({'error': 'Server not found'}, status_code=404)
     server = data['servers'][server_id]
-    ssh = await asyncio.to_thread(get_ssh, server)
-    await asyncio.to_thread(ssh.connect)
-    try:
-        if req.enabled:
-            _out, err, code = await asyncio.to_thread(ssh.run_sudo_command, RKN_INSTALL_CMD, 420)
-            if code != 0:
-                return JSONResponse({'error': f'install failed: {(err or "").strip()[-500:]}'},
-                                    status_code=500)
-        else:
-            await asyncio.to_thread(ssh.run_sudo_command, 'rkn-extra-block off 2>/dev/null || true')
-    finally:
-        try:
-            ssh.disconnect()
-        except Exception:
-            pass
-    server['rkn_block_enabled'] = bool(req.enabled)
+    err = await _rkn_ssh_run(server, RKN_INSTALL_CMD, 420)
+    if err is not None:
+        return err
+    server['rknblock'] = {'installed': True, 'enabled': True}
     save_data(data)
-    return {'status': 'success', 'enabled': req.enabled}
+    RKN_FLAG_CACHE.pop(server_id, None)
+    return {'status': 'success', 'installed': True, 'enabled': True}
+
+
+@app.post('/api/servers/{server_id}/rknblock/uninstall', tags=["Servers"])
+async def api_rknblock_uninstall(request: Request, server_id: int):
+    """Fully remove the blocking contour: rules, sets, units, scripts, logs."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    data = load_data()
+    if server_id >= len(data['servers']):
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    server = data['servers'][server_id]
+    err = await _rkn_ssh_run(server, _rkn_run_cmd('uninstall'), 180)
+    if err is not None:
+        return err
+    server.pop('rknblock', None)
+    save_data(data)
+    RKN_FLAG_CACHE.pop(server_id, None)
+    return {'status': 'success', 'installed': False}
+
+
+class RknBlockEnableRequest(BaseModel):
+    enabled: bool = True
+
+
+@app.post('/api/servers/{server_id}/rknblock/enable', tags=["Servers"])
+async def api_rknblock_enable(request: Request, server_id: int, req: RknBlockEnableRequest):
+    """Start or stop the blocking contour (rules jump in/out; lists stay)."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    data = load_data()
+    if server_id >= len(data['servers']):
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    server = data['servers'][server_id]
+    if not _rkn_record(server).get('installed'):
+        return JSONResponse({'error': 'App is not installed'}, status_code=409)
+    err = await _rkn_ssh_run(server, _rkn_run_cmd('on' if req.enabled else 'off'), 180)
+    if err is not None:
+        return err
+    server['rknblock'] = {'installed': True, 'enabled': bool(req.enabled)}
+    save_data(data)
+    RKN_FLAG_CACHE.pop(server_id, None)
+    return {'status': 'success', 'enabled': bool(req.enabled)}
+
+
+@app.post('/api/servers/{server_id}/rknblock/update', tags=["Servers"])
+async def api_rknblock_update(request: Request, server_id: int):
+    """Re-download the C24Be lists and atomically reload the ipset sets."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    data = load_data()
+    if server_id >= len(data['servers']):
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    server = data['servers'][server_id]
+    if not _rkn_record(server).get('installed'):
+        return JSONResponse({'error': 'App is not installed'}, status_code=409)
+    err = await _rkn_ssh_run(server, _rkn_run_cmd('update'), 300)
+    if err is not None:
+        return err
+    RKN_FLAG_CACHE.pop(server_id, None)
+    return {'status': 'success', 'updated': True}
 
 
 RKN_SCAN_SSH_CMD = ("rkn-extra-block status 2>/dev/null | head -6; "
@@ -3621,7 +3699,12 @@ async def api_rkn_scans(request: Request, server_id: int):
         return JSONResponse({'error': 'Server not found'}, status_code=404)
     server = data['servers'][server_id]
     out = await _fetch_rkn_scan_output(server)
-    return _parse_rkn_scan_output(out, server.get('rkn_block_enabled', False))
+    record = server.get('rknblock') or {}
+    installed = bool(record.get('installed'))
+    parsed = _parse_rkn_scan_output(out, installed)
+    parsed['installed'] = installed
+    parsed['enabled'] = bool(record.get('enabled', True)) if installed else False
+    return parsed
 
 
 @app.post('/api/servers/{server_id}/rkn_scans/clear', tags=["Servers"])
@@ -3678,6 +3761,7 @@ async def api_rkn_scan_flags(request: Request):
                        'events24': parsed['last_24h'],
                        'last': parsed['last_event'],
                        'flag': parsed['flag_enabled'],
+                       'installed': parsed['flag_enabled'],
                        'sets': parsed['sets']}
         except Exception:
             summary = None
