@@ -148,6 +148,10 @@ class SmartRouteUiWiringTests(unittest.TestCase):
         self.assertIn('rknblock/install', self.page)
         self.assertIn('rknblock/uninstall', self.page)
         self.assertIn('rknblock/enable', self.page)
+        # renderRknBlockCard must use the global escapeHtml, not the local
+        # esc helpers defined inside other functions (ReferenceError at runtime)
+        self.assertNotIn('esc(d.', self.page)
+        self.assertIn('escapeHtml(d.agent_state)', self.page)
         self.assertIn('function renderRknBlockCard(', self.page)
         self.assertIn('function installRknBlock(', self.page)
         self.assertIn('function uninstallRknBlock(', self.page)
