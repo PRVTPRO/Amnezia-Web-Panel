@@ -4677,7 +4677,13 @@
             rknBlockStatus = null;
             console.warn('RKN block load failed:', err);
         }
-        renderRknBlockCard();
+        // Render failures must not escape: this runs during page init, and
+        // an exception here used to cascade into the instance rendering.
+        try {
+            renderRknBlockCard();
+        } catch (err) {
+            console.error('RKN block render failed:', err);
+        }
         applyInstalledAppsVisibility();
         return rknBlockStatus;
     }
