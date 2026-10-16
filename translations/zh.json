@@ -760,8 +760,6 @@
   "rknblock_opt_log_in": "记录扫描",
   "rknblock_opt_log_out": "记录出站",
   "rknblock_opts_saved": "参数已保存",
-  "rkn_block_base_updated": "库已更新",
-  "rknblock_base_unknown": "库更新时间未知",
   "rknblock_disabled_short": "已关闭",
   "rknblock_opt_block_in_short": "入站",
   "rknblock_opt_block_out_short": "出站",
