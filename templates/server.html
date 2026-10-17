@@ -161,6 +161,7 @@
                 <h1 style="font-size:1.4rem; font-weight:700;">{{ server.name }}</h1>
                 <div class="font-mono text-muted text-sm">{{ server.host }}:{{ server.ssh_port }} • {{ server.username
                     }}</div>
+                <div class="font-mono text-muted text-sm" id="serverIpv6" style="display:none;" title="IPv6"></div>
             </div>
         </div>
         <div class="page-header__actions">
@@ -1985,6 +1986,14 @@
                 <span class="stat-pill" title="Disk: ${formatBytes(stats.disk_used)} / ${formatBytes(stats.disk_total)}">💾 ${stats.disk_percent || 0}%</span>
                 <span class="stat-pill" title="Network">🌐 ↓${formatBytes(stats.net_rx)} ↑${formatBytes(stats.net_tx)}</span>
             `;
+            const ipv6 = Array.isArray(stats.ipv6) ? stats.ipv6 : [];
+            const ipv6El = document.getElementById('serverIpv6');
+            if (ipv6.length) {
+                ipv6El.textContent = ipv6.join(' • ');
+                ipv6El.style.display = '';
+            } else {
+                ipv6El.style.display = 'none';
+            }
         } catch (err) {
             console.warn('Stats load failed:', err);
         }
