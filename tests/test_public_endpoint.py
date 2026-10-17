@@ -235,8 +235,9 @@ class PublicEndpointApiTests(unittest.TestCase):
 
     def test_set_and_clear_round_trip(self):
         client = self.client()
-        res = self.set_endpoint(client, protocol='awg2', public_host='203.0.113.9',
-                                public_port='443')
+        with mock.patch.object(panel, 'get_ssh', return_value=mock.Mock()):
+            res = self.set_endpoint(client, protocol='awg2', public_host='203.0.113.9',
+                                    public_port='443')
         self.assertEqual(res.status_code, 200, res.text)
         self.assertEqual(res.json()['warning'], '')
         self.assertEqual(self.stored('awg2')['public_host'], '203.0.113.9')
@@ -425,6 +426,75 @@ class PortCheckApiTests(PublicEndpointApiTests):
             res = client.get('/api/servers/0/protocol/port-check?port=443')
         self.assertEqual(res.status_code, 502, res.text)
         self.assertIn('host is down', res.json()['error'])
+
+
+class PublicPortForwardTests(PublicEndpointApiTests):
+    """A custom public port is published on the box itself: REDIRECT rules in
+    iptables/ip6tables per address family, removed when the port is cleared
+    or changed."""
+
+    def ssh_recorder(self):
+        ssh = mock.Mock()
+        ssh.commands = []
+        ssh.run_command.side_effect = lambda cmd, *a, **k: ssh.commands.append(cmd) or ('', '', 0)
+        return ssh
+
+    def test_command_builder_publishes_udp_for_wireguard_family(self):
+        cmds = panel.public_port_forward_commands('awg3', '8443', '55425')
+        self.assertEqual(len(cmds), 2)
+        for ipt in ('iptables', 'ip6tables'):
+            self.assertTrue(any(c.startswith(f'{ipt} -t nat -C PREROUTING -p udp --dport 8443') for c in cmds), cmds)
+
+    def test_command_builder_uses_tcp_for_xray_and_skips_services(self):
+        tcp = panel.public_port_forward_commands('xray', '8443', '443')
+        self.assertTrue(all('-p tcp' in c for c in tcp))
+        self.assertIsNone(panel.public_port_forward_commands('dns', '8443', '53'))
+
+    def test_same_or_empty_port_means_no_rule_but_clears_the_stale_one(self):
+        self.assertIsNone(panel.public_port_forward_commands('awg3', '', '55425', ''))
+        same = panel.public_port_forward_commands('awg3', '55425', '55425', '55425')
+        self.assertIsNone(same)
+        cleared = panel.public_port_forward_commands('awg3', '', '55425', '8443')
+        self.assertEqual(len(cleared), 2)
+        self.assertTrue(all('-D PREROUTING' in c and '--dport 8443' in c for c in cleared), cleared)
+        changed = panel.public_port_forward_commands('awg3', '9443', '55425', '8443')
+        self.assertTrue(any('-D PREROUTING' in c and '--dport 8443' in c for c in changed), changed)
+        self.assertTrue(any('-A PREROUTING' in c and '--dport 9443' in c for c in changed), changed)
+
+    def test_saving_a_custom_port_installs_both_families(self):
+        client = self.client()
+        ssh = self.ssh_recorder()
+        with mock.patch.object(panel, 'get_ssh', return_value=ssh):
+            res = self.set_endpoint(client, protocol='awg2', public_host='vpn.example.com',
+                                    public_port='8443')
+        self.assertEqual(res.status_code, 200, res.text)
+        self.assertEqual(res.json()['warning'], '')
+        self.assertEqual(len(ssh.commands), 2)
+        for ipt in ('iptables', 'ip6tables'):
+            self.assertTrue(any(c.startswith(f'{ipt} -t nat -C PREROUTING -p udp --dport 8443')
+                                and '--to-ports 55424' in c for c in ssh.commands), ssh.commands)
+
+    def test_clearing_the_port_removes_the_rules(self):
+        client = self.client()
+        ssh = self.ssh_recorder()
+        with mock.patch.object(panel, 'get_ssh', return_value=ssh):
+            self.set_endpoint(client, protocol='awg2', public_host='vpn.example.com',
+                              public_port='8443')
+            ssh.commands.clear()
+            res = self.set_endpoint(client, protocol='awg2', public_host='vpn.example.com',
+                                    public_port='')
+        self.assertEqual(res.status_code, 200, res.text)
+        self.assertEqual(len(ssh.commands), 2)
+        self.assertTrue(all('-D PREROUTING' in c for c in ssh.commands), ssh.commands)
+
+    def test_a_box_that_is_down_keeps_the_setting_and_warns(self):
+        client = self.client()
+        with mock.patch.object(panel, 'get_ssh', side_effect=RuntimeError('host is down')):
+            res = self.set_endpoint(client, protocol='awg2', public_host='vpn.example.com',
+                                    public_port='8443')
+        self.assertEqual(res.status_code, 200, res.text)
+        self.assertIn('host is down', res.json()['warning'])
+        self.assertEqual(self.stored('awg2')['public_port'], '8443')
 
 
 if __name__ == '__main__':

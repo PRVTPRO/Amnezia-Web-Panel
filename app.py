@@ -5307,6 +5307,8 @@ async def api_set_protocol_public_endpoint(request: Request, server_id: int, req
     Both fields are optional and empty means "as before": the server's own
     address, the instance's listen port. Useful when an instance answers on a
     second IP of the same box, behind a port forward, or under a domain name.
+    A custom public port on this same box is published automatically: REDIRECT
+    rules in iptables/ip6tables send it to the instance's listen port.
     """
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -5325,6 +5327,8 @@ async def api_set_protocol_public_endpoint(request: Request, server_id: int, req
             return JSONResponse({'error': str(e)}, status_code=400)
 
         record = server['protocols'][proto]
+        old_public_port = str(record.get('public_port') or '').strip()
+        listen_port = str(record.get('port') or '').strip()
         for key, value in (('public_host', host), ('public_port', port)):
             if value:
                 record[key] = value
@@ -5332,33 +5336,78 @@ async def api_set_protocol_public_endpoint(request: Request, server_id: int, req
                 record.pop(key, None)
         save_data(data)
 
-        # Telemt composes its own tg:// links from config.toml, so for that
-        # protocol the override reaches clients only after the file on the
-        # server carries it. The record is saved either way: a box that is down
-        # right now must not lose the setting, and the next install re-applies
-        # it.
+        # The override reaches the server in two ways: telemt composes its own
+        # tg:// links from config.toml, and a custom public port on this same
+        # box needs an iptables REDIRECT to the listen port. The record is
+        # saved either way: a box that is down right now must not lose the
+        # setting, and the next save re-applies it.
         warning = ''
-        if protocol_base(proto) == 'telemt':
-            ssh = None
-            try:
+        ssh = None
+        try:
+            base = protocol_base(proto)
+            if base == 'telemt':
                 pub_host, pub_port = protocol_public_endpoint(server, proto)
                 ssh = await asyncio.to_thread(get_ssh, server)
                 await asyncio.to_thread(ssh.connect)
                 manager = get_protocol_manager(ssh, proto)
                 await asyncio.to_thread(
                     manager.set_public_endpoint, pub_host, pub_port or record.get('port', '443'))
-            except Exception as e:
-                logger.warning(f"Could not apply the public endpoint to {proto}: {e}")
-                warning = str(e)
-            finally:
-                if ssh is not None:
-                    ssh.disconnect()
+            fwd = public_port_forward_commands(proto, port, listen_port, old_public_port)
+            if fwd is not None:
+                if ssh is None:
+                    ssh = await asyncio.to_thread(get_ssh, server)
+                    await asyncio.to_thread(ssh.connect)
+                for cmd in fwd:
+                    await asyncio.to_thread(ssh.run_command, cmd)
+        except Exception as e:
+            logger.warning(f"Could not apply the public endpoint to {proto}: {e}")
+            warning = str(e)
+        finally:
+            if ssh is not None:
+                ssh.disconnect()
 
         return {'status': 'success', 'protocol': proto,
                 'public_host': host, 'public_port': port, 'warning': warning}
     except Exception as e:
         logger.exception("Error setting protocol public endpoint")
         return JSONResponse({'error': str(e)}, status_code=500)
+
+
+# Public ports are published on the box itself: UDP for the WireGuard family,
+# TCP for the rest. DNS resolvers and the exit node have nothing to publish.
+PUBLIC_FORWARD_L4 = {
+    'udp': ('awg', 'awg2', 'awg3', 'awg_legacy', 'wireguard'),
+    'tcp': ('xray', 'telemt', 'socks5', 'nginx'),
+}
+
+
+def public_port_forward_commands(protocol, public_port, listen_port, old_public_port=''):
+    """iptables/ip6tables commands publishing a custom public port, or None.
+
+    A public port equal to the listen port (or empty) means "no rule"; any
+    previous rule for the same instance is removed. Idempotent: additions are
+    guarded by -C, removals loop -D until the rule is gone.
+    """
+    base = protocol_base(protocol)
+    l4 = next((k for k, v in PUBLIC_FORWARD_L4.items() if base in v), None)
+    if l4 is None:
+        return None
+    commands = []
+
+    def drop(port):
+        for ipt in ('iptables', 'ip6tables'):
+            rule = (f'-t nat -D PREROUTING -p {l4} --dport {port} '
+                    f'-j REDIRECT --to-ports {listen_port}')
+            commands.append(f'for i in 1 2 3; do {ipt} {rule} 2>/dev/null || break; done')
+
+    for stale in {p for p in (old_public_port,) if p and p != public_port}:
+        drop(stale)
+    if public_port and public_port != listen_port:
+        for ipt in ('iptables', 'ip6tables'):
+            rule = (f'-t nat -A PREROUTING -p {l4} --dport {public_port} '
+                    f'-j REDIRECT --to-ports {listen_port}')
+            commands.append(f'{ipt} {rule.replace("-A ", "-C ", 1)} 2>/dev/null || {ipt} {rule}')
+    return commands or None
 
 
 def _parse_ss_listeners(output):
