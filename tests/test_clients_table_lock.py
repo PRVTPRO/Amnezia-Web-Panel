@@ -12,6 +12,7 @@ is allowed to save, so without serialization the last save necessarily
 clobbers the other op's change.
 """
 import json
+import shlex
 import threading
 import time
 import unittest
@@ -33,6 +34,7 @@ def fake_ssh():
     ssh._awg_batch = None  # real attribute; a bare Mock would break _batch_entry
     ssh.docker_container_state = lambda name: (True, True)
     state = {'table': json.dumps(TABLE)}
+    uploads = {}
     sync = {'reads': 0, 'both_read': threading.Event()}
 
     def sudo(command, timeout=60):
@@ -44,16 +46,22 @@ def fake_ssh():
                 sync['both_read'].set()
             return snapshot, '', 0
         if command.startswith('docker cp'):
+            state['staged'] = uploads[shlex.split(command)[-2]]
+            return '', '', 0
+        if 'mv -f --' in command and 'clientsTable' in command:
+            state['table'] = state['staged']
             return '', '', 0
         return '', '', 1
 
     def upload(content, remote_path):
         # only the clientsTable snapshot models the server's table;
         # _apply_bw_limits uploads other files (tc scripts, bwlimits)
-        if remote_path.endswith('_clients.json'):
-            state['table'] = content
+        if remote_path.endswith('/clientsTable'):
+            uploads[remote_path] = content
 
     ssh.run_sudo_command = sudo
+    ssh.run_command.side_effect = lambda command, **kwargs: (
+        ('/tmp/amnezia-clients.fixture\n', '', 0) if command.startswith('mktemp') else ('', '', 0))
     ssh.upload_file = upload
     return ssh, state, sync
 

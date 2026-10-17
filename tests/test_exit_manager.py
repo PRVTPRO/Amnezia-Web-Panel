@@ -71,6 +71,8 @@ class FakeSSH:
 
     def run_command(self, cmd, timeout=60):
         self.commands.append(cmd)
+        if cmd.startswith('mktemp -d /tmp/amnezia-clients.'):
+            return '/tmp/amnezia-clients.fixture\n', '', 0
         if 'docker --version' in cmd:
             return 'Docker version 27.0', '', 0
         if 'systemctl is-active' in cmd:
@@ -82,9 +84,17 @@ class FakeSSH:
 
     def run_sudo_command(self, cmd, timeout=60):
         self.commands.append(cmd)
-        m = re.search(r"docker cp (\S+) \S+?:(\S+)", cmd)
+        m = re.search(r"docker cp (?:-- )?(\S+) \S+?:(\S+)", cmd)
         if m:
             self.files[m.group(2)] = self.uploads[m.group(1)]
+            return '', '', 0
+        if 'mv -f --' in cmd and 'clientsTable' in cmd:
+            for source, target in re.findall(r'cp -p -- (\S+) (\S+)', cmd):
+                if source in self.files:
+                    self.files[target] = self.files[source]
+            for source, target in re.findall(r'mv -f -- (\S+) (\S+)', cmd):
+                if source in self.files:
+                    self.files[target.rstrip("'")] = self.files.pop(source)
             return '', '', 0
         if 'docker ps -a' in cmd and 'amnezia-exit' in cmd:
             return ('amnezia-exit\n' if self.installed else ''), '', 0

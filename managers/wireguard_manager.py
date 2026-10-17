@@ -18,6 +18,7 @@ import threading
 from base64 import b64encode
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives import serialization
+from managers.clients_table import save_clients_table
 
 logger = logging.getLogger(__name__)
 
@@ -419,12 +420,7 @@ tail -f /dev/null
 
     def _save_clients_table(self, clients_table):
         """Save the clients table to the server."""
-        content = json.dumps(clients_table, indent=2)
-        self.ssh.upload_file(content, "/tmp/_wg_clients.json")
-        self.ssh.run_sudo_command(
-            f"docker cp /tmp/_wg_clients.json {self.CONTAINER_NAME}:{self.CLIENTS_TABLE_PATH}"
-        )
-        self.ssh.run_command("rm -f /tmp/_wg_clients.json")
+        save_clients_table(self.ssh, self.CONTAINER_NAME, self.CLIENTS_TABLE_PATH, clients_table)
 
         # Keep per-peer bandwidth limits in sync (best effort)
         try:

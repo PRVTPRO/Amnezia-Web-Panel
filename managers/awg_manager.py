@@ -22,6 +22,7 @@ import threading
 from base64 import b64encode, b64decode
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives import serialization
+from managers.clients_table import save_clients_table
 
 logger = logging.getLogger(__name__)
 
@@ -2264,18 +2265,12 @@ x_exit_sync() {
         """Save the clients table to the server."""
         container_name = self._container_name(protocol_type)
         clients_table_path = self._clients_table_path()
-        content = json.dumps(clients_table, indent=2)
-
-        # Write to /tmp via SFTP, then docker cp into container
-        self.ssh.upload_file(content, "/tmp/_amnz_clients.json")
-        self.ssh.run_sudo_command(
-            f"docker cp /tmp/_amnz_clients.json {container_name}:{clients_table_path}"
-        )
-        self.ssh.run_command("rm -f /tmp/_amnz_clients.json")
-
-        # Drop prefetched batch snapshot so next read sees fresh data
-        if getattr(self.ssh, '_awg_batch', None) is not None:
-            self.ssh._awg_batch = None
+        try:
+            save_clients_table(self.ssh, container_name, clients_table_path, clients_table)
+        finally:
+            # A lost reply may follow a committed rename: reread either way.
+            if getattr(self.ssh, '_awg_batch', None) is not None:
+                self.ssh._awg_batch = None
 
         # Keep per-peer bandwidth limits in sync (best effort)
         try:
