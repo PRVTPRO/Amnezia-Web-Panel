@@ -19,6 +19,7 @@ import re
 import time
 import functools
 import threading
+from managers.clients_table_reader import clients_table_missing
 from base64 import b64encode, b64decode
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives import serialization
@@ -308,6 +309,7 @@ CONN_LIVE_HANDSHAKE_SECONDS = 300
 # never block each other.
 _TABLE_LOCKS = {}
 _TABLE_LOCKS_GUARD = threading.Lock()
+_TABLE_WRITE_STATE = threading.local()
 
 
 def _clients_table_lock(host, container_name):
@@ -322,7 +324,12 @@ def _serialized_table_write(method):
         host = getattr(self.ssh, 'host', '') or 'unknown'
         container = self._container_name(protocol_type)
         with _clients_table_lock(host, container):
-            return method(self, protocol_type, *args, **kwargs)
+            previous = getattr(_TABLE_WRITE_STATE, 'target', None)
+            _TABLE_WRITE_STATE.target = (host, container)
+            try:
+                return method(self, protocol_type, *args, **kwargs)
+            finally:
+                _TABLE_WRITE_STATE.target = previous
     return wrapper
 
 
@@ -2149,7 +2156,10 @@ x_exit_sync() {
     def _get_clients_table(self, protocol_type):
         """Get the clients table from the server."""
         container_name = self._container_name(protocol_type)
-        batch = self._batch_entry(container_name)
+        host = getattr(self.ssh, 'host', '') or 'unknown'
+        writing = getattr(_TABLE_WRITE_STATE, 'target', None) == (host, container_name)
+        # Poll snapshots are not authoritative input for a read-modify-write.
+        batch = None if writing else self._batch_entry(container_name)
         if batch is not None:
             out = batch['clients']
         else:
@@ -2162,6 +2172,8 @@ x_exit_sync() {
             except Exception:
                 st = None
             if st and st[0] and not st[1]:
+                if writing:
+                    raise RuntimeError(f"Cannot update clientsTable in stopped {container_name}")
                 return []
             clients_table_path = self._clients_table_path()
             out, err, code = self.ssh.run_sudo_command(
@@ -2181,16 +2193,13 @@ x_exit_sync() {
                 if state and not state[1]:
                     # Container exists but is stopped: nothing to read, and
                     # the UI already shows the card as stopped.
+                    if writing:
+                        raise RuntimeError(f"Cannot update clientsTable in stopped {container_name}")
                     return []
                 # Running (or state unknown): probe the file itself.
-                _, _, fcode = self.ssh.run_sudo_command(
-                    f"docker exec -i {container_name} test -f {clients_table_path}")
-                if fcode == 0:
-                    raise RuntimeError(
-                        f"clientsTable exists in {container_name} but could "
-                        f"not be read (docker exec exit {code}): "
-                        f"{err or 'no output'}")
-                return []  # fresh instance: no clientsTable yet
+                if clients_table_missing(self.ssh, container_name, clients_table_path):
+                    return []  # positively confirmed fresh instance
+                raise RuntimeError(f"clientsTable in {container_name} could not be read")
 
         if not out.strip():
             if batch is not None:
@@ -2212,7 +2221,9 @@ x_exit_sync() {
                     except Exception:
                         pass
                     return self._get_clients_table(protocol_type)
-            return []
+            if batch is not None:
+                return []
+            raise RuntimeError(f"clientsTable in {container_name} is empty (expected JSON array)")
 
         try:
             data = json.loads(out)
@@ -2232,9 +2243,7 @@ x_exit_sync() {
                 for client_id, info in data.items():
                     result.append({
                         'clientId': client_id,
-                        'userData': {
-                            'clientName': info.get('clientName', 'Unknown'),
-                        }
+                        'userData': dict(info, clientName=info.get('clientName', 'Unknown'))
                     })
                 logger.info(
                     f"clientsTable {container_name}: {len(result)} records "
@@ -2259,6 +2268,7 @@ x_exit_sync() {
             raise RuntimeError(
                 f"clientsTable in {container_name} is not valid JSON "
                 f"(truncated read or corrupt file)")
+        raise RuntimeError(f"clientsTable in {container_name} has an unsupported JSON type")
 
     def _save_clients_table(self, protocol_type, clients_table):
         """Save the clients table to the server."""
@@ -2532,17 +2542,11 @@ done < "$BW"
             f"docker exec -i {container_name} cat {clients_table_path} 2>/dev/null"
         )
         if code != 0:
-            # cat fails both when docker exec is broken and when the file
-            # simply does not exist yet (fresh instance). Fail loudly only
-            # for the former; an absent table means no reservations.
-            _, terr, tcode = self.ssh.run_sudo_command(
-                f"docker exec -i {container_name} true")
-            if tcode != 0:
-                raise RuntimeError(
-                    f"Cannot read clients table from {container_name}: {terr.strip() or err.strip()}")
-            return set()
+            if clients_table_missing(self.ssh, container_name, clients_table_path):
+                return set()
+            raise RuntimeError(f"Cannot read IP reservations from {container_name}")
         if not out.strip():
-            return set()
+            raise RuntimeError(f"Clients table in {container_name} is empty (expected JSON)")
         try:
             data = json.loads(out)
         except json.JSONDecodeError:

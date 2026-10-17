@@ -234,8 +234,8 @@ class PrefetchAwgStateTest(unittest.TestCase):
         def no_file(cmd, timeout=60):
             if 'cat /opt/amnezia/awg/clientsTable' in cmd:
                 return '', '', 1
-            if 'test -f' in cmd:
-                return '', '', 1
+            if 'printf missing' in cmd:
+                return 'missing', '', 0
             return orig(cmd, timeout)
         ssh.run_sudo_command = no_file
         mgr = AWGManager(ssh)

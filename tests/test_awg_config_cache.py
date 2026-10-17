@@ -86,6 +86,10 @@ class FakeSSH:
         if m:
             return '', '', 0 if m.group(1) in self.files else 1
 
+        m = re.search(r"test ! -e (\S+) .*printf missing", command)
+        if m:
+            return ('missing', '', 0) if m.group(1) not in self.files else ('', '', 1)
+
         return '', '', 0
 
 
