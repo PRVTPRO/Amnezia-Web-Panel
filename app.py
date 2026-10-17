@@ -5146,12 +5146,13 @@ def api_clear_conn_warnings(request: Request, server_id: int, req: ConnectionAct
 
 
 @app.post('/api/servers/{server_id}/connections/rename', tags=["Connections"])
-def api_rename_connection(request: Request, server_id: int, req: RenameConnectionRequest):
+async def api_rename_connection(request: Request, server_id: int, req: RenameConnectionRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
-        data = load_data()
-        if server_id >= len(data['servers']):
+        async with DATA_LOCK:
+            data = load_data()
+        if server_id < 0 or server_id >= len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
         new_name = (req.new_name or '').strip()
@@ -5159,30 +5160,45 @@ def api_rename_connection(request: Request, server_id: int, req: RenameConnectio
             return JSONResponse({'error': 'New name is required'}, status_code=400)
         if not req.client_id:
             return JSONResponse({'error': 'Client ID is required'}, status_code=400)
-        ssh = get_ssh(server)
-        ssh.connect()
-        manager = get_protocol_manager(ssh, req.protocol)
-        result = _manager_call(manager, 'rename_client', req.protocol, req.client_id, new_name) or {}
-        # Optional per-peer bandwidth limit (managers exposing set_speed_limit)
-        speed_warning = None
-        if req.max_speed >= 0 and hasattr(manager, 'set_speed_limit'):
+        connection_ids = {
+            conn['id'] for conn in data.get('user_connections', [])
+            if conn.get('id') and conn.get('client_id') == req.client_id
+            and conn.get('server_id') == server_id and conn.get('protocol') == req.protocol
+        }
+
+        def rename_peer():
+            ssh = get_ssh(server)
             try:
-                _manager_call(manager, 'set_speed_limit', req.protocol, req.client_id, req.max_speed)
-            except Exception as se:
-                logger.warning(f"set_speed_limit failed: {se}")
-                speed_warning = str(se)
-        ssh.disconnect()
+                ssh.connect()
+                manager = get_protocol_manager(ssh, req.protocol)
+                result = _manager_call(manager, 'rename_client', req.protocol, req.client_id, new_name) or {}
+                speed_warning = None
+                if req.max_speed >= 0 and hasattr(manager, 'set_speed_limit'):
+                    try:
+                        _manager_call(manager, 'set_speed_limit', req.protocol, req.client_id, req.max_speed)
+                    except Exception as se:
+                        logger.warning(f"set_speed_limit failed: {se}")
+                        speed_warning = str(se)
+                return result, speed_warning
+            finally:
+                ssh.disconnect()
+
+        # Blocking SSH stays outside DATA_LOCK and off the event loop.
+        result, speed_warning = await asyncio.to_thread(rename_peer)
         # Telemt rename may also change client_id (username is the identity there)
         new_client_id = result.get('client_id', req.client_id)
         stored_name = result.get('name', new_name)
-        changed = False
-        for conn in data.get('user_connections', []):
-            if conn.get('client_id') == req.client_id and conn.get('server_id') == server_id and conn.get('protocol') == req.protocol:
-                conn['name'] = stored_name
-                conn['client_id'] = new_client_id
-                changed = True
-        if changed:
-            save_data(data)
+        async with DATA_LOCK:
+            current = load_data()
+            changed = False
+            for conn in current.get('user_connections', []):
+                if (conn.get('id') in connection_ids and conn.get('client_id') == req.client_id
+                        and conn.get('server_id') == server_id and conn.get('protocol') == req.protocol):
+                    conn['name'] = stored_name
+                    conn['client_id'] = new_client_id
+                    changed = True
+            if changed:
+                save_data(current)
         resp = {'status': 'success', 'name': stored_name, 'client_id': new_client_id}
         if speed_warning:
             resp['speed_warning'] = speed_warning
