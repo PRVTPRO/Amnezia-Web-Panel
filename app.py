@@ -5351,6 +5351,61 @@ async def api_set_protocol_public_endpoint(request: Request, server_id: int, req
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
+def _parse_ss_listeners(output):
+    """Turn `ss -tulpnH` output into [{proto, address, process, pid}]."""
+    listeners = []
+    for line in output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        fields = line.split(None, 5)
+        if len(fields) < 5 or fields[0] not in ('tcp', 'udp'):
+            continue
+        process, pid = '', ''
+        if len(fields) > 5:
+            m = re.search(r'\("([^"]+)",pid=(\d+)', fields[5])
+            if m:
+                process, pid = m.group(1), m.group(2)
+        listeners.append({'proto': fields[0], 'address': fields[4],
+                          'process': process, 'pid': pid})
+    return listeners
+
+
+@app.get('/api/servers/{server_id}/protocol/port-check', tags=["Protocols"])
+async def api_check_protocol_port(request: Request, server_id: int, port: str = ''):
+    """Who is listening on a candidate port on the server.
+
+    For the public-endpoint modal: before a custom port is published in
+    client configs the admin should see whether (and by what) it is taken.
+    """
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        port = normalize_public_port(port)
+    except ValueError as e:
+        return JSONResponse({'error': str(e)}, status_code=400)
+    if not port:
+        return JSONResponse({'error': 'Port is required'}, status_code=400)
+    data = load_data()
+    if server_id >= len(data['servers']):
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    server = data['servers'][server_id]
+    ssh = None
+    try:
+        ssh = get_ssh(server)
+        await asyncio.to_thread(ssh.connect)
+        out, _, _ = await asyncio.to_thread(
+            ssh.run_command, "ss -tulpnH '( sport = :%d )'" % int(port))
+        listeners = _parse_ss_listeners(out)
+        return {'port': int(port), 'in_use': bool(listeners), 'listeners': listeners}
+    except Exception as e:
+        logger.warning(f"Port check on server {server_id} failed: {e}")
+        return JSONResponse({'error': str(e)}, status_code=502)
+    finally:
+        if ssh is not None:
+            ssh.disconnect()
+
+
 @app.post('/api/servers/{server_id}/wgeasy/import', tags=["Protocols"])
 def api_wgeasy_import(request: Request, server_id: int, req: WgEasyImportRequest):
     """Migrate clients from a wg-easy panel on this server into a panel-managed

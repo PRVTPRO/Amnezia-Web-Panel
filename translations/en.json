@@ -810,5 +810,11 @@
   "rknblock_disabled_short": "disabled",
   "rknblock_opt_block_in_short": "inbound",
   "rknblock_opt_block_out_short": "outbound",
-  "rknblock_opt_log_off_short": "logging"
+  "rknblock_opt_log_off_short": "logging",
+  "public_endpoint_check": "Check",
+  "public_endpoint_checking": "Checking the port",
+  "public_endpoint_port_free": "Port is free — safe to publish.",
+  "public_endpoint_port_docker": "The port is held by your own Docker — safe to publish",
+  "public_endpoint_port_busy": "Port is busy:",
+  "public_endpoint_port_invalid": "Enter a port number (1-65535)."
 }

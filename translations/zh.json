@@ -810,5 +810,11 @@
   "rknblock_disabled_short": "已关闭",
   "rknblock_opt_block_in_short": "入站",
   "rknblock_opt_block_out_short": "出站",
-  "rknblock_opt_log_off_short": "日志"
+  "rknblock_opt_log_off_short": "日志",
+  "public_endpoint_check": "检查",
+  "public_endpoint_checking": "正在检查端口",
+  "public_endpoint_port_free": "端口空闲，可以发布。",
+  "public_endpoint_port_docker": "该端口由您自己的 Docker 占用——可以发布",
+  "public_endpoint_port_busy": "端口已被占用：",
+  "public_endpoint_port_invalid": "请输入端口号（1-65535）。"
 }

@@ -783,7 +783,11 @@
             </div>
             <div class="form-group">
                 <label class="form-label">{{ _('public_endpoint_port') }}</label>
-                <input type="text" class="form-input" id="publicEndpointPort" maxlength="5" inputmode="numeric" placeholder="{{ _('public_endpoint_port_placeholder') }}">
+                <div style="display:flex; gap: var(--space-sm); align-items:center;">
+                    <input type="text" class="form-input" id="publicEndpointPort" maxlength="5" inputmode="numeric" placeholder="{{ _('public_endpoint_port_placeholder') }}" style="flex:1;">
+                    <button class="btn btn-secondary" id="publicEndpointCheckBtn" onclick="checkPublicEndpointPort()">{{ _('public_endpoint_check') }}</button>
+                </div>
+                <div class="text-sm" id="publicEndpointPortResult" style="margin-top: var(--space-xs);"></div>
             </div>
             <div class="text-muted text-sm">{{ _('public_endpoint_hint') }}</div>
         </div>
@@ -2551,10 +2555,28 @@
 
     // ---------- public endpoint of an instance ----------
     let publicEndpointTarget = null;
+    let publicEndpointPortVerified = false;
+    let publicEndpointSavedPort = '';
 
     function publicEndpointLabel(ep) {
         if (!ep) return '';
         return ep.port ? `${ep.host || SERVER_HOST}:${ep.port}` : (ep.host || '');
+    }
+
+    function resetPublicEndpointPortCheck() {
+        publicEndpointPortVerified = false;
+        const res = document.getElementById('publicEndpointPortResult');
+        res.textContent = '';
+        res.className = 'text-sm';
+        res.style.color = '';
+    }
+
+    function updatePublicEndpointSaveState() {
+        const port = document.getElementById('publicEndpointPort').value.trim();
+        const btn = document.getElementById('publicEndpointSaveBtn');
+        // Empty port means "the instance's own port" -- nothing to check.
+        // An unchanged value keeps the previous verdict.
+        btn.disabled = !!port && port !== publicEndpointSavedPort && !publicEndpointPortVerified;
     }
 
     function openPublicEndpointModal(proto) {
@@ -2564,7 +2586,68 @@
         document.getElementById('publicEndpointPort').value = ep.port || '';
         document.getElementById('publicEndpointHint').textContent =
             _('public_endpoint_for').replace('{}', getProtoTitle(proto));
+        publicEndpointSavedPort = ep.port || '';
+        resetPublicEndpointPortCheck();
+        updatePublicEndpointSaveState();
         openModal('publicEndpointModal');
+    }
+
+    document.addEventListener('input', (e) => {
+        if (e.target && e.target.id === 'publicEndpointPort') {
+            resetPublicEndpointPortCheck();
+            updatePublicEndpointSaveState();
+        }
+    });
+
+    async function checkPublicEndpointPort() {
+        const port = document.getElementById('publicEndpointPort').value.trim();
+        const btn = document.getElementById('publicEndpointCheckBtn');
+        const res = document.getElementById('publicEndpointPortResult');
+        if (!/^[0-9]+$/.test(port)) {
+            res.className = 'text-sm';
+            res.style.color = 'var(--error, #dc2626)';
+            res.textContent = _('public_endpoint_port_invalid');
+            publicEndpointPortVerified = false;
+            updatePublicEndpointSaveState();
+            return;
+        }
+        btn.disabled = true;
+        res.className = 'text-sm';
+        res.style.color = '';
+        res.textContent = _('public_endpoint_checking') + '…';
+        try {
+            const data = await apiCall(`/api/servers/${SERVER_ID}/protocol/port-check?port=${encodeURIComponent(port)}`);
+            const describe = (l) =>
+                (l.process ? `${l.process}${l.pid ? ' (pid ' + l.pid + ')' : ''} — ` : '') +
+                `${l.proto.toUpperCase()} ${l.address}`;
+            if (!data.listeners || !data.listeners.length) {
+                publicEndpointPortVerified = true;
+                res.style.color = 'var(--success, #16a34a)';
+                res.textContent = '✓ ' + _('public_endpoint_port_free');
+            } else {
+                // docker-proxy/dockerd hold published container ports, so a port
+                // taken only by them is still publishable (e.g. another instance
+                // of this same box, or this one behind a forward).
+                const foreign = data.listeners.filter(l => !/^(docker-proxy|dockerd)$/.test(l.process));
+                const holders = data.listeners.map(describe).join('; ');
+                if (!foreign.length) {
+                    publicEndpointPortVerified = true;
+                    res.style.color = 'var(--success, #16a34a)';
+                    res.textContent = '✓ ' + _('public_endpoint_port_docker') + ': ' + holders;
+                } else {
+                    publicEndpointPortVerified = false;
+                    res.style.color = 'var(--error, #dc2626)';
+                    res.textContent = _('public_endpoint_port_busy') + ' ' + holders;
+                }
+            }
+        } catch (err) {
+            publicEndpointPortVerified = false;
+            res.style.color = 'var(--error, #dc2626)';
+            res.textContent = (_('error') || 'Error') + ': ' + err.message;
+        } finally {
+            btn.disabled = false;
+            updatePublicEndpointSaveState();
+        }
     }
 
     async function savePublicEndpoint() {

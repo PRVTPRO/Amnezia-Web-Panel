@@ -362,5 +362,70 @@ class PublicEndpointApiTests(unittest.TestCase):
         self.assertEqual(re.findall(r'>\s*public_endpoint_[a-z0-9_]+\s*<', page), [])
 
 
+class PortCheckApiTests(PublicEndpointApiTests):
+    """The port checker behind the public-endpoint modal: parsing of `ss`
+    output, auth, validation and the SSH call itself."""
+
+    SS_SAMPLE = (
+        'udp   UNCONN 0      0            0.0.0.0:55424       0.0.0.0:*    '
+        'users:(("docker-proxy",pid=1234,fd=4))\n'
+        'tcp   LISTEN 0      128          0.0.0.0:443         0.0.0.0:*    '
+        'users:(("nginx",pid=99,fd=6))\n'
+    )
+
+    def test_parser_extracts_proto_address_process_and_pid(self):
+        listeners = panel._parse_ss_listeners(self.SS_SAMPLE)
+        self.assertEqual(listeners, [
+            {'proto': 'udp', 'address': '0.0.0.0:55424', 'process': 'docker-proxy', 'pid': '1234'},
+            {'proto': 'tcp', 'address': '0.0.0.0:443', 'process': 'nginx', 'pid': '99'},
+        ])
+
+    def test_parser_handles_an_empty_answer_and_header_noise(self):
+        self.assertEqual(panel._parse_ss_listeners(''), [])
+        self.assertEqual(panel._parse_ss_listeners('Netid State Recv-Q Send-Q Local Address:Port  Peer Address:Port Process\n'), [])
+
+    def _ssh_returning(self, output):
+        ssh = mock.Mock()
+        ssh.run_command.return_value = (output, '', 0)
+        return ssh
+
+    def test_free_port_reports_no_listeners(self):
+        client = self.client()
+        ssh = self._ssh_returning('')
+        with mock.patch.object(panel, 'get_ssh', return_value=ssh):
+            res = client.get('/api/servers/0/protocol/port-check?port=59999')
+        self.assertEqual(res.status_code, 200, res.text)
+        body = res.json()
+        self.assertEqual(body['port'], 59999)
+        self.assertFalse(body['in_use'])
+        self.assertEqual(body['listeners'], [])
+        ssh.run_command.assert_called_once_with("ss -tulpnH '( sport = :59999 )'")
+
+    def test_busy_port_names_the_holder(self):
+        client = self.client()
+        ssh = self._ssh_returning(self.SS_SAMPLE)
+        with mock.patch.object(panel, 'get_ssh', return_value=ssh):
+            res = client.get('/api/servers/0/protocol/port-check?port=443')
+        self.assertEqual(res.status_code, 200, res.text)
+        body = res.json()
+        self.assertTrue(body['in_use'])
+        self.assertEqual(body['listeners'][1]['process'], 'nginx')
+
+    def test_bad_port_and_unknown_server_are_refused(self):
+        client = self.client()
+        self.assertEqual(client.get('/api/servers/0/protocol/port-check?port=70000').status_code, 400)
+        self.assertEqual(client.get('/api/servers/0/protocol/port-check').status_code, 400)
+        self.assertEqual(client.get('/api/servers/7/protocol/port-check?port=443').status_code, 404)
+
+    def test_anonymous_and_unreachable_server(self):
+        with TestClient(panel.app) as client:
+            self.assertEqual(client.get('/api/servers/0/protocol/port-check?port=443').status_code, 403)
+        client = self.client()
+        with mock.patch.object(panel, 'get_ssh', side_effect=RuntimeError('host is down')):
+            res = client.get('/api/servers/0/protocol/port-check?port=443')
+        self.assertEqual(res.status_code, 502, res.text)
+        self.assertIn('host is down', res.json()['error'])
+
+
 if __name__ == '__main__':
     unittest.main()

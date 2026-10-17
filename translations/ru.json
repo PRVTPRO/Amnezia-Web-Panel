@@ -810,5 +810,11 @@
   "rknblock_disabled_short": "выключено",
   "rknblock_opt_block_in_short": "входящие",
   "rknblock_opt_block_out_short": "исходящие",
-  "rknblock_opt_log_off_short": "логирование"
+  "rknblock_opt_log_off_short": "логирование",
+  "public_endpoint_check": "Проверить",
+  "public_endpoint_checking": "Проверяем порт",
+  "public_endpoint_port_free": "Порт свободен — можно публиковать.",
+  "public_endpoint_port_docker": "Порт держит ваш же Docker — публиковать можно",
+  "public_endpoint_port_busy": "Порт занят:",
+  "public_endpoint_port_invalid": "Введите номер порта (1–65535)."
 }

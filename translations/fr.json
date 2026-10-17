@@ -810,5 +810,11 @@
   "rknblock_disabled_short": "désactivé",
   "rknblock_opt_block_in_short": "entrant",
   "rknblock_opt_block_out_short": "sortant",
-  "rknblock_opt_log_off_short": "journalisation"
+  "rknblock_opt_log_off_short": "journalisation",
+  "public_endpoint_check": "Vérifier",
+  "public_endpoint_checking": "Vérification du port",
+  "public_endpoint_port_free": "Le port est libre — publication possible.",
+  "public_endpoint_port_docker": "Le port est utilisé par votre propre Docker — publication possible",
+  "public_endpoint_port_busy": "Le port est occupé :",
+  "public_endpoint_port_invalid": "Saisissez un numéro de port (1-65535)."
 }

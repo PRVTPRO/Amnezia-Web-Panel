@@ -810,5 +810,11 @@
   "rknblock_disabled_short": "خاموش",
   "rknblock_opt_block_in_short": "ورودی",
   "rknblock_opt_block_out_short": "خروجی",
-  "rknblock_opt_log_off_short": "ثبت رویداد"
+  "rknblock_opt_log_off_short": "ثبت رویداد",
+  "public_endpoint_check": "بررسی",
+  "public_endpoint_checking": "در حال بررسی پورت",
+  "public_endpoint_port_free": "پورت آزاد است — قابل انتشار است.",
+  "public_endpoint_port_docker": "پورت توسط داکر خود شما اشغال است — قابل انتشار است",
+  "public_endpoint_port_busy": "پورت اشغال است:",
+  "public_endpoint_port_invalid": "شماره پورت را وارد کنید (۱-۶۵۵۳۵)."
 }
