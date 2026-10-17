@@ -3446,6 +3446,16 @@ def api_server_stats(request: Request, server_id: int):
             stats['net_rx'] = stats['net_tx'] = 0
         out, _, _ = ssh.run_command("uptime -p 2>/dev/null || uptime")
         stats['uptime'] = out.strip()
+        # Global IPv6 addresses for the page header. Some providers mark ULA
+        # (fd00::/8) addresses as scope global, so filter them out explicitly.
+        # Small point-to-point transit prefixes (/126 etc. between the box and
+        # the provider's router) are infrastructure, not a public address.
+        out, _, _ = ssh.run_command(
+            "ip -6 addr show scope global 2>/dev/null | "
+            "awk '/inet6/ && $2 !~ /^fd[0-9a-fA-F]{2}:/ {"
+            "split($2, a, \"/\"); if (a[2] <= 64) print a[1]}'"
+        )
+        stats['ipv6'] = [a for a in (line.strip() for line in out.splitlines()) if a]
         ssh.disconnect()
         return stats
     except Exception as e:
