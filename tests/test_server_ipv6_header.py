@@ -51,22 +51,28 @@ class ServerStatsIpv6Tests(unittest.TestCase):
 
         def run_command(cmd, *args, **kwargs):
             if 'ip -6 addr' in cmd:
-                # the remote awk+cut filters ULA (fd00::/8) and strips /prefix
-                lines = [l.split('/')[0] for l in ipv6_output.splitlines()
-                         if l and not l.startswith('fd')]
-                return '\n'.join(lines) + ('\n' if lines else ''), '', 0
+                # the remote awk filters ULA (fd00::/8) and transit /126
+                # prefixes, and strips /prefix
+                kept = []
+                for line in ipv6_output.splitlines():
+                    addr, _, plen = line.partition('/')
+                    if addr.startswith('fd') or (plen and int(plen) > 64):
+                        continue
+                    kept.append(addr)
+                return '\n'.join(kept) + ('\n' if kept else ''), '', 0
             return '0', '', 0
 
         ssh.run_command.side_effect = run_command
         return ssh
 
     def test_global_addresses_come_back_as_a_list(self):
-        out = '2a0a:9300:1:ef0::1/48\n2a0c:5d00:3001::afc5:c09a/48\nfd00:42::1/64\n'
+        out = ('2a01:f500:aaa0:2800::a/56\n2a0c:5d00:3001::afc5:c09a/48\n'
+               'fd00:42::1/64\n2a01:f500:aaaa:fe00::1:2002/126\n')
         client = self.client()
         with mock.patch.object(panel, 'get_ssh', return_value=self._ssh_returning(out)):
             res = client.post('/api/servers/0/stats')
         self.assertEqual(res.status_code, 200, res.text)
-        self.assertEqual(res.json()['ipv6'], ['2a0a:9300:1:ef0::1', '2a0c:5d00:3001::afc5:c09a'])
+        self.assertEqual(res.json()['ipv6'], ['2a01:f500:aaa0:2800::a', '2a0c:5d00:3001::afc5:c09a'])
 
     def test_no_global_address_means_an_empty_list(self):
         client = self.client()
