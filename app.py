@@ -2740,6 +2740,10 @@ async def startup():
     # Start periodic background tasks
     asyncio.create_task(periodic_background_tasks())
 
+    # Re-apply public-port forwards on the fleet: hand-made iptables rules do
+    # not survive reboots on their own, and only some hosts persist them.
+    asyncio.create_task(restore_public_port_forwards())
+
     # Start Telegram bot if enabled
     tg_cfg = data.get('settings', {}).get('telegram', {})
     if tg_cfg.get('enabled') and tg_cfg.get('token'):
@@ -5379,6 +5383,50 @@ PUBLIC_FORWARD_L4 = {
     'udp': ('awg', 'awg2', 'awg3', 'awg_legacy', 'wireguard'),
     'tcp': ('xray', 'telemt', 'socks5', 'nginx'),
 }
+
+# Seconds before the startup re-apply touches SSH, so the panel is serving
+# first. Patched to 0 in tests.
+RESTORE_FORWARD_DELAY = 10
+
+
+async def restore_public_port_forwards():
+    """Re-apply public-port REDIRECT rules on every server at panel startup.
+
+    Hosts have no uniform persistence for hand-made iptables rules (netfilter
+    -persistent exists on some boxes only, docker restores only its own), so
+    after a server or panel restart the panel's own forwards were gone. The
+    panel owns these rules -- it puts them back. Idempotent: additions are
+    guarded by -C, so a double run never duplicates anything.
+    """
+    await asyncio.sleep(RESTORE_FORWARD_DELAY)  # let the panel finish booting
+    data = load_data()
+    for server in data.get('servers', []):
+        commands = []
+        for proto, record in (server.get('protocols') or {}).items():
+            if not isinstance(record, dict):
+                continue
+            public_port = str(record.get('public_port') or '').strip()
+            listen_port = str(record.get('port') or '').strip()
+            if not public_port or not listen_port:
+                continue
+            cmds = public_port_forward_commands(proto, public_port, listen_port)
+            if cmds:
+                commands.extend(cmds)
+        if not commands:
+            continue
+        ssh = None
+        try:
+            ssh = get_ssh(server)
+            await asyncio.to_thread(ssh.connect)
+            for cmd in commands:
+                await asyncio.to_thread(ssh.run_command, cmd)
+            logger.info(f"Public port forwards re-applied on {server.get('name') or server.get('host')}")
+        except Exception as e:
+            logger.warning(f"Could not re-apply public port forwards on "
+                           f"{server.get('name') or server.get('host')}: {e}")
+        finally:
+            if ssh is not None:
+                ssh.disconnect()
 
 
 def public_port_forward_commands(protocol, public_port, listen_port, old_public_port=''):

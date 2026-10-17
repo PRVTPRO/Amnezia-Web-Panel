@@ -14,6 +14,7 @@ import re
 import shutil
 import tempfile
 import unittest
+import asyncio
 from unittest import mock
 
 from fastapi.testclient import TestClient
@@ -495,6 +496,68 @@ class PublicPortForwardTests(PublicEndpointApiTests):
         self.assertEqual(res.status_code, 200, res.text)
         self.assertIn('host is down', res.json()['warning'])
         self.assertEqual(self.stored('awg2')['public_port'], '8443')
+
+
+class RestoreForwardTests(unittest.TestCase):
+    """At startup the panel re-applies its public-port forwards on every
+    server: hand-made iptables rules survive reboots on some hosts only, so
+    the panel owns putting them back. Plain TestCase on purpose: inheriting
+    PublicEndpointApiTests would re-run its tests against this fixture."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._data_file = panel.DATA_FILE
+        panel.DATA_FILE = os.path.join(self.tmp, 'data.json')
+        with open(panel.DATA_FILE, 'w', encoding='utf-8') as f:
+            json.dump({'servers': [
+                server_with({
+                    'awg2': {'installed': True, 'port': '55424',
+                             'public_host': 'vpn.example.com', 'public_port': '8443'},
+                    'xray': {'installed': True, 'port': '443', 'public_port': '8443'},
+                    'wireguard': {'installed': True, 'port': '51820'},  # no public port
+                }),
+                server_with({}),  # nothing to forward
+            ], 'users': [], 'user_connections': []}, f)
+        self._monitor_flag = panel._conn_monitor_started
+        panel._conn_monitor_started = True
+        self._delay = panel.RESTORE_FORWARD_DELAY
+        panel.RESTORE_FORWARD_DELAY = 0
+
+    def tearDown(self):
+        panel.RESTORE_FORWARD_DELAY = self._delay
+        panel.DATA_FILE = self._data_file
+        panel._conn_monitor_started = self._monitor_flag
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def run_restore(self):
+        seen = []
+
+        def fake_ssh(server):
+            ssh = mock.Mock()
+            ssh.commands = []
+            ssh.run_command.side_effect = lambda cmd, *a, **k: ssh.commands.append(cmd) or ('', '', 0)
+            seen.append((server, ssh))
+            return ssh
+
+        with mock.patch.object(panel, 'get_ssh', side_effect=fake_ssh):
+            asyncio.run(panel.restore_public_port_forwards())
+        return seen
+
+    def test_only_servers_with_public_ports_are_touched(self):
+        seen = self.run_restore()
+        self.assertEqual(len(seen), 1)
+        server, ssh = seen[0]
+        self.assertEqual(len(ssh.commands), 4)  # awg2 udp + xray tcp, two tables each
+        self.assertTrue(any('-p udp' in c and '--dport 8443' in c for c in ssh.commands), ssh.commands)
+        self.assertTrue(any('-p tcp' in c and '--dport 8443' in c for c in ssh.commands), ssh.commands)
+        self.assertFalse(any('--dport 51820' in c for c in ssh.commands))
+
+    def test_a_down_server_does_not_stop_the_rest(self):
+        def fake_ssh(server):
+            raise RuntimeError('host is down')
+
+        with mock.patch.object(panel, 'get_ssh', side_effect=fake_ssh):
+            asyncio.run(panel.restore_public_port_forwards())  # must not raise
 
 
 if __name__ == '__main__':
