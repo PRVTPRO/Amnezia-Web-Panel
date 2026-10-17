@@ -7,6 +7,7 @@ import hashlib
 import secrets
 import uuid
 import asyncio
+import math
 import platform
 import re
 import shutil
@@ -2348,6 +2349,14 @@ class RenameConnectionRequest(BaseModel):
     client_id: str = ''
     new_name: str = ''
     max_speed: float = -1  # Mbit/s; -1 = don't touch, 0 = unlimited
+
+
+class ConnectionSpeedRequest(BaseModel):
+    protocol: str = Field(default='awg', min_length=1, max_length=64)
+    client_id: str = Field(min_length=1, max_length=256)
+    # Validate numeric bounds in the handler so non-standard JSON NaN/Infinity
+    # also receive a JSON error without serializing the invalid number back.
+    max_speed: float = Field(strict=True, description='Finite Mbit/s, 0..1000000 in steps of 0.1; 0 = unlimited')
 
 class SaveConnectionConfigRequest(BaseModel):
     protocol: str = 'awg'
@@ -5190,6 +5199,51 @@ def api_rename_connection(request: Request, server_id: int, req: RenameConnectio
     except Exception as e:
         logger.exception("Error renaming connection")
         return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/connections/speed', tags=["Connections"])
+async def api_set_connection_speed(request: Request, server_id: int, req: ConnectionSpeedRequest):
+    actor = _check_admin(request)
+    if not actor or actor.get('role') != 'admin':
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if (not math.isfinite(req.max_speed) or not 0 <= req.max_speed <= 1000000
+            or round(req.max_speed, 1) != req.max_speed):
+        return JSONResponse({'error': 'max_speed must be finite, 0..1000000 Mbit/s, in steps of 0.1'}, status_code=400)
+    data = load_data()
+    if server_id < 0 or server_id >= len(data['servers']):
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    server = data['servers'][server_id]
+    if req.protocol not in (server.get('protocols') or {}):
+        return JSONResponse({'error': 'Protocol not installed'}, status_code=404)
+
+    def set_peer_speed():
+        ssh = get_ssh(server)
+        try:
+            ssh.connect()
+            manager = get_protocol_manager(ssh, req.protocol)
+            if not callable(getattr(manager, 'set_speed_limit', None)):
+                return JSONResponse({'error': 'Speed limits are not supported by this protocol'}, status_code=501)
+            clients = _manager_call(manager, 'get_clients', req.protocol)
+            if not any(c.get('clientId') == req.client_id for c in clients):
+                return JSONResponse({'error': 'Client not found'}, status_code=404)
+            result = _manager_call(manager, 'set_speed_limit', req.protocol, req.client_id, req.max_speed)
+            if not isinstance(result, dict) or result.get('status') != 'success' or result.get('speed_warning'):
+                raise RuntimeError('Speed limit application was not confirmed')
+            clients = _manager_call(manager, 'get_clients', req.protocol)
+            peer = next((c for c in clients if c.get('clientId') == req.client_id), None)
+            if peer is None or float((peer.get('userData') or {}).get('maxSpeed') or 0) != req.max_speed:
+                raise RuntimeError('Speed limit read-back mismatch')
+            return {'status': 'success', 'server_id': server_id, 'protocol': req.protocol,
+                    'client_id': req.client_id, 'max_speed': req.max_speed}
+        finally:
+            ssh.disconnect()
+
+    try:
+        # No rename, local JSON write, or DATA_LOCK held across SSH.
+        return await asyncio.to_thread(set_peer_speed)
+    except Exception:
+        logger.exception('Error applying connection speed limit')
+        return JSONResponse({'error': 'Speed limit could not be applied or verified'}, status_code=502)
 
 
 @app.post('/api/servers/{server_id}/connections/config/save', tags=["Connections"])

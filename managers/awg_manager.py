@@ -2282,6 +2282,7 @@ x_exit_sync() {
             self._apply_bw_limits(protocol_type, clients_table)
         except Exception as err:
             logger.warning(f"apply bw limits warning: {err}")
+            return str(err) or type(err).__name__
 
     def _bwlimits_path(self):
         """Flat file with per-peer speed limits, next to clientsTable."""
@@ -2340,19 +2341,25 @@ done < "$BW"
             lines.append(f"{ip4} {ip6} {mbps:g}")
         content = "\n".join(lines) + ("\n" if lines else "")
         self.ssh.upload_file(content, "/tmp/_amnz_bwlimits")
-        self.ssh.run_sudo_command(
+        _, err, code = self.ssh.run_sudo_command(
             f"docker cp /tmp/_amnz_bwlimits {container_name}:{self._bwlimits_path()}"
         )
         self.ssh.run_command("rm -f /tmp/_amnz_bwlimits")
+        if code != 0:
+            raise RuntimeError(f"Failed to save bandwidth limits: {err}")
         if self.check_container_running(protocol_type):
             body = self._tc_apply_body(self._bwlimits_path(), self._resolve_config_path(protocol_type))
             self.ssh.upload_file(body, "/tmp/_amnz_tc.sh")
-            self.ssh.run_sudo_command(
+            _, err, code = self.ssh.run_sudo_command(
                 f"docker cp /tmp/_amnz_tc.sh {container_name}:/tmp/_amnz_tc.sh && "
                 f"docker exec {container_name} bash /tmp/_amnz_tc.sh",
                 timeout=60
             )
             self.ssh.run_command("rm -f /tmp/_amnz_tc.sh")
+            if code != 0:
+                raise RuntimeError(f"Failed to apply bandwidth limits: {err}")
+        else:
+            raise RuntimeError('Bandwidth limits deferred: container is not running')
 
     @_serialized_table_write
     def set_speed_limit(self, protocol_type, client_id, max_speed):
@@ -2375,7 +2382,9 @@ done < "$BW"
             ud.pop('maxSpeed', None)
         else:
             ud['maxSpeed'] = mbps
-        self._save_clients_table(protocol_type, clients_table)
+        warning = self._save_clients_table(protocol_type, clients_table)
+        if warning:
+            raise RuntimeError(f"Speed limit was not applied: {warning}")
         return {'status': 'success', 'max_speed': mbps}
 
     def _get_server_config(self, protocol_type):
