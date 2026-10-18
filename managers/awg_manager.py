@@ -295,6 +295,18 @@ CONN_WARN_MAX_EVENTS = 5     # how many recent warnings are kept per peer
 # table. Counts are only trusted for peers whose handshake is fresh.
 CONN_LIVE_HANDSHAKE_SECONDS = 300
 
+# Multi-IP (key sharing) detection: a peer whose WireGuard endpoint changes
+# to a DIFFERENT public IP while the previous endpoint was still seen within
+# MULTI_IP_WINDOW seconds is very likely the same key on 2+ devices at once
+# (a single device switching networks cleanly would show a gap: the old
+# endpoint disappears and the new one appears minutes later, outside the
+# window). Legit fast network switches (Wi-Fi -> LTE) can still false-positive,
+# which is why the alert shows both IPs and the timestamp instead of banning.
+MULTI_IP_WINDOW = 1800        # seconds: previous endpoint must be this fresh
+MULTI_IP_COOLDOWN = 3600      # min seconds between two recorded alerts per peer
+MULTI_IP_MAX_EVENTS = 10      # how many recent alerts are kept per peer
+MULTI_IP_SEEN_TTL = 7 * 86400 # drop endpoint observations older than this
+
 
 # ----- clientsTable mutation serialization -----
 # Every mutating op does read-table -> modify -> save-table. Uvicorn serves
@@ -2779,6 +2791,7 @@ done < "$BW"
             if not conn_counts:
                 conn_counts = self._count_connections_by_ip(protocol_type)
             conn_warnings = self._load_conn_warnings(protocol_type)
+            multi_alerts = self._load_multi_ip_state(protocol_type).get('alerts', {})
             for client in clients_table:
                 user_data = client.get('userData', {})
                 ip = user_data.get('clientIp', '')
@@ -2791,6 +2804,8 @@ done < "$BW"
                 user_data['connCount'] = conn_counts.get(ip, 0)
                 if ip in conn_warnings:
                     user_data['connWarnings'] = conn_warnings[ip]
+                if ip in multi_alerts:
+                    user_data['multiIpAlerts'] = multi_alerts[ip]
                 client['userData'] = user_data
         except Exception as e:
             logger.warning(f'get_clients: conn monitoring failed: {e}')
@@ -2937,9 +2952,15 @@ done < "$BW"
 
         Counts conntrack entries per peer IP inside the container (compact
         awk summary, no raw table transfer), saves the snapshot and records
-        flood warnings. Called by the panel's background monitor so that
-        detection runs 24/7 even when nobody has the UI open.
+        flood warnings. Also runs the multi-IP (key sharing) detector, which
+        only needs the 'awg show' output it reads on its own. Called by the
+        panel's background monitor so that detection runs 24/7 even when
+        nobody has the UI open.
         """
+        try:
+            self.detect_multi_ip_use(protocol_type)
+        except Exception as e:
+            logger.warning(f'multi-IP detection failed: {e}')
         counts = self._count_connections_by_ip(protocol_type)
         if not counts:
             return False
@@ -2999,7 +3020,7 @@ done < "$BW"
         return warnings
 
     def clear_conn_warnings(self, protocol_type, client_id):
-        """Clear all recorded connection-flood warnings for one peer."""
+        """Clear all recorded warnings for one peer: connection-flood and multi-IP."""
         clients_table = self._get_clients_table(protocol_type)
         client = next((c for c in clients_table if c.get('clientId') == client_id), None)
         ip = None
@@ -3015,7 +3036,139 @@ done < "$BW"
         if ip in warnings:
             warnings.pop(ip, None)
             self._save_conn_warnings(protocol_type, warnings)
+        state = self._load_multi_ip_state(protocol_type)
+        if ip in state.get('alerts', {}):
+            state['alerts'].pop(ip, None)
+            self._save_multi_ip_state(protocol_type, state)
         return {'status': 'success', 'cleared_ip': ip}
+
+    # ---- Multi-IP (key sharing) detection ----
+
+    def _multi_ip_path(self):
+        """Path inside container for endpoint observations + alerts."""
+        return '/opt/amnezia/awg/multi_ip.json'
+
+    def _load_multi_ip_state(self, protocol_type):
+        """Load {"seen": {ip: {endpoint, ts}}, "alerts": {ip: [{ts, ips}]}}."""
+        container_name = self._container_name(protocol_type)
+        out, err, code = self.ssh.run_sudo_command(
+            f"docker exec -i {container_name} cat {self._multi_ip_path()} 2>/dev/null"
+        )
+        if code != 0 or not out.strip():
+            return {'seen': {}, 'alerts': {}}
+        try:
+            data = json.loads(out)
+            if isinstance(data, dict):
+                data.setdefault('seen', {})
+                data.setdefault('alerts', {})
+                return data
+        except json.JSONDecodeError:
+            pass
+        return {'seen': {}, 'alerts': {}}
+
+    def _save_multi_ip_state(self, protocol_type, state):
+        """Persist the multi-IP state into the container."""
+        container_name = self._container_name(protocol_type)
+        self.ssh.upload_file(json.dumps(state), "/tmp/_amnz_multiip.json")
+        self.ssh.run_sudo_command(
+            f"docker cp /tmp/_amnz_multiip.json {container_name}:{self._multi_ip_path()}"
+        )
+        self.ssh.run_command("rm -f /tmp/_amnz_multiip.json")
+
+    def _collect_peer_endpoints(self, protocol_type):
+        """Map each connected peer's tunnel IP to its current public endpoint.
+
+        Runs 'awg show' in the container and pairs every peer's first allowed
+        IP (tunnel identity, same key used elsewhere in this file) with its
+        endpoint line. Peers without an endpoint (never connected) are skipped.
+        Returns {tunnel_ip: endpoint_host}; empty dict when show fails.
+        """
+        container = self._container_name(protocol_type)
+        out, err, code = self.ssh.run_sudo_command(
+            f'docker exec -i {container} sh -c "awg show 2>/dev/null || wg show 2>/dev/null"'
+        )
+        if code != 0 or not out.strip():
+            return {}
+        endpoints = {}
+        current_ip = None
+        pending_ep = None
+        for line in out.split('\n'):
+            line = line.strip()
+            if line.startswith('peer:'):
+                current_ip = None
+                pending_ep = None
+            elif line.startswith('endpoint:'):
+                # Comes BEFORE 'allowed ips' in wg show output: remember it
+                # and pair it with the peer identity on the allowed ips line.
+                ep = line.split(':', 1)[1].strip()
+                if ep and ep != '(none)':
+                    # Strip the port; IPv6 literals come bracketed: [::1]:51820
+                    host = ep.rsplit(':', 1)[0].strip()
+                    pending_ep = host.strip('[]')
+            elif line.startswith('allowed ips:'):
+                first = line.split(':', 1)[1].split(',')[0].strip()
+                current_ip = first.split('/')[0].strip()
+                if pending_ep:
+                    endpoints[current_ip] = pending_ep
+        return endpoints
+
+    def detect_multi_ip_use(self, protocol_type):
+        """Record an alert when one key is used from 2+ public IPs at once.
+
+        Called by the background collector next to conntrack counting. A peer
+        whose endpoint IP changed while the previous endpoint was still seen
+        within MULTI_IP_WINDOW seconds very likely runs the same key on 2+
+        devices simultaneously. Alerts are {ts, ips} events per tunnel IP,
+        deduplicated by MULTI_IP_COOLDOWN and capped at MULTI_IP_MAX_EVENTS.
+        Returns True when the state file was modified.
+        """
+        endpoints = self._collect_peer_endpoints(protocol_type)
+        if not endpoints:
+            return False
+        state = self._load_multi_ip_state(protocol_type)
+        seen = state.setdefault('seen', {})
+        alerts = state.setdefault('alerts', {})
+        now = int(time.time())
+        changed = False
+
+        # Prune stale observations so the file stays small.
+        for ip in [i for i, v in seen.items()
+                   if now - int(v.get('ts', 0)) > MULTI_IP_SEEN_TTL]:
+            seen.pop(ip, None)
+            changed = True
+
+        for ip, ep in endpoints.items():
+            prev = seen.get(ip)
+            seen[ip] = {'endpoint': ep, 'ts': now}
+            if not prev:
+                # First time we see this peer: persist the observation even
+                # though there is nothing to alert about yet.
+                changed = True
+                continue
+            prev_ep = prev.get('endpoint')
+            if not prev_ep or prev_ep == ep:
+                continue
+            if now - int(prev.get('ts', 0)) > MULTI_IP_WINDOW:
+                continue
+            events = alerts.get(ip, [])
+            if events and now - int(events[-1].get('ts', 0)) < MULTI_IP_COOLDOWN:
+                # Same incident still unfolding: merge the new IP into the
+                # open alert instead of spamming one event per poll round.
+                merged = sorted(set(events[-1].get('ips', [])) | {prev_ep, ep})
+                if merged != events[-1].get('ips'):
+                    events[-1]['ips'] = merged
+                    changed = True
+                continue
+            events.append({'ts': now, 'ips': sorted({prev_ep, ep})})
+            alerts[ip] = events[-MULTI_IP_MAX_EVENTS:]
+            changed = True
+
+        if changed:
+            try:
+                self._save_multi_ip_state(protocol_type, state)
+            except Exception as e:
+                logger.warning(f'failed to save multi-IP state: {e}')
+        return changed
 
     def _wg_show(self, protocol_type):
         """Run 'wg show all' and parse output."""

@@ -4068,8 +4068,27 @@
                             .replace('{time}', timeStr)
                             .replace('{count}', ev.count);
                         return `<div class="conn-warning">${escapeHtml(text)}</div>`;
-                    }).join('') +
-                    `<button class="btn btn-secondary btn-sm btn-icon conn-warning-clear" onclick="clearConnWarnings('${escapeJs(client.clientId)}')" title="${_('clear_warnings')}" style="margin-top:4px;">${ICON_TRASH}</button></div>`;
+                    }).join('');
+                }
+
+                // Multi-IP alerts (key sharing detection): the same key seen
+                // from 2+ public IPs within a short window, newest last.
+                if (Array.isArray(userData.multiIpAlerts) && userData.multiIpAlerts.length) {
+                    if (!warningsHtml) warningsHtml = '<div class="conn-warnings">';
+                    warningsHtml += userData.multiIpAlerts.map(ev => {
+                        const d = new Date(ev.ts * 1000);
+                        const dateStr = String(d.getDate()).padStart(2, '0') + '.' + String(d.getMonth() + 1).padStart(2, '0') + '.' + d.getFullYear();
+                        const timeStr = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+                        const text = _('multi_ip_alert_text')
+                            .replace('{date}', dateStr)
+                            .replace('{time}', timeStr)
+                            .replace('{ips}', (ev.ips || []).join(', '));
+                        return `<div class="conn-warning conn-multi-ip">${escapeHtml(text)}</div>`;
+                    }).join('');
+                }
+
+                if (warningsHtml) {
+                    warningsHtml += `<button class="btn btn-secondary btn-sm btn-icon conn-warning-clear" onclick="clearConnWarnings('${escapeJs(client.clientId)}')" title="${_('clear_warnings')}" style="margin-top:4px;">${ICON_TRASH}</button></div>`;
                 }
 
                 // Per-peer bandwidth limit badge (AWG): ⚡∞ by default, 🐢 X Mbps when a limit is set

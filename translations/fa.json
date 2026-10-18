@@ -441,6 +441,7 @@
   "traffic_reset_success": "ترافیک بازنشانی شد",
   "host_tuning": "تنظیمات میزبان",
   "conn_warning_text": "⚠️ هشدار: در {date} ساعت {time} تعداد {count} اتصال باز شد!",
+  "multi_ip_alert_text": "⚠️ کلید در حال اشتراک‌گذاری است: در {date} ساعت {time} همین کلید از IP های {ips} وصل شد!",
   "clear_warnings": "پاک کردن هشدارها",
   "warnings_cleared": "هشدارها پاک شدند",
   "max_speed": "حداکثر سرعت (Mbps)",

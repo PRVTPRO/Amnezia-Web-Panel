@@ -441,6 +441,7 @@
   "traffic_reset_success": "流量已重置",
   "host_tuning": "主机调优",
   "conn_warning_text": "⚠️ 警告：{date} {time} 打开了 {count} 个连接！",
+  "multi_ip_alert_text": "⚠️ 密钥被共享：{date} {time}，同一密钥从 IP {ips} 连接！",
   "clear_warnings": "清除警告",
   "warnings_cleared": "警告已清除",
   "max_speed": "最大速度 (Mbps)",

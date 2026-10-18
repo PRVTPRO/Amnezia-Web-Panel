@@ -492,6 +492,7 @@
   "traffic_reset_success": "Трафик сброшен",
   "host_tuning": "Конфигурация",
   "conn_warning_text": "⚠️ Внимание: {date} в {time} открыто {count} соединений!",
+  "multi_ip_alert_text": "⚠️ Ключ раздают: {date} в {time} с одного ключа подключались с IP {ips}!",
   "clear_warnings": "Очистить предупреждения",
   "warnings_cleared": "Предупреждения очищены",
   "max_speed": "Макс. скорость (Мбит/с)",

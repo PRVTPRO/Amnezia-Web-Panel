@@ -441,6 +441,7 @@
   "traffic_reset_success": "Trafic réinitialisé",
   "host_tuning": "Réglages hôte",
   "conn_warning_text": "⚠️ Attention : {count} connexions ouvertes le {date} à {time} !",
+  "multi_ip_alert_text": "⚠️ Clé partagée : le {date} à {time}, la même clé s'est connectée depuis les IP {ips} !",
   "clear_warnings": "Effacer les avertissements",
   "warnings_cleared": "Avertissements effacés",
   "max_speed": "Vitesse max (Mbps)",
