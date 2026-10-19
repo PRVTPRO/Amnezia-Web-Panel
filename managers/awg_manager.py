@@ -3216,6 +3216,19 @@ done < "$BW"
                 continue
             if now - int(prev.get('ts', 0)) > MULTI_IP_WINDOW:
                 continue
+            # ISP pool rotation (dynamic DHCP / CGNAT) renumbers a device
+            # inside the same /16 while it never leaves the couch — observed
+            # live as 76 alerts/day, e.g. 91.79.129.x <-> 91.79.141.x pairs
+            # and five-address carousels inside one /24. That is ONE location
+            # changing address, not a second device: only a cross-network
+            # pair (different /16) is worth an alert.
+            try:
+                if '.' in prev_ep and '.' in ep and \
+                        ipaddress.IPv4Network(f'{prev_ep}/16', strict=False) == \
+                        ipaddress.IPv4Network(f'{ep}/16', strict=False):
+                    continue
+            except (ValueError, TypeError):
+                pass
             events = alerts.get(ip, [])
             if events and now - int(events[-1].get('ts', 0)) < MULTI_IP_COOLDOWN:
                 # Same incident still unfolding: merge the new IP into the
@@ -3272,8 +3285,19 @@ done < "$BW"
                     sport = t.split('=', 1)[1]
                 if src and sport:
                     break
-            if src and sport:
-                flows[f'{src}:{sport}'] = timeout
+            if not src or not sport:
+                continue
+            # Skip non-public sources: the host itself talks to the VPN port
+            # from docker-internal nets (observed live as 172.29.172.x from
+            # amnezia-dns-net), and such flows would otherwise "confirm" a
+            # key being shared. Global-unicast only; on a parse error drop
+            # the flow rather than feed garbage into the evidence.
+            try:
+                if not ipaddress.ip_address(src).is_global:
+                    continue
+            except ValueError:
+                continue
+            flows[f'{src}:{sport}'] = timeout
         return flows
 
     def _sim_check_due(self, protocol_type, state):

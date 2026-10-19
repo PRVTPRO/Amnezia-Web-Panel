@@ -331,6 +331,31 @@ class SimultaneousUseTests(unittest.TestCase):
             'awg', endpoints={'10.8.1.5': '1.1.1.1:5000'}, port='55424')
         self.assertTrue(changed)
 
+    def test_same_sixteen_rotation_no_alert(self):
+        """ISP pool rotation: 91.79.129.x -> 91.79.141.x is ONE location
+        changing address inside the same /16, not a second device."""
+        state = {'seen': {'10.8.1.5': {'endpoint': '91.79.129.10',
+                                       'ts': self.now - 600}},
+                 'alerts': {}}
+        ssh = fake_ssh(show_output({'10.8.1.5': '91.79.141.20'}), state)
+        saved = {}
+        ssh.upload_file = lambda content, remote: saved.update(
+            {'state': json.loads(content)})
+        changed = manager(ssh).detect_multi_ip_use('awg')
+        self.assertTrue(changed)  # 'seen' updated, but no alert
+        self.assertEqual(saved['state']['alerts'], {})
+
+    def test_cross_sixteen_change_still_alerts(self):
+        state = {'seen': {'10.8.1.5': {'endpoint': '91.79.129.10',
+                                       'ts': self.now - 600}},
+                 'alerts': {}}
+        ssh = fake_ssh(show_output({'10.8.1.5': '95.24.7.8'}), state)
+        saved = {}
+        ssh.upload_file = lambda content, remote: saved.update(
+            {'state': json.loads(content)})
+        manager(ssh).detect_multi_ip_use('awg')
+        self.assertEqual(len(saved['state']['alerts']['10.8.1.5']), 1)
+
     def test_outer_flow_parsing(self):
         ssh = sim_ssh(None, '', '')
         mgr = manager(ssh)
@@ -344,6 +369,28 @@ class SimultaneousUseTests(unittest.TestCase):
         ssh.run_sudo_command = lambda command, timeout=60: (lines, '', 0)
         flows = mgr._collect_outer_flows(['55424', '8443'])
         self.assertEqual(flows, {'1.1.1.1:5000': 120})  # tcp line filtered
+
+    def test_outer_flow_drops_private_and_garbage_src(self):
+        """Host-side flows from docker-internal nets (172.29.172.x seen live
+        from amnezia-dns-net) are service traffic, not clients; a corrupt
+        src token must drop the flow instead of feeding garbage."""
+        ssh = sim_ssh(None, '', '')
+        mgr = manager(ssh)
+        lines = ('ipv4     2 udp      17 120 src=172.29.172.3 dst=46.183.21.61 '
+                 'sport=5353 dport=55424 src=46.183.21.61 dst=172.29.172.3 '
+                 'sport=55424 dport=5353 mark=0 use=2\n'
+                 'ipv4     2 udp      17 110 src=10.8.0.9 dst=46.183.21.61 '
+                 'sport=9999 dport=55424 src=46.183.21.61 dst=10.8.0.9 '
+                 'sport=55424 dport=9999 mark=0 use=2\n'
+                 'ipv4     2 udp      17 100 src=fd00:42::1] dst=46.183.21.61 '
+                 'sport=7777 dport=55424 src=46.183.21.61 dst=x '
+                 'sport=55424 dport=7777 mark=0 use=2\n'
+                 'ipv4     2 udp      17  90 src=8.8.8.8 dst=46.183.21.61 '
+                 'sport=4444 dport=55424 src=46.183.21.61 dst=8.8.8.8 '
+                 'sport=55424 dport=4444 mark=0 use=2\n')
+        ssh.run_sudo_command = lambda command, timeout=60: (lines, '', 0)
+        flows = mgr._collect_outer_flows(['55424'])
+        self.assertEqual(flows, {'8.8.8.8:4444': 90})
 
 
 if __name__ == '__main__':
