@@ -9,6 +9,7 @@ import time
 import threading
 import logging
 import shlex
+import os
 from contextlib import nullcontext
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,13 @@ class SSHManager:
                             f"SSH connect to {self.host} attempt {attempt} "
                             f"failed: {e}")
                         self._disconnect_locked()
+                    except Exception:
+                        # Host-key/authentication/configuration failures are
+                        # not transient TCP failures: never retry or accept a
+                        # different key, and do not leave a half-open client.
+                        self._disconnect_locked()
+                        self._record_connect_failure()
+                        raise
                 if last_exc is not None:
                     self._record_connect_failure()
                     raise last_exc
@@ -121,7 +129,17 @@ class SSHManager:
     def _connect_once(self):
         """Single TCP+SSH handshake attempt (caller holds _conn_lock)."""
         self.client = paramiko.SSHClient()
-        self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        self.client.load_system_host_keys()
+        # Persist trust alongside DATA_FILE (the standard Docker data volume).
+        # Explicitly configured files must exist and parse successfully; never
+        # fall back to trust-on-first-use when trust configuration is broken.
+        configured = os.environ.get('SSH_KNOWN_HOSTS_FILE')
+        known_hosts = configured or os.path.join(
+            os.path.dirname(os.environ.get('DATA_FILE', '/app/data/data.json')),
+            'ssh_known_hosts')
+        if configured or os.path.isfile(known_hosts):
+            self.client.load_host_keys(known_hosts)
+        self.client.set_missing_host_key_policy(paramiko.RejectPolicy())
 
         kwargs = {
             'hostname': self.host,

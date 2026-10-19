@@ -49,14 +49,25 @@ class FakeSSH:
 
     def run_command(self, command, timeout=60):
         self.commands.append(command)
+        if command.startswith('mktemp -d /tmp/amnezia-clients.'):
+            return '/tmp/amnezia-clients.fixture\n', '', 0
         return '', '', 0
 
     def run_sudo_command(self, command, timeout=60):
         self.commands.append(command)
 
-        m = re.search(r"docker cp (\S+) \S+?:(\S+)", command)
+        m = re.search(r"docker cp (?:-- )?(\S+) \S+?:(\S+)", command)
         if m:
             self.files[m.group(2)] = self.uploads[m.group(1)]
+            return '', '', 0
+
+        if 'mv -f --' in command and 'clientsTable' in command:
+            for source, target in re.findall(r'cp -p -- (\S+) (\S+)', command):
+                if source in self.files:
+                    self.files[target] = self.files[source]
+            for source, target in re.findall(r'mv -f -- (\S+) (\S+)', command):
+                if source in self.files:
+                    self.files[target.rstrip("'")] = self.files.pop(source)
             return '', '', 0
 
         m = re.search(r"for p in (.+?); do", command)
@@ -85,6 +96,10 @@ class FakeSSH:
         m = re.search(r"docker exec -i \S+ test -f (\S+)", command)
         if m:
             return '', '', 0 if m.group(1) in self.files else 1
+
+        m = re.search(r"test ! -e (\S+) .*printf missing", command)
+        if m:
+            return ('missing', '', 0) if m.group(1) not in self.files else ('', '', 1)
 
         return '', '', 0
 

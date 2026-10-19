@@ -19,9 +19,11 @@ import re
 import time
 import functools
 import threading
+from managers.clients_table_reader import clients_table_missing
 from base64 import b64encode, b64decode
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives import serialization
+from managers.clients_table import save_clients_table
 
 logger = logging.getLogger(__name__)
 
@@ -351,6 +353,7 @@ _sim_round_counters = {}
 # never block each other.
 _TABLE_LOCKS = {}
 _TABLE_LOCKS_GUARD = threading.Lock()
+_TABLE_WRITE_STATE = threading.local()
 
 
 def _clients_table_lock(host, container_name):
@@ -365,7 +368,12 @@ def _serialized_table_write(method):
         host = getattr(self.ssh, 'host', '') or 'unknown'
         container = self._container_name(protocol_type)
         with _clients_table_lock(host, container):
-            return method(self, protocol_type, *args, **kwargs)
+            previous = getattr(_TABLE_WRITE_STATE, 'target', None)
+            _TABLE_WRITE_STATE.target = (host, container)
+            try:
+                return method(self, protocol_type, *args, **kwargs)
+            finally:
+                _TABLE_WRITE_STATE.target = previous
     return wrapper
 
 
@@ -2209,7 +2217,10 @@ x_exit_sync() {
     def _get_clients_table(self, protocol_type):
         """Get the clients table from the server."""
         container_name = self._container_name(protocol_type)
-        batch = self._batch_entry(container_name)
+        host = getattr(self.ssh, 'host', '') or 'unknown'
+        writing = getattr(_TABLE_WRITE_STATE, 'target', None) == (host, container_name)
+        # Poll snapshots are not authoritative input for a read-modify-write.
+        batch = None if writing else self._batch_entry(container_name)
         if batch is not None:
             out = batch['clients']
         else:
@@ -2222,6 +2233,8 @@ x_exit_sync() {
             except Exception:
                 st = None
             if st and st[0] and not st[1]:
+                if writing:
+                    raise RuntimeError(f"Cannot update clientsTable in stopped {container_name}")
                 return []
             clients_table_path = self._clients_table_path()
             out, err, code = self.ssh.run_sudo_command(
@@ -2241,16 +2254,13 @@ x_exit_sync() {
                 if state and not state[1]:
                     # Container exists but is stopped: nothing to read, and
                     # the UI already shows the card as stopped.
+                    if writing:
+                        raise RuntimeError(f"Cannot update clientsTable in stopped {container_name}")
                     return []
                 # Running (or state unknown): probe the file itself.
-                _, _, fcode = self.ssh.run_sudo_command(
-                    f"docker exec -i {container_name} test -f {clients_table_path}")
-                if fcode == 0:
-                    raise RuntimeError(
-                        f"clientsTable exists in {container_name} but could "
-                        f"not be read (docker exec exit {code}): "
-                        f"{err or 'no output'}")
-                return []  # fresh instance: no clientsTable yet
+                if clients_table_missing(self.ssh, container_name, clients_table_path):
+                    return []  # positively confirmed fresh instance
+                raise RuntimeError(f"clientsTable in {container_name} could not be read")
 
         if not out.strip():
             if batch is not None:
@@ -2272,7 +2282,9 @@ x_exit_sync() {
                     except Exception:
                         pass
                     return self._get_clients_table(protocol_type)
-            return []
+            if batch is not None:
+                return []
+            raise RuntimeError(f"clientsTable in {container_name} is empty (expected JSON array)")
 
         try:
             data = json.loads(out)
@@ -2306,9 +2318,7 @@ x_exit_sync() {
                 for client_id, info in data.items():
                     result.append({
                         'clientId': client_id,
-                        'userData': {
-                            'clientName': info.get('clientName', 'Unknown'),
-                        }
+                        'userData': dict(info, clientName=info.get('clientName', 'Unknown'))
                     })
                 return result
         except json.JSONDecodeError:
@@ -2330,29 +2340,25 @@ x_exit_sync() {
             raise RuntimeError(
                 f"clientsTable in {container_name} is not valid JSON "
                 f"(truncated read or corrupt file)")
+        raise RuntimeError(f"clientsTable in {container_name} has an unsupported JSON type")
 
     def _save_clients_table(self, protocol_type, clients_table):
         """Save the clients table to the server."""
         container_name = self._container_name(protocol_type)
         clients_table_path = self._clients_table_path()
-        content = json.dumps(clients_table, indent=2)
-
-        # Write to /tmp via SFTP, then docker cp into container
-        self.ssh.upload_file(content, "/tmp/_amnz_clients.json")
-        self.ssh.run_sudo_command(
-            f"docker cp /tmp/_amnz_clients.json {container_name}:{clients_table_path}"
-        )
-        self.ssh.run_command("rm -f /tmp/_amnz_clients.json")
-
-        # Drop prefetched batch snapshot so next read sees fresh data
-        if getattr(self.ssh, '_awg_batch', None) is not None:
-            self.ssh._awg_batch = None
+        try:
+            save_clients_table(self.ssh, container_name, clients_table_path, clients_table)
+        finally:
+            # A lost reply may follow a committed rename: reread either way.
+            if getattr(self.ssh, '_awg_batch', None) is not None:
+                self.ssh._awg_batch = None
 
         # Keep per-peer bandwidth limits in sync (best effort)
         try:
             self._apply_bw_limits(protocol_type, clients_table)
         except Exception as err:
             logger.warning(f"apply bw limits warning: {err}")
+            return str(err) or type(err).__name__
 
     def _bwlimits_path(self):
         """Flat file with per-peer speed limits, next to clientsTable."""
@@ -2411,19 +2417,25 @@ done < "$BW"
             lines.append(f"{ip4} {ip6} {mbps:g}")
         content = "\n".join(lines) + ("\n" if lines else "")
         self.ssh.upload_file(content, "/tmp/_amnz_bwlimits")
-        self.ssh.run_sudo_command(
+        _, err, code = self.ssh.run_sudo_command(
             f"docker cp /tmp/_amnz_bwlimits {container_name}:{self._bwlimits_path()}"
         )
         self.ssh.run_command("rm -f /tmp/_amnz_bwlimits")
+        if code != 0:
+            raise RuntimeError(f"Failed to save bandwidth limits: {err}")
         if self.check_container_running(protocol_type):
             body = self._tc_apply_body(self._bwlimits_path(), self._resolve_config_path(protocol_type))
             self.ssh.upload_file(body, "/tmp/_amnz_tc.sh")
-            self.ssh.run_sudo_command(
+            _, err, code = self.ssh.run_sudo_command(
                 f"docker cp /tmp/_amnz_tc.sh {container_name}:/tmp/_amnz_tc.sh && "
                 f"docker exec {container_name} bash /tmp/_amnz_tc.sh",
                 timeout=60
             )
             self.ssh.run_command("rm -f /tmp/_amnz_tc.sh")
+            if code != 0:
+                raise RuntimeError(f"Failed to apply bandwidth limits: {err}")
+        else:
+            raise RuntimeError('Bandwidth limits deferred: container is not running')
 
     @_serialized_table_write
     def set_speed_limit(self, protocol_type, client_id, max_speed):
@@ -2446,7 +2458,9 @@ done < "$BW"
             ud.pop('maxSpeed', None)
         else:
             ud['maxSpeed'] = mbps
-        self._save_clients_table(protocol_type, clients_table)
+        warning = self._save_clients_table(protocol_type, clients_table)
+        if warning:
+            raise RuntimeError(f"Speed limit was not applied: {warning}")
         return {'status': 'success', 'max_speed': mbps}
 
     def _get_server_config(self, protocol_type):
@@ -2603,17 +2617,11 @@ done < "$BW"
             f"docker exec -i {container_name} cat {clients_table_path} 2>/dev/null"
         )
         if code != 0:
-            # cat fails both when docker exec is broken and when the file
-            # simply does not exist yet (fresh instance). Fail loudly only
-            # for the former; an absent table means no reservations.
-            _, terr, tcode = self.ssh.run_sudo_command(
-                f"docker exec -i {container_name} true")
-            if tcode != 0:
-                raise RuntimeError(
-                    f"Cannot read clients table from {container_name}: {terr.strip() or err.strip()}")
-            return set()
+            if clients_table_missing(self.ssh, container_name, clients_table_path):
+                return set()
+            raise RuntimeError(f"Cannot read IP reservations from {container_name}")
         if not out.strip():
-            return set()
+            raise RuntimeError(f"Clients table in {container_name} is empty (expected JSON)")
         try:
             data = json.loads(out)
         except json.JSONDecodeError:

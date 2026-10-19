@@ -37,6 +37,12 @@ class _FakeClient:
     def set_missing_host_key_policy(self, policy):
         pass
 
+    def load_system_host_keys(self):
+        pass
+
+    def load_host_keys(self, filename):
+        pass
+
     def connect(self, **kwargs):
         pass
 
