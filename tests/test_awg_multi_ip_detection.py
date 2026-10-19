@@ -115,7 +115,9 @@ class MultiIpDetectionTests(unittest.TestCase):
         ssh.upload_file = lambda content, remote: saved.update(
             {'state': json.loads(content)})
         changed = mgr.detect_multi_ip_use('awg')
-        self.assertFalse(changed)
+        # The endpoint rotated, so 'seen'/history were updated (changed=True)
+        # but no alert may be recorded: the previous endpoint is stale.
+        self.assertTrue(changed)
         self.assertEqual(saved.get('state', state)['alerts'], {})
 
     def test_coolown_merges_into_open_alert(self):
@@ -195,6 +197,14 @@ def sim_ssh(state, flows1, flows2, host='10.255.0.1'):
 
 
 class SimultaneousUseTests(unittest.TestCase):
+    """Per-peer attribution: two legit users online at once is NOT sharing.
+
+    Regression for the instance-level bug: the detector used to count any
+    two active flows on the instance port as key sharing, so every busy
+    instance (two users with different keys online) would raise a false
+    CONFIRMED event.
+    """
+
     def setUp(self):
         self.now = int(time.time())
         self.patchers = [
@@ -211,23 +221,51 @@ class SimultaneousUseTests(unittest.TestCase):
             p.stop()
         awg_manager._sim_round_counters.clear()
 
-    def test_two_active_flows_raise_event(self):
-        state = {'seen': {}, 'alerts': {}, 'sim': {}}
+    def _due(self):
+        awg_manager._sim_round_counters[('10.255.0.1', 'awg')] =             awg_manager.SIM_ROUND_FULL_EVERY - 1
+
+    def _state(self, history=()):
+        seen = {}
+        if history:
+            seen['10.8.1.5'] = {
+                'endpoint': '1.1.1.1', 'ts': self.now - 60,
+                'recent': [{'ep': ep, 'ts': self.now - ts}
+                           for ep, ts in history],
+            }
+        return {'seen': seen, 'alerts': {}, 'sim': {}}
+
+    def _two_flows(self):
         flows1 = conntrack([
             {'timeout': 120, 'src': '1.1.1.1', 'sport': 5000},
             {'timeout': 118, 'src': '2.2.2.2', 'sport': 6000},
         ])
-        # 60s later: both refreshed back near the top of the countdown
         flows2 = conntrack([
             {'timeout': 119, 'src': '1.1.1.1', 'sport': 5000},
             {'timeout': 120, 'src': '2.2.2.2', 'sport': 6000},
         ])
-        awg_manager._sim_round_counters[('10.255.0.1', 'awg')] =             awg_manager.SIM_ROUND_FULL_EVERY - 1
+        return flows1, flows2
+
+    def test_two_users_different_keys_no_event(self):
+        """THE BUG: two online users = two active flows = was a false CONFIRMED."""
+        self._due()
+        flows1, flows2 = self._two_flows()
+        ssh = sim_ssh(self._state(), flows1, flows2)
+        endpoints = {'10.8.1.5': '1.1.1.1:5000', '10.8.1.6': '2.2.2.2:6000'}
+        changed = manager(ssh).detect_simultaneous_use(
+            'awg', endpoints=endpoints, port='55424')
+        self.assertFalse(changed)
+        self.assertEqual(ssh.saved, {})
+
+    def test_sharing_same_key_raise_event(self):
+        """One key: primary device 1.1.1.1 active + orphan 2.2.2.2 whose IP
+        is in the peer's endpoint history -> CONFIRMED for that peer."""
+        self._due()
+        flows1, flows2 = self._two_flows()
+        state = self._state(history=[('1.1.1.1', 60), ('2.2.2.2', 300)])
         ssh = sim_ssh(state, flows1, flows2)
-        mgr = manager(ssh)
-        changed = mgr.detect_simultaneous_use(
-            'awg', endpoints={'10.8.1.5': '1.1.1.1'},
-            port='55424', public_port='8443')
+        endpoints = {'10.8.1.5': '1.1.1.1:5000'}
+        changed = manager(ssh).detect_simultaneous_use(
+            'awg', endpoints=endpoints, port='55424', public_port='8443')
         self.assertTrue(changed)
         events = ssh.saved['state']['sim']['10.8.1.5']
         self.assertEqual(events, [{'ts': self.now,
@@ -235,76 +273,62 @@ class SimultaneousUseTests(unittest.TestCase):
                                    'sessions': 2}])
 
     def test_handover_old_flow_dead_no_event(self):
-        state = {'seen': {}, 'alerts': {}, 'sim': {}}
+        """Wi-Fi->LTE: old flow not refreshed -> not active -> no orphan."""
+        self._due()
         flows1 = conntrack([
             {'timeout': 120, 'src': '1.1.1.1', 'sport': 5000},
             {'timeout': 118, 'src': '2.2.2.2', 'sport': 6000},
         ])
-        # 60s later the Wi-Fi flow went silent: timeout counted down to 58
         flows2 = conntrack([
             {'timeout': 119, 'src': '2.2.2.2', 'sport': 6000},
             {'timeout': 58, 'src': '1.1.1.1', 'sport': 5000},
         ])
-        awg_manager._sim_round_counters[('10.255.0.1', 'awg')] = \
-            awg_manager.SIM_ROUND_FULL_EVERY - 1
-        ssh = sim_ssh(state, flows1, flows2)
+        ssh = sim_ssh(self._state(history=[('1.1.1.1', 120), ('2.2.2.2', 30)]),
+                      flows1, flows2)
+        endpoints = {'10.8.1.5': '2.2.2.2:6000'}
         changed = manager(ssh).detect_simultaneous_use(
-            'awg', endpoints={'10.8.1.5': '2.2.2.2'}, port='55424')
-        self.assertFalse(changed)
-        self.assertEqual(ssh.saved, {})  # no active pair -> nothing saved
-
-    def test_single_flow_never_alerts(self):
-        state = {'seen': {}, 'alerts': {}, 'sim': {}}
-        flows1 = conntrack([{'timeout': 120, 'src': '1.1.1.1', 'sport': 5000}])
-        flows2 = conntrack([{'timeout': 120, 'src': '1.1.1.1', 'sport': 5000}])
-        awg_manager._sim_round_counters[('10.255.0.1', 'awg')] = \
-            awg_manager.SIM_ROUND_FULL_EVERY - 1
-        ssh = sim_ssh(state, flows1, flows2)
-        changed = manager(ssh).detect_simultaneous_use(
-            'awg', endpoints={'10.8.1.5': '1.1.1.1'}, port='55424')
+            'awg', endpoints=endpoints, port='55424')
         self.assertFalse(changed)
         self.assertEqual(ssh.saved, {})
 
-    def test_unresolvable_flows_go_to_star(self):
-        state = {'seen': {}, 'alerts': {}, 'sim': {}}
-        flows1 = conntrack([
-            {'timeout': 120, 'src': '9.9.9.9', 'sport': 5000},
-            {'timeout': 120, 'src': '8.8.8.8', 'sport': 6000},
-        ])
-        flows2 = conntrack([
-            {'timeout': 120, 'src': '9.9.9.9', 'sport': 5000},
-            {'timeout': 120, 'src': '8.8.8.8', 'sport': 6000},
-        ])
-        awg_manager._sim_round_counters[('10.255.0.1', 'awg')] =             awg_manager.SIM_ROUND_FULL_EVERY - 1
-        ssh = sim_ssh(state, flows1, flows2)
-        manager(ssh).detect_simultaneous_use(
-            'awg', endpoints={}, port='55424')
+    def test_single_flow_never_alerts(self):
+        self._due()
+        flows1 = conntrack([{'timeout': 120, 'src': '1.1.1.1', 'sport': 5000}])
+        flows2 = conntrack([{'timeout': 120, 'src': '1.1.1.1', 'sport': 5000}])
+        ssh = sim_ssh(self._state(), flows1, flows2)
+        changed = manager(ssh).detect_simultaneous_use(
+            'awg', endpoints={'10.8.1.5': '1.1.1.1:5000'}, port='55424')
+        self.assertFalse(changed)
+
+    def test_unattributed_orphan_goes_to_star(self):
+        """Orphan flow whose IP is in NO peer's history: stored under '*',
+        never attached to a random peer."""
+        self._due()
+        flows1, flows2 = self._two_flows()
+        ssh = sim_ssh(self._state(), flows1, flows2)
+        endpoints = {'10.8.1.5': '1.1.1.1:5000'}
+        changed = manager(ssh).detect_simultaneous_use(
+            'awg', endpoints=endpoints, port='55424')
+        self.assertTrue(changed)
         self.assertIn('*', ssh.saved['state']['sim'])
+        self.assertNotIn('10.8.1.5', ssh.saved['state']['sim'])
 
     def test_not_due_round_skips_sampling(self):
-        state = {'seen': {}, 'alerts': {}, 'sim': {}}
-        # rounds 1..5 are skipped for a clean instance; make counters say 1
+        state = self._state()
         ssh = sim_ssh(state, '', '')
-        mgr = manager(ssh)
-        self.assertFalse(mgr.detect_simultaneous_use('awg', endpoints={},
-                                                     port='55424'))
-        self.assertEqual(ssh.saved, {})  # nothing was uploaded
+        changed = manager(ssh).detect_simultaneous_use(
+            'awg', endpoints={}, port='55424')
+        self.assertFalse(changed)
+        self.assertEqual(ssh.saved, {})
 
     def test_recent_multi_ip_alert_makes_it_due(self):
-        state = {'seen': {}, 'alerts': {'10.8.1.5': [{'ts': self.now - 60,
-                                                      'ips': ['1.1.1.1']}]},
-                 'sim': {}}
-        flows1 = conntrack([
-            {'timeout': 120, 'src': '1.1.1.1', 'sport': 5000},
-            {'timeout': 120, 'src': '2.2.2.2', 'sport': 6000},
-        ])
-        flows2 = conntrack([
-            {'timeout': 120, 'src': '1.1.1.1', 'sport': 5000},
-            {'timeout': 120, 'src': '2.2.2.2', 'sport': 6000},
-        ])
+        state = self._state(history=[('2.2.2.2', 300)])
+        state['alerts'] = {'10.8.1.5': [{'ts': self.now - 60,
+                                         'ips': ['1.1.1.1', '2.2.2.2']}]}
+        flows1, flows2 = self._two_flows()
         ssh = sim_ssh(state, flows1, flows2)
         changed = manager(ssh).detect_simultaneous_use(
-            'awg', endpoints={'10.8.1.5': '1.1.1.1'}, port='55424')
+            'awg', endpoints={'10.8.1.5': '1.1.1.1:5000'}, port='55424')
         self.assertTrue(changed)
 
     def test_outer_flow_parsing(self):

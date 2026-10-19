@@ -330,6 +330,9 @@ SIM_ROUND_FULL_EVERY = 6      # every Nth monitor round covers ALL instances
 SIM_RECENT_ALERT = 86400      # once alerted, check this instance every round
 SIM_COOLDOWN = 3600           # min seconds between two recorded events
 SIM_MAX_EVENTS = 10           # how many recent events are kept per peer
+SIM_HISTORY_WINDOW = 900      # an orphan flow counts as "this peer's second
+                              # device" if its IP was the peer's endpoint
+                              # within this many seconds
 
 # Round counters for SIM_ROUND_FULL_EVERY; managers are recreated each
 # round, so this lives at module level, keyed by (host, protocol).
@@ -2990,13 +2993,16 @@ done < "$BW"
         panel's background monitor so that detection runs 24/7 even when
         nobody has the UI open.
         """
-        endpoints = self._collect_peer_endpoints(protocol_type)
+        endpoints_full = self._collect_peer_endpoints(protocol_type,
+                                                      with_ports=True)
+        endpoints = {tip: ep.rsplit(':', 1)[0]
+                     for tip, ep in endpoints_full.items()}
         try:
             self.detect_multi_ip_use(protocol_type, endpoints)
         except Exception as e:
             logger.warning(f'multi-IP detection failed: {e}')
         try:
-            self.detect_simultaneous_use(protocol_type, endpoints,
+            self.detect_simultaneous_use(protocol_type, endpoints_full,
                                          port=port, public_port=public_port)
         except Exception as e:
             logger.warning(f'simultaneous-use detection failed: {e}')
@@ -3120,13 +3126,15 @@ done < "$BW"
         )
         self.ssh.run_command("rm -f /tmp/_amnz_multiip.json")
 
-    def _collect_peer_endpoints(self, protocol_type):
+    def _collect_peer_endpoints(self, protocol_type, with_ports=False):
         """Map each connected peer's tunnel IP to its current public endpoint.
 
         Runs 'awg show' in the container and pairs every peer's first allowed
         IP (tunnel identity, same key used elsewhere in this file) with its
         endpoint line. Peers without an endpoint (never connected) are skipped.
-        Returns {tunnel_ip: endpoint_host}; empty dict when show fails.
+        Returns {tunnel_ip: endpoint_host} by default, or {tunnel_ip:
+        'host:port'} when with_ports=True (for exact matching against
+        conntrack flow keys); empty dict when show fails.
         """
         container = self._container_name(protocol_type)
         out, err, code = self.ssh.run_sudo_command(
@@ -3147,9 +3155,12 @@ done < "$BW"
                 # and pair it with the peer identity on the allowed ips line.
                 ep = line.split(':', 1)[1].strip()
                 if ep and ep != '(none)':
-                    # Strip the port; IPv6 literals come bracketed: [::1]:51820
-                    host = ep.rsplit(':', 1)[0].strip()
-                    pending_ep = host.strip('[]')
+                    # IPv6 literals come bracketed: [::1]:51820
+                    if with_ports:
+                        pending_ep = ep.strip('[]')
+                    else:
+                        host = ep.rsplit(':', 1)[0].strip()
+                        pending_ep = host.strip('[]')
             elif line.startswith('allowed ips:'):
                 first = line.split(':', 1)[1].split(',')[0].strip()
                 current_ip = first.split('/')[0].strip()
@@ -3185,11 +3196,20 @@ done < "$BW"
 
         for ip, ep in endpoints.items():
             prev = seen.get(ip)
-            seen[ip] = {'endpoint': ep, 'ts': now}
-            if not prev:
-                # First time we see this peer: persist the observation even
-                # though there is nothing to alert about yet.
+            # Keep a short endpoint history per peer: the simultaneous-use
+            # detector attributes an orphan flow to the peer whose key that
+            # device rode on by matching the orphan's IP against this list.
+            recent = list(prev.get('recent') or []) if prev else []
+            if not prev or prev.get('endpoint') != ep:
+                recent.append({'ep': ep, 'ts': now})
+                recent = [r for r in recent
+                          if now - int(r.get('ts', 0)) <= MULTI_IP_SEEN_TTL]
+                recent = recent[-10:]
                 changed = True
+            seen[ip] = {'endpoint': ep, 'ts': now, 'recent': recent}
+            if not prev:
+                # First time we see this peer: the observation above already
+                # marked the state dirty; nothing to alert about yet.
                 continue
             prev_ep = prev.get('endpoint')
             if not prev_ep or prev_ep == ep:
@@ -3277,21 +3297,27 @@ done < "$BW"
 
     def detect_simultaneous_use(self, protocol_type, endpoints=None,
                                 port=None, public_port=None):
-        """Record hard evidence when one key moves data from 2+ devices at
+        """Record hard evidence when ONE key moves data from 2+ devices at
         the same time.
 
         Takes two conntrack samples SIM_SAMPLE_GAP (60s) apart and keeps
         flows whose timeout was refreshed (i.e. packets actually flowed)
-        inside that window. Two or more active flows in BOTH samples means
-        the overlap lasted at least a minute — impossible for a Wi-Fi->LTE
-        handover (old flow dies within seconds, expires within 120s) and
-        guaranteed while 2+ devices with PersistentKeepalive=25 share one
-        key. distinct src IPs means different locations, same src IP with
-        different ports means several devices behind one NAT. Attributed to
-        the peer whose current endpoint is one of the active source IPs
-        ('*' when unresolvable). Events are {ts, ips, sessions}, merged into
-        an open event during SIM_COOLDOWN and capped at SIM_MAX_EVENTS.
-        Returns True when the state file was modified.
+        inside that window — an overlap lasting at least a minute, which a
+        Wi-Fi->LTE handover cannot produce (old flow dies within seconds,
+        expires within 120s) while devices sharing a key with
+        PersistentKeepalive=25 keep refreshing forever.
+
+        Attribution is per peer, NOT per instance (an instance with two
+        legit users online has two active flows too — that is not sharing):
+        an active flow that matches NO peer's current endpoint is an
+        ORPHAN — a second device of a shared key. The orphan is attributed
+        to the peer whose own endpoint was active in the same windows AND
+        whose recent endpoint history contains the orphan's IP (the second
+        device takes turns being the endpoint, so its IP shows up there).
+        Unattributed orphans are stored under '*' for debugging only.
+        Events are {ts, ips, sessions}, merged into an open event during
+        SIM_COOLDOWN and capped at SIM_MAX_EVENTS. Returns True when the
+        state file was modified.
         """
         state = self._load_multi_ip_state(protocol_type)
         if not self._sim_check_due(protocol_type, state):
@@ -3305,33 +3331,58 @@ done < "$BW"
         active = sorted(k for k in flows1
                         if k in flows2
                         and flows2[k] >= flows1[k] - SIM_ACTIVE_MARGIN)
-        if len(active) < 2:
+        if not active:
             return False
 
-        active_ips = sorted({k.rsplit(':', 1)[0] for k in active})
         if endpoints is None:
-            endpoints = self._collect_peer_endpoints(protocol_type)
-        owner = next((tip for tip, ep in endpoints.items()
-                      if ep in active_ips), '*')
+            endpoints = self._collect_peer_endpoints(protocol_type,
+                                                     with_ports=True)
+        active_set = set(active)
+        claimed = set(endpoints.values())
+        orphans = [f for f in active if f not in claimed]
+        if not orphans:
+            # Every active flow belongs to a different online peer: plain
+            # concurrency, not key sharing.
+            return False
+        orphan_ips = sorted({f.rsplit(':', 1)[0] for f in orphans})
+
+        now = int(time.time())
+        seen = state.get('seen') or {}
+        guilty = []
+        for tip, ep in endpoints.items():
+            if ep not in active_set:
+                continue  # the key's primary device must be online too
+            history = [h.get('ep') for h in
+                       (seen.get(tip) or {}).get('recent', [])
+                       if now - int(h.get('ts', 0)) <= SIM_HISTORY_WINDOW]
+            if any(ip in history for ip in orphan_ips):
+                guilty.append((tip,
+                               sorted(set(orphan_ips)
+                                      | {ep.rsplit(':', 1)[0]}),
+                               1 + len(orphans)))
+        if not guilty:
+            guilty.append(('*', orphan_ips, len(orphans)))
 
         sim = state.setdefault('sim', {})
-        events = sim.get(owner, [])
-        now = int(time.time())
-        if events and now - int(events[-1].get('ts', 0)) < SIM_COOLDOWN:
-            merged = sorted(set(events[-1].get('ips', [])) | set(active_ips))
-            events[-1]['ips'] = merged
-            events[-1]['sessions'] = max(int(events[-1].get('sessions', 0)),
-                                         len(active))
-            events[-1]['ts'] = now
-        else:
-            events.append({'ts': now, 'ips': active_ips,
-                           'sessions': len(active)})
-        sim[owner] = events[-SIM_MAX_EVENTS:]
-        try:
-            self._save_multi_ip_state(protocol_type, state)
-        except Exception as e:
-            logger.warning(f'failed to save simultaneous-use state: {e}')
-        return True
+        changed = False
+        for owner, ips, sessions in guilty:
+            events = sim.get(owner, [])
+            if events and now - int(events[-1].get('ts', 0)) < SIM_COOLDOWN:
+                merged = sorted(set(events[-1].get('ips', [])) | set(ips))
+                events[-1]['ips'] = merged
+                events[-1]['sessions'] = max(
+                    int(events[-1].get('sessions', 0)), sessions)
+                events[-1]['ts'] = now
+            else:
+                events.append({'ts': now, 'ips': ips, 'sessions': sessions})
+            sim[owner] = events[-SIM_MAX_EVENTS:]
+            changed = True
+        if changed:
+            try:
+                self._save_multi_ip_state(protocol_type, state)
+            except Exception as e:
+                logger.warning(f'failed to save simultaneous-use state: {e}')
+        return changed
 
     def _wg_show(self, protocol_type):
         """Run 'wg show all' and parse output."""
