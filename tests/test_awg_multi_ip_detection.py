@@ -159,5 +159,168 @@ class MultiIpDetectionTests(unittest.TestCase):
         self.assertEqual(endpoints, {'10.8.1.5': '2001:db8::1'})
 
 
+# conntrack lines as they appear on the hosts: no accounting (no
+# packets=/bytes=), reply tuple right after the original one.
+FLOW_LINE = ('ipv4     2 udp      17 {timeout} src={src} dst=46.183.21.61 '
+             'sport={sport} dport=55424 src=46.183.21.61 dst={src} '
+             'sport=55424 dport={sport} mark=0 zone=0 use=2')
+
+
+def conntrack(flows):
+    return '\n'.join(FLOW_LINE.format(**f) for f in flows) + '\n'
+
+
+def sim_ssh(state, flows1, flows2, host='10.255.0.1'):
+    """Scripted ssh: cat multi_ip.json -> state, then nf_conntrack greps."""
+    ssh = mock.Mock()
+    ssh.host = host
+    samples = iter([flows1, flows2])
+
+    def sudo(command, timeout=60):
+        if 'multi_ip.json' in command:
+            if state is None:
+                return '', 'No such file', 1
+            return json.dumps(state), '', 0
+        if 'nf_conntrack' in command:
+            return next(samples), '', 0
+        return '', '', 1
+
+    ssh.run_sudo_command = sudo
+    saved = {}
+    ssh.upload_file = lambda content, remote: saved.update(
+        {'state': json.loads(content)})
+    ssh.run_command = mock.Mock()
+    ssh.__dict__['saved'] = saved
+    return ssh
+
+
+class SimultaneousUseTests(unittest.TestCase):
+    def setUp(self):
+        self.now = int(time.time())
+        self.patchers = [
+            mock.patch.object(awg_manager.time, 'time',
+                              return_value=self.now),
+            mock.patch.object(awg_manager.time, 'sleep'),
+        ]
+        for p in self.patchers:
+            p.start()
+        awg_manager._sim_round_counters.clear()
+
+    def tearDown(self):
+        for p in self.patchers:
+            p.stop()
+        awg_manager._sim_round_counters.clear()
+
+    def test_two_active_flows_raise_event(self):
+        state = {'seen': {}, 'alerts': {}, 'sim': {}}
+        flows1 = conntrack([
+            {'timeout': 120, 'src': '1.1.1.1', 'sport': 5000},
+            {'timeout': 118, 'src': '2.2.2.2', 'sport': 6000},
+        ])
+        # 60s later: both refreshed back near the top of the countdown
+        flows2 = conntrack([
+            {'timeout': 119, 'src': '1.1.1.1', 'sport': 5000},
+            {'timeout': 120, 'src': '2.2.2.2', 'sport': 6000},
+        ])
+        awg_manager._sim_round_counters[('10.255.0.1', 'awg')] =             awg_manager.SIM_ROUND_FULL_EVERY - 1
+        ssh = sim_ssh(state, flows1, flows2)
+        mgr = manager(ssh)
+        changed = mgr.detect_simultaneous_use(
+            'awg', endpoints={'10.8.1.5': '1.1.1.1'},
+            port='55424', public_port='8443')
+        self.assertTrue(changed)
+        events = ssh.saved['state']['sim']['10.8.1.5']
+        self.assertEqual(events, [{'ts': self.now,
+                                   'ips': ['1.1.1.1', '2.2.2.2'],
+                                   'sessions': 2}])
+
+    def test_handover_old_flow_dead_no_event(self):
+        state = {'seen': {}, 'alerts': {}, 'sim': {}}
+        flows1 = conntrack([
+            {'timeout': 120, 'src': '1.1.1.1', 'sport': 5000},
+            {'timeout': 118, 'src': '2.2.2.2', 'sport': 6000},
+        ])
+        # 60s later the Wi-Fi flow went silent: timeout counted down to 58
+        flows2 = conntrack([
+            {'timeout': 119, 'src': '2.2.2.2', 'sport': 6000},
+            {'timeout': 58, 'src': '1.1.1.1', 'sport': 5000},
+        ])
+        awg_manager._sim_round_counters[('10.255.0.1', 'awg')] = \
+            awg_manager.SIM_ROUND_FULL_EVERY - 1
+        ssh = sim_ssh(state, flows1, flows2)
+        changed = manager(ssh).detect_simultaneous_use(
+            'awg', endpoints={'10.8.1.5': '2.2.2.2'}, port='55424')
+        self.assertFalse(changed)
+        self.assertEqual(ssh.saved, {})  # no active pair -> nothing saved
+
+    def test_single_flow_never_alerts(self):
+        state = {'seen': {}, 'alerts': {}, 'sim': {}}
+        flows1 = conntrack([{'timeout': 120, 'src': '1.1.1.1', 'sport': 5000}])
+        flows2 = conntrack([{'timeout': 120, 'src': '1.1.1.1', 'sport': 5000}])
+        awg_manager._sim_round_counters[('10.255.0.1', 'awg')] = \
+            awg_manager.SIM_ROUND_FULL_EVERY - 1
+        ssh = sim_ssh(state, flows1, flows2)
+        changed = manager(ssh).detect_simultaneous_use(
+            'awg', endpoints={'10.8.1.5': '1.1.1.1'}, port='55424')
+        self.assertFalse(changed)
+        self.assertEqual(ssh.saved, {})
+
+    def test_unresolvable_flows_go_to_star(self):
+        state = {'seen': {}, 'alerts': {}, 'sim': {}}
+        flows1 = conntrack([
+            {'timeout': 120, 'src': '9.9.9.9', 'sport': 5000},
+            {'timeout': 120, 'src': '8.8.8.8', 'sport': 6000},
+        ])
+        flows2 = conntrack([
+            {'timeout': 120, 'src': '9.9.9.9', 'sport': 5000},
+            {'timeout': 120, 'src': '8.8.8.8', 'sport': 6000},
+        ])
+        awg_manager._sim_round_counters[('10.255.0.1', 'awg')] =             awg_manager.SIM_ROUND_FULL_EVERY - 1
+        ssh = sim_ssh(state, flows1, flows2)
+        manager(ssh).detect_simultaneous_use(
+            'awg', endpoints={}, port='55424')
+        self.assertIn('*', ssh.saved['state']['sim'])
+
+    def test_not_due_round_skips_sampling(self):
+        state = {'seen': {}, 'alerts': {}, 'sim': {}}
+        # rounds 1..5 are skipped for a clean instance; make counters say 1
+        ssh = sim_ssh(state, '', '')
+        mgr = manager(ssh)
+        self.assertFalse(mgr.detect_simultaneous_use('awg', endpoints={},
+                                                     port='55424'))
+        self.assertEqual(ssh.saved, {})  # nothing was uploaded
+
+    def test_recent_multi_ip_alert_makes_it_due(self):
+        state = {'seen': {}, 'alerts': {'10.8.1.5': [{'ts': self.now - 60,
+                                                      'ips': ['1.1.1.1']}]},
+                 'sim': {}}
+        flows1 = conntrack([
+            {'timeout': 120, 'src': '1.1.1.1', 'sport': 5000},
+            {'timeout': 120, 'src': '2.2.2.2', 'sport': 6000},
+        ])
+        flows2 = conntrack([
+            {'timeout': 120, 'src': '1.1.1.1', 'sport': 5000},
+            {'timeout': 120, 'src': '2.2.2.2', 'sport': 6000},
+        ])
+        ssh = sim_ssh(state, flows1, flows2)
+        changed = manager(ssh).detect_simultaneous_use(
+            'awg', endpoints={'10.8.1.5': '1.1.1.1'}, port='55424')
+        self.assertTrue(changed)
+
+    def test_outer_flow_parsing(self):
+        ssh = sim_ssh(None, '', '')
+        mgr = manager(ssh)
+        lines = ('ipv4     2 udp      17 120 src=1.1.1.1 dst=46.183.21.61 '
+                 'sport=5000 dport=55424 packets=9 bytes=900 '
+                 'src=46.183.21.61 dst=1.1.1.1 sport=55424 dport=5000 '
+                 'packets=4 bytes=400 [ASSURED] mark=0 use=2\n'
+                 'ipv4     2 tcp      6 100 src=1.1.1.1 dst=46.183.21.61 '
+                 'sport=5001 dport=55424 src=46.183.21.61 dst=1.1.1.1 '
+                 'sport=55424 dport=5001 mark=0 use=2\n')
+        ssh.run_sudo_command = lambda command, timeout=60: (lines, '', 0)
+        flows = mgr._collect_outer_flows(['55424', '8443'])
+        self.assertEqual(flows, {'1.1.1.1:5000': 120})  # tcp line filtered
+
+
 if __name__ == '__main__':
     unittest.main()

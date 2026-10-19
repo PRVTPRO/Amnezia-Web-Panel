@@ -2319,11 +2319,13 @@ a:hover {
     font-variant-numeric: tabular-nums;
 }
 
-/* Key-sharing alerts are a policy violation, not a nuisance: red, not amber */
-.conn-multi-ip {
+/* Simultaneous-use alerts are proven key sharing (conntrack double
+   sample), not a heuristic: red, stronger than the amber tripwire */
+.conn-sim {
     color: #ef4444;
     background: rgba(239, 68, 68, 0.12);
     border-color: rgba(239, 68, 68, 0.4);
+    font-weight: 600;
 }
 
 /* ===== Header Navigation ===== */

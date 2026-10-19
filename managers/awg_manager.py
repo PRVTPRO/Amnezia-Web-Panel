@@ -307,6 +307,34 @@ MULTI_IP_COOLDOWN = 3600      # min seconds between two recorded alerts per peer
 MULTI_IP_MAX_EVENTS = 10      # how many recent alerts are kept per peer
 MULTI_IP_SEEN_TTL = 7 * 86400 # drop endpoint observations older than this
 
+# Simultaneous-use detection (the strong evidence): conntrack on the HOST
+# keeps one UDP flow per client device, even for devices sharing one key.
+# A flow's timeout counts down (default UDP timeout 120s) and jumps back to
+# the full value on every packet, so two samples ~SIM_SAMPLE_GAP seconds
+# apart tell which flows passed traffic inside that exact window — with no
+# byte counters (nf_conntrack_acct stays off), no sysctl changes and no
+# extra packages.
+#
+# The gap is 60s on purpose. Client configs carry PersistentKeepalive=25,
+# so EVERY online device re-sends every 25s and its flow stays refreshed
+# indefinitely: two devices = two flows active in BOTH samples = overlap
+# lasting at least a minute. A Wi-Fi->LTE handover kills the old flow
+# within seconds and conntrack expires it in <=120s, so at the second
+# sample only one flow is active and nothing is recorded. A 15s gap would
+# false-positive on someone walking out of the house; a "same second" rule
+# would not help either — handover packets land in the same second too.
+# What separates sharing from switching is DURATION, not simultaneity.
+SIM_SAMPLE_GAP = 60           # seconds between the two conntrack samples
+SIM_ACTIVE_MARGIN = 2         # timeout slop: refreshed if t2 >= t1 - margin
+SIM_ROUND_FULL_EVERY = 6      # every Nth monitor round covers ALL instances
+SIM_RECENT_ALERT = 86400      # once alerted, check this instance every round
+SIM_COOLDOWN = 3600           # min seconds between two recorded events
+SIM_MAX_EVENTS = 10           # how many recent events are kept per peer
+
+# Round counters for SIM_ROUND_FULL_EVERY; managers are recreated each
+# round, so this lives at module level, keyed by (host, protocol).
+_sim_round_counters = {}
+
 
 # ----- clientsTable mutation serialization -----
 # Every mutating op does read-table -> modify -> save-table. Uvicorn serves
@@ -2791,7 +2819,9 @@ done < "$BW"
             if not conn_counts:
                 conn_counts = self._count_connections_by_ip(protocol_type)
             conn_warnings = self._load_conn_warnings(protocol_type)
-            multi_alerts = self._load_multi_ip_state(protocol_type).get('alerts', {})
+            mi_state = self._load_multi_ip_state(protocol_type)
+            multi_alerts = mi_state.get('alerts', {})
+            sim_alerts = mi_state.get('sim', {})
             for client in clients_table:
                 user_data = client.get('userData', {})
                 ip = user_data.get('clientIp', '')
@@ -2806,6 +2836,8 @@ done < "$BW"
                     user_data['connWarnings'] = conn_warnings[ip]
                 if ip in multi_alerts:
                     user_data['multiIpAlerts'] = multi_alerts[ip]
+                if ip in sim_alerts:
+                    user_data['simAlerts'] = sim_alerts[ip]
                 client['userData'] = user_data
         except Exception as e:
             logger.warning(f'get_clients: conn monitoring failed: {e}')
@@ -2947,20 +2979,27 @@ done < "$BW"
         )
         self.ssh.run_command("rm -f /tmp/_amnz_conncount.json")
 
-    def collect_conn_stats(self, protocol_type):
+    def collect_conn_stats(self, protocol_type, port=None, public_port=None):
         """Background collector: one cheap SSH roundtrip per instance.
 
         Counts conntrack entries per peer IP inside the container (compact
         awk summary, no raw table transfer), saves the snapshot and records
-        flood warnings. Also runs the multi-IP (key sharing) detector, which
-        only needs the 'awg show' output it reads on its own. Called by the
+        flood warnings. Also runs the multi-IP (key sharing) detector and —
+        when due — the simultaneous-use detector, which reads the HOST's
+        conntrack table around the same awg show snapshot. Called by the
         panel's background monitor so that detection runs 24/7 even when
         nobody has the UI open.
         """
+        endpoints = self._collect_peer_endpoints(protocol_type)
         try:
-            self.detect_multi_ip_use(protocol_type)
+            self.detect_multi_ip_use(protocol_type, endpoints)
         except Exception as e:
             logger.warning(f'multi-IP detection failed: {e}')
+        try:
+            self.detect_simultaneous_use(protocol_type, endpoints,
+                                         port=port, public_port=public_port)
+        except Exception as e:
+            logger.warning(f'simultaneous-use detection failed: {e}')
         counts = self._count_connections_by_ip(protocol_type)
         if not counts:
             return False
@@ -3037,8 +3076,14 @@ done < "$BW"
             warnings.pop(ip, None)
             self._save_conn_warnings(protocol_type, warnings)
         state = self._load_multi_ip_state(protocol_type)
+        changed = False
         if ip in state.get('alerts', {}):
             state['alerts'].pop(ip, None)
+            changed = True
+        if ip in state.get('sim', {}):
+            state['sim'].pop(ip, None)
+            changed = True
+        if changed:
             self._save_multi_ip_state(protocol_type, state)
         return {'status': 'success', 'cleared_ip': ip}
 
@@ -3112,7 +3157,7 @@ done < "$BW"
                     endpoints[current_ip] = pending_ep
         return endpoints
 
-    def detect_multi_ip_use(self, protocol_type):
+    def detect_multi_ip_use(self, protocol_type, endpoints=None):
         """Record an alert when one key is used from 2+ public IPs at once.
 
         Called by the background collector next to conntrack counting. A peer
@@ -3122,7 +3167,8 @@ done < "$BW"
         deduplicated by MULTI_IP_COOLDOWN and capped at MULTI_IP_MAX_EVENTS.
         Returns True when the state file was modified.
         """
-        endpoints = self._collect_peer_endpoints(protocol_type)
+        if endpoints is None:
+            endpoints = self._collect_peer_endpoints(protocol_type)
         if not endpoints:
             return False
         state = self._load_multi_ip_state(protocol_type)
@@ -3169,6 +3215,123 @@ done < "$BW"
             except Exception as e:
                 logger.warning(f'failed to save multi-IP state: {e}')
         return changed
+
+    def _collect_outer_flows(self, ports):
+        """Active UDP flows to any of the given ports on the HOST.
+
+        Host conntrack (not the container's) carries the pre-DNAT tuples, so
+        every client device is a separate flow keyed by its public
+        src_ip:sport — even devices sharing one key, and even two devices
+        behind the same NAT (same src_ip, different sport). Returns
+        {src_ip:sport: timeout_seconds}; {} when nothing matches or the
+        table is unreadable.
+        """
+        ports = [str(p).strip() for p in ports if str(p or '').strip()]
+        if not ports:
+            return {}
+        pattern = '|'.join(p.replace('.', '\\.') for p in ports)
+        cmd = (f"grep -E 'dport=({pattern}) ' /proc/net/nf_conntrack "
+               f"2>/dev/null | grep ' udp '")
+        out, err, code = self.ssh.run_sudo_command(cmd)
+        if code != 0 or not out.strip():
+            return {}
+        flows = {}
+        for line in out.split('\n'):
+            tokens = line.split()
+            if len(tokens) < 9 or tokens[2] != 'udp':
+                continue
+            try:
+                timeout = int(tokens[4])
+            except (ValueError, IndexError):
+                continue
+            src = sport = None
+            for t in tokens[5:]:
+                if t.startswith('src=') and src is None:
+                    src = t.split('=', 1)[1]
+                elif t.startswith('sport=') and sport is None:
+                    sport = t.split('=', 1)[1]
+                if src and sport:
+                    break
+            if src and sport:
+                flows[f'{src}:{sport}'] = timeout
+        return flows
+
+    def _sim_check_due(self, protocol_type, state):
+        """Sampling costs SIM_SAMPLE_GAP seconds, so it does not run for
+        every instance every round: every SIM_ROUND_FULL_EVERY-th round
+        covers all instances, and any instance with a recent multi-IP or
+        simultaneous-use alert is re-checked every round while suspicious.
+        """
+        key = (getattr(self.ssh, 'host', '') or '', protocol_type)
+        n = _sim_round_counters.get(key, 0) + 1
+        _sim_round_counters[key] = n
+        if n % SIM_ROUND_FULL_EVERY == 0:
+            return True
+        now = int(time.time())
+        for bucket in ('alerts', 'sim'):
+            for events in (state.get(bucket) or {}).values():
+                for ev in events:
+                    if now - int(ev.get('ts', 0)) < SIM_RECENT_ALERT:
+                        return True
+        return False
+
+    def detect_simultaneous_use(self, protocol_type, endpoints=None,
+                                port=None, public_port=None):
+        """Record hard evidence when one key moves data from 2+ devices at
+        the same time.
+
+        Takes two conntrack samples SIM_SAMPLE_GAP (60s) apart and keeps
+        flows whose timeout was refreshed (i.e. packets actually flowed)
+        inside that window. Two or more active flows in BOTH samples means
+        the overlap lasted at least a minute — impossible for a Wi-Fi->LTE
+        handover (old flow dies within seconds, expires within 120s) and
+        guaranteed while 2+ devices with PersistentKeepalive=25 share one
+        key. distinct src IPs means different locations, same src IP with
+        different ports means several devices behind one NAT. Attributed to
+        the peer whose current endpoint is one of the active source IPs
+        ('*' when unresolvable). Events are {ts, ips, sessions}, merged into
+        an open event during SIM_COOLDOWN and capped at SIM_MAX_EVENTS.
+        Returns True when the state file was modified.
+        """
+        state = self._load_multi_ip_state(protocol_type)
+        if not self._sim_check_due(protocol_type, state):
+            return False
+        ports = [port, public_port]
+        flows1 = self._collect_outer_flows(ports)
+        if not flows1:
+            return False
+        time.sleep(SIM_SAMPLE_GAP)
+        flows2 = self._collect_outer_flows(ports)
+        active = sorted(k for k in flows1
+                        if k in flows2
+                        and flows2[k] >= flows1[k] - SIM_ACTIVE_MARGIN)
+        if len(active) < 2:
+            return False
+
+        active_ips = sorted({k.rsplit(':', 1)[0] for k in active})
+        if endpoints is None:
+            endpoints = self._collect_peer_endpoints(protocol_type)
+        owner = next((tip for tip, ep in endpoints.items()
+                      if ep in active_ips), '*')
+
+        sim = state.setdefault('sim', {})
+        events = sim.get(owner, [])
+        now = int(time.time())
+        if events and now - int(events[-1].get('ts', 0)) < SIM_COOLDOWN:
+            merged = sorted(set(events[-1].get('ips', [])) | set(active_ips))
+            events[-1]['ips'] = merged
+            events[-1]['sessions'] = max(int(events[-1].get('sessions', 0)),
+                                         len(active))
+            events[-1]['ts'] = now
+        else:
+            events.append({'ts': now, 'ips': active_ips,
+                           'sessions': len(active)})
+        sim[owner] = events[-SIM_MAX_EVENTS:]
+        try:
+            self._save_multi_ip_state(protocol_type, state)
+        except Exception as e:
+            logger.warning(f'failed to save simultaneous-use state: {e}')
+        return True
 
     def _wg_show(self, protocol_type):
         """Run 'wg show all' and parse output."""
