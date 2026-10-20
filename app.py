@@ -50,6 +50,7 @@ from managers.backup_manager import BackupManager
 import telegram_bot as tg_bot
 
 from exit_link_service import ExitLinkError, ExitLinkService
+from smartroute_service import SmartRouteError, SmartRouteService
 from mail_service import (
     DEFAULT_MAIL_SETTINGS,
     MailError,
@@ -1711,6 +1712,17 @@ exit_link_svc = ExitLinkService(
     find_server_by_uid=find_server_by_uid,
 )
 
+smartroute_svc = SmartRouteService(
+    load_data=load_data,
+    save_data=save_data,
+    data_lock=DATA_LOCK,
+    get_ssh=get_ssh,
+    awg_manager_factory=lambda ssh: AWGManager(ssh),
+    protocol_base=protocol_base,
+    awg_protocols=AWG_PROTOCOLS,
+    apply_dns_via_exit=lambda sid, proto, en: exit_link_svc.set_dns_via_exit(sid, proto, en),
+)
+
 
 def _self_service_error_response(exc):
     if isinstance(exc, RateLimitError):
@@ -2274,6 +2286,28 @@ class ExitLinkRequest(BaseModel):
 class ExitDnsRequest(BaseModel):
     protocol: str = 'awg'
     enabled: bool = False
+
+
+class SmartRouteOwnSubnetsRequest(BaseModel):
+    cidrs: list = []
+
+
+class SmartRouteSplitRequest(BaseModel):
+    protocol: str = 'awg'
+    enabled: bool = False
+
+
+class SmartRouteDnsRequest(BaseModel):
+    enabled: bool = False
+
+
+class SmartRouteEnableRequest(BaseModel):
+    enabled: bool = True
+
+
+class SmartRouteDnsServersRequest(BaseModel):
+    direct: str = '77.88.8.8'
+    exit: str = '1.1.1.1'
 
 
 class Socks5SettingsRequest(BaseModel):
@@ -4069,6 +4103,10 @@ def _exit_link_error(e: ExitLinkError):
     return JSONResponse({'error': e.code, 'message': str(e)}, status_code=e.status_code)
 
 
+def _smartroute_error(e: SmartRouteError):
+    return JSONResponse({'error': e.code, 'message': str(e)}, status_code=e.status_code)
+
+
 @app.get('/api/exit-nodes', tags=["Servers"])
 def api_exit_nodes(request: Request):
     """Servers with an installed exit node, from data.json (no SSH)."""
@@ -4142,12 +4180,21 @@ async def api_exit_link_status(request: Request, server_id: int, req: ProtocolRe
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
-        return await exit_link_svc.status(server_id, req.protocol)
+        payload = await exit_link_svc.status(server_id, req.protocol)
     except ExitLinkError as e:
         return _exit_link_error(e)
     except Exception as e:
         logger.exception("Error reading exit link status")
         return JSONResponse({'error': str(e)}, status_code=500)
+    # Smart Route counters ride along best-effort: a probe failure must not
+    # hide the whole link status.
+    try:
+        payload['smartroute'] = await smartroute_svc.counters(server_id, req.protocol)
+    except Exception:
+        logger.debug("smartroute counters unavailable for server %s %s",
+                     server_id, req.protocol)
+        payload['smartroute'] = None
+    return payload
 
 
 @app.post('/api/servers/{server_id}/exit-link/check-egress', tags=["Protocols"])
@@ -4162,6 +4209,145 @@ async def api_exit_link_check_egress(request: Request, server_id: int, req: Prot
         return _exit_link_error(e)
     except Exception as e:
         logger.exception("Error checking exit egress")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/smartroute/install', tags=["Protocols"])
+async def api_smartroute_install(request: Request, server_id: int):
+    """Install the host-side Smart Route updater (lists + systemd timer)."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        return await smartroute_svc.install(server_id)
+    except SmartRouteError as e:
+        return _smartroute_error(e)
+    except Exception as e:
+        logger.exception("Error installing Smart Route")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/smartroute/uninstall', tags=["Protocols"])
+async def api_smartroute_uninstall(request: Request, server_id: int):
+    """Remove Smart Route: every split instance is rolled back to full
+    tunnel through the exit node first."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        return await smartroute_svc.uninstall(server_id)
+    except SmartRouteError as e:
+        return _smartroute_error(e)
+    except Exception as e:
+        logger.exception("Error uninstalling Smart Route")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/smartroute/update', tags=["Protocols"])
+async def api_smartroute_update(request: Request, server_id: int):
+    """Re-download the RU prefix lists and re-apply them now."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        return await smartroute_svc.run_update(server_id)
+    except SmartRouteError as e:
+        return _smartroute_error(e)
+    except Exception as e:
+        logger.exception("Error updating Smart Route lists")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/smartroute/own-subnets', tags=["Protocols"])
+async def api_smartroute_own_subnets(request: Request, server_id: int,
+                                     req: SmartRouteOwnSubnetsRequest):
+    """Own subnets routed directly (merged into every split instance)."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        return await smartroute_svc.set_own_subnets(server_id, req.cidrs)
+    except SmartRouteError as e:
+        return _smartroute_error(e)
+    except Exception as e:
+        logger.exception("Error saving Smart Route own subnets")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/smartroute/split', tags=["Protocols"])
+async def api_smartroute_split(request: Request, server_id: int,
+                               req: SmartRouteSplitRequest):
+    """Toggle RU-direct split routing for one exit-linked instance."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        return await smartroute_svc.set_split(server_id, req.protocol, req.enabled)
+    except SmartRouteError as e:
+        return _smartroute_error(e)
+    except Exception as e:
+        logger.exception("Error toggling Smart Route split")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/smartroute/dns', tags=["Protocols"])
+async def api_smartroute_dns(request: Request, server_id: int,
+                             req: SmartRouteDnsRequest):
+    """Resolve DNS at the exit node for all split instances of the server."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        return await smartroute_svc.set_dns_via_exit(server_id, req.enabled)
+    except SmartRouteError as e:
+        return _smartroute_error(e)
+    except Exception as e:
+        logger.exception("Error switching Smart Route DNS")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/smartroute/enable', tags=["Protocols"])
+async def api_smartroute_enable(request: Request, server_id: int,
+                                req: SmartRouteEnableRequest):
+    """Global pause/resume of Smart Route on the server (card toggle).
+
+    Pausing rolls the split routing out of every split instance (traffic
+    returns to the exit node); resuming re-applies it. Lists, timer and
+    per-instance preferences are preserved."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        return await smartroute_svc.set_enabled(server_id, req.enabled)
+    except SmartRouteError as e:
+        return _smartroute_error(e)
+    except Exception as e:
+        logger.exception("Error toggling Smart Route globally")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/smartroute/dns-servers', tags=["Protocols"])
+async def api_smartroute_dns_servers(request: Request, server_id: int,
+                                     req: SmartRouteDnsServersRequest):
+    """Resolver pair for split instances: the direct resolver is expected to
+    be a RU IP (routed directly), the exit resolver a foreign one (routed
+    through the exit node). Stored server-wide and pushed into every split
+    instance's client-config DNS line."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        return await smartroute_svc.set_dns_servers(server_id, req.direct, req.exit)
+    except SmartRouteError as e:
+        return _smartroute_error(e)
+    except Exception as e:
+        logger.exception("Error saving Smart Route DNS pair")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.get('/api/servers/{server_id}/smartroute/status', tags=["Protocols"])
+async def api_smartroute_status(request: Request, server_id: int):
+    """App state: host lists, timer, own subnets, DNS choice, split instances."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        return await smartroute_svc.status(server_id)
+    except SmartRouteError as e:
+        return _smartroute_error(e)
+    except Exception as e:
+        logger.exception("Error reading Smart Route status")
         return JSONResponse({'error': str(e)}, status_code=500)
 
 

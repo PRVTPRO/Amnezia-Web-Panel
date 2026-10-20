@@ -54,10 +54,10 @@ def fake_ssh():
         return '', '', 1
 
     def upload(content, remote_path):
-        # only the clientsTable snapshot models the server's table;
-        # _apply_bw_limits uploads other files (tc scripts, bwlimits)
-        if remote_path.endswith('/clientsTable'):
-            uploads[remote_path] = content
+        # clientsTable staging is what models the server's table, but every
+        # upload must be stored: _apply_bw_limits uploads bwlimits/tc scripts
+        # and its docker cp reads them back before any container check.
+        uploads[remote_path] = content
 
     ssh.run_sudo_command = sudo
     ssh.run_command.side_effect = lambda command, **kwargs: (
