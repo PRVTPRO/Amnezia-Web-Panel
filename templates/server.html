@@ -1758,12 +1758,12 @@
                                             <div class="protocol-icon" style="width:38px;height:38px;font-size:1.2rem;">${app.icon}</div>
                                             <div>
                                                 <div class="marketplace-app-title">${app.title} ${app.badge ? `<span class="badge badge-info" style="font-size:0.65rem;">${app.badge}</span>` : ''}</div>
-                                                ${marketplaceAppStatus(app.proto)}
+                                                ${statusBadge}
                                             </div>
                                         </div>
                                     </div>
                                     <div class="marketplace-app-desc">${_(app.descKey)}</div>
-                                    <button class="btn ${installed && !canInstallAnother ? 'btn-secondary' : 'btn-primary'} btn-sm" ${installed && !canInstallAnother ? 'disabled' : `onclick="installFromMarketplace('${app.proto}', ${canInstallAnother ? 'true' : 'false'})"`}>
+                                    <button class="btn ${installed && !canInstallAnother ? 'btn-secondary' : 'btn-primary'} btn-sm" ${action}>
                                         ${canInstallAnother ? _('install_another') : (installed ? _('installed') : _('install'))}
                                     </button>
                                 </div>
