@@ -4338,7 +4338,7 @@
     async function removeServer() {
         if (!confirm("Are you sure you want to remove this server from the panel? (The server itself will not be erased).")) return;
         try {
-            await apiCall(`/api/servers/${SERVER_ID}/delete`, 'POST');
+            await apiCall(`/api/servers/${SERVER_ID}/delete?server_uid=${encodeURIComponent(document.body.dataset.serverUid || '')}`, 'POST');
             window.location.href = '/';
         } catch (err) {
             showToast('Error: ' + err.message, 'error');

@@ -19,7 +19,7 @@
     {% if servers %}
     <div class="server-grid" id="serverGrid">
         {% for server in servers %}
-        <div class="card card-hover server-card" id="server-{{ loop.index0 }}" data-idx="{{ loop.index0 }}"
+        <div class="card card-hover server-card" id="server-{{ loop.index0 }}" data-idx="{{ loop.index0 }}" data-uid="{{ server.uid or '' }}"
             data-name="{{ server.name }}" data-host="{{ server.host }}" data-port="{{ server.ssh_port }}"
             data-username="{{ server.username }}" data-auth="{{ 'key' if server.private_key else 'password' }}"
             data-self-service="{{ 'true' if server.get('self_service_enabled') else 'false' }}"
@@ -294,7 +294,8 @@
         if (!confirm(_('delete_confirm'))) return;
 
         try {
-            await apiCall(`/api/servers/${serverId}/delete`, 'POST');
+            const uid = document.getElementById(`server-${serverId}`)?.dataset.uid || '';
+            await apiCall(`/api/servers/${serverId}/delete?server_uid=${encodeURIComponent(uid)}`, 'POST');
             showToast(_('server_deleted'), 'success');
             setTimeout(() => window.location.reload(), 500);
         } catch (err) {
@@ -317,6 +318,7 @@
         const card = btn.closest('.server-card');
         if (!card) return;
         document.getElementById('editServerIdx').value = card.dataset.idx;
+        document.getElementById('editServerForm').dataset.serverUid = card.dataset.uid || '';
         document.getElementById('editServerName').value = card.dataset.name || '';
         document.getElementById('editServerHost').value = card.dataset.host || '';
         document.getElementById('editServerPort').value = card.dataset.port || '22';
@@ -357,7 +359,8 @@
                 private_key: document.getElementById('editServerKey').value || null,
                 self_service_enabled: document.getElementById('editServerSelfService').checked,
             };
-            await apiCall(`/api/servers/${idx}/edit`, 'POST', body);
+            const uid = document.getElementById('editServerForm').dataset.serverUid || '';
+            await apiCall(`/api/servers/${idx}/edit?server_uid=${encodeURIComponent(uid)}`, 'POST', body);
             showToast(_('server_saved'), 'success');
             setTimeout(() => window.location.reload(), 500);
         } catch (err) {
@@ -418,7 +421,8 @@
         const newOrder = Array.from(grid.querySelectorAll('.server-card'))
             .map(c => parseInt(c.dataset.idx, 10));
         try {
-            await apiCall('/api/servers/reorder', 'POST', { order: newOrder });
+            const serverUids = Array.from(grid.querySelectorAll('.server-card')).map(c => c.dataset.uid || '');
+            await apiCall('/api/servers/reorder', 'POST', { order: newOrder, server_uids: serverUids });
             showToast(_('servers_reordered'), 'success');
             setTimeout(() => window.location.reload(), 400);
         } catch (err) {

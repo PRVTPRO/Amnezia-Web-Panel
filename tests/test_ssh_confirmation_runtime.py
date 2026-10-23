@@ -76,7 +76,7 @@ class RuntimeTests(http_tests.EnrollmentHTTPTests):
         with mock.patch.object(self.module, 'load_data', return_value=data), \
              mock.patch.object(self.module, 'save_data') as save, \
              mock.patch.object(self.module, 'SSHManager') as ssh, \
-             mock.patch.object(self.module.exit_link_svc, 'forget_entry_peers', new=mock.AsyncMock()):
+             mock.patch.object(self.module.exit_link_svc, 'forget_entry_peers', new=mock.AsyncMock(return_value=[])):
             ssh.return_value.test_connection.return_value = {}
             asyncio.run(run('edit'))
             self.assertEqual(self.server['name'], 'renamed')
