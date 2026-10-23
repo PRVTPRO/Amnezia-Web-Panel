@@ -774,5 +774,7 @@
     "ssh_trust_trusted": "Clé SSH approuvée",
     "ssh_trust_new": "Clé proposée",
     "ssh_trust_old": "Anciennes clés approuvées",
-    "ssh_trust_error": "Échec de vérification SSH"
+    "ssh_trust_error": "Échec de vérification SSH",
+    "ssh_onboarding_hint": "Clé SSH inconnue ou modifiée ? Inspectez-la ici avant la connexion. Aucun identifiant SSH n’est envoyé.",
+    "ssh_onboarding_saved": "Clé hôte enregistrée. L’authentification SSH n’a pas été testée. Utilisez Connexion / Enregistrer pour vérifier les identifiants et terminer."
 }

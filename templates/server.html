@@ -169,7 +169,7 @@
         document.getElementById('ssh-trust-verified').checked = false;
         const details = document.getElementById('ssh-trust-details');
         try {
-            const data = await apiCall('/api/servers/{{ server_id }}/ssh-trust/inspect', 'POST');
+            const data = await apiCall('/api/servers/{{ server_id }}/ssh-trust/inspect?server_uid=' + encodeURIComponent({{ server.uid | tojson }}), 'POST');
             const labels = {unknown: {{ _('ssh_trust_unknown') | tojson }}, changed: {{ _('ssh_trust_changed') | tojson }}, trusted: {{ _('ssh_trust_trusted') | tojson }}};
             details.textContent = labels[data.status] + '\n' + data.host + ':' + data.port + '\n' +
                 {{ _('ssh_trust_new') | tojson }} + ': ' + data.algorithm + ' ' + data.fingerprint + '\n' +
@@ -183,7 +183,7 @@
         const button = document.getElementById('ssh-trust-save');
         button.disabled = true;
         try {
-            await apiCall('/api/servers/{{ server_id }}/ssh-trust/confirm', 'POST', {token: sshTrustToken, confirmed: true});
+            await apiCall('/api/servers/{{ server_id }}/ssh-trust/confirm?server_uid=' + encodeURIComponent({{ server.uid | tojson }}), 'POST', {token: sshTrustToken, confirmed: true});
             location.reload();
         } catch (error) {
             sshTrustToken = null;

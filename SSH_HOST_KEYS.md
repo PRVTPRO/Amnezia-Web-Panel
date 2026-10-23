@@ -1,5 +1,35 @@
 # Trusted SSH host keys
 
+## Server onboarding and endpoint changes
+
+**Add Server** and **Edit Server** include **Inspect SSH key**. Enter the exact
+hostname/IP (unbracketed IPv6) and SSH port, inspect, then compare the displayed
+algorithm and SHA256 fingerprint through an independent trusted console. A
+changed key can indicate interception: investigate before explicitly confirming.
+Inspection and confirmation only perform SSH key exchange, never authentication.
+After confirming, click **Connect / Save** to test the SSH credentials. Only a
+successful authenticated connection adds/edits the inventory entry. A bad password
+or cancelled add leaves inventory unchanged; the independently approved pin stays
+trusted. It is not removed as an implicit rollback of a credential failure.
+
+Draft enrollment does not require a temporary server in `data.json`. Five-minute
+signed tokens bind the exact endpoint, algorithm, public key, previous trust
+snapshot and (for edits) saved connection settings and stable server UID. Changing
+an endpoint or saved credentials requires re-inspection. Confirmation re-probes,
+then checks expiry, inventory and trust again before atomic persistence. A
+reordered inventory is resolved by UID; a deleted/edited target is rejected.
+Browser endpoint edits discard pending tokens and obsolete asynchronous results.
+Only administrators may inspect/confirm; same-origin restrictions also apply.
+
+No inventory lock is held during key exchange or add/edit SSH authentication.
+Short trust commits are serialized with inventory writes, including on request
+cancellation. These are in-process locks: use one panel writer per data/trust file.
+The existing server-page recovery controls continue to use the same trust code.
+A saved pin, TCP reachability and a successful authenticated SSH connection are
+different states; saving trust does not claim authentication succeeded. Trust-file
+errors, authentication failures and network/cooldown errors remain failures and
+never trigger automatic trust or credential fallback.
+
 ## v1.7.8 — web enrollment and migration
 
 Administrators can open a server page and use **SSH host key → Inspect SSH key**,

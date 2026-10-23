@@ -774,5 +774,7 @@
     "ssh_trust_trusted": "SSH key trusted",
     "ssh_trust_new": "Candidate key",
     "ssh_trust_old": "Previously trusted keys",
-    "ssh_trust_error": "SSH trust check failed"
+    "ssh_trust_error": "SSH trust check failed",
+    "ssh_onboarding_hint": "Unknown or changed SSH key? Inspect it here before connecting. Inspection sends no SSH credentials.",
+    "ssh_onboarding_saved": "Host key saved. SSH authentication has not been tested. Use Connect / Save to verify credentials and finish."
 }

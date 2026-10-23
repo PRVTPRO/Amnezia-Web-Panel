@@ -28,7 +28,7 @@ class EnrollmentHTTPTests(unittest.TestCase):
         self.server = {'host': 'example.test', 'ssh_port': 22, 'uid': 'a'}
         self.trust = mock.Mock()
         self.trust.inspect.return_value = {'status': 'unknown', 'token': 'abc'}
-        self.trust.enroll.return_value = {'status': 'success'}
+        self.trust.commit_enrollment.return_value = {'status': 'success'}
         self.drop = mock.Mock()
         self.data_lock = asyncio.Lock()
         for name, value in [('DATA_LOCK', self.data_lock), ('ssh_trust', self.trust),
@@ -49,12 +49,13 @@ class EnrollmentHTTPTests(unittest.TestCase):
                                             json={'token': 'abc', 'confirmed': True})
                 self.assertEqual(response.status_code, 403)
         self.trust.inspect.assert_not_called()
-        self.trust.enroll.assert_not_called()
+        self.trust.prepare_enrollment.assert_not_called()
+        self.trust.commit_enrollment.assert_not_called()
 
     def test_confirmation_and_reset(self):
         self.assertEqual(self.client.post('/api/servers/0/ssh-trust/inspect').status_code, 200)
         self.assertEqual(self.client.post('/api/servers/0/ssh-trust/confirm', json={'token': 'abc', 'confirmed': False}).status_code, 400)
-        self.trust.enroll.assert_not_called()
+        self.trust.commit_enrollment.assert_not_called()
         self.assertEqual(self.client.post('/api/servers/0/ssh-trust/confirm', json={'token': 'abc', 'confirmed': True}).status_code, 200)
         self.drop.assert_called_once_with(self.server)
 
@@ -62,7 +63,11 @@ class EnrollmentHTTPTests(unittest.TestCase):
         def enroll(*args, **kwargs):
             self.assertTrue(self.data_lock.locked())
             return {'status': 'success'}
-        self.trust.enroll.side_effect = enroll
+        self.trust.commit_enrollment.side_effect = enroll
+        def prepare(*args):
+            self.assertFalse(self.data_lock.locked())
+            return mock.sentinel.key
+        self.trust.prepare_enrollment.side_effect = prepare
         response = self.client.post('/api/servers/0/ssh-trust/confirm',
                                     json={'token': 'abc', 'confirmed': True})
         self.assertEqual(response.status_code, 200, response.text)
@@ -77,7 +82,7 @@ class EnrollmentHTTPTests(unittest.TestCase):
         self.assertEqual(self.client.post('/api/servers/-1/ssh-trust/inspect').status_code, 404)
         for body in [{}, {'token': '', 'confirmed': True}, {'token': 'abc', 'confirmed': 'yes'}]:
             self.assertEqual(self.client.post('/api/servers/0/ssh-trust/confirm', json=body).status_code, 422)
-        self.trust.enroll.side_effect = ValueError('candidate changed')
+        self.trust.prepare_enrollment.side_effect = ValueError('candidate changed')
         response = self.client.post('/api/servers/0/ssh-trust/confirm', json={'token': 'abc', 'confirmed': True})
         self.assertEqual(response.status_code, 409)
         self.drop.assert_not_called()

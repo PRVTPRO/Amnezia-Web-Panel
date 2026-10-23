@@ -774,5 +774,7 @@
     "ssh_trust_trusted": "SSH 密钥已信任",
     "ssh_trust_new": "候选密钥",
     "ssh_trust_old": "以前信任的密钥",
-    "ssh_trust_error": "SSH 信任检查失败"
+    "ssh_trust_error": "SSH 信任检查失败",
+    "ssh_onboarding_hint": "SSH 密钥未知或已更改？连接前请在此检查。检查不会发送 SSH 身份验证信息。",
+    "ssh_onboarding_saved": "主机密钥已保存，尚未测试 SSH 身份验证。请点击连接 / 保存以验证凭据并完成。"
 }

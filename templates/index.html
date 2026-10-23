@@ -19,7 +19,7 @@
     {% if servers %}
     <div class="server-grid" id="serverGrid">
         {% for server in servers %}
-        <div class="card card-hover server-card" id="server-{{ loop.index0 }}" data-idx="{{ loop.index0 }}"
+        <div class="card card-hover server-card" id="server-{{ loop.index0 }}" data-idx="{{ loop.index0 }}" data-uid="{{ server.uid }}"
             data-name="{{ server.name }}" data-host="{{ server.host }}" data-port="{{ server.ssh_port }}"
             data-username="{{ server.username }}" data-auth="{{ 'key' if server.private_key else 'password' }}"
             data-self-service="{{ 'true' if server.get('self_service_enabled') else 'false' }}"
@@ -168,6 +168,7 @@
                 <div class="form-hint">{{ _('server_self_service_enabled_desc') }}</div>
             </div>
 
+            {% set trust_kind = 'edit' %}{% include '_ssh_onboarding.html' %}
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" onclick="closeModal('editServerModal')">{{ _('cancel')
                     }}</button>
@@ -233,6 +234,7 @@
                 </div>
             </div>
 
+            {% set trust_kind = 'add' %}{% include '_ssh_onboarding.html' %}
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" onclick="closeModal('addServerModal')">{{ _('cancel')
                     }}</button>
@@ -317,6 +319,8 @@
         const card = btn.closest('.server-card');
         if (!card) return;
         document.getElementById('editServerIdx').value = card.dataset.idx;
+        document.getElementById('editServerForm').dataset.serverUid = card.dataset.uid || '';
+        resetOnboardingTrust('edit');
         document.getElementById('editServerName').value = card.dataset.name || '';
         document.getElementById('editServerHost').value = card.dataset.host || '';
         document.getElementById('editServerPort').value = card.dataset.port || '22';
@@ -357,7 +361,8 @@
                 private_key: document.getElementById('editServerKey').value || null,
                 self_service_enabled: document.getElementById('editServerSelfService').checked,
             };
-            await apiCall(`/api/servers/${idx}/edit`, 'POST', body);
+            const uid = document.getElementById('editServerForm').dataset.serverUid;
+            await apiCall(`/api/servers/${idx}/edit?server_uid=${encodeURIComponent(uid)}`, 'POST', body);
             showToast(_('server_saved'), 'success');
             setTimeout(() => window.location.reload(), 500);
         } catch (err) {
@@ -368,6 +373,69 @@
             spinner.classList.add('hidden');
         }
         return false;
+    }
+
+    /* Trust candidates are ephemeral, endpoint-bound, and never contain auth. */
+    const onboardingTrust = {add: {sequence: 0}, edit: {sequence: 0}};
+    function onboardingEndpoint(kind) {
+        const edit = kind === 'edit';
+        const result = {
+            host: document.getElementById(edit ? 'editServerHost' : 'serverHost').value.trim(),
+            ssh_port: Number(document.getElementById(edit ? 'editServerPort' : 'serverPort').value || 22),
+        };
+        if (edit) result.server_uid = document.getElementById('editServerForm').dataset.serverUid;
+        return result;
+    }
+    function resetOnboardingTrust(kind) {
+        onboardingTrust[kind] = {sequence: onboardingTrust[kind].sequence + 1};
+        document.getElementById(kind + '-trust-details').textContent = '';
+        document.getElementById(kind + '-trust-confirmation').hidden = true;
+        document.getElementById(kind + '-trust-verified').checked = false;
+        document.getElementById(kind + '-trust-inspect').disabled = false;
+        document.getElementById(kind + '-trust-save').disabled = false;
+    }
+    async function inspectOnboardingTrust(kind) {
+        resetOnboardingTrust(kind);
+        const state = onboardingTrust[kind], endpoint = onboardingEndpoint(kind);
+        const button = document.getElementById(kind + '-trust-inspect');
+        button.disabled = true;
+        try {
+            const data = await apiCall('/api/ssh-trust/onboarding/inspect', 'POST', endpoint);
+            if (onboardingTrust[kind] !== state || JSON.stringify(endpoint) !== JSON.stringify(onboardingEndpoint(kind))) return;
+            state.token = data.token;
+            state.endpoint = endpoint;
+            const labels = {unknown: _('ssh_trust_unknown'), changed: _('ssh_trust_changed'), trusted: _('ssh_trust_trusted')};
+            document.getElementById(kind + '-trust-details').textContent =
+                data.host + ':' + data.port + '\n' + labels[data.status] + '\n' +
+                data.algorithm + ' ' + data.fingerprint + '\n' + _('ssh_trust_old') + ':\n' +
+                data.old_fingerprints.map(k => k.algorithm + ' ' + k.fingerprint).join('\n');
+            document.getElementById(kind + '-trust-confirmation').hidden = data.status === 'trusted';
+        } catch (error) {
+            if (onboardingTrust[kind] === state) document.getElementById(kind + '-trust-details').textContent = error.message;
+        } finally {
+            if (onboardingTrust[kind] === state) button.disabled = false;
+        }
+    }
+    async function confirmOnboardingTrust(kind) {
+        const state = onboardingTrust[kind], button = document.getElementById(kind + '-trust-save');
+        if (button.disabled || !state.token || !document.getElementById(kind + '-trust-verified').checked) return;
+        if (JSON.stringify(state.endpoint) !== JSON.stringify(onboardingEndpoint(kind))) { resetOnboardingTrust(kind); return; }
+        button.disabled = true;
+        try {
+            await apiCall('/api/ssh-trust/onboarding/confirm', 'POST', {...state.endpoint, token: state.token, confirmed: true});
+            if (onboardingTrust[kind] !== state) return;
+            resetOnboardingTrust(kind);
+            document.getElementById(kind + '-trust-details').textContent = _('ssh_onboarding_saved');
+        } catch (error) {
+            if (onboardingTrust[kind] === state) {
+                resetOnboardingTrust(kind);
+                document.getElementById(kind + '-trust-details').textContent = error.message;
+            }
+        }
+    }
+    for (const kind of ['add', 'edit']) {
+        const ids = kind === 'add' ? ['serverHost', 'serverPort'] : ['editServerHost', 'editServerPort'];
+        ids.forEach(id => document.getElementById(id).addEventListener('input', () => resetOnboardingTrust(kind)));
     }
 
     /* ========== Ping indicators ========== */
