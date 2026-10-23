@@ -820,5 +820,7 @@
     "public_endpoint_port_busy": "پورت اشغال است:",
     "public_endpoint_port_invalid": "شماره پورت را وارد کنید (۱-۶۵۵۳۵).",
     "smartroute_ack_title": "Smart Route (RU direct): please read first",
-    "smartroute_ack_accept": "Accept and enable"
+    "smartroute_ack_accept": "Accept and enable",
+    "smartroute_ack_readme": "Readme",
+    "smartroute_ack_close": "Close"
 }

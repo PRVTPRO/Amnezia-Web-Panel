@@ -820,5 +820,7 @@
     "public_endpoint_port_busy": "Port is busy:",
     "public_endpoint_port_invalid": "Enter a port number (1-65535).",
     "smartroute_ack_title": "Smart Route (RU direct): please read first",
-    "smartroute_ack_accept": "Accept and enable"
+    "smartroute_ack_accept": "Accept and enable",
+    "smartroute_ack_readme": "Readme",
+    "smartroute_ack_close": "Close"
 }

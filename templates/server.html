@@ -516,6 +516,10 @@
             <div class="protocol-info" id="smartroute-info-grid"></div>
         </div>
         <div class="flex gap-sm" id="smartroute-actions">
+            <button class="btn btn-secondary btn-sm" onclick="openSmartRouteReadme()" id="smartroute-readme-btn"
+                style="flex:1">
+                {{ _('smartroute_ack_readme') }}
+            </button>
             <button class="btn btn-secondary btn-sm" onclick="openSmartRouteModal()" id="smartroute-settings-btn"
                 style="flex:1">
                 {{ _('smartroute_card_settings') }}
@@ -1158,7 +1162,7 @@
     <div class="modal" style="max-width:640px;">
         <div class="modal-header">
             <h2 class="modal-title">{{ _('smartroute_ack_title') }}</h2>
-            <button class="modal-close" onclick="declineSmartRouteAck()">×</button>
+            <button class="modal-close" onclick="closeSmartRouteAck()">×</button>
         </div>
         <div style="overflow-y:auto; max-height:60vh; padding-right:var(--space-sm); text-align:left; line-height:1.55; font-size:0.95rem;">
             <p><b>Как это работает.</b> Трафик к российским ресурсам (по спискам RIPE + ваши подсети) выходит <b>напрямую с этого сервера</b> — с его IP-адреса. Весь остальной трафик по-прежнему идёт через выходную ноду. Клиентские конфиги не меняются.</p>
@@ -1173,8 +1177,8 @@
             <p><b>При сбоях:</b> если связь с выходной нодой пропадёт, RU-трафик продолжит идти напрямую, остальной прервётся. При отключении Smart Route инстанс автоматически вернётся к полному туннелю.</p>
         </div>
         <div class="modal-footer">
-            <button class="btn btn-secondary" onclick="declineSmartRouteAck()">{{ _('cancel') }}</button>
-            <button class="btn btn-primary" onclick="acceptSmartRouteAck()">{{ _('smartroute_ack_accept') }}</button>
+            <button class="btn btn-secondary" onclick="closeSmartRouteAck()" id="smartRouteAckCloseBtn">{{ _('smartroute_ack_close') }}</button>
+            <button class="btn btn-primary" onclick="acceptSmartRouteAck()" id="smartRouteAckAcceptBtn">{{ _('smartroute_ack_accept') }}</button>
         </div>
     </div>
 </div>
@@ -3792,17 +3796,29 @@
         openModal('smartRouteAckModal');
     }
 
+    let smartrouteReadmeMode = false;
+
+    function openSmartRouteReadme() {
+        smartrouteReadmeMode = true;
+        document.getElementById('smartRouteAckAcceptBtn').classList.add('hidden');
+        openModal('smartRouteAckModal');
+    }
+
+    function closeSmartRouteAck() {
+        closeModal('smartRouteAckModal');
+        if (!smartrouteReadmeMode) {
+            document.getElementById('smartRouteToggle').checked = false;
+        }
+        smartrouteReadmeMode = false;
+        document.getElementById('smartRouteAckAcceptBtn').classList.remove('hidden');
+    }
+
     function acceptSmartRouteAck() {
         localStorage.setItem(SMARTROUTE_ACK_KEY, '1');
         closeModal('smartRouteAckModal');
         const box = document.getElementById('smartRouteToggle');
         box.checked = true;
         saveSmartRouteSplit(true);
-    }
-
-    function declineSmartRouteAck() {
-        closeModal('smartRouteAckModal');
-        document.getElementById('smartRouteToggle').checked = false;
     }
 
     async function saveSmartRouteSplit(enabled) {
