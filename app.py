@@ -3457,29 +3457,46 @@ def api_reboot_server(request: Request, server_id: int):
 
 
 @app.post('/api/servers/{server_id}/clear', tags=["Servers"])
-async def api_clear_server(request: Request, server_id: int):
+async def api_clear_server(request: Request, server_id: int, server_uid: Optional[str] = None):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
-    try:
-        data = load_data()
-        if server_id >= len(data['servers']):
-            return JSONResponse({'error': 'Server not found'}, status_code=404)
-        server = data['servers'][server_id]
+    data = load_data()
+    if not 0 <= server_id < len(data['servers']):
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    selected = data['servers'][server_id]
+    uid = selected.get('uid')
+    if not uid or (server_uid is not None and server_uid != uid):
+        return JSONResponse({'error': 'Server identity changed; refresh before clearing'}, status_code=409)
+
+    def unchanged(current):
+        return current is not None and all(current.get(k) == selected.get(k)
+                                          for k in ('host', 'ssh_port', 'username', 'protocols'))
+
+    async def clear():
+        remote_completed = False
+        local_committed = False
         try:
+            async with DATA_LOCK:
+                _, server = find_server_by_uid(load_data(), uid)
+                if not unchanged(server):
+                    return JSONResponse({'error': 'Server changed before cleanup'}, status_code=409)
+            results = []
             if (server.get('protocols') or {}).get('exit'):
-                await exit_link_svc.detach_entries_for_exit(server.get('uid'), 'exit_cleared')
-            await exit_link_svc.forget_entry_peers(server)
-        except Exception as e:
-            logger.warning(f"exit-link cleanup before clear failed: {e}")
-        data = load_data()
-        server = data['servers'][server_id]
-        ssh = await asyncio.to_thread(get_ssh, server)
-        await asyncio.to_thread(ssh.connect)
-        # Match every Amnezia container by name prefix (catches awg/awg2/awg-legacy,
-        # wireguard, xray/ssxray, openvpn, dns, and any future amnezia-* protocol)
-        # plus the telemt container which doesn't share that prefix.
-        # Using a single script avoids one SSH round-trip per command.
-        cleanup_script = r"""
+                results.extend(await exit_link_svc.detach_entries_for_exit(uid, 'exit_cleared'))
+            results.extend(await exit_link_svc.forget_entry_peers(server))
+            if any(item.get('status') != 'success' for item in results):
+                return JSONResponse({'error': 'Exit-link cleanup incomplete; clear aborted',
+                                     'cleanup_results': results}, status_code=409)
+            async with DATA_LOCK:
+                _, server = find_server_by_uid(load_data(), uid)
+                if not unchanged(server):
+                    return JSONResponse({'error': 'Server changed during exit cleanup'}, status_code=409)
+
+            def run_remote():
+                ssh = get_ssh(server)
+                try:
+                    ssh.connect()
+                    cleanup_script = r"""
 for c in $(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E '^(amnezia-|telemt$)'); do
     docker stop "$c" >/dev/null 2>&1 || true
     docker rm -fv "$c" >/dev/null 2>&1 || true
@@ -3493,15 +3510,46 @@ done
 docker network rm amnezia-dns-net >/dev/null 2>&1 || true
 rm -rf /opt/amnezia
 """
-        await asyncio.to_thread(ssh.run_sudo_script, cleanup_script, timeout=120)
+                    return ssh.run_sudo_script(cleanup_script, timeout=120)
+                finally:
+                    ssh.disconnect()
+            result = await asyncio.to_thread(run_remote)
+            if not isinstance(result, (tuple, list)) or len(result) != 3 or result[2] != 0:
+                return JSONResponse({'error': 'Remote cleanup failed; protocol metadata retained',
+                                     'remote_cleanup_completed': False, 'local_commit_completed': False}, status_code=502)
+            remote_completed = True
+            async with DATA_LOCK:
+                data = load_data()
+                _, current = find_server_by_uid(data, uid)
+                if not unchanged(current):
+                    return JSONResponse({'error': 'Server changed after remote cleanup; refresh and reconcile',
+                                         'remote_cleanup_completed': True, 'local_commit_completed': False}, status_code=409)
+                current['protocols'] = {}
+                save_data(data)
+                local_committed = True
+            return {'status': 'success'}
+        except Exception as e:
+            logger.exception("Error clearing server uid=%s; remote_completed=%s local_committed=%s",
+                             uid, remote_completed, local_committed)
+            return JSONResponse({'error': str(e), 'remote_cleanup_completed': remote_completed,
+                                 'local_commit_completed': local_committed}, status_code=500)
 
-        server['protocols'] = {}
-        save_data(data)
-        ssh.disconnect()
-        return {'status': 'success'}
-    except Exception as e:
-        logger.exception("Error clearing server")
-        return JSONResponse({'error': str(e)}, status_code=500)
+    # Do not abandon a destructive worker on HTTP disconnect. Finish its local
+    # reconciliation before propagating cancellation; DATA_LOCK is free during SSH.
+    worker = asyncio.create_task(clear())
+    cancelled = False
+    while not worker.done():
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception:
+            break
+    if cancelled:
+        if not worker.cancelled():
+            worker.exception()
+        raise asyncio.CancelledError
+    return worker.result()
 
 
 @app.post('/api/servers/{server_id}/stats', tags=["Servers"])

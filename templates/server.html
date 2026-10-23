@@ -4327,7 +4327,7 @@
         if (!confirm("⚠️ WARNING: This will completely delete all Amnezia configurations, containers, and data from /opt/amnezia on the server! Are you absolutely sure?")) return;
         try {
             showToast('Clearing server from Amnezia software...', 'info');
-            await apiCall(`/api/servers/${SERVER_ID}/clear`, 'POST');
+            await apiCall(`/api/servers/${SERVER_ID}/clear?server_uid=${encodeURIComponent(document.body.dataset.serverUid || '')}`, 'POST');
             showToast('Server cleared successfully!', 'success');
             setTimeout(() => location.reload(), 1500);
         } catch (err) {
