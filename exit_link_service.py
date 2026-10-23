@@ -119,6 +119,12 @@ class ExitLinkService:
             raise ExitLinkError('exit_not_found', 'Exit node not found or not installed', 404)
         return server, rec
 
+    def _entry_by_uid(self, data, uid, protocol):
+        index, _ = self.find_server_by_uid(data, uid)
+        if index is None:
+            raise ExitLinkError('server_not_found', 'Entry server no longer exists', 404)
+        return self._entry(data, index, protocol)
+
     async def _awg(self, server):
         # get_ssh() blocks on ensure_connected (TCP+SSH handshake, up to the
         # connect timeout) — never run it inside the event loop.
@@ -139,6 +145,18 @@ class ExitLinkService:
             mutate(rec)
             self.save_data(data)
             return rec
+
+    async def _record_link(self, entry, exit_server, protocol, record):
+        """Publish only while both endpoints still describe the SSH targets."""
+        async with self.data_lock:
+            data = self.load_data()
+            current_entry, rec = self._entry_by_uid(data, entry['uid'], protocol)
+            current_exit, _ = self._exit(data, exit_server['uid'])
+            for current, expected in ((current_entry, entry), (current_exit, exit_server)):
+                if any(current.get(key) != expected.get(key) for key in ('host', 'ssh_port', 'username')):
+                    raise ExitLinkError('server_changed', 'Server endpoint changed during link setup', 409)
+            rec['exit_link'] = record
+            self.save_data(data)
 
     # ----- link / unlink -----
 
@@ -214,30 +232,33 @@ class ExitLinkService:
     async def link(self, entry_server_id, protocol, exit_uid, force=False, dns_via_exit=None):
         data = self.load_data()
         entry, rec = self._entry(data, entry_server_id, protocol)
-        exit_srv, exit_rec = self._exit(data, exit_uid)
-        if exit_srv.get('uid') == entry['uid']:
-            raise ExitLinkError('exit_self', 'A server cannot be its own exit node')
-        if self.protocol_base(protocol) == 'awg_legacy' and exit_rec.get('obfuscation'):
-            raise ExitLinkError('exit_legacy_obfuscation',
-                                'AmneziaWG Legacy can only link to a non-obfuscated exit node')
-        previous = rec.get('exit_link') or {}
-        explicit_dns = dns_via_exit is not None
-        dns_via_exit = bool(previous.get('dns_via_exit') if dns_via_exit is None else dns_via_exit)
-        peer_id = peer_id_for(entry['uid'], protocol)
-        warnings, log = [], []
-        if dns_via_exit:
-            try:
-                self._require_exit_dns(exit_srv)
-            except ExitLinkError:
-                # Repairing a link must not fail over an option the caller did
-                # not ask for; the flag inherited from the saved link is dropped
-                # so DNS comes back to this node instead of a black hole.
-                if explicit_dns:
-                    raise
-                dns_via_exit = False
-                warnings.append('exit_dns_disabled_no_dns')
+        entry_uid = entry['uid']
+        async with self._locks[(entry_uid, protocol)]:
+            data = self.load_data()
+            entry, rec = self._entry_by_uid(data, entry_uid, protocol)
+            exit_srv, exit_rec = self._exit(data, exit_uid)
+            if exit_srv.get('uid') == entry['uid']:
+                raise ExitLinkError('exit_self', 'A server cannot be its own exit node')
+            if self.protocol_base(protocol) == 'awg_legacy' and exit_rec.get('obfuscation'):
+                raise ExitLinkError('exit_legacy_obfuscation',
+                                    'AmneziaWG Legacy can only link to a non-obfuscated exit node')
+            previous = rec.get('exit_link') or {}
+            explicit_dns = dns_via_exit is not None
+            dns_via_exit = bool(previous.get('dns_via_exit') if dns_via_exit is None else dns_via_exit)
+            peer_id = peer_id_for(entry['uid'], protocol)
+            warnings, log = [], []
+            if dns_via_exit:
+                try:
+                    self._require_exit_dns(exit_srv)
+                except ExitLinkError:
+                    # Repairing a link must not fail over an option the caller did
+                    # not ask for; the flag inherited from the saved link is dropped
+                    # so DNS comes back to this node instead of a black hole.
+                    if explicit_dns:
+                        raise
+                    dns_via_exit = False
+                    warnings.append('exit_dns_disabled_no_dns')
 
-        async with self._locks[(entry['uid'], protocol)]:
             awg = await self._awg(entry)
             entry_pub = await asyncio.to_thread(awg.exit_prepare_keys, protocol)
             try:
@@ -318,18 +339,25 @@ class ExitLinkService:
                 'linked_at': datetime.now().isoformat(),
                 'stale': None,
             }
-            await self._update_record(entry['uid'], protocol, lambda r: r.__setitem__('exit_link', record))
+            try:
+                await self._record_link(entry, exit_srv, protocol, record)
+            except Exception:
+                await rolled_back()
+                raise
         return {'status': 'success', 'exit_link': record, 'ipv6_refused': ipv6,
                 'warnings': warnings, 'log': log}
 
     async def unlink(self, entry_server_id, protocol):
         data = self.load_data()
-        entry, rec = self._entry(data, entry_server_id, protocol)
-        link = rec.get('exit_link')
-        if not link:
-            return {'status': 'success', 'warnings': [], 'unlinked': False}
+        entry, _ = self._entry(data, entry_server_id, protocol)
+        entry_uid = entry['uid']
         warnings = []
-        async with self._locks[(entry['uid'], protocol)]:
+        async with self._locks[(entry_uid, protocol)]:
+            data = self.load_data()
+            entry, rec = self._entry_by_uid(data, entry_uid, protocol)
+            link = rec.get('exit_link')
+            if not link:
+                return {'status': 'success', 'warnings': [], 'unlinked': False}
             # Entry first: direct egress must come back even when the exit is dead.
             awg = await self._awg(entry)
             await asyncio.to_thread(awg.exit_unlink, protocol)
@@ -337,11 +365,11 @@ class ExitLinkService:
                 exit_srv, _ = self._exit(data, link.get('exit_uid'))
                 exit_manager = await self._exit_manager(exit_srv)
                 await asyncio.to_thread(exit_manager.remove_peer, None,
-                                        peer_id_for(entry['uid'], protocol))
+                                        peer_id_for(entry_uid, protocol))
             except Exception as err:
                 logger.warning("exit %s unreachable on unlink, peer left behind: %s", link.get('exit_uid'), err)
                 warnings.append('exit_unreachable_orphan_peer')
-            await self._update_record(entry['uid'], protocol, lambda r: r.pop('exit_link', None))
+            await self._update_record(entry_uid, protocol, lambda r: r.pop('exit_link', None))
         return {'status': 'success', 'warnings': warnings, 'unlinked': True}
 
     async def relink_entry(self, entry_server_id, protocol):
@@ -419,43 +447,59 @@ class ExitLinkService:
             return {'exit_link_restored': 'orphan', 'exit_name': info.get('exit_name', '')}
 
     async def detach_entries_for_exit(self, exit_uid, reason):
-        """The exit is gone (uninstalled, deleted, cleared): restore direct
-        egress on every linked entry; unreachable ones keep the record marked
-        stale so the UI offers Unlink/Repair and the kill-switch keeps
-        protecting their clients."""
+        """Restore direct egress without clearing a concurrently replaced link."""
         results = []
-        data = self.load_data()
-        for item in self.linked_entries(data, exit_uid):
-            entry = data['servers'][item['server_id']]
-            try:
-                awg = await self._awg(entry)
-                await asyncio.to_thread(awg.exit_unlink, item['protocol'])
-                await self._update_record(item['server_uid'], item['protocol'], lambda r: r.pop('exit_link', None))
-                results.append({**item, 'status': 'success', 'error': None})
-            except Exception as err:
-                logger.warning("detach %s/%s failed, marking stale: %s", item['name'], item['protocol'], err)
-                await self._update_record(item['server_uid'], item['protocol'],
-                                          lambda r: (r.get('exit_link') or {}).__setitem__('stale', reason))
-                results.append({**item, 'status': 'error', 'error': str(err)})
+        for item in self.linked_entries(self.load_data(), exit_uid):
+            entry_uid, protocol = item['server_uid'], item['protocol']
+            async with self._locks[(entry_uid, protocol)]:
+                data = self.load_data()
+                _, entry = self.find_server_by_uid(data, entry_uid)
+                rec = ((entry or {}).get('protocols') or {}).get(protocol) or {}
+                link = dict(rec.get('exit_link') or {})
+                if link.get('exit_uid') != exit_uid:
+                    # A queued link switch/removal won. Its route and peer belong
+                    # to the current link, not to the exit being removed.
+                    continue
+                try:
+                    awg = await self._awg(entry)
+                    await asyncio.to_thread(awg.exit_unlink, protocol)
+                    def remove_current(record):
+                        if record.get('exit_link') != link:
+                            raise ExitLinkError('exit_link_changed', 'Link changed during exit cleanup', 409)
+                        record.pop('exit_link', None)
+                    await self._update_record(entry_uid, protocol, remove_current)
+                    results.append({**item, 'status': 'success', 'error': None})
+                except Exception as err:
+                    logger.warning("detach %s/%s failed, marking matching link stale: %s", item['name'], protocol, err)
+                    def mark_current(record):
+                        if record.get('exit_link') == link:
+                            record['exit_link']['stale'] = reason
+                    await self._update_record(entry_uid, protocol, mark_current)
+                    results.append({**item, 'status': 'error', 'error': str(err)})
         return results
 
     async def forget_entry_peers(self, server):
-        """An entry server is deleted or cleared: drop its peers on the exits."""
+        """Drop this entry's current peers, serialized with link/unlink."""
         results = []
-        data = self.load_data()
-        for proto, rec in (server.get('protocols') or {}).items():
-            link = (rec or {}).get('exit_link') or {}
-            if not link.get('exit_uid') or not server.get('uid'):
-                continue
-            try:
-                exit_srv, _ = self._exit(data, link['exit_uid'])
-                exit_manager = await self._exit_manager(exit_srv)
-                await asyncio.to_thread(exit_manager.remove_peer, None,
-                                        peer_id_for(server['uid'], proto))
-                results.append({'protocol': proto, 'exit_uid': link['exit_uid'], 'status': 'success'})
-            except Exception as err:
-                logger.warning("could not drop peer for %s on exit %s: %s", proto, link['exit_uid'], err)
-                results.append({'protocol': proto, 'exit_uid': link['exit_uid'], 'status': 'error', 'error': str(err)})
+        entry_uid = server.get('uid')
+        _, current = self.find_server_by_uid(self.load_data(), entry_uid)
+        for proto in ((current or {}).get('protocols') or {}):
+            async with self._locks[(entry_uid, proto)]:
+                data = self.load_data()
+                _, entry = self.find_server_by_uid(data, entry_uid)
+                rec = ((entry or {}).get('protocols') or {}).get(proto) or {}
+                link = rec.get('exit_link') or {}
+                if not link.get('exit_uid'):
+                    continue
+                try:
+                    exit_srv, _ = self._exit(data, link['exit_uid'])
+                    exit_manager = await self._exit_manager(exit_srv)
+                    await asyncio.to_thread(exit_manager.remove_peer, None,
+                                            peer_id_for(entry_uid, proto))
+                    results.append({'protocol': proto, 'exit_uid': link['exit_uid'], 'status': 'success'})
+                except Exception as err:
+                    logger.warning("could not drop peer for %s on exit %s: %s", proto, link['exit_uid'], err)
+                    results.append({'protocol': proto, 'exit_uid': link['exit_uid'], 'status': 'error', 'error': str(err)})
         return results
 
     @staticmethod
