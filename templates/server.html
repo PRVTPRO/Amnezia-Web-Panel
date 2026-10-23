@@ -1135,7 +1135,7 @@
         </div>
         <div class="form-group hidden" id="smartRouteGroup">
             <label class="form-label" style="display:flex; align-items:center; gap:var(--space-sm);">
-                <input type="checkbox" id="smartRouteToggle" onchange="saveSmartRouteSplit(this.checked)"> {{ _('smartroute_toggle') }}
+                <input type="checkbox" id="smartRouteToggle" onchange="onSmartRouteToggleChange(this.checked)"> {{ _('smartroute_toggle') }}
             </label>
             <div class="form-hint" id="smartRouteHint">{{ _('smartroute_toggle_hint') }}</div>
             <div id="smartRouteCounters" style="margin-top:var(--space-sm);"></div>
@@ -1154,6 +1154,31 @@
 </div>
 
 <!-- ===== Smart Route Modal ===== -->
+<div class="modal-backdrop" id="smartRouteAckModal">
+    <div class="modal" style="max-width:640px;">
+        <div class="modal-header">
+            <h2 class="modal-title">{{ _('smartroute_ack_title') }}</h2>
+            <button class="modal-close" onclick="declineSmartRouteAck()">×</button>
+        </div>
+        <div style="overflow-y:auto; max-height:60vh; padding-right:var(--space-sm); text-align:left; line-height:1.55; font-size:0.95rem;">
+            <p><b>Как это работает.</b> Трафик к российским ресурсам (по спискам RIPE + ваши подсети) выходит <b>напрямую с этого сервера</b> — с его IP-адреса. Весь остальной трафик по-прежнему идёт через выходную ноду. Клиентские конфиги не меняются.</p>
+            <p><b>Зачем.</b> Российские сервисы (банки, Госуслуги, VK, Яндекс, маркетплейсы) часто отказывают зарубежным и хостинговым IP. Smart Route даёт доступ к ним «из России» при включённом VPN. Использование российского VPS для доступа к российским ресурсам — <b>не обход блокировок</b>, это штатный сценарий VPN.</p>
+            <p><b>Компромиссы (осознанно):</b></p>
+            <ul style="margin:0 0 0.5em 1.2em; padding:0;">
+                <li>Российские сайты видят IP этого VPS и могут распознавать его как хостинговый; часть сервисов ограничивает такие IP.</li>
+                <li>Хостер VPS (а для ноды в РФ — и СОРМ) видит метаданные трафика к RU-сайтам. Этот режим <b>не скрывает</b> факт использования VPN от хостера/провайдера ноды.</li>
+                <li>Входящий (клиентский) и исходящий (RU) трафик на одном сервере коррелируются по времени и объёму — факт работы VPN на ноде наблюдаем.</li>
+            </ul>
+            <p><b>Когда НЕ подходит:</b> если нужна анонимность от провайдера или государства — используйте полный туннель через выходную ноду.</p>
+            <p><b>При сбоях:</b> если связь с выходной нодой пропадёт, RU-трафик продолжит идти напрямую, остальной прервётся. При отключении Smart Route инстанс автоматически вернётся к полному туннелю.</p>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="declineSmartRouteAck()">{{ _('cancel') }}</button>
+            <button class="btn btn-primary" onclick="acceptSmartRouteAck()">{{ _('smartroute_ack_accept') }}</button>
+        </div>
+    </div>
+</div>
+
 <div class="modal-backdrop" id="smartRouteModal">
     <div class="modal" style="max-width:560px;">
         <div class="modal-header">
@@ -3755,6 +3780,29 @@
             `↑ ${formatBytes(up.bytes || 0)} · ↓ ${formatBytes(down.bytes || 0)}</div>`;
         box.innerHTML = row(_('smartroute_counters_direct'), direct, directOut, directIn)
             + row(_('smartroute_counters_exit'), viaExit, viaExitOut, viaExitIn);
+    }
+
+    const SMARTROUTE_ACK_KEY = 'smartroute_ack_v1';
+
+    function onSmartRouteToggleChange(enabled) {
+        const box = document.getElementById('smartRouteToggle');
+        if (!enabled) { saveSmartRouteSplit(false); return; }
+        if (localStorage.getItem(SMARTROUTE_ACK_KEY) === '1') { saveSmartRouteSplit(true); return; }
+        box.checked = false;
+        openModal('smartRouteAckModal');
+    }
+
+    function acceptSmartRouteAck() {
+        localStorage.setItem(SMARTROUTE_ACK_KEY, '1');
+        closeModal('smartRouteAckModal');
+        const box = document.getElementById('smartRouteToggle');
+        box.checked = true;
+        saveSmartRouteSplit(true);
+    }
+
+    function declineSmartRouteAck() {
+        closeModal('smartRouteAckModal');
+        document.getElementById('smartRouteToggle').checked = false;
     }
 
     async function saveSmartRouteSplit(enabled) {
