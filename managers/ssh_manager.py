@@ -11,6 +11,7 @@ import logging
 import shlex
 import os
 from contextlib import nullcontext
+from managers import ssh_trust
 
 logger = logging.getLogger(__name__)
 
@@ -134,9 +135,7 @@ class SSHManager:
         # Explicitly configured files must exist and parse successfully; never
         # fall back to trust-on-first-use when trust configuration is broken.
         configured = os.environ.get('SSH_KNOWN_HOSTS_FILE')
-        known_hosts = configured or os.path.join(
-            os.path.dirname(os.environ.get('DATA_FILE', '/app/data/data.json')),
-            'ssh_known_hosts')
+        known_hosts = ssh_trust.trust_path()
         if configured or os.path.isfile(known_hosts):
             self.client.load_host_keys(known_hosts)
         self.client.set_missing_host_key_policy(paramiko.RejectPolicy())

@@ -382,7 +382,12 @@
             const res = await fetch(`/api/servers/${idx}/ping`, { credentials: 'same-origin' });
             const data = await res.json();
             dot.classList.remove('ping-pending');
-            if (data.alive) {
+            if (data.alive && data.ssh_trust !== 'trusted') {
+                dot.classList.add('ping-fail');
+                const labels = {unknown: _('ssh_trust_unknown'), changed: _('ssh_trust_changed'), error: _('ssh_trust_error')};
+                dot.title = labels[data.ssh_trust] || labels.error;
+                if (ms) ms.textContent = dot.title;
+            } else if (data.alive) {
                 dot.classList.add('ping-ok');
                 dot.title = `${data.ms} ms`;
                 if (ms) ms.textContent = `${data.ms} ms`;

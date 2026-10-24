@@ -150,6 +150,49 @@
 {% endblock %}
 
 {% block content %}
+{% if current_user and current_user.role == 'admin' %}
+<section class="card" id="ssh-trust-panel" style="margin-bottom: 20px; padding: 20px;">
+    <h2>{{ _('ssh_trust_title') }}</h2>
+    <p>{{ _('ssh_trust_warning') }}</p>
+    <button class="btn btn-secondary" type="button" onclick="inspectSSHTrust()">{{ _('ssh_trust_inspect') }}</button>
+    <pre id="ssh-trust-details" aria-live="polite" style="white-space: pre-wrap; overflow-wrap: anywhere;"></pre>
+    <div id="ssh-trust-confirmation" hidden>
+        <label><input id="ssh-trust-verified" type="checkbox"> {{ _('ssh_trust_verified') }}</label>
+        <button id="ssh-trust-save" class="btn btn-primary" type="button" onclick="confirmSSHTrust()">{{ _('ssh_trust_save') }}</button>
+    </div>
+</section>
+<script>
+    let sshTrustToken = null;
+    async function inspectSSHTrust() {
+        sshTrustToken = null;
+        document.getElementById('ssh-trust-confirmation').hidden = true;
+        document.getElementById('ssh-trust-verified').checked = false;
+        const details = document.getElementById('ssh-trust-details');
+        try {
+            const data = await apiCall('/api/servers/{{ server_id }}/ssh-trust/inspect', 'POST');
+            const labels = {unknown: {{ _('ssh_trust_unknown') | tojson }}, changed: {{ _('ssh_trust_changed') | tojson }}, trusted: {{ _('ssh_trust_trusted') | tojson }}};
+            details.textContent = labels[data.status] + '\n' + data.host + ':' + data.port + '\n' +
+                {{ _('ssh_trust_new') | tojson }} + ': ' + data.algorithm + ' ' + data.fingerprint + '\n' +
+                {{ _('ssh_trust_old') | tojson }} + ':\n' + data.old_fingerprints.map(k => k.algorithm + ' ' + k.fingerprint).join('\n');
+            sshTrustToken = data.token;
+            document.getElementById('ssh-trust-confirmation').hidden = data.status === 'trusted';
+        } catch (error) { details.textContent = error.message; }
+    }
+    async function confirmSSHTrust() {
+        if (!sshTrustToken || !document.getElementById('ssh-trust-verified').checked) return;
+        const button = document.getElementById('ssh-trust-save');
+        button.disabled = true;
+        try {
+            await apiCall('/api/servers/{{ server_id }}/ssh-trust/confirm', 'POST', {token: sshTrustToken, confirmed: true});
+            location.reload();
+        } catch (error) {
+            sshTrustToken = null;
+            document.getElementById('ssh-trust-confirmation').hidden = true;
+            document.getElementById('ssh-trust-details').textContent = error.message;
+        } finally { button.disabled = false; }
+    }
+</script>
+{% endif %}
 <a href="/" class="back-link page-back-link">{{ _('back_to_servers') }}</a>
 
 <!-- Server Info Header -->

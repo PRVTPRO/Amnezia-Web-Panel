@@ -1,0 +1,6 @@
+[Unit]
+Description=RKN scan-stats collector (hourly aggregation of rkn-extra-block LOG hits)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/rkn-agent-collect

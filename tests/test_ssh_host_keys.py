@@ -43,7 +43,8 @@ def endpoint(key):
             conn, _ = listener.accept()
             transport = paramiko.Transport(conn)
             transports.append(transport)
-            transport.add_server_key(key)
+            for host_key in key if isinstance(key, (list, tuple)) else [key]:
+                transport.add_server_key(host_key)
             transport.start_server(server=server)
             stop.wait(4)
         except (OSError, EOFError, paramiko.SSHException):

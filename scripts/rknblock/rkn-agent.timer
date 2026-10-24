@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly RKN scan-stats collection
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=15min
+Persistent=true
+Unit=rkn-agent.service
+
+[Install]
+WantedBy=timers.target

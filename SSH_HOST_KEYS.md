@@ -1,12 +1,64 @@
 # Trusted SSH host keys
 
+## v1.7.8 — web enrollment and migration
+
+Administrators can open a server page and use **SSH host key → Inspect SSH key**,
+including when statistics/protocol loading fails. Unknown and changed keys have
+distinct warnings; the server list no longer equates TCP reachability with trusted
+SSH. Inspection performs SSH key exchange only: no username, password, private
+key or agent authentication is sent.
+
+Server-list refreshes check TCP reachability and local pin presence only, not
+live SSH identity (`ssh_verified: false`); use **Inspect SSH key** to check the
+current fingerprint. Refreshing a list never starts an extra SSH key exchange.
+Inspection uses the same pinned-algorithm preference as Paramiko SSHClient,
+so an existing RSA pin is not falsely reported changed merely because the
+server also offers Ed25519 or ECDSA.
+
+Compare the displayed algorithm and SHA256 fingerprint with an independent VPS
+console (use the matching `/etc/ssh/ssh_host_*_key.pub`, not necessarily Ed25519).
+For replacement, investigate why the old fingerprint changed. Tick the explicit
+verification checkbox, then **Trust key and retry**. The page reloads and retries
+normal operations with a fresh connection and reset cooldown. No VPN clients,
+VPN keys or configurations are changed.
+
+Confirmation is signed, expires after five minutes, binds the server UID,
+host, port and exact candidate key, and re-probes before saving. Restarting the
+panel invalidates outstanding confirmations. A changed candidate or endpoint
+requires a fresh inspection. Only admins (not support users) may use these POST
+endpoints; session/Bearer access controls and same-origin browser checks apply.
+
+Confirmations also bind the previous trust entries: a concurrent administrator
+change requires re-inspection rather than silently overwriting that decision.
+Endpoint edits are serialized with confirmation in the panel process. Modern
+browsers' same-origin Fetch Metadata permits TLS-terminating reverse proxies;
+older browsers require the proxy to preserve the external request origin.
+
+The default file is `ssh_known_hosts` beside the resolved `DATA_FILE`: beside
+`app.py` for source installs, beside the executable for frozen installs, and
+`/app/data/ssh_known_hosts` for the supplied Docker Compose deployment. Override
+with `SSH_KNOWN_HOSTS_FILE`. A missing file can be created by enrollment; its
+parent must be writable. Read-only mounts/files produce an explicit error; make
+the persistent trust location writable if web enrollment is desired.
+
+Updates are serialized within the panel process and use atomic file replacement.
+Other endpoints (including aliases on shared lines) are preserved; hashed entries
+and nonstandard ports are supported. Conflicting system `~/.ssh/known_hosts`
+entries are never silently overridden: correct them independently as the panel
+OS user, then inspect again. Run one panel writer per trust file; external editors
+or multiple processes are not coordinated by the in-process lock.
+
+Existing manually enrolled entries keep working. The manual procedure below is
+still supported for read-only/operator-managed trust. `RejectPolicy` remains in
+force; there is no automatic trust-on-first-use fallback.
+
 SSH connections reject unknown or changed host keys before password/public-key
 authentication. There is no automatic first-use enrollment. Existing SSH user
 keys and passwords are still supported; server host trust is a separate check.
 
-**Upgrade prerequisite:** enroll every managed SSH endpoint before deploying a
-release containing this change. Otherwise operations against unenrolled servers
-fail closed. This is deliberate; do not restore `AutoAddPolicy` as a workaround.
+**Upgrade prerequisite:** enroll every managed SSH endpoint manually before upgrade
+or use the administrator recovery controls after upgrade. Until enrollment,
+operations fail closed. Do not restore `AutoAddPolicy` as a workaround.
 
 Paramiko loads the panel process user's `~/.ssh/known_hosts` and a persistent
 panel trust file, defaulting to `ssh_known_hosts` beside `DATA_FILE` (normally

@@ -1,0 +1,8 @@
+[Unit]
+Description=RKN extra block (C24Be lists): boot restore + daily list update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/rkn-extra-block boot
