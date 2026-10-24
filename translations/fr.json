@@ -841,7 +841,7 @@
     "smartroute_doc_risk_title": "Risques et compromis (assumés) :",
     "smartroute_doc_risk_1": "Les sites russes voient l'IP de ce VPS. Les adresses d'hébergeur sont souvent signalées comme VPN/proxy, et certains services les restreignent.",
     "smartroute_doc_risk_2": "Une IP pour plusieurs comptes : les services russes voient de nombreux utilisateurs différents arriver d'une seule adresse, un marqueur classique de VPN. Les comptes sont alors liés à l'IP du serveur.",
-    "smartroute_doc_risk_3": "La loi russe oblige ces services à conserver et à transmettre les journaux de connexion. Le cercle des utilisateurs du nœud peut être révélé sur requête.",
+    "smartroute_doc_risk_3": "Les services russes peuvent conserver les journaux de connexion et les transmettre sur demande. Le cercle des utilisateurs du nœud peut être révélé sur requête.",
     "smartroute_doc_risk_4": "Le trafic entrant du tunnel et le trafic RU sortant sur le même hôte peuvent être corrélés par le moment et le volume, ce qui confirme la présence d'un VPN sur le nœud.",
     "smartroute_doc_risk_5": "Si le nœud est hébergé en Russie, l'hébergeur (et le SORM) voit les requêtes DNS/SNI sortir du serveur : le nœud n'est plus un relais opaque.",
     "smartroute_doc_risk_6": "Si le nœud de sortie tombe, le trafic RU continue de sortir directement (le kill-switch ne bloque pas la voie directe) : le nœud d'entrée reste un point de sortie autonome.",

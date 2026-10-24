@@ -128,10 +128,10 @@ class ExitNodeUiWiringTests(unittest.TestCase):
             self.assertEqual(missing, [], f'{lang}: {missing}')
 
 
-class SmartRouteUiWiringTests(unittest.TestCase):
-    """Smart Route is a host-level marketplace app: its card must bypass the
-    protocol installer, the split toggle lives in the exit-link modal, and
-    every smartroute_* key must exist in all locales."""
+class HostAppsUiWiringTests(unittest.TestCase):
+    """Smart Route and RKN Block are host-level marketplace apps: their cards
+    bypass the protocol installer, and every smartroute_*/rknblock_* key must
+    exist in all locales."""
 
     def setUp(self):
         self.page = read('templates', 'server.html')
@@ -215,6 +215,10 @@ class SmartRouteUiWiringTests(unittest.TestCase):
             data = json.loads(read('translations', f'{lang}.json'))
             missing = sorted(k for k in keys if k not in data)
             self.assertEqual(missing, [], f'{lang}: {missing}')
+
+    def test_card_not_shown_via_container_status(self):
+        self.assertIn("if (app.proto === 'smartroute' || app.proto === 'rknblock') return;",
+                      self.page)
 
     def test_card_dns_pair_inputs(self):
         self.assertIn('id="smartroute-direct-dns"', self.page)

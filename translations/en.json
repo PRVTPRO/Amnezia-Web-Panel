@@ -841,7 +841,7 @@
     "smartroute_doc_risk_title": "Risks and trade-offs (deliberate):",
     "smartroute_doc_risk_1": "Russian sites see this VPS IP address. Datacenter IPs are often flagged as VPN/proxy, and some services restrict them.",
     "smartroute_doc_risk_2": "One IP for many accounts: Russian services see many different users coming from a single address — a textbook VPN marker. User accounts become linked to the server IP.",
-    "smartroute_doc_risk_3": "By law, Russian services must store and hand over connection logs. Your user base can be exposed to anyone who can request those logs.",
+    "smartroute_doc_risk_3": "Russian services may retain connection logs and hand them over on request. Your user base can be exposed to anyone who can request those logs.",
     "smartroute_doc_risk_4": "Inbound tunnel traffic and outbound RU traffic on the same host can be correlated by timing and volume, which confirms the node is a VPN.",
     "smartroute_doc_risk_5": "If the node is hosted in Russia, the hoster (and SORM) can see DNS/SNI requests leaving the box, so the node is no longer an opaque relay.",
     "smartroute_doc_risk_6": "If the exit link goes down, RU traffic keeps going out directly (the kill-switch does not block the direct path), so the entry keeps working as a standalone egress.",

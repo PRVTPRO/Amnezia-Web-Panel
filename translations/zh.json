@@ -841,7 +841,7 @@
     "smartroute_doc_risk_title": "风险与取舍（有意为之）：",
     "smartroute_doc_risk_1": "俄罗斯网站会看到此 VPS 的 IP。机房 IP 常被标记为 VPN/代理，部分服务会加以限制。",
     "smartroute_doc_risk_2": "一个 IP 对应多个账户：俄罗斯服务会看到大量不同用户来自同一地址，这是典型的 VPN 特征。用户账户会与服务器 IP 关联。",
-    "smartroute_doc_risk_3": "根据俄罗斯法律，这些服务必须保存并按要求提供连接日志。节点用户群体可能因调取日志而暴露。",
+    "smartroute_doc_risk_3": "俄罗斯服务可能保存连接日志并按要求提供。节点用户群体可能因调取日志而暴露。",
     "smartroute_doc_risk_4": "同一主机上的入站隧道流量与出站俄罗斯流量可通过时间和流量体积进行关联，从而确认该节点是 VPN。",
     "smartroute_doc_risk_5": "如果节点托管在俄罗斯，主机商（以及 SORM）可以看到离开服务器的 DNS/SNI 请求，节点不再是不可见的中间跳板。",
     "smartroute_doc_risk_6": "如果出口节点不可用，俄罗斯流量仍会直接发出（kill-switch 不会阻断直连路径），入口节点仍可作为独立出口继续工作。",
