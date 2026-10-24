@@ -227,5 +227,63 @@ class SmartRouteUiWiringTests(unittest.TestCase):
         self.assertIn('srGloballyOn', self.page)
 
 
+class SmartRouteReadmeI18nTests(unittest.TestCase):
+    """The Smart Route README (ack modal) must be fully translated in every
+    panel language and must carry the security warnings raised in PR review."""
+
+    DOC_KEYS = [
+        'smartroute_doc_how_title', 'smartroute_doc_how',
+        'smartroute_doc_why_title', 'smartroute_doc_why',
+        'smartroute_doc_risk_title',
+        'smartroute_doc_risk_1', 'smartroute_doc_risk_2',
+        'smartroute_doc_risk_3', 'smartroute_doc_risk_4',
+        'smartroute_doc_risk_5', 'smartroute_doc_risk_6',
+        'smartroute_doc_security_title', 'smartroute_doc_security_intro',
+        'smartroute_doc_security_1', 'smartroute_doc_security_2',
+        'smartroute_doc_security_3', 'smartroute_doc_security_4',
+        'smartroute_doc_fit_title', 'smartroute_doc_fit_ok',
+        'smartroute_doc_fit_no',
+        'smartroute_doc_fail_title', 'smartroute_doc_fail',
+    ]
+
+    def setUp(self):
+        self.page = read('templates', 'server.html')
+        start = self.page.index('id="smartRouteAckModal"')
+        end = self.page.index('id="smartRouteModal"')
+        self.modal = self.page[start:end]
+        self.locales = {
+            lang: json.loads(read('translations', f'{lang}.json'))
+            for lang in ('ru', 'en', 'fr', 'zh', 'fa')
+        }
+
+    def test_modal_has_no_hardcoded_russian_text(self):
+        for key in self.DOC_KEYS:
+            self.assertIn("{{ _('%s') }}" % key, self.modal)
+        for fragment in ('Как это работает', 'Российские сайты', 'Компромиссы',
+                         'выходную ноду', 'Безопасность:'):
+            self.assertNotIn(fragment, self.modal)
+
+    def test_every_locale_has_the_doc(self):
+        for lang, data in self.locales.items():
+            missing = [k for k in self.DOC_KEYS if not data.get(k)]
+            self.assertEqual(missing, [], f'{lang}: {missing}')
+
+    def test_readme_label_is_localized(self):
+        labels = {lang: data.get('smartroute_ack_readme')
+                  for lang, data in self.locales.items()}
+        self.assertEqual(len(set(labels.values())), 5, labels)
+
+    def test_security_warnings_are_present(self):
+        en = self.locales['en']
+        self.assertIn('pure relay', en['smartroute_doc_security_1'])
+        self.assertIn('split tunneling', en['smartroute_doc_security_2'])
+        self.assertIn('VPN marker', en['smartroute_doc_risk_2'])
+        self.assertIn('SORM', en['smartroute_doc_risk_5'])
+        self.assertIn('standalone egress', en['smartroute_doc_risk_6'])
+        ru = self.locales['ru']
+        self.assertIn('СОРМ', ru['smartroute_doc_risk_5'])
+        self.assertIn('split-tunneling', ru['smartroute_doc_security_2'])
+
+
 if __name__ == '__main__':
     unittest.main()
