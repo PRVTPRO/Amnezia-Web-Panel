@@ -273,6 +273,14 @@ class SmartRouteReadmeI18nTests(unittest.TestCase):
                   for lang, data in self.locales.items()}
         self.assertEqual(len(set(labels.values())), 5, labels)
 
+    def test_ack_controls_are_localized(self):
+        en = self.locales['en']
+        for lang in ('ru', 'fr', 'zh', 'fa'):
+            data = self.locales[lang]
+            for key in ('smartroute_ack_title', 'smartroute_ack_accept',
+                        'smartroute_ack_close'):
+                self.assertNotEqual(data[key], en[key], f'{lang}: {key}')
+
     def test_security_warnings_are_present(self):
         en = self.locales['en']
         self.assertIn('pure relay', en['smartroute_doc_security_1'])
