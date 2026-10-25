@@ -49,6 +49,9 @@ class SSHManager:
         # in open_sftp, bursts of 500s followed by the connect cooldown).
         # RLock because run_command retries by calling itself.
         self._exec_lock = threading.RLock()
+        # Serializes access to the AWG batched-status cache (_awg_batch),
+        # which is shared across threads via the pooled SSH manager.
+        self._awg_batch_lock = threading.RLock()
         # Circuit breaker: after a failed connect, do not hammer the dead
         # server on every request (each attempt costs up to `timeout` seconds
         # and can exhaust the web worker pool when several servers are down).

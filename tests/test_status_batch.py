@@ -1,5 +1,22 @@
 import time
 import unittest
+import uuid as _uuid
+
+class _FixedUUID:
+    hex = 'a' * 32
+
+import managers.awg_manager as _awg_mod
+
+_ORIGINAL_UUID4 = _awg_mod.uuid.uuid4
+
+
+def setUpModule():
+    _awg_mod.uuid.uuid4 = lambda: _FixedUUID()
+
+
+def tearDownModule():
+    _awg_mod.uuid.uuid4 = _ORIGINAL_UUID4
+
 
 from managers.awg_manager import AWGManager
 from managers.ssh_manager import SSHManager
@@ -15,7 +32,7 @@ class FakeSSH:
             "@@CONTAINER@@ amnezia-awg2\n"
             "[Interface]\nPrivateKey = SRV\nListenPort = 55424\n"
             "[Peer]\nPublicKey = PEER_A\nAllowedIPs = 10.8.1.2/32\n"
-            "@@CLIENTS@@\n"
+            "@@CLIENTS_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@@\n"
             '[{"clientId": "PEER_A", "userData": {"clientName": "alice"}}]\n'
         )
 
@@ -121,7 +138,7 @@ class PrefetchAwgStateTest(unittest.TestCase):
             "@@CONTAINER@@ amnezia-awg2\n"
             "[Interface]\nPrivateKey = SRV\nListenPort = 55424\n"
             "[Peer]\nPublicKey = PEER_A\nAllowedIPs = 10.8.1.2/32\n"
-            "@@CLIENTS@@\n"
+            "@@CLIENTS_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@@\n"
             '[{"clientId": "ALIEN_PUBKEY", "userData": {"clientName": "eve"}}]\n'
         )
         mgr = AWGManager(ssh)
@@ -133,8 +150,8 @@ class PrefetchAwgStateTest(unittest.TestCase):
                      if 'docker exec' in c and not c.startswith('for c in ')]
         self.assertTrue(exec_cmds,
                         "direct read expected after poisoned batch entry was dropped")
-        self.assertNotIn('amnezia-awg2', ssh._awg_batch['containers'],
-                         "poisoned batch entry must be removed")
+        self.assertIsNone(ssh._awg_batch['containers'].get('amnezia-awg2'),
+                         "poisoned batch entry must be invalidated")
 
     def test_glued_markers_still_split_sections(self):
         """A dump file without a trailing newline glues the next marker
@@ -149,17 +166,17 @@ class PrefetchAwgStateTest(unittest.TestCase):
             "@@CONTAINER@@ amnezia-awg2\n"
             "[Interface]\nPrivateKey = S1\nListenPort = 1\n"
             "[Peer]\nPublicKey = K1\nAllowedIPs = 10.8.1.2/32\n"
-            "@@CLIENTS@@\n"
+            "@@CLIENTS_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@@\n"
             '[{"clientId": "K1", "userData": {"clientName": "a"}}]'  # no \n
             "@@CONTAINER@@ amnezia-awg2-2\n"
             "[Interface]\nPrivateKey = S2\nListenPort = 2\n"
             "[Peer]\nPublicKey = K2\nAllowedIPs = 10.8.2.2/32"  # no \n
-            "@@CLIENTS@@\n"
+            "@@CLIENTS_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@@\n"
             '[{"clientId": "K2", "userData": {"clientName": "b"}}]\n'
             "@@CONTAINER@@ amnezia-awg3\n"
             "[Interface]\nPrivateKey = S3\nListenPort = 3\n"
             "[Peer]\nPublicKey = K3\nAllowedIPs = 10.8.3.2/32\n"
-            "@@CLIENTS@@\n"
+            "@@CLIENTS_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@@\n"
             '[{"clientId": "K3", "userData": {"clientName": "c"}}]\n'
         )
         mgr = AWGManager(ssh)
@@ -204,7 +221,7 @@ class PrefetchAwgStateTest(unittest.TestCase):
         ssh.batch_output = (
             "@@CONTAINER@@ amnezia-awg2\n"
             "[Interface]\nListenPort = 55424\n"
-            "@@CLIENTS@@\n"
+            "@@CLIENTS_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@@\n"
             '[{"clientId": "PEER_A", "userData": {"clie'  # cut off mid-JSON
         )
         mgr = AWGManager(ssh)
@@ -213,7 +230,7 @@ class PrefetchAwgStateTest(unittest.TestCase):
         clients = mgr._get_clients_table('awg2')
         # direct read returns '[]' in FakeSSH, but the point is the retry happened
         self.assertEqual(clients, [])
-        self.assertNotIn('amnezia-awg2', ssh._awg_batch['containers'])
+        self.assertIsNone(ssh._awg_batch['containers'].get('amnezia-awg2'))
         direct = [c for c in ssh.commands
                   if 'clientsTable' in c and not c.startswith('for c in ')]
         self.assertEqual(len(direct), 1)
@@ -242,14 +259,14 @@ class PrefetchAwgStateTest(unittest.TestCase):
             "@@CONTAINER@@ amnezia-awg2\n"
             "[Interface]\nListenPort = 55424\n"
             "[Peer]\nPublicKey = PEER_A\nAllowedIPs = 10.8.1.2/32\n"
-            "@@CLIENTS@@\n"   # <- cat failed transiently, nothing followed
+            "@@CLIENTS_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@@\n"   # <- cat failed transiently, nothing followed
         )
         mgr = AWGManager(ssh)
         mgr.prefetch_awg_state(['awg2'])
 
         clients = mgr._get_clients_table('awg2')
         self.assertEqual(clients, [])  # FakeSSH direct read returns '[]'
-        self.assertNotIn('amnezia-awg2', ssh._awg_batch['containers'])
+        self.assertIsNone(ssh._awg_batch['containers'].get('amnezia-awg2'))
         direct = [c for c in ssh.commands
                   if 'clientsTable' in c and not c.startswith('for c in ')]
         self.assertEqual(len(direct), 1)
@@ -261,7 +278,7 @@ class PrefetchAwgStateTest(unittest.TestCase):
         ssh.batch_output = (
             "@@CONTAINER@@ amnezia-awg2\n"
             "[Interface]\nListenPort = 55424\n"
-            "@@CLIENTS@@\n"
+            "@@CLIENTS_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@@\n"
         )
         mgr = AWGManager(ssh)
         mgr.prefetch_awg_state(['awg2'])
@@ -323,7 +340,7 @@ class PrefetchAwgStateTest(unittest.TestCase):
             "[Interface]\nPrivateKey = SRV\nListenPort = 55424\n\n"
             "[Peer]\nPublicKey = PEER_A\nAllowedIPs = 10.8.1.2/32\n\n"
             "[Peer]\nPublicKey = PEER_EXT\nAllowedIPs = 10.8.1.9/32\n"
-            "@@CLIENTS@@\n"
+            "@@CLIENTS_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@@\n"
             '[{"clientId": "PEER_A", "userData": {"clientName": "alice"}}]\n'
         )
         mgr = AWGManager(ssh)
@@ -332,6 +349,21 @@ class PrefetchAwgStateTest(unittest.TestCase):
         self.assertEqual(info['clients_count'], 2)
         self.assertEqual(info['external_count'], 1)
 
+
+
+    def test_prefetch_nonzero_exit_code_leaves_batch_invalid(self):
+        """A failing composite prefetch must not leave a half-built batch:
+        _awg_batch is set to None so callers fall back to direct reads."""
+        ssh = FakeSSH()
+        orig = ssh.run_sudo_command
+        def failing(cmd, timeout=60):
+            if cmd.startswith('for c in '):
+                return '', 'boom: something failed', 1
+            return orig(cmd, timeout)
+        ssh.run_sudo_command = failing
+        mgr = AWGManager(ssh)
+        mgr.prefetch_awg_state(['awg2'])
+        self.assertIsNone(ssh._awg_batch)
 
 if __name__ == '__main__':
     unittest.main()
