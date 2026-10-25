@@ -136,6 +136,11 @@ class HostAppsUiWiringTests(unittest.TestCase):
     def setUp(self):
         self.page = read('templates', 'server.html')
 
+    def test_only_confirmed_key_sharing_warning_is_rendered(self):
+        self.assertIn('simAlerts', self.page)
+        self.assertNotIn('multiIpAlerts', self.page)
+        self.assertNotIn('multi_ip_alert_text', self.page)
+
     def test_marketplace_card_and_modal(self):
         self.assertRegex(self.page, r"\{ proto: 'smartroute', category: 'services'")
         self.assertIn('id="smartRouteModal"', self.page)

@@ -2831,7 +2831,6 @@ done < "$BW"
                 conn_counts = self._count_connections_by_ip(protocol_type)
             conn_warnings = self._load_conn_warnings(protocol_type)
             mi_state = self._load_multi_ip_state(protocol_type)
-            multi_alerts = mi_state.get('alerts', {})
             sim_alerts = mi_state.get('sim', {})
             for client in clients_table:
                 user_data = client.get('userData', {})
@@ -2845,8 +2844,6 @@ done < "$BW"
                 user_data['connCount'] = conn_counts.get(ip, 0)
                 if ip in conn_warnings:
                     user_data['connWarnings'] = conn_warnings[ip]
-                if ip in multi_alerts:
-                    user_data['multiIpAlerts'] = multi_alerts[ip]
                 if ip in sim_alerts:
                     user_data['simAlerts'] = sim_alerts[ip]
                 client['userData'] = user_data

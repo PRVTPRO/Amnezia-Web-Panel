@@ -775,7 +775,6 @@
     "ssh_trust_new": "Candidate key",
     "ssh_trust_old": "Previously trusted keys",
     "ssh_trust_error": "SSH trust check failed",
-    "multi_ip_alert_text": "⚠️ Possible key sharing: on {date} at {time} the key appeared from IPs {ips}. Checking for overlap…",
     "sim_alert_text": "⛔ Key sharing CONFIRMED: around {date} {time} one key passed traffic from {ips} ({sessions} sessions) at the same time!",
     "smartroute_desc": "RU traffic goes direct, everything else through the exit node — split routing by RU prefix lists.",
     "smartroute_open": "Open",

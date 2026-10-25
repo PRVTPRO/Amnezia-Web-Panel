@@ -4189,24 +4189,6 @@
                     }).join('');
                 }
 
-                // Multi-IP alerts (key sharing heuristic): the same key seen
-                // from 2+ public IPs within a short window, newest last.
-                // Amber — a tripwire that promotes the instance to frequent
-                // simultaneous-use checks, not proof by itself.
-                if (Array.isArray(userData.multiIpAlerts) && userData.multiIpAlerts.length) {
-                    if (!warningsHtml) warningsHtml = '<div class="conn-warnings">';
-                    warningsHtml += userData.multiIpAlerts.map(ev => {
-                        const d = new Date(ev.ts * 1000);
-                        const dateStr = String(d.getDate()).padStart(2, '0') + '.' + String(d.getMonth() + 1).padStart(2, '0') + '.' + d.getFullYear();
-                        const timeStr = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
-                        const text = _('multi_ip_alert_text')
-                            .replace('{date}', dateStr)
-                            .replace('{time}', timeStr)
-                            .replace('{ips}', (ev.ips || []).join(', '));
-                        return `<div class="conn-warning">${escapeHtml(text)}</div>`;
-                    }).join('');
-                }
-
                 // Simultaneous-use alerts (hard evidence): conntrack double
                 // sampling proved 2+ devices passing traffic with one key in
                 // the same minute, newest last. Red — this one is actionable.
