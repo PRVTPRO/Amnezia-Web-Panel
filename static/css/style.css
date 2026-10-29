@@ -2950,3 +2950,213 @@ body,
     grid-template-columns: 1fr 1fr;
     gap: 8px;
 }
+
+/* ===== Server enrollment (/servers/new) ===== */
+.server-enroll {
+    max-width: 720px;
+    margin: 0 auto;
+}
+
+.server-enroll [hidden] {
+    display: none !important;
+}
+
+.enroll-intro {
+    max-width: 70ch;
+    margin: calc(-1 * var(--space-sm)) 0 var(--space-lg);
+}
+
+.enroll-card {
+    padding: var(--space-lg);
+}
+
+.enroll-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(96px, 132px);
+    column-gap: var(--space-md);
+}
+
+.enroll-grid > .form-group {
+    min-width: 0;
+    margin-bottom: var(--space-md);
+}
+
+.enroll-grid__full {
+    grid-column: 1 / -1;
+}
+
+.enroll-grid__host {
+    grid-column: 1;
+}
+
+.enroll-grid__port {
+    grid-column: 2;
+}
+
+.enroll-optional {
+    color: var(--text-muted);
+    font-weight: 400;
+    letter-spacing: 0;
+    text-transform: none;
+}
+
+.enroll-auth__tabs {
+    margin-bottom: var(--space-md);
+}
+
+.enroll-auth #authPassword,
+.enroll-auth #authKey {
+    min-width: 0;
+}
+
+.enroll-alert {
+    margin-bottom: var(--space-md);
+    padding: var(--space-sm) var(--space-md);
+    border: 1px solid var(--danger-border);
+    border-radius: var(--radius-md);
+    background: var(--danger-bg);
+    color: var(--text-primary);
+    font-size: var(--text-base);
+    overflow-wrap: anywhere;
+}
+
+.enroll-success {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-sm);
+    margin-bottom: var(--space-md);
+    padding: var(--space-sm) var(--space-md);
+    background: var(--success-bg);
+    border: 1px solid var(--success-border);
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    font-size: var(--text-base);
+    overflow-wrap: anywhere;
+}
+
+.enroll-success .badge {
+    flex: 0 0 auto;
+}
+
+.enroll-changed {
+    margin-bottom: var(--space-md);
+    padding: var(--space-md);
+    background: var(--warning-bg);
+    border: 1px solid rgba(245, 158, 11, 0.35);
+    border-radius: var(--radius-md);
+}
+
+.enroll-changed__title {
+    margin: 0 0 var(--space-xs);
+    font-size: var(--text-lg);
+}
+
+.enroll-changed__help {
+    margin: 0 0 var(--space-sm);
+    color: var(--text-secondary);
+    font-size: var(--text-base);
+}
+
+.enroll-changed__details {
+    margin: 0 0 var(--space-md);
+    padding: var(--space-sm) var(--space-md);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 0.8rem;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    direction: ltr;
+    text-align: left;
+    unicode-bidi: isolate;
+}
+
+.enroll-check {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-sm);
+    margin-bottom: var(--space-md);
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: var(--text-base);
+    line-height: 1.45;
+}
+
+.enroll-check input {
+    flex: 0 0 auto;
+    width: 18px;
+    height: 18px;
+    margin-top: 2px;
+    accent-color: var(--accent);
+}
+
+.enroll-changed .btn {
+    width: auto;
+}
+
+.enroll-hint {
+    margin: 0 0 var(--space-sm);
+    color: var(--warning);
+    text-align: start;
+}
+
+.enroll-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-sm);
+    padding-top: var(--space-md);
+    border-top: 1px solid var(--border-color);
+}
+
+.enroll-actions__end {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-sm);
+    margin-inline-start: auto;
+}
+
+.enroll-actions .btn,
+.enroll-changed .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-sm);
+}
+
+@media (max-width: 640px) {
+    .enroll-card {
+        padding: var(--space-md);
+    }
+
+    .enroll-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .enroll-grid__host,
+    .enroll-grid__port,
+    .enroll-grid__full {
+        grid-column: 1;
+    }
+
+    .enroll-actions {
+        flex-direction: column-reverse;
+        align-items: stretch;
+    }
+
+    .enroll-actions__end {
+        flex-direction: column;
+        align-items: stretch;
+        margin-inline-start: 0;
+    }
+
+    .enroll-actions .btn,
+    .enroll-changed .btn {
+        width: 100%;
+    }
+}

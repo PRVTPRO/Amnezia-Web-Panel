@@ -28,13 +28,19 @@ class TrustUITests(unittest.TestCase):
         self.assertIn('ssh_trust.saved_status(servers[server_id])', block)
         self.assertNotIn('ssh_trust.inspect(', block)
         # Non-status endpoints keep using the network probe.
-        self.assertIn('ssh_trust.inspect(servers[server_id])', app_source)
+        self.assertIn('ssh_trust.inspect(', app_source)
 
     def test_listing_does_not_call_tcp_ping_ssh_success(self):
         app_source = (ROOT / 'app.py').read_text(encoding='utf-8')
-        self.assertIn('asyncio.to_thread(ssh_trust.saved_status, server)', app_source)
-        self.assertNotIn('asyncio.to_thread(ssh_trust.inspect, server)', app_source)
+        marker = "@app.get('/api/servers/{server_id}/ping'"
+        idx = app_source.index(marker)
+        block = app_source[idx:app_source.index('\n@app.', idx)]
+        # Cards need a live changed/unknown signal, so ping performs a key-only
+        # probe. It must not authenticate or open an SSH session.
+        self.assertIn('ssh_trust.inspect', block)
+        self.assertIn("'ssh_trust_detail': inspection", block)
+        self.assertNotIn('SSHManager', block)
         source = (ROOT / 'templates/index.html').read_text(encoding='utf-8')
-        self.assertIn('data.ssh_trust', source)
+        self.assertIn('data.ssh_trust_detail', source)
         self.assertIn('ssh_trust_unknown', source)
         self.assertIn('ssh_trust_changed', source)

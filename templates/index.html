@@ -2,6 +2,87 @@
 
 {% block page_class %}page page--servers{% endblock %}
 
+{% block head_extra %}
+<style>
+    /* Compact host-key warning on server cards. Kept local to this page so the
+       card signal does not depend on the detail-page trust panel styles. */
+    .ssh-trust-warn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex: 0 0 auto;
+        width: 22px;
+        height: 22px;
+        padding: 0;
+        border-radius: 50%;
+        border: 1px solid var(--danger-border);
+        background: var(--danger-bg);
+        color: var(--danger);
+        cursor: pointer;
+        vertical-align: middle;
+    }
+
+    .ssh-trust-warn:hover,
+    .ssh-trust-warn:focus-visible {
+        background: var(--danger);
+        color: #fff;
+        outline: none;
+    }
+
+    .ssh-trust-warn.is-changed {
+        animation: sshTrustWarnPulse 1.6s ease-in-out infinite;
+    }
+
+    @keyframes sshTrustWarnPulse {
+        0%, 100% { box-shadow: 0 0 0 0 var(--danger-border); }
+        50% { box-shadow: 0 0 0 4px transparent; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        .ssh-trust-warn.is-changed { animation: none; }
+    }
+
+    .ssh-trust-details {
+        display: grid;
+        gap: var(--space-sm);
+        margin: var(--space-md) 0;
+        padding: var(--space-md);
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-md);
+        background: var(--bg-tertiary, var(--bg-secondary));
+    }
+
+    .ssh-trust-details__label {
+        color: var(--text-muted);
+        font-size: var(--text-sm);
+    }
+
+    .ssh-trust-details__value {
+        display: block;
+        margin-top: 2px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: var(--text-sm);
+        direction: ltr;
+        unicode-bidi: isolate;
+        overflow-wrap: anywhere;
+        text-align: left;
+    }
+
+    [dir="rtl"] .ssh-trust-details__value { text-align: left; }
+
+    .ssh-trust-details__old {
+        margin: var(--space-xs) 0 0;
+        padding-inline-start: 18px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: var(--text-sm);
+        direction: ltr;
+        unicode-bidi: isolate;
+        overflow-wrap: anywhere;
+        text-align: left;
+    }
+</style>
+{% endblock %}
+
 {% block content %}
 <section>
     <div class="page-header">
@@ -10,9 +91,13 @@
             {{ _('nav_servers') }}
         </h1>
         <div class="page-header__actions">
-            <button class="btn btn-primary" onclick="openModal('addServerModal')">
+            {% if current_user.role == 'admin' %}
+            <a href="/servers/new" class="btn btn-primary">
                 <span>＋</span> {{ _('add_server') }}
-            </button>
+            </a>
+            {% else %}
+            <span class="text-muted text-sm">{{ _('add_server_admin_only') }}</span>
+            {% endif %}
         </div>
     </div>
 
@@ -31,6 +116,19 @@
                         <span class="ping-dot ping-pending" id="ping-{{ loop.index0 }}"
                             title="{{ _('ping_checking') }}"></span>
                         <span>{{ server.name }}</span>
+                        {% if current_user.role == 'admin' %}
+                        <button type="button" class="ssh-trust-warn hidden" id="ssh-trust-{{ loop.index0 }}"
+                            onclick="openServerTrust({{ loop.index0 }})"
+                            title="{{ _('ssh_trust_button_changed') }}"
+                            aria-label="{{ _('ssh_trust_button_changed') }}">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+                                <line x1="12" y1="9" x2="12" y2="13" />
+                                <line x1="12" y1="17" x2="12.01" y2="17" />
+                            </svg>
+                        </button>
+                        {% endif %}
                         <span class="ping-ms text-muted" id="ping-ms-{{ loop.index0 }}"></span>
                     </div>
                     <div class="server-host">{{ server.host }}:{{ server.ssh_port }}</div>
@@ -98,9 +196,13 @@
         <div class="empty-desc">
             {{ _('add_server_desc') }}
         </div>
-        <button class="btn btn-primary" onclick="openModal('addServerModal')">
+        {% if current_user.role == 'admin' %}
+        <a href="/servers/new" class="btn btn-primary">
             <span>＋</span> {{ _('add_server') }}
-        </button>
+        </a>
+        {% else %}
+        <p class="text-muted text-sm">{{ _('add_server_admin_only') }}</p>
+        {% endif %}
     </div>
     {% endif %}
 </section>
@@ -181,7 +283,43 @@
     </div>
 </div>
 
-<!-- ===== Add Server Modal ===== -->
+{% if current_user.role == 'admin' %}
+<!-- ===== Server host-key warning modal ===== -->
+<div class="modal-backdrop" id="serverTrustModal">
+    <div class="modal">
+        <div class="modal-header">
+            <h2 class="modal-title" id="serverTrustTitle">{{ _('ssh_trust_changed') }}</h2>
+            <button class="modal-close" type="button" onclick="closeModal('serverTrustModal')">×</button>
+        </div>
+
+        <div class="modal-body">
+            <p class="text-muted" id="serverTrustWarning" style="margin-top: 0;">{{ _('ssh_trust_warning') }}</p>
+
+            <div class="ssh-trust-details" id="serverTrustDetails" aria-live="polite">
+                <span class="text-muted">{{ _('ssh_trust_inspect') }}…</span>
+            </div>
+
+            <label id="serverTrustConfirmRow" class="hidden" style="display: flex; gap: var(--space-sm); align-items: flex-start;">
+                <input type="checkbox" id="serverTrustVerified">
+                <span>{{ _('ssh_trust_verified') }}</span>
+            </label>
+
+            <p class="form-error hidden" id="serverTrustError" role="alert"></p>
+        </div>
+
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary"
+                onclick="closeModal('serverTrustModal')">{{ _('cancel') }}</button>
+            <button type="button" class="btn btn-primary" id="serverTrustAccept"
+                onclick="acceptServerTrust()" disabled>
+                <span id="serverTrustAcceptText">{{ _('ssh_trust_save') }}</span>
+                <div class="spinner hidden" id="serverTrustSpinner"></div>
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- ===== Add Server Modal (legacy; admin links now use /servers/new) ===== -->
 <div class="modal-backdrop" id="addServerModal">
     <div class="modal">
         <div class="modal-header">
@@ -246,6 +384,7 @@
         </form>
     </div>
 </div>
+{% endif %}
 {% endblock %}
 
 {% block scripts %}
@@ -435,7 +574,171 @@
     }
     for (const kind of ['add', 'edit']) {
         const ids = kind === 'add' ? ['serverHost', 'serverPort'] : ['editServerHost', 'editServerPort'];
-        ids.forEach(id => document.getElementById(id).addEventListener('input', () => resetOnboardingTrust(kind)));
+        ids.forEach(id => {
+            const input = document.getElementById(id);
+            if (input) input.addEventListener('input', () => resetOnboardingTrust(kind));
+        });
+    }
+
+    /* ========== Server card host-key warning ========== */
+
+    const serverTrust = { idx: null, uid: '', detail: null, busy: false };
+
+    function serverTrustEndpoint(idx, suffix) {
+        const query = serverTrust.uid ? `?server_uid=${encodeURIComponent(serverTrust.uid)}` : '';
+        return `/api/servers/${idx}/ssh-trust/${suffix}${query}`;
+    }
+
+    function setServerTrustIcon(idx, status) {
+        const btn = document.getElementById(`ssh-trust-${idx}`);
+        if (!btn) return;
+        if (status === 'changed' || status === 'unknown') {
+            btn.classList.remove('hidden');
+            btn.classList.toggle('is-changed', status === 'changed');
+            btn.title = status === 'changed' ? _('ssh_trust_button_changed') : _('ssh_trust_button_urgent');
+            btn.setAttribute('aria-label', btn.title);
+        } else {
+            btn.classList.add('hidden');
+            btn.classList.remove('is-changed');
+        }
+    }
+
+    function trustDetailRow(label, value) {
+        const row = document.createElement('div');
+        const labelEl = document.createElement('span');
+        labelEl.className = 'ssh-trust-details__label';
+        labelEl.textContent = label;
+        const valueEl = document.createElement('span');
+        valueEl.className = 'ssh-trust-details__value';
+        valueEl.textContent = value;
+        row.append(labelEl, valueEl);
+        return row;
+    }
+
+    function renderServerTrust(detail) {
+        const box = document.getElementById('serverTrustDetails');
+        box.textContent = '';
+        box.append(trustDetailRow(_('ssh_host'), `${detail.host}:${detail.port}`));
+        box.append(trustDetailRow(_('ssh_trust_new'), `${detail.algorithm} ${detail.fingerprint}`));
+        if (detail.old_fingerprints && detail.old_fingerprints.length) {
+            const old = document.createElement('div');
+            const label = document.createElement('span');
+            label.className = 'ssh-trust-details__label';
+            label.textContent = _('ssh_trust_old');
+            const list = document.createElement('ul');
+            list.className = 'ssh-trust-details__old';
+            detail.old_fingerprints.forEach(item => {
+                const li = document.createElement('li');
+                li.textContent = `${item.algorithm} ${item.fingerprint}`;
+                list.append(li);
+            });
+            old.append(label, list);
+            box.append(old);
+        }
+    }
+
+    function resetServerTrust() {
+        serverTrust.idx = null;
+        serverTrust.uid = '';
+        serverTrust.detail = null;
+        serverTrust.busy = false;
+        const details = document.getElementById('serverTrustDetails');
+        if (details) details.textContent = '';
+        document.getElementById('serverTrustConfirmRow').classList.add('hidden');
+        document.getElementById('serverTrustVerified').checked = false;
+        document.getElementById('serverTrustError').classList.add('hidden');
+        document.getElementById('serverTrustSpinner').classList.add('hidden');
+        document.getElementById('serverTrustAccept').disabled = true;
+        document.getElementById('serverTrustAcceptText').textContent = _('ssh_trust_save');
+        document.getElementById('serverTrustTitle').textContent = _('ssh_trust_changed');
+        document.getElementById('serverTrustWarning').textContent = _('ssh_trust_warning');
+    }
+
+    async function openServerTrust(idx) {
+        resetServerTrust();
+        serverTrust.idx = idx;
+        const card = document.getElementById(`server-${idx}`);
+        serverTrust.uid = card ? (card.dataset.uid || '') : '';
+        openModal('serverTrustModal');
+
+        const box = document.getElementById('serverTrustDetails');
+        const loading = document.createElement('span');
+        loading.className = 'text-muted';
+        loading.textContent = `${_('ssh_trust_inspect')}…`;
+        box.append(loading);
+
+        try {
+            const res = await fetch(serverTrustEndpoint(idx, 'inspect'), {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: { 'Accept': 'application/json' }
+            });
+            const data = await res.json().catch(() => ({}));
+            if (serverTrust.idx !== idx) return;
+            if (!res.ok) throw new Error(data.error || _('ssh_trust_error'));
+
+            serverTrust.detail = data;
+            renderServerTrust(data);
+            if (data.status === 'trusted') {
+                document.getElementById('serverTrustTitle').textContent = _('ssh_trust_trusted');
+                document.getElementById('serverTrustAcceptText').textContent = _('ssh_trust_trusted');
+                return;
+            }
+            document.getElementById('serverTrustTitle').textContent =
+                data.status === 'changed' ? _('ssh_trust_changed') : _('ssh_trust_unknown');
+            document.getElementById('serverTrustConfirmRow').classList.remove('hidden');
+        } catch (err) {
+            box.textContent = '';
+            const error = document.getElementById('serverTrustError');
+            error.textContent = err.message || _('ssh_trust_error');
+            error.classList.remove('hidden');
+        }
+    }
+
+    async function acceptServerTrust() {
+        if (serverTrust.busy || !serverTrust.detail || !serverTrust.detail.token) return;
+        if (!document.getElementById('serverTrustVerified').checked) return;
+
+        serverTrust.busy = true;
+        const idx = serverTrust.idx;
+        const accept = document.getElementById('serverTrustAccept');
+        const spinner = document.getElementById('serverTrustSpinner');
+        const text = document.getElementById('serverTrustAcceptText');
+        const error = document.getElementById('serverTrustError');
+        accept.disabled = true;
+        spinner.classList.remove('hidden');
+        text.textContent = _('connecting');
+        error.classList.add('hidden');
+
+        try {
+            const res = await fetch(serverTrustEndpoint(idx, 'confirm'), {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                body: JSON.stringify({ token: serverTrust.detail.token, confirmed: true })
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.error || _('ssh_trust_error'));
+            closeModal('serverTrustModal');
+            setServerTrustIcon(idx, 'trusted');
+            showToast(_('ssh_trust_trusted'), 'success');
+            pingServer(idx);
+        } catch (err) {
+            error.textContent = err.message || _('ssh_trust_error');
+            error.classList.remove('hidden');
+            accept.disabled = !document.getElementById('serverTrustVerified').checked;
+        } finally {
+            serverTrust.busy = false;
+            spinner.classList.add('hidden');
+            text.textContent = _('ssh_trust_save');
+        }
+    }
+
+    const serverTrustVerified = document.getElementById('serverTrustVerified');
+    if (serverTrustVerified) {
+        serverTrustVerified.addEventListener('change', () => {
+            document.getElementById('serverTrustAccept').disabled = !serverTrustVerified.checked;
+        });
     }
 
     /* ========== Ping indicators ========== */
@@ -448,6 +751,8 @@
             const res = await fetch(`/api/servers/${idx}/ping`, { credentials: 'same-origin' });
             const data = await res.json();
             dot.classList.remove('ping-pending');
+            const trustStatus = (data.ssh_trust_detail && data.ssh_trust_detail.status) || data.ssh_trust;
+            setServerTrustIcon(idx, trustStatus);
             if (data.alive && data.ssh_trust !== 'trusted') {
                 dot.classList.add('ping-fail');
                 const labels = {unknown: _('ssh_trust_unknown'), changed: _('ssh_trust_changed'), error: _('ssh_trust_error')};
