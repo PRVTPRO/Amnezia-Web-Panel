@@ -38,6 +38,7 @@ class FakeAWG:
         self.ipv6 = ''
         self.link_error = None
         self.status_sequence = None       # list of exit_link_status answers
+        self.handshake_age = 3
         self.fail_unlink = False
         self.egress = {'via_exit': '203.0.113.5', 'direct': '198.51.100.1'}
         self.egress_error = None
@@ -45,6 +46,10 @@ class FakeAWG:
         self.link_info = None          # what exit0.conf inside the container says
         self.link_info_error = None
         self.dns_error = None
+        self.backup_error = None
+        self.restore_error = None
+        self.conf_snapshot = None
+        self.applied_link = None
 
     def exit_prepare_keys(self, protocol):
         self.calls.append(('exit_prepare_keys', protocol))
@@ -61,13 +66,34 @@ class FakeAWG:
         self.events.append((self.host, 'exit_link'))
         if self.link_error:
             raise RuntimeError(self.link_error)
+        self.applied_link = dict(link)
+        # A successful apply brings a live handshake from the new peer.
+        self.handshake_age = 3
         return 'exit link up: 10.9.0.7/24 -> table 200'
+
+    def exit_backup_conf(self, protocol):
+        self.calls.append(('exit_backup_conf', protocol))
+        self.events.append((self.host, 'exit_backup_conf'))
+        if self.backup_error:
+            raise RuntimeError(self.backup_error)
+        self.conf_snapshot = dict(self.applied_link) if self.applied_link else {'snapshot': True}
+        return True
+
+    def exit_restore_conf(self, protocol):
+        self.calls.append(('exit_restore_conf', protocol))
+        self.events.append((self.host, 'exit_restore_conf'))
+        if self.restore_error:
+            raise RuntimeError(self.restore_error)
+        self.applied_link = dict(self.conf_snapshot) if self.conf_snapshot else None
+        return 'exit link restored'
 
     def exit_link_status(self, protocol, now=None):
         self.calls.append(('exit_link_status', protocol))
         if self.status_sequence:
             return self.status_sequence.pop(0)
-        return {'up': True, 'handshake_age': 3, 'rx_bytes': 1, 'tx_bytes': 2, 'endpoint': self.endpoint}
+        age = self.handshake_age
+        return {'up': age is not None and age < 300, 'handshake_age': age,
+                'rx_bytes': 1, 'tx_bytes': 2, 'endpoint': self.endpoint}
 
     def exit_link_info(self, protocol):
         self.calls.append(('exit_link_info', protocol))
@@ -102,6 +128,8 @@ class FakeExit:
         self.add_error = None
         self.remove_error = None
         self.next_ip = '10.9.0.7'
+        self.running = True
+        self.running_error = None
 
     def add_peer(self, peer_id, name, public_key):
         self.calls.append(('add_peer', peer_id, name, public_key))
@@ -118,6 +146,12 @@ class FakeExit:
             raise RuntimeError(self.remove_error)
         return True
 
+    def check_container_running(self, protocol='exit'):
+        self.calls.append(('check_container_running', protocol))
+        if self.running_error:
+            raise RuntimeError(self.running_error)
+        return bool(self.running)
+
 
 class Harness:
     """In-memory data.json plus one fake manager per host, injected the way app.py wires the real ones."""
@@ -129,6 +163,7 @@ class Harness:
         self.unreachable = set()
         self.sleeps = []
         self.events = []
+        self.now = 1_700_000_000.0
 
         async def sleep(seconds):
             self.sleeps.append(seconds)
@@ -150,6 +185,7 @@ class Harness:
             protocol_display_name=lambda p: {'awg2': 'AmneziaWG 2.0'}.get(p, p),
             find_server_by_uid=find_server_by_uid,
             sleep=sleep,
+            time_fn=lambda: self.now,
         )
 
     def _save(self, data):

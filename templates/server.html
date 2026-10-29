@@ -1125,7 +1125,7 @@
 
 <!-- ===== Exit Node: link an AWG instance ===== -->
 <div class="modal-backdrop" id="exitLinkModal">
-    <div class="modal" style="max-width:560px;">
+    <div class="modal" style="max-width:640px;">
         <div class="modal-header">
             <h2 class="modal-title" id="exitLinkTitle">{{ _('exit_link_title') }}</h2>
             <button class="modal-close" onclick="closeModal('exitLinkModal')">×</button>
@@ -1144,6 +1144,51 @@
                 <input type="checkbox" id="exitDnsViaExit" onchange="saveExitDns(this.checked)"> {{ _('exit_dns_via_exit') }}
             </label>
             <div class="form-hint">{{ _('exit_dns_via_exit_hint') }}</div>
+        </div>
+        <div class="form-group hidden" id="exitFailoverGroup" style="border-top:1px solid var(--border, rgba(127,127,127,.25)); padding-top:var(--space-md);">
+            <label class="form-label" style="display:flex; align-items:center; gap:var(--space-sm);">
+                <input type="checkbox" id="exitFailoverEnabled"> {{ _('exit_failover_enable') }}
+            </label>
+            <div class="form-hint">{{ _('exit_failover_hint') }}</div>
+            <div id="exitFailoverHealth" style="margin:var(--space-sm) 0;"></div>
+            <label class="form-label">{{ _('exit_failover_backups') }}</label>
+            <div id="exitFailoverBackups"></div>
+            <div style="display:flex; gap:var(--space-sm); margin-top:var(--space-sm);">
+                <select class="form-input" id="exitFailoverAddSelect"></select>
+                <button type="button" class="btn btn-secondary" onclick="addExitFailoverBackup()">{{ _('exit_failover_add') }}</button>
+            </div>
+            <div class="form-hint">{{ _('exit_failover_backups_hint') }}</div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:var(--space-sm); margin-top:var(--space-md);">
+                <div>
+                    <label class="form-label">{{ _('exit_failover_interval') }}</label>
+                    <input class="form-input" type="number" id="exitFailoverInterval" min="10" max="3600" value="45">
+                </div>
+                <div>
+                    <label class="form-label">{{ _('exit_failover_threshold') }}</label>
+                    <input class="form-input" type="number" id="exitFailoverThreshold" min="1" max="20" value="3">
+                </div>
+                <div>
+                    <label class="form-label">{{ _('exit_failover_failback_stable') }}</label>
+                    <input class="form-input" type="number" id="exitFailoverFailbackStable" min="30" max="86400" value="180">
+                </div>
+                <div>
+                    <label class="form-label">{{ _('exit_failover_handshake_age') }}</label>
+                    <input class="form-input" type="number" id="exitFailoverHandshakeAge" min="60" max="900" value="240">
+                </div>
+            </div>
+            <label class="form-label" style="display:flex; align-items:center; gap:var(--space-sm); margin-top:var(--space-sm);">
+                <input type="checkbox" id="exitFailoverAutoFailback" checked> {{ _('exit_failover_auto_failback') }}
+            </label>
+            <label class="form-label" style="display:flex; align-items:center; gap:var(--space-sm);">
+                <input type="checkbox" id="exitFailoverProbeEgress" checked> {{ _('exit_failover_probe_egress') }}
+            </label>
+            <div class="form-hint">{{ _('exit_failover_probe_hint') }}</div>
+            <div style="display:flex; gap:var(--space-sm); margin-top:var(--space-sm);">
+                <button type="button" class="btn btn-secondary" onclick="saveExitFailover()">{{ _('exit_failover_save') }}</button>
+                <button type="button" class="btn btn-secondary" onclick="runExitFailoverCheck()">{{ _('exit_failover_check_now') }}</button>
+            </div>
+            <div class="form-label" style="margin-top:var(--space-md);">{{ _('exit_failover_events') }}</div>
+            <div id="exitFailoverEvents" class="form-hint"></div>
         </div>
         <div class="modal-footer">
             <button class="btn btn-secondary" onclick="closeModal('exitLinkModal')">{{ _('cancel') }}</button>
@@ -2223,7 +2268,16 @@
                     grid += `<div class="protocol-info-item"><span class="protocol-info-label">${_('connections')}</span><span class="protocol-info-value">${info.clients_count}</span></div>`;
                 }
                 if (!isService && info.exit_link) {
-                    grid += `<div class="protocol-info-item"><span class="protocol-info-label">${_('exit_link_via')}</span><span class="protocol-info-value">${escapeHtml(info.exit_link.exit_name || '')} ${exitStatusBadge(info.exit_link_status, info.exit_link)}</span></div>`;
+                    let via = escapeHtml(info.exit_link.exit_name || '');
+                    if (info.exit_failover && info.exit_failover.enabled) {
+                        const activeName = (info.exit_failover.active && info.exit_failover.active.name) || info.exit_link.exit_name || '';
+                        const primaryName = (info.exit_failover.primary && info.exit_failover.primary.name) || '';
+                        via = escapeHtml(activeName);
+                        if (primaryName && primaryName !== activeName) {
+                            via += ` · ${_('exit_failover_backup_of').replace('{name}', escapeHtml(primaryName))}`;
+                        }
+                    }
+                    grid += `<div class="protocol-info-item"><span class="protocol-info-label">${_('exit_link_via')}</span><span class="protocol-info-value">${via} ${exitStatusBadge(info.exit_link_status, info.exit_link)}</span></div>`;
                 }
                 infoGrid.innerHTML = grid;
             }
@@ -3279,7 +3333,9 @@
     let currentExitLinkState = null;
     const EXIT_LINK_ERROR_KEYS = ['exit_no_handshake', 'exit_mtu_too_big', 'exit_self', 'exit_legacy_obfuscation',
         'exit_not_found', 'exit_apply_failed', 'exit_in_use', 'exit_egress_failed', 'exit_dns_needs_dns',
-        'not_linked'];
+        'not_linked', 'failover_no_backups'];
+    let currentExitFailoverBackups = [];
+    let currentExitNodes = [];
 
     function exitStatusBadge(status, link) {
         const badge = (cls, text, title = '') => `<span class="badge ${cls}" title="${escapeHtml(title)}"><span class="badge-dot"></span> ${escapeHtml(text)}</span>`;
@@ -3346,8 +3402,10 @@
         unlinkBtn.classList.toggle('hidden', !link);
         document.getElementById('exitEgressBtn').classList.toggle('hidden', !link);
         document.getElementById('exitDnsGroup').classList.toggle('hidden', !link);
+        document.getElementById('exitFailoverGroup').classList.toggle('hidden', !link);
         document.getElementById('exitDnsViaExit').checked = !!(link && link.dns_via_exit);
         repairBtn.classList.toggle('hidden', !(link && (link.stale || !(state.exit_link_status && state.exit_link_status.up))));
+        renderExitFailover(state);
         if (!link) {
             el.innerHTML = `<div class="form-hint">${_('exit_link_none')}</div>`;
         } else {
@@ -3381,8 +3439,9 @@
                 apiCall(`/api/servers/${SERVER_ID}/exit-link/status`, 'POST', { protocol: proto }),
             ]);
             currentExitLinkState = state;
+            currentExitNodes = nodes.exit_nodes || [];
             const own = document.body.dataset.serverUid || '';
-            const candidates = (nodes.exit_nodes || []).filter(n => n.uid !== own);
+            const candidates = currentExitNodes.filter(n => n.uid !== own);
             if (!candidates.length) {
                 hint.textContent = _('exit_no_exit_nodes');
             }
@@ -3485,6 +3544,158 @@
 
     async function repairExitLink() {
         await exitLinkRequest('/relink', { protocol: currentExitLinkProto }, 'exit_link_saved');
+    }
+
+    function exitFailoverNodes() {
+        const own = document.body.dataset.serverUid || '';
+        const primary = (currentExitLinkState && currentExitLinkState.exit_link && currentExitLinkState.exit_link.exit_uid)
+            || (currentExitLinkState && currentExitLinkState.exit_failover && currentExitLinkState.exit_failover.primary && currentExitLinkState.exit_failover.primary.uid)
+            || '';
+        return (currentExitNodes || []).filter(n => n.uid && n.uid !== own && n.uid !== primary);
+    }
+
+    function renderExitFailover(state) {
+        const fo = (state && state.exit_failover) || {};
+        const linked = !!(state && state.exit_link);
+        if (!linked) {
+            currentExitFailoverBackups = [];
+            return;
+        }
+        document.getElementById('exitFailoverEnabled').checked = !!fo.enabled;
+        document.getElementById('exitFailoverInterval').value = fo.check_interval_seconds || 45;
+        document.getElementById('exitFailoverThreshold').value = fo.failure_threshold || 3;
+        document.getElementById('exitFailoverFailbackStable').value = fo.failback_stable_seconds || 180;
+        document.getElementById('exitFailoverHandshakeAge').value = fo.handshake_max_age_seconds || 240;
+        document.getElementById('exitFailoverAutoFailback').checked = fo.auto_failback !== false;
+        document.getElementById('exitFailoverProbeEgress').checked = fo.probe_egress !== false;
+        currentExitFailoverBackups = (fo.backups || []).map(b => b.uid).filter(Boolean);
+        renderExitFailoverBackupList();
+        renderExitFailoverHealth(fo);
+        renderExitFailoverEvents(fo.events || []);
+    }
+
+    function renderExitFailoverBackupList() {
+        const box = document.getElementById('exitFailoverBackups');
+        const nodes = exitFailoverNodes();
+        const byUid = {};
+        nodes.forEach(n => { byUid[n.uid] = n; });
+        (currentExitNodes || []).forEach(n => { byUid[n.uid] = byUid[n.uid] || n; });
+        if (!currentExitFailoverBackups.length) {
+            box.innerHTML = `<div class="form-hint">${_('exit_failover_no_backups')}</div>`;
+        } else {
+            box.innerHTML = currentExitFailoverBackups.map((uid, idx) => {
+                const n = byUid[uid] || { uid, name: uid, host: '' };
+                const label = escapeHtml(`${n.name || uid}${n.host ? ' (' + n.host + ')' : ''}`);
+                return `<div style="display:flex; align-items:center; gap:var(--space-sm); margin-top:4px;">
+                    <span style="flex:1">${idx + 1}. ${label}</span>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="moveExitFailoverBackup(${idx}, -1)">↑</button>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="moveExitFailoverBackup(${idx}, 1)">↓</button>
+                    <button type="button" class="btn btn-danger btn-sm" onclick="removeExitFailoverBackup(${idx})">×</button>
+                </div>`;
+            }).join('');
+        }
+        const add = document.getElementById('exitFailoverAddSelect');
+        add.innerHTML = '';
+        nodes.filter(n => !currentExitFailoverBackups.includes(n.uid)).forEach(n => {
+            const opt = document.createElement('option');
+            opt.value = n.uid;
+            opt.textContent = `${n.name} (${n.host}:${n.port || '?'})${n.obfuscation ? ' [AWG]' : ''}`;
+            add.appendChild(opt);
+        });
+        add.disabled = !add.options.length;
+    }
+
+    function addExitFailoverBackup() {
+        const uid = document.getElementById('exitFailoverAddSelect').value;
+        if (!uid || currentExitFailoverBackups.includes(uid)) return;
+        currentExitFailoverBackups.push(uid);
+        renderExitFailoverBackupList();
+    }
+
+    function removeExitFailoverBackup(idx) {
+        currentExitFailoverBackups.splice(idx, 1);
+        renderExitFailoverBackupList();
+    }
+
+    function moveExitFailoverBackup(idx, delta) {
+        const next = idx + delta;
+        if (next < 0 || next >= currentExitFailoverBackups.length) return;
+        const list = currentExitFailoverBackups;
+        const tmp = list[idx];
+        list[idx] = list[next];
+        list[next] = tmp;
+        renderExitFailoverBackupList();
+    }
+
+    function renderExitFailoverHealth(fo) {
+        const el = document.getElementById('exitFailoverHealth');
+        if (!fo || !fo.enabled) {
+            el.innerHTML = `<div class="form-hint">${_('exit_failover_disabled')}</div>`;
+            return;
+        }
+        const st = fo.state || {};
+        const active = (fo.active && fo.active.name) || st.active_uid || '—';
+        const primary = (fo.primary && fo.primary.name) || st.primary_uid || '—';
+        const ok = st.last_ok;
+        const reason = st.last_reason ? ` · ${escapeHtml(st.last_reason)}` : '';
+        const health = ok === true ? _('exit_failover_healthy') : (ok === false ? _('exit_failover_unhealthy') : _('exit_status_down'));
+        const last = st.last_check_at ? escapeHtml(st.last_check_at) : '—';
+        el.innerHTML = `<div>${_('exit_failover_active').replace('{name}', escapeHtml(active))}
+            <span class="badge ${ok === true ? 'badge-success' : (ok === false ? 'badge-danger' : 'badge-secondary')}"><span class="badge-dot"></span> ${escapeHtml(health)}</span>${reason}</div>
+            <div class="form-hint">${_('exit_failover_primary').replace('{name}', escapeHtml(primary))} · ${_('exit_failover_last_check').replace('{at}', last)} · ${_('exit_failover_failures').replace('{n}', String(st.consecutive_failures || 0))}</div>`;
+    }
+
+    function renderExitFailoverEvents(events) {
+        const el = document.getElementById('exitFailoverEvents');
+        if (!events || !events.length) {
+            el.textContent = _('exit_failover_events_empty');
+            return;
+        }
+        const nodes = {};
+        (currentExitNodes || []).forEach(n => { nodes[n.uid] = n.name || n.host || n.uid; });
+        const nameOf = uid => escapeHtml(nodes[uid] || uid || '—');
+        el.innerHTML = events.slice(0, 12).map(ev => {
+            const action = escapeHtml(ev.action || '');
+            const reason = ev.reason ? ` · ${escapeHtml(ev.reason)}` : '';
+            return `<div>${escapeHtml(ev.at || '')} — ${action}: ${nameOf(ev.from_uid)} → ${nameOf(ev.to_uid)}${reason}</div>`;
+        }).join('');
+    }
+
+    async function saveExitFailover() {
+        if (!currentExitLinkProto) return;
+        try {
+            const res = await apiCall(`/api/servers/${SERVER_ID}/exit-link/failover`, 'POST', {
+                protocol: currentExitLinkProto,
+                enabled: document.getElementById('exitFailoverEnabled').checked,
+                backup_uids: currentExitFailoverBackups.slice(),
+                check_interval_seconds: Number(document.getElementById('exitFailoverInterval').value),
+                failure_threshold: Number(document.getElementById('exitFailoverThreshold').value),
+                failback_stable_seconds: Number(document.getElementById('exitFailoverFailbackStable').value),
+                handshake_max_age_seconds: Number(document.getElementById('exitFailoverHandshakeAge').value),
+                auto_failback: document.getElementById('exitFailoverAutoFailback').checked,
+                probe_egress: document.getElementById('exitFailoverProbeEgress').checked,
+            });
+            if (currentExitLinkState) currentExitLinkState.exit_failover = res.exit_failover;
+            renderExitFailover(currentExitLinkState || { exit_link: true, exit_failover: res.exit_failover });
+            showToast(_('exit_failover_saved'), 'success');
+        } catch (err) {
+            showToast(_('error') + ': ' + exitLinkErrorText(err), 'error');
+        }
+    }
+
+    async function runExitFailoverCheck() {
+        if (!currentExitLinkProto) return;
+        try {
+            const res = await apiCall(`/api/servers/${SERVER_ID}/exit-link/failover/check`, 'POST',
+                { protocol: currentExitLinkProto });
+            if (res.exit_failover && currentExitLinkState) currentExitLinkState.exit_failover = res.exit_failover;
+            renderExitFailover(currentExitLinkState || { exit_link: true, exit_failover: res.exit_failover });
+            const action = res.action && res.action !== 'stay' && res.action !== 'noop' ? res.action : 'stay';
+            showToast(_('exit_failover_checked').replace('{action}', action), 'info');
+            if (res.action === 'failover' || res.action === 'failback') setTimeout(() => checkServer(), 500);
+        } catch (err) {
+            showToast(_('error') + ': ' + exitLinkErrorText(err), 'error');
+        }
     }
 
     async function openSocks5Settings(proto = 'socks5') {

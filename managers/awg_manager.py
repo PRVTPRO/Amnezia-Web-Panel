@@ -146,6 +146,7 @@ AWG_QUICK_FORCE_USERSPACE_PATCH = (
 # shell block runs at container start and when the panel (un)links live.
 EXIT_DIR = '/opt/amnezia/awg/exit'
 EXIT_CONF = f'{EXIT_DIR}/exit0.conf'
+EXIT_CONF_BACKUP = f'{EXIT_DIR}/exit0.conf.failover-bak'
 EXIT_KEY = f'{EXIT_DIR}/exit_private.key'
 EXIT_IFACE = 'exit0'
 EXIT_TABLE = 200
@@ -1994,6 +1995,35 @@ x_exit_sync() {
         """Tear the link down live and delete exit0.conf; the key pair stays
         so a re-link reuses the public key already known to the exit."""
         return self._exit_apply(protocol_type, teardown=True)
+
+    def exit_backup_conf(self, protocol_type):
+        """Snapshot live exit0.conf so a failed switch can restore routing
+        instead of tearing the link down. Raises when there is no link file."""
+        container_name = self._container_name(protocol_type)
+        out, err, code = self.ssh.run_sudo_command(
+            f"docker exec -i {container_name} sh -c 'test -f {EXIT_CONF} || exit 9; "
+            f"cp -p {EXIT_CONF} {EXIT_CONF_BACKUP} && chmod 600 {EXIT_CONF_BACKUP}'"
+        )
+        if code == 9:
+            raise RuntimeError('This instance has no exit link file')
+        if code != 0:
+            raise RuntimeError(f"Failed to snapshot exit0.conf: {err or out or f'SSH exit code {code}'}")
+        return True
+
+    def exit_restore_conf(self, protocol_type):
+        """Put the failover snapshot back and re-apply routing. Raises if the
+        snapshot is missing or apply fails — the caller must not record a
+        switch whose clients would still leave via eth0."""
+        container_name = self._container_name(protocol_type)
+        out, err, code = self.ssh.run_sudo_command(
+            f"docker exec -i {container_name} sh -c 'test -f {EXIT_CONF_BACKUP} || exit 9; "
+            f"cp -p {EXIT_CONF_BACKUP} {EXIT_CONF} && chmod 600 {EXIT_CONF}'"
+        )
+        if code == 9:
+            raise RuntimeError('No failover snapshot to restore')
+        if code != 0:
+            raise RuntimeError(f"Failed to restore exit0.conf: {err or out or f'SSH exit code {code}'}")
+        return self._exit_apply(protocol_type)
 
     def exit_link_info(self, protocol_type):
         """What the container believes it is linked to, or None. Reads only

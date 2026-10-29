@@ -79,6 +79,21 @@ class ExitNodeUiWiringTests(unittest.TestCase):
         self.assertIn('id="awgSetMtuExitHint"', self.page)
         self.assertIn("_('awg_mtu_exit_hint').replace('{exit_mtu}', data.exit_mtu)", self.page)
 
+    def test_failover_controls_only_when_linked(self):
+        self.assertIn('id="exitFailoverGroup"', self.page)
+        self.assertIn('id="exitFailoverEnabled"', self.page)
+        self.assertIn('id="exitFailoverBackups"', self.page)
+        self.assertIn('id="exitFailoverEvents"', self.page)
+        self.assertIn("exit-link/failover", self.page)
+        self.assertIn("exit-link/failover/check", self.page)
+        self.assertIn("document.getElementById('exitFailoverGroup').classList.toggle('hidden', !link);", self.page)
+        for fn in ('saveExitFailover', 'runExitFailoverCheck', 'addExitFailoverBackup',
+                   'renderExitFailover', 'renderExitFailoverEvents'):
+            self.assertRegex(self.page, rf"function {fn}\(")
+        events = self.page[self.page.index('function renderExitFailoverEvents'):self.page.index('async function saveExitFailover')]
+        self.assertIn('escapeHtml', events)
+        self.assertNotRegex(events, r'\$\{ev\.[a-z_]+\}')
+
     def test_restore_reports_the_exit_link_outcome(self):
         body = self.page[self.page.index('backups/restore'):][:1600]
         for key in ('exit_entries_relinked', 'exit_link_restored'):
