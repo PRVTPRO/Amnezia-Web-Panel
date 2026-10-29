@@ -176,14 +176,95 @@ build_map() {
 }
 
 apply_jumps() {
-    iptables -C INPUT -j "$IN_CHAIN" 2>/dev/null || iptables -I INPUT 1 -j "$IN_CHAIN"
-    iptables -C OUTPUT -j "$OUT_CHAIN" 2>/dev/null || iptables -I OUTPUT 1 -j "$OUT_CHAIN"
-    iptables -C FORWARD -j "$OUT_CHAIN" 2>/dev/null || iptables -I FORWARD 1 -j "$OUT_CHAIN"
-    if have6; then
-        ip6tables -C INPUT -j "$IN_CHAIN" 2>/dev/null || ip6tables -I INPUT 1 -j "$IN_CHAIN" 2>/dev/null
-        ip6tables -C OUTPUT -j "$OUT_CHAIN" 2>/dev/null || ip6tables -I OUTPUT 1 -j "$OUT_CHAIN" 2>/dev/null
-        ip6tables -C FORWARD -j "$OUT_CHAIN" 2>/dev/null || ip6tables -I FORWARD 1 -j "$OUT_CHAIN" 2>/dev/null
+    local rc=0
+    if ! iptables -C INPUT -j "$IN_CHAIN" 2>/dev/null; then
+        iptables -I INPUT 1 -j "$IN_CHAIN" || { log "JUMP-FAIL INPUT -> $IN_CHAIN"; rc=1; }
     fi
+    if ! iptables -C OUTPUT -j "$OUT_CHAIN" 2>/dev/null; then
+        iptables -I OUTPUT 1 -j "$OUT_CHAIN" || { log "JUMP-FAIL OUTPUT -> $OUT_CHAIN"; rc=1; }
+    fi
+    if ! iptables -C FORWARD -j "$OUT_CHAIN" 2>/dev/null; then
+        iptables -I FORWARD 1 -j "$OUT_CHAIN" || { log "JUMP-FAIL FORWARD -> $OUT_CHAIN"; rc=1; }
+    fi
+    if have6; then
+        ip6tables -C INPUT -j "$IN_CHAIN" 2>/dev/null || ip6tables -I INPUT 1 -j "$IN_CHAIN" 2>/dev/null || { log "JUMP-FAIL v6 INPUT -> $IN_CHAIN"; rc=1; }
+        ip6tables -C OUTPUT -j "$OUT_CHAIN" 2>/dev/null || ip6tables -I OUTPUT 1 -j "$OUT_CHAIN" 2>/dev/null || { log "JUMP-FAIL v6 OUTPUT -> $OUT_CHAIN"; rc=1; }
+        ip6tables -C FORWARD -j "$OUT_CHAIN" 2>/dev/null || ip6tables -I FORWARD 1 -j "$OUT_CHAIN" 2>/dev/null || { log "JUMP-FAIL v6 FORWARD -> $OUT_CHAIN"; rc=1; }
+    fi
+    return "$rc"
+}
+
+set_count() { ipset list "$1" 2>/dev/null | grep -c '^[0-9]' || true; }
+
+# Verify the contour is actually usable, not merely "installed". A zero set
+# or a missing iptables jump means the app did nothing even though the
+# installer exited successfully; report that as a hard failure.
+cmd_verify() {
+    local fail=0
+    local st in4 in6 out4 out6
+    st=$(get_state)
+    in4=$(set_count "$IN_SET4"); in6=$(set_count "$IN_SET6")
+    out4=$(set_count "$OUT_SET4"); out6=$(set_count "$OUT_SET6")
+
+    if [ "$st" != "on" ]; then
+        echo "FAIL: state=$st (expected on)" >&2
+        fail=1
+    fi
+    echo "sets: in4=$in4 in6=$in6 out4=$out4 out6=$out6"
+    if [ "$in4" -le 0 ]; then
+        echo "FAIL: $IN_SET4 is empty - C24Be lists were not loaded" >&2
+        fail=1
+    fi
+    if [ "$out4" -le 0 ]; then
+        echo "FAIL: $OUT_SET4 is empty - C24Be lists were not loaded" >&2
+        fail=1
+    fi
+    if ! iptables -C INPUT -j "$IN_CHAIN" 2>/dev/null; then
+        echo "FAIL: missing iptables INPUT jump to $IN_CHAIN" >&2
+        fail=1
+    fi
+    if ! iptables -C OUTPUT -j "$OUT_CHAIN" 2>/dev/null; then
+        echo "FAIL: missing iptables OUTPUT jump to $OUT_CHAIN" >&2
+        fail=1
+    fi
+    if ! iptables -C FORWARD -j "$OUT_CHAIN" 2>/dev/null; then
+        echo "FAIL: missing iptables FORWARD jump to $OUT_CHAIN" >&2
+        fail=1
+    fi
+
+    if block_flag block_in; then
+        if ! iptables -S "$IN_CHAIN" 2>/dev/null | grep -q -- '--match-set'; then
+            echo "FAIL: $IN_CHAIN has no blocking rule" >&2
+            fail=1
+        fi
+    fi
+    if block_flag block_out; then
+        if ! iptables -S "$OUT_CHAIN" 2>/dev/null | grep -q -- '--match-set'; then
+            echo "FAIL: $OUT_CHAIN has no blocking rule" >&2
+            fail=1
+        fi
+    fi
+
+    if have6; then
+        if [ "$in6" -gt 0 ] && ! ip6tables -C INPUT -j "$IN_CHAIN" 2>/dev/null; then
+            echo "FAIL: missing ip6tables INPUT jump to $IN_CHAIN" >&2
+            fail=1
+        fi
+        if [ "$out6" -gt 0 ] && ! ip6tables -C OUTPUT -j "$OUT_CHAIN" 2>/dev/null; then
+            echo "FAIL: missing ip6tables OUTPUT jump to $OUT_CHAIN" >&2
+            fail=1
+        fi
+        if [ "$out6" -gt 0 ] && ! ip6tables -C FORWARD -j "$OUT_CHAIN" 2>/dev/null; then
+            echo "FAIL: missing ip6tables FORWARD jump to $OUT_CHAIN" >&2
+            fail=1
+        fi
+    fi
+
+    if [ "$fail" -eq 0 ]; then
+        echo "OK: RKN block active (in4=$in4 out4=$out4)"
+        return 0
+    fi
+    return 1
 }
 
 remove_jumps() {
@@ -265,21 +346,35 @@ build_chains() {
 
 cmd_update() {
     load_config
-    swap_list "$URL_IN4" "$IN_SET4" inet
+    local failed=0
+    swap_list "$URL_IN4" "$IN_SET4" inet || failed=1
     if have6; then
-        swap_list "$URL_IN6" "$IN_SET6" inet6
+        swap_list "$URL_IN6" "$IN_SET6" inet6 || failed=1
     else
         log "SKIP $IN_SET6: на хосте нет IPv6"
     fi
-    swap_list "$URL_OUT4" "$OUT_SET4" inet
+    swap_list "$URL_OUT4" "$OUT_SET4" inet || failed=1
     if have6; then
-        swap_list "$URL_OUT6" "$OUT_SET6" inet6
+        swap_list "$URL_OUT6" "$OUT_SET6" inet6 || failed=1
     else
         log "SKIP $OUT_SET6: на хосте нет IPv6"
     fi
     mkdir -p "$CONF_DIR"
-    build_map "$URL_MAP" "$CONF_DIR/nets.map"
-    date -u +%Y-%m-%dT%H:%M:%SZ > "$CONF_DIR/last_update"
+    build_map "$URL_MAP" "$CONF_DIR/nets.map" || log "MAP-FAIL: старый nets.map сохранён"
+
+    local in4 out4
+    in4=$(set_count "$IN_SET4"); out4=$(set_count "$OUT_SET4")
+    if [ "$in4" -le 0 ] || [ "$out4" -le 0 ]; then
+        log "UPDATE-FAIL: critical sets empty (in4=$in4 out4=$out4)"
+        echo "ERROR: C24Be lists are empty (in4=$in4 out4=$out4). Check the server's access to raw.githubusercontent.com." >&2
+        return 1
+    fi
+    if [ "$failed" -eq 0 ]; then
+        date -u +%Y-%m-%dT%H:%M:%SZ > "$CONF_DIR/last_update"
+    else
+        log "UPDATE-WARN: some lists failed, non-empty sets kept, last_update not changed"
+    fi
+    return 0
 }
 
 cmd_on() {
@@ -287,12 +382,26 @@ cmd_on() {
     if have6; then create_set "$IN_SET6" inet6; fi
     create_set "$OUT_SET4" inet
     if have6; then create_set "$OUT_SET6" inet6; fi
-    # Если наборы пустые (первый запуск / после ребута) — подгрузить
-    local n; n=$(ipset list "$IN_SET4" 2>/dev/null | grep -c '^[0-9]')
-    [ "$n" -lt 1 ] && cmd_update
+
+    local in4 out4
+    in4=$(set_count "$IN_SET4"); out4=$(set_count "$OUT_SET4")
+    if [ "$in4" -lt 1 ] || [ "$out4" -lt 1 ]; then
+        if ! cmd_update; then
+            set_state off
+            die "cannot enable: C24Be lists are empty; check server access to raw.githubusercontent.com"
+        fi
+    fi
+
     build_chains
-    apply_jumps
+    if ! apply_jumps; then
+        set_state off
+        die "cannot enable: failed to install iptables jumps"
+    fi
     set_state on
+    if ! cmd_verify; then
+        set_state off
+        die "cannot enable: verification failed (lists or iptables rules are not active)"
+    fi
     log "ON"
     echo "rkn-extra-block: ON"
     cmd_status_short
@@ -301,11 +410,16 @@ cmd_on() {
 cmd_off() {
     remove_jumps
     set_state off
+    if iptables -C INPUT -j "$IN_CHAIN" 2>/dev/null \
+            || iptables -C OUTPUT -j "$OUT_CHAIN" 2>/dev/null \
+            || iptables -C FORWARD -j "$OUT_CHAIN" 2>/dev/null; then
+        log "OFF-FAIL: iptables jumps are still present"
+        echo "ERROR: could not remove all iptables jumps" >&2
+        return 1
+    fi
     log "OFF"
     echo "rkn-extra-block: OFF (наборы ipset сохранены, повторное включение мгновенное)"
 }
-
-set_count() { ipset list "$1" 2>/dev/null | grep -c '^[0-9]'; }
 
 cmd_status() {
     local st; st=$(get_state)
@@ -319,6 +433,11 @@ cmd_status() {
     echo "  last_update: $(cat "$CONF_DIR/last_update" 2>/dev/null || echo '—')"
     if iptables -C INPUT -j "$IN_CHAIN" 2>/dev/null; then echo "  правила: iptables INPUT/OUTPUT/FORWARD — вешаются"; else echo "  правила: СНЯТЫ (блокировка неактивна)"; fi
     have6 && ip6tables -C INPUT -j "$IN_CHAIN" 2>/dev/null && echo "  правила v6: вешаются"
+    if [ "$st" = "on" ]; then
+        if cmd_verify >/dev/null 2>&1; then echo "  health: ok"; else echo "  health: failed"; fi
+    else
+        echo "  health: off"
+    fi
 }
 
 cmd_status_short() {
@@ -328,14 +447,39 @@ cmd_status_short() {
 cmd_boot() {
     load_config
     ensure_deps
-    cmd_update
+    if ! cmd_update; then
+        log "BOOT-FAIL: lists empty, rules not applied"
+        exit 1
+    fi
     if [ "$(get_state)" = "on" ]; then
         build_chains
-        apply_jumps
+        if ! apply_jumps; then
+            log "BOOT-FAIL: iptables jumps could not be restored"
+            exit 1
+        fi
+        if ! cmd_verify; then
+            log "BOOT-FAIL: verification failed"
+            exit 1
+        fi
         log "BOOT: восстановлено состояние ON"
     else
         log "BOOT: состояние OFF, только наборы обновлены"
     fi
+}
+
+# Re-attach jumps and verify only when the contour is supposed to be on.
+ensure_live_if_on() {
+    if [ "$(get_state)" = "on" ]; then
+        if ! apply_jumps; then
+            log "LIVE-FAIL: iptables jumps could not be restored"
+            return 1
+        fi
+        if ! cmd_verify; then
+            log "LIVE-FAIL: verification failed"
+            return 1
+        fi
+    fi
+    return 0
 }
 
 cmd_log() {
@@ -346,6 +490,11 @@ cmd_log() {
             echo on > "$CONF_DIR/log_in"
             echo on > "$CONF_DIR/log_out"
             build_chains   # пересобрать цепочки с LOG-правилами (прыжки не трогаем)
+            if ! ensure_live_if_on; then
+                set_state off
+                log "LOG-FAIL: logging change was not applied"
+                return 1
+            fi
             log "LOGGING ON"
             echo "Журналирование ВКЛ — срабатывания: journalctl -k -g RKN_EXTRA (лимит 10/мин)"
             ;;
@@ -355,6 +504,11 @@ cmd_log() {
             echo off > "$CONF_DIR/log_in"
             echo off > "$CONF_DIR/log_out"
             build_chains
+            if ! ensure_live_if_on; then
+                set_state off
+                log "LOG-FAIL: logging change was not applied"
+                return 1
+            fi
             log "LOGGING OFF"
             echo "Журналирование ВЫКЛ"
             ;;
@@ -380,6 +534,11 @@ cmd_set() {
         esac
     done
     build_chains
+    if ! ensure_live_if_on; then
+        set_state off
+        log "SET-FAIL: flags were saved but rules are not active"
+        return 1
+    fi
     log "SET: $*"
     flags_line
 }
@@ -495,12 +654,13 @@ case "${1:-}" in
     on)      lock; ensure_deps; cmd_on ;;
     off)     lock; ensure_deps; cmd_off ;;
     status)  cmd_status ;;
-    update)  lock; ensure_deps; cmd_update; cmd_status_short ;;
+    verify)  ensure_deps; cmd_verify ;;
+    update)  lock; ensure_deps; cmd_update || exit $?; cmd_status_short ;;
     boot)    lock; cmd_boot ;;
     log)     lock; ensure_deps; shift; cmd_log "${1:-status}" ;;
     scan)    shift; cmd_scan "$@" ;;
     set)     lock; ensure_deps; shift; cmd_set "$@" ;;
     clearscans) lock; cmd_clearscans ;;
     uninstall) lock; ensure_deps; cmd_uninstall ;;
-    *) echo "Использование: rkn-extra-block {on|off|status|update|boot|set флаг=on|off...|log on|off|status|scan [файлы...]|clearscans|uninstall}" >&2; exit 2 ;;
+    *) echo "Использование: rkn-extra-block {on|off|status|verify|update|boot|set флаг=on|off...|log on|off|status|scan [файлы...]|clearscans|uninstall}" >&2; exit 2 ;;
 esac

@@ -1079,7 +1079,24 @@
                 body.telemt_max_conns = parseInt(document.getElementById('ucTelemtMaxConns').value) || null;
             }
 
+            // Keep the same operation across a timeout/reload. It is not a
+            // credential. Clear it only after a confirmed successful response.
+            const operationKey = 'peer-create:' + JSON.stringify([
+                currentUserId, body.server_id, body.protocol, body.name]);
+            try {
+                let operationId = sessionStorage.getItem(operationKey);
+                if (!operationId) {
+                    const bytes = crypto.getRandomValues(new Uint8Array(16));
+                    bytes[6] = (bytes[6] & 15) | 64;
+                    bytes[8] = (bytes[8] & 63) | 128;
+                    const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+                    operationId = `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+                    sessionStorage.setItem(operationKey, operationId);
+                }
+                body.operation_id = operationId;
+            } catch (e) { /* Backend uses a stable request identity fallback. */ }
             const result = await apiCall(`/api/users/${currentUserId}/connections/add`, 'POST', body);
+            try { sessionStorage.removeItem(operationKey); } catch (e) {}
             showToast(_('connection_created').replace('{}', body.name), 'success');
             closeModal('addUserConnModal');
 
@@ -1169,8 +1186,8 @@
                             <button class="btn btn-secondary btn-sm btn-icon" onclick="renameUserConnection(${sid}, '${escapeJs(c.client_id)}', '${escapeJs(proto)}', '${escapeJs(name)}')" title="${_('rename')}">${ICON_PENCIL}</button>
                             <button class="btn btn-secondary btn-sm btn-icon" onclick="showUserConnectionConfig(${sid}, '${escapeJs(c.client_id)}', '${escapeJs(proto)}', '${escapeJs(name)}')" title="${_('config')}">📄</button>
                             <button class="btn btn-secondary btn-sm btn-icon ${toggleCls}" onclick="toggleUserConnection(${sid}, '${escapeJs(c.client_id)}', '${escapeJs(proto)}', ${!enabled}, this)" title="${toggleTitle}">💡</button>
-                            <button class="btn btn-secondary btn-sm btn-icon" onclick="unlinkUserConnection(${sid}, '${escapeJs(c.client_id)}', '${escapeJs(proto)}', '${escapeJs(name)}')" title="${_('unlink_key_title').replace('{}', name).replace('{}', currentConnsUsername)}">✂️</button>
-                            <button class="btn btn-danger btn-sm btn-icon" onclick="removeUserConnection(${sid}, '${escapeJs(c.client_id)}', '${escapeJs(proto)}', '${escapeJs(name)}')" title="${_('delete')}">${ICON_TRASH}</button>
+                            <button class="btn btn-secondary btn-sm btn-icon" onclick="unlinkUserConnection(${sid}, '${escapeJs(c.client_id)}', '${escapeJs(proto)}', '${escapeJs(name)}', ${enabled})" title="${_('unlink_key_title').replace('{}', name).replace('{}', currentConnsUsername)}">✂️</button>
+                            <button class="btn btn-danger btn-sm btn-icon" onclick="removeUserConnection(${sid}, '${escapeJs(c.client_id)}', '${escapeJs(proto)}', '${escapeJs(name)}', ${enabled})" title="${_('delete')}">${ICON_TRASH}</button>
                         </div>
                     </div>
                 `;
@@ -1180,16 +1197,34 @@
         }
     }
 
-    async function unlinkUserConnection(serverId, clientId, proto, name) {
+    async function unlinkUserConnection(serverId, clientId, proto, name, enabled) {
         if (!confirm(_('unlink_confirm'))) return;
+        const payload = {
+            server_id: serverId, protocol: proto, client_id: clientId,
+        };
         try {
-            await apiCall(`/api/users/${currentConnsUserId}/connections/unlink`, 'POST', {
-                server_id: serverId, protocol: proto, client_id: clientId,
-            });
+            await apiCall(`/api/users/${currentConnsUserId}/connections/unlink`, 'POST', payload);
             showToast(_('conn_unlinked'), 'success');
             viewUserConnections(currentConnsUserId, currentConnsUsername);
         } catch (err) {
-            showToast(`${_('error')}: ` + err.message, 'error');
+            const code = err.payload && err.payload.code;
+            if (code === 'peer_active_stop_required' && err.payload.can_stop) {
+                if (!confirm(_('unlink_stop_and_unlink_confirm'))) return;
+                payload.stop = true;
+            } else if (code === 'final_counter_read_failed' && err.payload.can_force) {
+                if (!confirm(_('unlink_unverified_confirm'))) return;
+                payload.allow_unverified = true;
+            } else {
+                showToast(`${_('error')}: ` + err.message, 'error');
+                return;
+            }
+            try {
+                await apiCall(`/api/users/${currentConnsUserId}/connections/unlink`, 'POST', payload);
+                showToast(_('conn_unlinked'), 'success');
+                viewUserConnections(currentConnsUserId, currentConnsUsername);
+            } catch (retryErr) {
+                showToast(`${_('error')}: ` + retryErr.message, 'error');
+            }
         }
     }
 
@@ -1233,16 +1268,30 @@
         }
     }
 
-    async function removeUserConnection(serverId, clientId, proto, name) {
+    async function removeUserConnection(serverId, clientId, proto, name, enabled) {
         if (!confirm(`${_('delete')}: ${name}?`)) return;
+        const payload = {
+            protocol: proto, client_id: clientId,
+        };
         try {
-            await apiCall(`/api/servers/${serverId}/connections/remove`, 'POST', {
-                protocol: proto, client_id: clientId,
-            });
+            await apiCall(`/api/servers/${serverId}/connections/remove`, 'POST', payload);
             showToast(_('success'), 'success');
             viewUserConnections(currentConnsUserId, currentConnsUsername);
         } catch (err) {
-            showToast(`${_('error')}: ` + err.message, 'error');
+            if (err.payload && err.payload.code === 'final_counter_read_failed' && err.payload.can_force) {
+                if (!confirm(_('delete_unverified_confirm'))) return;
+                payload.allow_unverified = true;
+            } else {
+                showToast(`${_('error')}: ` + err.message, 'error');
+                return;
+            }
+            try {
+                await apiCall(`/api/servers/${serverId}/connections/remove`, 'POST', payload);
+                showToast(_('success'), 'success');
+                viewUserConnections(currentConnsUserId, currentConnsUsername);
+            } catch (retryErr) {
+                showToast(`${_('error')}: ` + retryErr.message, 'error');
+            }
         }
     }
 

@@ -13,6 +13,7 @@ from unittest.mock import Mock
 from fastapi.responses import JSONResponse
 
 FUNCTIONS = {'_rkn_ssh_run', '_rkn_run_cmd', '_rkn_record',
+             '_rkn_server_index', '_rkn_store_record', '_rkn_drop_record',
              'api_rknblock_install', 'api_rknblock_uninstall',
              'api_rknblock_enable', 'api_rknblock_update'}
 
@@ -39,6 +40,7 @@ def isolated_panel():
         'RKN_SCRIPT_URL': 'https://example.test/rkn.sh',
         'BaseModel': BaseModelStub,
         'asyncio': __import__('asyncio'),
+        'DATA_LOCK': __import__('asyncio').Lock(),
     }
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), 'exec'), namespace)
     return namespace
@@ -89,7 +91,8 @@ class InstallTests(SshCase):
     def test_install_marks_record_and_clears_cache(self):
         result = self.call()
         self.assertEqual(result, {'status': 'success', 'installed': True, 'enabled': True})
-        self.assertEqual(self.server['rknblock'], {'installed': True, 'enabled': True})
+        self.assertEqual(self.server['rknblock'],
+                         {'installed': True, 'enabled': True, 'last_error': None})
         self.assertEqual(self.ran[0][1], 420)  # install timeout
         self.assertNotIn(0, self.panel['RKN_FLAG_CACHE'])
 
@@ -99,6 +102,21 @@ class InstallTests(SshCase):
         self.assertIsInstance(resp, JSONResponse)
         self.assertEqual(resp.status_code, 500)
         self.assertNotIn('rknblock', self.server)
+
+    def test_install_updates_reloaded_server_by_uid(self):
+        # A long SSH call may be followed by a fresh data.json snapshot and a
+        # reorder. The record must land on the same uid, not a stale object.
+        self.server['uid'] = 'u1'
+        initial = {'servers': [self.server], 'users': [], 'user_connections': []}
+        fresh = {'servers': [{'name': 'B', 'uid': 'u2'},
+                             {'name': 'A', 'uid': 'u1'}],
+                 'users': [], 'user_connections': []}
+        self.panel['load_data'] = Mock(side_effect=[initial, fresh])
+        result = self.call()
+        self.assertEqual(result, {'status': 'success', 'installed': True, 'enabled': True})
+        self.assertNotIn('rknblock', self.server)
+        self.assertEqual(fresh['servers'][1]['rknblock'],
+                         {'installed': True, 'enabled': True, 'last_error': None})
 
     def test_forbidden(self):
         self.panel['_check_admin'] = Mock(return_value=False)
@@ -142,7 +160,8 @@ class EnableTests(SshCase):
         self.server['rknblock'] = {'installed': True, 'enabled': True}
         result = self.call(False)
         self.assertEqual(result, {'status': 'success', 'enabled': False})
-        self.assertEqual(self.server['rknblock'], {'installed': True, 'enabled': False})
+        self.assertEqual(self.server['rknblock'],
+                         {'installed': True, 'enabled': False, 'last_error': None})
         self.assertIn(' off;', self.ran[0][0].split('rkn-extra-block-run.sh', 1)[1])
 
     def test_enable_runs_on(self):
@@ -178,9 +197,9 @@ class UpdateTests(SshCase):
 
 
 class ScansResponseTests(unittest.TestCase):
-    """api_rkn_scans must expose installed/enabled alongside the parsed stats."""
+    """api_rkn_scans exposes installed/enabled plus live running/healthy flags."""
 
-    def test_isolated_scans_endpoint_shape(self):
+    def _run(self, parsed, record):
         path = Path(__file__).resolve().parents[1] / 'app.py'
         tree = ast.parse(path.read_text(encoding='utf-8'))
         nodes = [n for n in tree.body
@@ -190,7 +209,7 @@ class ScansResponseTests(unittest.TestCase):
         namespace = {
             'Request': object, 'JSONResponse': JSONResponse, 'logger': Mock(),
             'load_data': Mock(), '_check_admin': Mock(return_value=True),
-            '_parse_rkn_scan_output': lambda out, flag: {'flag_enabled': flag},
+            '_parse_rkn_scan_output': lambda out, flag: dict(parsed),
             'asyncio': __import__('asyncio'),
         }
 
@@ -199,14 +218,43 @@ class ScansResponseTests(unittest.TestCase):
 
         namespace['_fetch_rkn_scan_output'] = fake_fetch
         exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), 'exec'), namespace)
-        server = {'name': 'A', 'rknblock': {'installed': True, 'enabled': False}}
+        server = {'name': 'A', 'rknblock': record}
         namespace['load_data'] = Mock(return_value={'servers': [server]})
         request = SimpleNamespace(session={'user_id': 'admin'}, headers={})
-        result = namespace['asyncio'].run(
+        return namespace['asyncio'].run(
             namespace['api_rkn_scans'](request, 0))
+
+    def test_isolated_scans_endpoint_shape(self):
+        result = self._run(
+            {'flag_enabled': True, 'agent_state': 'unknown', 'sets_ok': False,
+             'health': None, 'problems': ['not_running', 'lists_empty'],
+             'sets': {'in4': 0, 'in6': 0, 'out4': 0, 'out6': 0}},
+            {'installed': True, 'enabled': False})
         self.assertTrue(result['installed'])
         self.assertFalse(result['enabled'])
         self.assertTrue(result['flag_enabled'])
+        self.assertFalse(result['running'])
+        self.assertFalse(result['healthy'])
+
+    def test_live_running_and_healthy_flags(self):
+        result = self._run(
+            {'flag_enabled': True, 'agent_state': 'on', 'sets_ok': True,
+             'health': 'ok', 'problems': [],
+             'sets': {'in4': 1151, 'in6': 21, 'out4': 204, 'out6': 3}},
+            {'installed': True, 'enabled': True})
+        self.assertTrue(result['running'])
+        self.assertTrue(result['healthy'])
+
+    def test_empty_sets_make_running_unhealthy(self):
+        result = self._run(
+            {'flag_enabled': True, 'agent_state': 'on', 'sets_ok': False,
+             'health': 'failed', 'problems': ['lists_empty', 'health_failed'],
+             'sets': {'in4': 0, 'in6': 0, 'out4': 0, 'out6': 0}},
+            {'installed': True, 'enabled': True})
+        self.assertTrue(result['running'])
+        self.assertFalse(result['healthy'])
+        self.assertIn('lists_empty', result['problems'])
+        self.assertIn('health_failed', result['problems'])
 
 
 if __name__ == '__main__':

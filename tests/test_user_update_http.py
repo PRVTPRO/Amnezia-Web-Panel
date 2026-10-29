@@ -19,7 +19,7 @@ class ApiSmoke(unittest.IsolatedAsyncioTestCase):
         self.ns['_check_admin'] = lambda r: r.headers.get('X-Synthetic-Admin') == 'yes'
         self.ns['get_current_user'] = lambda r: {
             'role': 'admin' if self.ns['_check_admin'](r) else 'user'}
-        self.ns['save_data'](dict(users=[dict(id='test', username='before', enabled=False,
+        self.ns['save_data'](dict(users=[dict(id='test', username='before', enabled=False, disable_reasons=['quota'],
             traffic_used=430*GIB, traffic_limit=500*GIB, expiration_date='2030-01-01')],
             servers=[], user_connections=[]))
         self.app = FastAPI()
@@ -60,7 +60,8 @@ class ApiSmoke(unittest.IsolatedAsyncioTestCase):
         response = await self.client.post('/api/users/test/toggle', json={'enabled': True})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {'status': 'success', 'enabled': True})
-        self.assertEqual(self.user(), dict(before, enabled=True))
+        self.assertEqual(self.user(), dict(before, enabled=True, disable_reasons=[],
+            access_revision=1, access_sync_pending=False))
 
     async def test_forbidden_http_unchanged(self):
         before = self.file.read_bytes()
@@ -103,7 +104,12 @@ class ApiSmoke(unittest.IsolatedAsyncioTestCase):
         ssh = SimpleNamespace(connect=lambda: None, disconnect=lambda: None)
         self.ns['get_ssh'] = lambda _: ssh
         self.ns['get_protocol_manager'] = lambda *args: object()
-        self.ns['_manager_call'] = lambda *args: None
+        peer = {'clientId': 'mock', 'enabled': False}
+        def manager_call(manager, method, protocol, *args):
+            if method == 'get_clients':
+                return [dict(peer)]
+            peer['enabled'] = args[-1]
+        self.ns['_manager_call'] = manager_call
 
         async def to_thread(function, *args):
             if function is self.ns['get_ssh']:
@@ -111,7 +117,7 @@ class ApiSmoke(unittest.IsolatedAsyncioTestCase):
                 await release.wait()
             return function(*args)
 
-        self.ns['asyncio'] = SimpleNamespace(to_thread=to_thread)
+        self.ns['asyncio'] = SimpleNamespace(**{k:v for k,v in vars(asyncio).items() if k!='to_thread'}, to_thread=to_thread)
         first = asyncio.create_task(self.client.post('/api/users/test/update',
                                                      json={'traffic_limit': 1000}))
         try:

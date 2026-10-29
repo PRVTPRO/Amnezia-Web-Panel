@@ -5,7 +5,10 @@ import threading
 from unittest import mock
 import paramiko
 from starlette.requests import Request
-import test_ssh_enrollment_http as http_tests
+try:
+    from . import test_ssh_enrollment_http as http_tests
+except ImportError:
+    import test_ssh_enrollment_http as http_tests
 from managers import ssh_trust
 
 
@@ -30,7 +33,7 @@ class RuntimeTests(http_tests.EnrollmentHTTPTests):
             if not release.wait(5):
                 raise TimeoutError('worker not released')
             return {'status': 'success'}
-        self.trust.enroll.side_effect = enroll
+        self.trust.commit_enrollment.side_effect = enroll
         async def run():
             request = Request({'type': 'http', 'headers': []})
             task = asyncio.create_task(self.module.api_ssh_trust_confirm(request, 0,
@@ -76,7 +79,7 @@ class RuntimeTests(http_tests.EnrollmentHTTPTests):
         with mock.patch.object(self.module, 'load_data', return_value=data), \
              mock.patch.object(self.module, 'save_data') as save, \
              mock.patch.object(self.module, 'SSHManager') as ssh, \
-             mock.patch.object(self.module.exit_link_svc, 'forget_entry_peers', new=mock.AsyncMock()):
+             mock.patch.object(self.module.exit_link_svc, 'forget_entry_peers', new=mock.AsyncMock(return_value=[])):
             ssh.return_value.test_connection.return_value = {}
             asyncio.run(run('edit'))
             self.assertEqual(self.server['name'], 'renamed')

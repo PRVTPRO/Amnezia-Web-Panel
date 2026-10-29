@@ -6,3 +6,6 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/rkn-extra-block boot
+
+[Install]
+WantedBy=multi-user.target

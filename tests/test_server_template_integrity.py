@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVER_TEMPLATE = ROOT / "templates" / "server.html"
@@ -16,15 +17,20 @@ class TestServerTemplateIntegrity(unittest.TestCase):
         """A JS parse error prevents checkServer() from clearing the loading state."""
         import app
         from starlette.testclient import TestClient
+        import json as _json
 
-        with TestClient(app.app) as client:
-            login = client.post(
-                "/api/auth/login",
-                json={"username": "admin", "password": "admin", "captcha": None},
-            )
-            self.assertEqual(login.status_code, 200, login.text)
-            page = client.get("/server/0")
-            self.assertEqual(page.status_code, 200, page.text)
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(app, 'DATA_FILE', str(Path(tmp) / 'data.json')):
+            # Seed an empty data file so startup migrations create the default admin.
+            Path(app.DATA_FILE).write_text(_json.dumps({'servers': [], 'users': []}), encoding='utf-8')
+            with TestClient(app.app) as client:
+                login = client.post(
+                    "/api/auth/login",
+                    json={"username": "admin", "password": "admin", "captcha": None},
+                )
+                self.assertEqual(login.status_code, 200, login.text)
+                page = client.get("/server/0")
+                self.assertEqual(page.status_code, 200, page.text)
 
         scripts = re.findall(r"<script(?:[^>]*)>(.*?)</script>", page.text, re.S)
         inline_js = "\n".join(scripts)

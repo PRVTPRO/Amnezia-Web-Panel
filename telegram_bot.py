@@ -3,6 +3,7 @@ Telegram bot for Amnezia Web Panel.
 Uses raw Telegram Bot API via httpx — no library version conflicts.
 Runs as a background asyncio task alongside the FastAPI app.
 """
+from peer_accounting import serialize_peer_lifecycle
 import asyncio
 import html
 import logging
@@ -1179,6 +1180,7 @@ async def _admin_choose_client_user(api: TelegramAPI, chat_id: int, name: str, s
     )
 
 
+@serialize_peer_lifecycle
 async def _admin_create_client(api: TelegramAPI, chat_id: int, message_id: int, server_id: int, proto: str, name: str, user_id: Optional[str], load_data_fn: Callable, save_data_fn: Optional[Callable], generate_vpn_link_fn: Callable, lang: str = "en"):
     if not save_data_fn:
         await api.edit_message(chat_id, message_id, f"❌ {_tt(lang, 'saving_not_available')}")
@@ -1265,6 +1267,7 @@ async def _admin_toggle_client(api: TelegramAPI, chat_id: int, message_id: int, 
         await api.edit_message(chat_id, message_id, f"❌ {_tt(lang, 'error')}: {_e(e)}")
 
 
+@serialize_peer_lifecycle
 async def _admin_remove_client(api: TelegramAPI, chat_id: int, message_id: int, server_id: int, proto: str, client_id: str, load_data_fn: Callable, save_data_fn: Optional[Callable], lang: str = "en"):
     if not save_data_fn:
         await api.edit_message(chat_id, message_id, f"❌ {_tt(lang, 'saving_not_available')}")
@@ -1273,6 +1276,8 @@ async def _admin_remove_client(api: TelegramAPI, chat_id: int, message_id: int, 
 
     def _remove():
         data = load_data_fn()
+        from peer_accounting import require_unowned
+        require_unowned(data, server_id=server_id, protocol=proto, client_id=client_id)
         server = data["servers"][server_id]
         ssh, manager = _get_ssh_and_manager(server, proto)
         try:
@@ -1280,11 +1285,9 @@ async def _admin_remove_client(api: TelegramAPI, chat_id: int, message_id: int, 
             _manager_call(manager, "remove_client", proto, client_id)
         finally:
             ssh.disconnect()
-        data["user_connections"] = [
-            c for c in data.get("user_connections", [])
-            if not (c.get("server_id") == server_id and c.get("protocol") == proto and c.get("client_id") == client_id)
-        ]
-        save_data_fn(data)
+        # Unlinked removal has no local mutation; never overwrite concurrent
+        # accounting/access commits with the earlier snapshot.
+
 
     try:
         await asyncio.to_thread(_remove)

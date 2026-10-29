@@ -30,6 +30,7 @@ coverage.xml
 
 # User data
 data.json
+*.runtime.lock
 .DS_Store
 
 # IDEs

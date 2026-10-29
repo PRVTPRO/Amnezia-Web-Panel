@@ -1,4 +1,5 @@
 import asyncio
+from peer_accounting import serialize_peer_lifecycle
 import logging
 import time
 import uuid
@@ -157,6 +158,7 @@ class ConnectionService:
             'servers': servers,
         }
 
+    @serialize_peer_lifecycle
     async def create_user_connection(self, user_id, server_id, protocol, name, source):
         clean_name = self._validate_name(name)
         self._validate_protocol(protocol)
@@ -231,6 +233,7 @@ class ConnectionService:
                 except Exception:
                     pass
 
+    @serialize_peer_lifecycle
     async def delete_user_connection(self, user_id, connection_id, source):
         data = self.load_data()
         settings = self._settings(data)
@@ -251,31 +254,12 @@ class ConnectionService:
                 conn = self._get_connection(data, user_id, connection_id)
                 if conn.get('created_by') != 'self_service':
                     raise SelfServiceError('Only self-service connections can be deleted', status_code=403, forbidden=True)
-                if server_id is None or server_id >= len(data.get('servers', [])):
-                    raise SelfServiceError('Server not found', status_code=404)
-                server = dict(data['servers'][server_id])
-
-            # get_ssh() blocks on ensure_connected — keep it off the event loop.
-            ssh = await asyncio.to_thread(self.get_ssh, server)
-            try:
-                await asyncio.to_thread(ssh.connect)
-                manager = self.get_protocol_manager(ssh, protocol)
-                await asyncio.to_thread(self.manager_call, manager, 'remove_client', protocol, conn.get('client_id'))
-            finally:
-                try:
-                    await asyncio.to_thread(ssh.disconnect)
-                except Exception:
-                    pass
-
-            async with self.data_lock:
-                data = self.load_data()
-                self._validate_channel(self._settings(data), source)
-                conn = self._get_connection(data, user_id, connection_id)
-                if conn.get('created_by') != 'self_service':
-                    raise SelfServiceError('Only self-service connections can be deleted', status_code=403, forbidden=True)
-                data['user_connections'] = [c for c in data.get('user_connections', []) if c.get('id') != connection_id]
-                self.save_data(data)
-            return {'status': 'success'}
+                # Keeping an owner is mandatory until stopped-peer counters can
+                # be durably settled. Disabling metadata is not such a receipt.
+                from peer_accounting import FINALIZATION_MESSAGE
+                error = SelfServiceError(FINALIZATION_MESSAGE, status_code=409)
+                error.code = 'traffic_finalization_required'
+                raise error
 
     def _settings(self, data):
         settings = dict(DEFAULT_SELF_SERVICE_SETTINGS)

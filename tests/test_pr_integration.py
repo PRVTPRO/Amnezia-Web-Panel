@@ -1,6 +1,7 @@
 """Cross-PR integration guards; no live SSH, Telegram, or user data."""
 import ast
 import asyncio
+import copy
 from collections import Counter
 from contextlib import ExitStack
 import inspect
@@ -21,18 +22,48 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class IntegrationTests(unittest.TestCase):
-    def test_unlink_only_removes_exact_panel_link(self):
-        link = dict(user_id='u', server_id=0, protocol='wg', client_id='peer')
+    def test_unlink_finalizes_active_peer_with_stop(self):
+        link = dict(id='link', user_id='u', server_id=0, protocol='wg', client_id='peer', last_bytes=60)
         retained = dict(link, user_id='other')
-        data = {'user_connections': [link, retained]}
+        data = {'users': [{'id': 'u', 'enabled': True, 'traffic_used': 60, 'traffic_total': 60}],
+                'servers': [{'uid': 's'}], 'user_connections': [link, retained]}
+        reads = iter([(70, False), (70, True)])
+        saved = []
+        def fake_commit(data_file, operation_id, actor, kind, intent, before, after):
+            saved.append(copy.deepcopy(after))
+            return {'status': 'success', 'operation_id': 'op', 'replayed': False,
+                    'counters_verified_final': False}
         with patch.object(panel, '_check_admin', return_value=True), \
+             patch.object(panel, 'get_current_user', return_value={'id': 'admin'}), \
+             patch.object(panel, 'load_data', return_value=data), \
+             patch.object(panel, 'commit_finalize', side_effect=fake_commit), \
+             patch.object(panel, 'get_ssh', return_value=Mock()), \
+             patch.object(panel, 'get_protocol_manager', return_value=Mock()), \
+             patch.object(panel, '_manager_call', return_value=True), \
+             patch.object(panel, 'read_peer_state', side_effect=lambda *a, **k: next(reads)):
+            result = asyncio.run(panel.api_unlink_user_connection(
+                Mock(), 'u', panel.UnlinkConnectionRequest(server_id=0, protocol='wg', client_id='peer', stop=True)))
+            self.assertEqual(result.status_code if hasattr(result, 'status_code') else 200, 200)
+            self.assertEqual(saved[-1]['user_connections'], [retained])
+            self.assertEqual(len(saved[-1].get('accounting_recoveries', [])), 1)
+
+    def test_unlink_rejects_active_peer_without_stop(self):
+        link = dict(id='link', user_id='u', server_id=0, protocol='wg', client_id='peer', last_bytes=60)
+        data = {'users': [{'id': 'u', 'enabled': True, 'traffic_used': 60, 'traffic_total': 60}],
+                'servers': [{'uid': 's'}], 'user_connections': [link]}
+        with patch.object(panel, '_check_admin', return_value=True), \
+             patch.object(panel, 'get_current_user', return_value={'id': 'admin'}), \
              patch.object(panel, 'load_data', return_value=data), \
              patch.object(panel, 'save_data') as save, \
-             patch.object(panel, 'get_ssh', side_effect=AssertionError('unlink must not use SSH')):
-            result = asyncio.run(panel.api_unlink_user_connection(Mock(), 'u', panel.UnlinkConnectionRequest(server_id=0, protocol='wg', client_id='peer')))
-            self.assertEqual(result, {'status': 'success'})
-            self.assertEqual(data['user_connections'], [retained])
-            save.assert_called_once_with(data)
+             patch.object(panel, 'get_ssh', return_value=Mock()), \
+             patch.object(panel, 'get_protocol_manager', return_value=Mock()), \
+             patch.object(panel, '_manager_call', return_value=True), \
+             patch.object(panel, 'read_peer_state', return_value=(70, False)):
+            result = asyncio.run(panel.api_unlink_user_connection(
+                Mock(), 'u', panel.UnlinkConnectionRequest(server_id=0, protocol='wg', client_id='peer')))
+            self.assertEqual(result.status_code, 409)
+            self.assertEqual(json.loads(result.body)['code'], 'peer_active_stop_required')
+            save.assert_not_called()
 
     def test_ssh_failure_cooldown_prevents_reconnect_storm(self):
         ssh = SSHManager('192.0.2.1', 22, 'root', 'fake')

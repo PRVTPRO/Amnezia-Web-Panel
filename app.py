@@ -21,9 +21,11 @@ import urllib.parse
 import urllib.request
 import zipfile
 import signal
+import socket
 import struct
 import zlib
-from datetime import datetime, timedelta
+import ipaddress
+from datetime import datetime, timedelta, timezone
 import io
 from fastapi.responses import (JSONResponse, RedirectResponse, HTMLResponse, StreamingResponse,
                                FileResponse, PlainTextResponse)
@@ -32,7 +34,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi import FastAPI, Request, Query, UploadFile, File, Form
 from starlette.middleware.sessions import SessionMiddleware
-from pydantic import BaseModel, Field, StrictBool, constr
+from pydantic import BaseModel, Field, StrictBool, constr, conint
 from typing import Optional, List, Dict
 import uvicorn
 import httpx
@@ -51,6 +53,7 @@ from managers.backup_manager import BackupManager
 import telegram_bot as tg_bot
 
 from exit_link_service import ExitLinkError, ExitLinkService
+from smartroute_service import SmartRouteError, SmartRouteService
 from mail_service import (
     DEFAULT_MAIL_SETTINGS,
     MailError,
@@ -60,6 +63,7 @@ from mail_service import (
 )
 from pwa import build_manifest
 from captcha_challenges import captcha_challenges
+from user_state import reconcile_user_state, apply_traffic_samples, traffic_server_identity
 from connection_service import (
     ConnectionService,
     DEFAULT_SELF_SERVICE_SETTINGS,
@@ -203,7 +207,7 @@ DATA_FILE = os.path.abspath(os.path.expanduser(
     os.environ.get('DATA_FILE') or os.path.join(application_path, 'data.json')
 ))
 ssh_trust.configure(DATA_FILE)
-CURRENT_VERSION = "v1.7.9"
+CURRENT_VERSION = "v1.8.3"
 
 # Custom protocol instance names: the rename modal caps input at 64 chars.
 CUSTOM_PROTOCOL_NAME_MAX = 64
@@ -258,7 +262,48 @@ load_translations()
 # ======================== Helpers ========================
 
 # Global lock for data.json access to prevent race conditions during async operations
+from peer_lifecycle_lock import serialize_peer_lifecycle
+import peer_lifecycle_lock
+from peer_accounting import guard_user_deletions
+from peer_recovery import (RecoveryStore, RecoveryError, PanelLease, STATE_FILE_LOCK,
+                           GENERATION, digest as recovery_digest, orphan_scope, validate_backup)
+from peer_recovery import verify_awg_peer_absent, check_create_journal, require_repair_target, DISASTER_HOLD
+from peer_finalization import (
+    FinalizationError,
+    connection_scope,
+    find_connection,
+    read_peer_state,
+    finalize_connection_record,
+    commit_finalize,
+    make_intent,
+)
+
+peer_lifecycle_lock.configure(DATA_FILE)
+_panel_lease = None
+
 DATA_LOCK = asyncio.Lock()
+# Serialize overlapping traffic collection/commit cycles.
+_TRAFFIC_SYNC_LOCK = asyncio.Lock()
+# Inventory/identity operations may await SSH; unrelated JSON updates stay free.
+SERVER_MUTATION_LOCK = asyncio.Lock()
+
+
+@app.on_event('shutdown')
+async def close_panel_lease():
+    if _panel_lease is not None:
+        _panel_lease.close()
+
+
+@app.exception_handler(peer_lifecycle_lock.PeerLifecycleBusy)
+async def lifecycle_busy_response(request, error):
+    return JSONResponse({'error': 'A lifecycle operation is still running. Retry later.',
+                         'code': str(error)}, status_code=503, headers={'Retry-After': '10'})
+
+
+@app.exception_handler(peer_lifecycle_lock.PeerLifecycleUncertain)
+async def lifecycle_uncertain_response(request, error):
+    return JSONResponse({'error': 'An SSH result is unknown. Administrator recovery is required.',
+                         'code': error.code}, status_code=503)
 
 
 def load_data():
@@ -322,21 +367,16 @@ def load_data():
 
 
 def save_data(data):
-    data_dir = os.path.dirname(DATA_FILE) or '.'
-    os.makedirs(data_dir, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(prefix='.data-', suffix='.json', dir=data_dir)
-    try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, DATA_FILE)
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+    # Keep this writer self-contained for isolated handler/AST tests as well.
+    from peer_recovery import STATE_FILE_LOCK, GENERATION, RecoveryError, atomic_json
+    with STATE_FILE_LOCK:
+        if os.path.exists(DATA_FILE):
+            with open(DATA_FILE, 'r', encoding='utf-8') as source:
+                generation = json.load(source).get(GENERATION)
+            if generation and data.get(GENERATION) != generation:
+                raise RecoveryError('stale_snapshot_after_recovery')
+        os.makedirs(os.path.dirname(DATA_FILE) or '.', exist_ok=True)
+        atomic_json(DATA_FILE, data)
 
 
 async def save_data_async(data):
@@ -1668,6 +1708,18 @@ def config_payloads(config_text, server=None, protocol=None):
     }
 
 
+from peer_create import PeerCreateService, PeerCreateError
+from panel_backup import ArchiveJob, PRIVATE_HEADERS
+
+peer_creates = PeerCreateService(
+    path=lambda: DATA_FILE + '.peer-creates.json',
+    load_data=lambda: load_data(), save_data=lambda data: save_data(data),
+    data_lock=DATA_LOCK, get_ssh=lambda server: get_ssh(server),
+    get_manager=lambda ssh, protocol: get_protocol_manager(ssh, protocol),
+    public_endpoint=lambda server, protocol: protocol_public_endpoint(server, protocol),
+)
+
+
 self_service_connections = ConnectionService(
     load_data=load_data,
     save_data=save_data,
@@ -1717,12 +1769,26 @@ exit_link_svc = ExitLinkService(
     find_server_by_uid=find_server_by_uid,
 )
 
+smartroute_svc = SmartRouteService(
+    load_data=load_data,
+    save_data=save_data,
+    data_lock=DATA_LOCK,
+    get_ssh=get_ssh,
+    awg_manager_factory=lambda ssh: AWGManager(ssh),
+    protocol_base=protocol_base,
+    awg_protocols=AWG_PROTOCOLS,
+    apply_dns_via_exit=lambda sid, proto, en: exit_link_svc.set_dns_via_exit(sid, proto, en),
+)
+
 
 def _self_service_error_response(exc):
     if isinstance(exc, RateLimitError):
         return JSONResponse({'error': str(exc)}, status_code=429)
     if isinstance(exc, SelfServiceError):
-        return JSONResponse({'error': str(exc)}, status_code=exc.status_code)
+        body = {'error': str(exc)}
+        if getattr(exc, 'code', None):
+            body['code'] = exc.code
+        return JSONResponse(body, status_code=exc.status_code)
     logger.exception("Unexpected self-service error")
     return JSONResponse({'error': 'Internal server error'}, status_code=500)
 
@@ -1801,68 +1867,160 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
 
 
+def _traffic_removal_guard(data, **scope):
+    from peer_accounting import TrafficFinalizationRequired, require_unowned
+    try:
+        require_unowned(data, **scope)
+    except TrafficFinalizationRequired as error:
+        return JSONResponse({'error': str(error), 'code': error.code}, status_code=409)
+    return None
+
+
 def perform_delete_user(data: dict, user_id: str):
     user = next((u for u in data['users'] if u['id'] == user_id), None)
     if not user:
         return False
-    # Remove user's connections from servers
-    user_conns = [c for c in data.get('user_connections', []) if c['user_id'] == user_id]
-    for uc in user_conns:
-        try:
-            sid = uc['server_id']
-            if sid < len(data['servers']):
-                server = data['servers'][sid]
-                ssh = get_ssh(server)
-                ssh.connect()
-                manager = get_protocol_manager(ssh, uc['protocol'])
-                _manager_call(manager, 'remove_client', uc['protocol'], uc['client_id'])
-                ssh.disconnect()
-        except Exception as e:
-            logger.warning(f"Failed to remove connection {uc['client_id']} during user delete: {e}")
-    data['user_connections'] = [c for c in data.get('user_connections', []) if c['user_id'] != user_id]
+    from peer_accounting import require_unowned
+    require_unowned(data, user_ids={user_id})
     data['users'] = [u for u in data['users'] if u['id'] != user_id]
     return True
 
 
-async def perform_toggle_user(data: dict, user_id: str, enable: bool) -> bool:
-    """Enable or disable a user and propagate the change to all their VPN connections."""
-    user = next((u for u in data['users'] if u['id'] == user_id), None)
-    if not user:
-        return False
+def _user_connection_identity(data, user_id):
+    result = []
+    for conn in data.get('user_connections', []):
+        if conn['user_id'] != user_id:
+            continue
+        sid = conn['server_id']
+        identity = traffic_server_identity(data['servers'][sid]) if 0 <= sid < len(data['servers']) else None
+        result.append((conn['id'], conn['protocol'], conn['client_id'], identity))
+    return sorted(result)
 
-    user['enabled'] = enable
 
-    user_conns = [c for c in data.get('user_connections', []) if c['user_id'] == user_id]
-    for uc in user_conns:
-        try:
-            sid = uc['server_id']
-            if sid >= len(data['servers']):
+async def _propagate_user_state(user_id):
+    # One worker per user, including when an HTTP waiter is cancelled. A newer
+    # committed intent is applied after any already-running SSH command.
+    for _ in range(8):
+        async with DATA_LOCK:
+            data = load_data()
+            user = next((u for u in data['users'] if u['id'] == user_id), None)
+            if user is None:
+                return False
+            revision = user.get('access_revision', 0)
+            enabled = user.get('enabled', True)
+            connections = _user_connection_identity(data, user_id)
+        failed = False
+        for connection_id, protocol, client_id, server_identity in connections:
+            ssh = None
+            try:
+                async with DATA_LOCK:
+                    current = load_data()
+                    user = next((u for u in current['users'] if u['id'] == user_id), None)
+                    if user is None:
+                        return False
+                    if user.get('access_revision', 0) != revision:
+                        break
+                    conn = next((c for c in current['user_connections'] if c['id'] == connection_id), None)
+                    if conn is None or not 0 <= conn['server_id'] < len(current['servers']):
+                        failed = True
+                        break
+                    server = current['servers'][conn['server_id']]
+                    if (traffic_server_identity(server) != server_identity or conn['client_id'] != client_id
+                            or conn['protocol'] != protocol or conn['user_id'] != user_id):
+                        failed = True
+                        break
+                ssh = await asyncio.to_thread(get_ssh, server)
+                await asyncio.to_thread(ssh.connect)
+                # Do not execute an obsolete decision after a slow connect.
+                async with DATA_LOCK:
+                    latest = load_data()
+                    user = next((u for u in latest['users'] if u['id'] == user_id), None)
+                    if user is None:
+                        return False
+                    if user.get('access_revision', 0) != revision:
+                        break
+                    if _user_connection_identity(latest, user_id) != connections:
+                        break
+                manager = get_protocol_manager(ssh, protocol)
+                clients = await asyncio.to_thread(_manager_call, manager, 'get_clients', protocol)
+                peer = next((c for c in clients if str(c.get('clientId')) == str(client_id)), None)
+                actual = peer.get('enabled', peer.get('userData', {}).get('enabled')) if peer else None
+                if not isinstance(actual, bool):
+                    raise RuntimeError('Peer state could not be verified')
+                if actual != enabled:
+                    async with DATA_LOCK:
+                        latest = load_data()
+                        user = next((u for u in latest['users'] if u['id'] == user_id), None)
+                        if user is None:
+                            return False
+                        if (user.get('access_revision', 0) != revision
+                                or _user_connection_identity(latest, user_id) != connections):
+                            break
+                    await asyncio.to_thread(_manager_call, manager, 'toggle_client', protocol, client_id, enabled)
+                    clients = await asyncio.to_thread(_manager_call, manager, 'get_clients', protocol)
+                    peer = next((c for c in clients if str(c.get('clientId')) == str(client_id)), None)
+                    if peer is None or peer.get('enabled', peer.get('userData', {}).get('enabled')) is not enabled:
+                        raise RuntimeError('Peer state was not applied')
+            except Exception:
+                failed = True
+                logger.warning("User access SSH application pending: user=%s connection=%s", user_id, connection_id)
+            finally:
+                if ssh is not None:
+                    try:
+                        await asyncio.to_thread(ssh.disconnect)
+                    except Exception:
+                        failed = True
+        async with DATA_LOCK:
+            current = load_data()
+            user = next((u for u in current['users'] if u['id'] == user_id), None)
+            if user is None:
+                return False
+            if user.get('access_revision', 0) != revision or _user_connection_identity(current, user_id) != connections:
                 continue
-            server = data['servers'][sid]
-            ssh = await asyncio.to_thread(get_ssh, server)
-            await asyncio.to_thread(ssh.connect)
-            manager = get_protocol_manager(ssh, uc['protocol'])
-            await asyncio.to_thread(
-                _manager_call, manager, 'toggle_client', uc['protocol'], uc['client_id'], enable
-            )
-            await asyncio.to_thread(ssh.disconnect)
-        except Exception as e:
-            logger.warning(f"Failed to toggle connection {uc['client_id']} during user toggle: {e}")
-
-    return True
+            if failed:
+                return False
+            user['access_sync_pending'] = False
+            save_data(current)
+            return True
+    return False
 
 
+async def perform_toggle_user(data: dict, user_id: str, enable: bool) -> bool:
+    # The old snapshot/enable arguments are deliberately not authoritative.
+    task = _USER_STATE_TASKS.get(user_id)
+    if task is None or task.done():
+        task = asyncio.create_task(_propagate_user_state(user_id))
+        _USER_STATE_TASKS[user_id] = task
+        def finished(done):
+            if _USER_STATE_TASKS.get(user_id) is done:
+                _USER_STATE_TASKS.pop(user_id, None)
+        task.add_done_callback(finished)
+    return await asyncio.shield(task)
+
+
+@serialize_peer_lifecycle
+@guard_user_deletions(lambda: load_data())
 async def perform_mass_operations(delete_uids: List[str] = None, toggle_uids: List[tuple] = None, create_conns: List[dict] = None):
     """
     Executes multiple SSH operations efficiently.
     Reloads data inside to ensure we don't overwrite other changes.
     """
+    toggle_results = []
+    if toggle_uids:
+        async with DATA_LOCK:
+            current = load_data()
+            for uid, enabled in toggle_uids:
+                user = next((u for u in current['users'] if u['id'] == uid), None)
+                if user:
+                    reconcile_user_state(user, datetime.now(), external=enabled)
+            save_data(current)
+        toggle_results = await asyncio.gather(*(perform_toggle_user({}, uid, enabled) for uid, enabled in toggle_uids))
     data = load_data()
     server_ops = {}
 
     def get_ops(sid):
         if sid not in server_ops:
-            server_ops[sid] = {'delete': [], 'toggle': [], 'create': []}
+            server_ops[sid] = {'delete': [], 'create': []}
         return server_ops[sid]
 
     if delete_uids:
@@ -1870,11 +2028,6 @@ async def perform_mass_operations(delete_uids: List[str] = None, toggle_uids: Li
             conns = [c for c in data.get('user_connections', []) if c['user_id'] == uid]
             for c in conns: get_ops(c['server_id'])['delete'].append(c)
     
-    if toggle_uids:
-        for uid, enabled in toggle_uids:
-            conns = [c for c in data.get('user_connections', []) if c['user_id'] == uid]
-            for c in conns: get_ops(c['server_id'])['toggle'].append((c, enabled))
-
     if create_conns:
         for req in create_conns: get_ops(req['server_id'])['create'].append(req)
 
@@ -1897,18 +2050,6 @@ async def perform_mass_operations(delete_uids: List[str] = None, toggle_uids: Li
                 async with DATA_LOCK:
                     current_data = load_data()
                     current_data['user_connections'] = [conn for conn in current_data['user_connections'] if conn['id'] != c['id']]
-                    save_data(current_data)
-            
-            # 2. Toggles
-            for c, enabled in ops['toggle']:
-                manager = get_protocol_manager(ssh, c['protocol'])
-                await asyncio.to_thread(_manager_call, manager, 'toggle_client', c['protocol'], c['client_id'], enabled)
-                # Incremental toggle in data
-                async with DATA_LOCK:
-                    current_data = load_data()
-                    # We also need to update user status if it was a user toggle
-                    # Wait, mass ops caller usually handles user enabled status. 
-                    # Here we just toggle the actual wireguard peer.
                     save_data(current_data)
             
             # 3. Creates
@@ -1951,15 +2092,13 @@ async def perform_mass_operations(delete_uids: List[str] = None, toggle_uids: Li
     async with DATA_LOCK:
         current_data = load_data()
         if delete_uids:
+            from peer_accounting import require_unowned
+            require_unowned(current_data, user_ids=set(delete_uids))
             current_data['users'] = [u for u in current_data['users'] if u['id'] not in delete_uids]
             current_data['user_connections'] = [c for c in current_data.get('user_connections', []) if c['user_id'] not in delete_uids]
-        if toggle_uids:
-            for uid, enabled in toggle_uids:
-                user = next((u for u in current_data['users'] if u['id'] == uid), None)
-                if user: user['enabled'] = enabled
         save_data(current_data)
 
-    return True
+    return all(toggle_results)
 
 
 async def sync_users_with_remnawave(data: dict):
@@ -2043,7 +2182,8 @@ async def sync_users_with_remnawave(data: dict):
                         # Update index
                         idx = next((i for i, u in enumerate(current['users']) if u['id'] == local_u['id']), -1)
                         if idx != -1:
-                            current['users'][idx] = local_u
+                            current['users'][idx].update({key: local_u[key] for key in
+                                ('username', 'telegramId', 'email', 'description', 'remnawave_uuid')})
                             save_data(current)
                     
                     synced_count += 1
@@ -2058,6 +2198,7 @@ async def sync_users_with_remnawave(data: dict):
                         'email': rw_u.get('email'),
                         'description': rw_u.get('description'),
                         'enabled': is_active,
+                        'disable_reasons': [] if is_active else ['external'],
                         'created_at': datetime.now().isoformat(),
                         'remnawave_uuid': rw_u['uuid'],
                         'share_enabled': False,
@@ -2083,7 +2224,9 @@ async def sync_users_with_remnawave(data: dict):
             # Execute all collected mass operations
             if to_toggle or to_create_conns:
                 logger.info(f"Executing mass ops for Remnawave sync: toggle={len(to_toggle)}, create={len(to_create_conns)}")
-                await perform_mass_operations(toggle_uids=to_toggle, create_conns=to_create_conns)
+                applied = await perform_mass_operations(toggle_uids=to_toggle, create_conns=to_create_conns)
+                if not applied:
+                    return synced_count, "Metadata synchronized; access SSH application pending"
             
             return synced_count, "Successfully synchronized with Remnawave"
             
@@ -2183,7 +2326,7 @@ class LoginRequest(BaseModel):
 
 class AddServerRequest(BaseModel):
     host: str = ''
-    ssh_port: int = 22
+    ssh_port: conint(strict=True, ge=1, le=65535) = 22
     username: str = ''
     password: str = ''
     private_key: str = ''
@@ -2193,7 +2336,7 @@ class AddServerRequest(BaseModel):
 class EditServerRequest(BaseModel):
     name: str = ''
     host: str = ''
-    ssh_port: int = 22
+    ssh_port: Optional[conint(strict=True, ge=1, le=65535)] = None
     username: str = ''
     # Optional[str] = None lets the client distinguish "leave field as is"
     # (omit / null) from "explicitly clear" (empty string). Both credential
@@ -2206,6 +2349,7 @@ class EditServerRequest(BaseModel):
 class ReorderServersRequest(BaseModel):
     # `order[i]` is the *old* server index now at position `i` in the new layout.
     order: List[int]
+    server_uids: Optional[List[str]] = None
 
 
 class InstallProtocolRequest(BaseModel):
@@ -2294,6 +2438,29 @@ class ExitFailoverRequest(BaseModel):
     probe_egress: Optional[bool] = None
 
 
+class SmartRouteOwnSubnetsRequest(BaseModel):
+    cidrs: list = []
+
+
+class SmartRouteSplitRequest(BaseModel):
+    protocol: str = 'awg'
+    enabled: bool = False
+
+
+class SmartRouteDnsRequest(BaseModel):
+    enabled: bool = False
+
+
+class SmartRouteEnableRequest(BaseModel):
+    enabled: bool = True
+
+
+class SmartRouteDnsServersRequest(BaseModel):
+    direct: str = '77.88.8.8'
+    exit: str = '1.1.1.1'
+
+
+
 class Socks5SettingsRequest(BaseModel):
     protocol: str = 'socks5'
     port: Optional[int] = None
@@ -2360,6 +2527,7 @@ class EditConnectionRequest(BaseModel):
 class ConnectionActionRequest(BaseModel):
     protocol: str = 'awg'
     client_id: str = ''
+    allow_unverified: bool = False
 
 
 class RenameConnectionRequest(BaseModel):
@@ -2551,6 +2719,7 @@ class AddUserConnectionRequest(BaseModel):
     protocol: str = 'awg'
     name: str = 'VPN Connection'
     client_id: Optional[str] = None
+    operation_id: Optional[str] = None
     telemt_quota: Optional[str] = None
     telemt_max_ips: Optional[int] = None
     telemt_expiry: Optional[str] = None
@@ -2644,9 +2813,14 @@ def _start_conn_monitor():
 
 @app.on_event("startup")
 async def startup():
+    global _panel_lease
+    _panel_lease = PanelLease(DATA_FILE, runtime=True)
+    _panel_lease.acquire()
+    data = load_data()
+    if data.get(DISASTER_HOLD):
+        raise RuntimeError('Disaster recovery requires independent node reconciliation before startup')
     _start_conn_monitor()
     _start_duckdns_monitor()
-    data = load_data()
     changed = False
     if not data.get('users'):
         data['users'] = [{
@@ -2689,7 +2863,7 @@ async def startup():
             
         if migrated:
             changed = True
-            logger.info(f"Migrated user {u['username']} to new traffic/sharing fields")
+            logger.info(f"Migrated user {u.get('username', u.get('id', '?'))} to new traffic/sharing fields")
     
     # API tokens collection — initialise lazily on first run.
     if 'api_tokens' not in data:
@@ -2729,6 +2903,12 @@ async def startup():
     # Start periodic background tasks
     asyncio.create_task(periodic_background_tasks())
     asyncio.create_task(exit_failover_background_loop())
+
+    # Re-apply public-port forwards on the fleet: hand-made iptables rules do
+    # not survive reboots on their own, and only some hosts persist them.
+    asyncio.create_task(restore_public_port_forwards())
+    # ... and keep re-applying: a VPS can reboot while the panel keeps running.
+    asyncio.create_task(restore_public_port_forwards_loop())
 
     # Start Telegram bot if enabled
     tg_cfg = data.get('settings', {}).get('telegram', {})
@@ -2844,122 +3024,109 @@ async def run_auto_backups_if_due():
 
 
 def _scrape_server_traffic(server, sid, my_conns):
+    from collections import Counter
+    from managers.traffic_counters import counter
+    from peer_accounting import _protocol_scope
+
     server_updates = []
+    ssh = None
     try:
         ssh = get_ssh(server)
         ssh.connect()
-        for proto in ['awg', 'awg2', 'awg3', 'awg_legacy', 'xray', 'telemt', 'wireguard']:
-            if proto in server.get('protocols', {}):
+        # The manager resolves first-instance aliases to the same container.
+        # Query each physical scope once, retaining each link's full protocol.
+        scopes = {}
+        for proto, record in server.get('protocols', {}).items():
+            if (str(proto).split('__', 1)[0] in ('awg', 'awg2', 'awg3', 'awg_legacy', 'xray', 'telemt', 'wireguard')
+                    and isinstance(record, dict) and record.get('installed', True)):
+                scopes.setdefault(_protocol_scope(proto), proto)
+        owners = Counter((_protocol_scope(c['protocol']), c['client_id']) for c in my_conns)
+        for scope, proto in scopes.items():
+            try:
                 manager = get_protocol_manager(ssh, proto)
-                clients = _manager_call(manager, 'get_clients', proto)
-                client_bytes = {}
-                for c in clients:
-                    rx = c.get('userData', {}).get('dataReceivedBytes', 0)
-                    tx = c.get('userData', {}).get('dataSentBytes', 0)
-                    client_bytes[c.get('clientId')] = rx + tx
-                    
+                observed_at = time.time()
+                epoch = None
+                if scope[0] in ('awg', 'awg2', 'awg3', 'awg_legacy', 'wireguard'):
+                    snapshot = _manager_call(manager, 'get_traffic_snapshot', proto)
+                    epoch, peer_counters = snapshot['epoch'], snapshot['peers']
+                    if not isinstance(epoch, str) or not epoch:
+                        raise ValueError('Counter epoch missing')
+                else:
+                    # Other protocols keep their adapters, but missing, bool,
+                    # malformed or cached counters must not become zero either.
+                    peer_counters = {}
+                    for client in _manager_call(manager, 'get_clients', proto):
+                        ud = client.get('userData', {})
+                        if ud.get('traffic_valid', True):
+                            peer_counters[client.get('clientId')] = {
+                                'rx_bytes': ud.get('dataReceivedBytes'),
+                                'tx_bytes': ud.get('dataSentBytes'),
+                            }
                 for uc in my_conns:
-                    if uc['protocol'] == proto and uc['client_id'] in client_bytes:
-                        curr_bytes = client_bytes[uc['client_id']]
-                        last_bytes = uc.get('last_bytes', 0)
-                        delta = curr_bytes - last_bytes if curr_bytes >= last_bytes else curr_bytes
-                        server_updates.append((uc['id'], delta, curr_bytes))
-        ssh.disconnect()
-    except Exception as e:
-        logger.error(f"Traffic sync err server {sid}: {e}")
+                    if _protocol_scope(uc['protocol']) != scope:
+                        continue
+                    if owners[(scope, uc['client_id'])] != 1:
+                        logger.warning('Traffic ownership ambiguous on server %s; sample skipped', sid)
+                        continue
+                    values = peer_counters.get(uc['client_id'], {})
+                    rx, tx = values.get('rx_bytes'), values.get('tx_bytes')
+                    if not counter(rx) or not counter(tx):
+                        continue
+                    sample = {
+                        'id': uc['id'], 'user_id': uc['user_id'],
+                        'protocol': uc['protocol'], 'client_id': uc['client_id'],
+                        'server_identity': traffic_server_identity(server),
+                        'bytes': rx + tx, 'observed_at': observed_at,
+                    }
+                    if epoch is not None:
+                        sample.update(rx_bytes=rx, tx_bytes=tx, counter_epoch=epoch)
+                    server_updates.append(sample)
+            except Exception:
+                # One unavailable instance must not starve the other instances.
+                # Never include arbitrary remote stderr or configurations.
+                logger.warning('Traffic snapshot unavailable on server %s protocol %s; baselines retained', sid, proto)
+    except Exception:
+        logger.warning('Traffic SSH unavailable on server %s; baselines retained', sid)
+    finally:
+        if ssh is not None:
+            try:
+                ssh.disconnect()
+            except Exception:
+                logger.warning('Traffic SSH disconnect failed on server %s', sid)
     return server_updates
+
+
+async def sync_user_traffic_and_state():
+    # Serialize collection AND commit across overlapping cycles, not DATA_LOCK
+    # across SSH. Normal admin writes continue while counters are collected.
+    async with _TRAFFIC_SYNC_LOCK:
+        async with DATA_LOCK:
+            data = load_data()
+        updates = []
+        for sid, server in enumerate(data.get('servers', [])):
+            conns = [c for c in data.get('user_connections', []) if c['server_id'] == sid]
+            if conns:
+                updates.extend(await asyncio.to_thread(_scrape_server_traffic, server, sid, conns))
+        async with DATA_LOCK:
+            current = load_data()
+            apply_traffic_samples(current, updates, datetime.now())
+            pending = [u['id'] for u in current['users'] if u.get('access_sync_pending')]
+            save_data(current)
+        if pending:
+            await asyncio.gather(*(perform_toggle_user({}, uid, False) for uid in pending))
 
 
 async def periodic_background_tasks():
     """Background task to sync traffic limits and Remnawave every 10 minutes"""
     while True:
         try:
+            peer_creates.schedule_recovery()
             # We wait before the first sync to let the app settle
             await asyncio.sleep(60) 
             
             # --- 1. TRAFFIC SYNC & LIMITS ---
             logger.info("Starting background traffic sync...")
-            data = load_data()
-            
-            conns_by_server = {}
-            for uc in data.get('user_connections', []):
-                sid = uc['server_id']
-                conns_by_server.setdefault(sid, []).append(uc)
-                
-            updates = []
-            
-            for sid, server in enumerate(data.get('servers', [])):
-                if sid not in conns_by_server: continue
-                
-                # Run the blocking SSH traffic scraping in a background thread!
-                server_updates = await asyncio.to_thread(_scrape_server_traffic, server, sid, conns_by_server[sid])
-                if server_updates:
-                    updates.extend(server_updates)
-
-            to_disable_uids = []
-            if updates:
-                async with DATA_LOCK:
-                    curr_data = load_data()
-                    users_map = {u['id']: u for u in curr_data.get('users', [])}
-                    uc_list = curr_data.get('user_connections', [])
-                    uc_map = {uc['id']: uc for uc in uc_list}
-                    
-                    # Current date/time for reset checking
-                    now = datetime.now()
-                    
-                    for uc_id, delta, curr_bytes in updates:
-                        if uc_id in uc_map:
-                            uc_map[uc_id]['last_bytes'] = curr_bytes
-                            uid = uc_map[uc_id]['user_id']
-                            if uid in users_map:
-                                u = users_map[uid]
-                                # Check if reset is needed BEFORE adding new consumption
-                                strategy = u.get('traffic_reset_strategy', 'never')
-                                last_reset_iso = u.get('last_reset_at')
-                                
-                                reset_needed = False
-                                if strategy != 'never' and last_reset_iso:
-                                    try:
-                                        last = datetime.fromisoformat(last_reset_iso)
-                                        if strategy == 'daily':
-                                            reset_needed = now.date() > last.date()
-                                        elif strategy == 'weekly':
-                                            reset_needed = now.isocalendar()[1] != last.isocalendar()[1] or now.year != last.year
-                                        elif strategy == 'monthly':
-                                            reset_needed = now.month != last.month or now.year != last.year
-                                    except:
-                                        pass
-                                
-                                if reset_needed:
-                                    logger.info(f"Resetting traffic for user {u['username']} (strategy: {strategy})")
-                                    u['traffic_used'] = 0
-                                    u['last_reset_at'] = now.isoformat()
-                                
-                                # Update both resettable and total traffic
-                                u['traffic_used'] = u.get('traffic_used', 0) + delta
-                                u['traffic_total'] = u.get('traffic_total', 0) + delta
-                                
-                                limit = u.get('traffic_limit', 0)
-                                if limit > 0 and u['traffic_used'] >= limit and u.get('enabled', True):
-                                    if uid not in to_disable_uids:
-                                        to_disable_uids.append(uid)
-                                
-                                # Check expiration date
-                                exp_str = u.get('expiration_date')
-                                if exp_str and u.get('enabled', True):
-                                    try:
-                                        exp_date = datetime.fromisoformat(exp_str)
-                                        if now > exp_date:
-                                            logger.info(f"Subscription expired for user {u['username']} (expired at {exp_str})")
-                                            if uid not in to_disable_uids:
-                                                to_disable_uids.append(uid)
-                                    except:
-                                        pass
-                    save_data(curr_data)
-                    
-            if to_disable_uids:
-                logger.info(f"Traffic limit reached, disabling users: {to_disable_uids}")
-                await perform_mass_operations(toggle_uids=[(uid, False) for uid in to_disable_uids])
+            await sync_user_traffic_and_state()
 
             # --- 2. AUTO BACKUP ---
             await run_auto_backups_if_due()
@@ -3133,7 +3300,7 @@ def api_login(request: Request, req: LoginRequest):
 
     for u in data.get('users', []):
         # Users without a password (role 'none', record-only) can never log in.
-        if u['username'] == req.username and u.get('password_hash') and verify_password(req.password, u['password_hash']):
+        if u.get('username') == req.username and u.get('password_hash') and verify_password(req.password, u['password_hash']):
             lang = request.cookies.get('lang', 'ru')
             if u.get('role') == 'none':
                 # Record-only account: even a password set later does not
@@ -3183,6 +3350,67 @@ class SSHTrustConfirmation(BaseModel):
     confirmed: StrictBool
 
 
+class SSHOnboardingEndpoint(BaseModel):
+    host: constr(min_length=1, max_length=253)
+    ssh_port: conint(strict=True, ge=1, le=65535) = 22
+    server_uid: Optional[constr(min_length=1, max_length=128)] = None
+
+    class Config:
+        # Inspect/confirm must never receive SSH authentication material.
+        extra = 'forbid'
+
+
+class SSHOnboardingConfirmation(SSHOnboardingEndpoint, SSHTrustConfirmation):
+    pass
+
+
+def _ssh_onboarding_endpoint(req):
+    endpoint = {'host': req.host, 'ssh_port': req.ssh_port,
+                'uid': req.server_uid, 'enrollment_context': 'new-server'}
+    ssh_trust.identity(endpoint)
+    if req.server_uid:
+        current = next((s for s in load_data()['servers'] if s.get('uid') == req.server_uid), None)
+        if current is None:
+            raise ValueError('Server no longer exists; refresh inventory')
+        endpoint['enrollment_context'] = ssh_trust.inventory_binding(current)
+    return endpoint
+
+
+@app.post('/api/ssh-trust/onboarding/inspect', tags=["Servers"])
+async def api_ssh_onboarding_inspect(request: Request, req: SSHOnboardingEndpoint):
+    if not _ssh_trust_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        async with DATA_LOCK:
+            endpoint = _ssh_onboarding_endpoint(req)
+        result = await asyncio.to_thread(ssh_trust.inspect, endpoint)
+        async with DATA_LOCK:
+            if endpoint != _ssh_onboarding_endpoint(req):
+                raise ValueError('Server endpoint changed; inspect again')
+        return result
+    except Exception as exc:
+        return JSONResponse({'error': str(exc)}, status_code=409)
+
+
+@app.post('/api/ssh-trust/onboarding/confirm', tags=["Servers"])
+async def api_ssh_onboarding_confirm(request: Request, req: SSHOnboardingConfirmation):
+    if not _ssh_trust_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if not req.confirmed:
+        return JSONResponse({'error': 'Explicit confirmation required'}, status_code=400)
+    try:
+        async with DATA_LOCK:
+            endpoint = _ssh_onboarding_endpoint(req)
+            reset_server = next((dict(s) for s in load_data()['servers']
+                                 if s.get('uid') == req.server_uid), None) if req.server_uid else None
+        key = await asyncio.to_thread(ssh_trust.prepare_enrollment, endpoint, req.token)
+        result = await _save_ssh_confirmation(endpoint, req.token, key,
+            lambda: endpoint == _ssh_onboarding_endpoint(req), reset_server)
+        return dict(result, ssh_authenticated=False)
+    except Exception as exc:
+        return JSONResponse({'error': str(exc)}, status_code=409)
+
+
 def _ssh_trust_admin(request):
     # Keep session/Bearer authorization; reject cross-origin browser writes.
     origin = request.headers.get('origin')
@@ -3198,14 +3426,31 @@ def _ssh_trust_admin(request):
 
 
 @app.post('/api/servers/{server_id}/ssh-trust/inspect', tags=["Servers"])
-def api_ssh_trust_inspect(request: Request, server_id: int):
+def api_ssh_trust_inspect(request: Request, server_id: int, server_uid: Optional[str] = None):
     if not _ssh_trust_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     servers = load_data()['servers']
     if not 0 <= server_id < len(servers):
         return JSONResponse({'error': 'Server not found'}, status_code=404)
+    if server_uid is not None and servers[server_id].get('uid') != server_uid:
+        return JSONResponse({'error': 'Inventory changed; refresh and retry'}, status_code=409)
     try:
         return ssh_trust.inspect(servers[server_id])
+    except Exception as exc:
+        return JSONResponse({'error': str(exc)}, status_code=409)
+
+
+@app.get('/api/servers/{server_id}/ssh-trust/status', tags=["Servers"])
+def api_ssh_trust_status(request: Request, server_id: int, server_uid: Optional[str] = None):
+    if not _ssh_trust_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    servers = load_data()['servers']
+    if not 0 <= server_id < len(servers):
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    if server_uid is not None and servers[server_id].get('uid') != server_uid:
+        return JSONResponse({'error': 'Inventory changed; refresh and retry'}, status_code=409)
+    try:
+        return {'status': ssh_trust.saved_status(servers[server_id])}
     except Exception as exc:
         return JSONResponse({'error': str(exc)}, status_code=409)
 
@@ -3229,8 +3474,25 @@ async def _finish_locked_worker(function):
     return worker.result()
 
 
+async def _save_ssh_confirmation(endpoint, token, key, unchanged, reset_server):
+    committed = []
+    def commit():
+        result = ssh_trust.commit_enrollment(endpoint, token, key, validate_endpoint=unchanged)
+        committed.append(True)
+        return result
+    try:
+        async with DATA_LOCK:
+            return await _finish_locked_worker(commit)
+    finally:
+        # A pooled transport can be busy with a handshake/command. Wait outside
+        # DATA_LOCK, including if the HTTP request was cancelled during commit.
+        if committed and reset_server is not None:
+            await _finish_locked_worker(lambda: drop_ssh(reset_server))
+
+
 @app.post('/api/servers/{server_id}/ssh-trust/confirm', tags=["Servers"])
-async def api_ssh_trust_confirm(request: Request, server_id: int, req: SSHTrustConfirmation):
+async def api_ssh_trust_confirm(request: Request, server_id: int, req: SSHTrustConfirmation,
+                                server_uid: Optional[str] = None):
     if not _ssh_trust_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     if not req.confirmed:
@@ -3239,27 +3501,54 @@ async def api_ssh_trust_confirm(request: Request, server_id: int, req: SSHTrustC
     if not 0 <= server_id < len(servers):
         return JSONResponse({'error': 'Server not found'}, status_code=404)
     server = servers[server_id]
+    if server_uid is not None and server.get('uid') != server_uid:
+        return JSONResponse({'error': 'Inventory changed; refresh and retry'}, status_code=409)
     try:
+        key = await asyncio.to_thread(ssh_trust.prepare_enrollment, server, req.token)
         def unchanged():
             current = load_data()['servers']
-            return (server_id < len(current) and
-                    all(current[server_id].get(k) == server.get(k)
-                        for k in ('uid', 'host', 'ssh_port')))
-        # Serialize the final endpoint check and trust write with server edits.
-        async with DATA_LOCK:
-            def enroll_and_reset():
-                result = ssh_trust.enroll(server, req.token, validate_endpoint=unchanged)
-                drop_ssh(server)
-                return result
-
-            result = await _finish_locked_worker(enroll_and_reset)
-        return result
+            return any(all(s.get(k) == server.get(k) for k in ('uid', 'host', 'ssh_port'))
+                       for s in current)
+        return await _save_ssh_confirmation(server, req.token, key, unchanged, server)
     except Exception as exc:
         return JSONResponse({'error': str(exc)}, status_code=409)
 
 
+def _server_identity(server_id, server_uid=None):
+    servers = load_data()['servers']
+    if not 0 <= server_id < len(servers):
+        return None, JSONResponse({'error': 'Server not found'}, status_code=404)
+    server = servers[server_id]
+    if not server.get('uid') or (server_uid is not None and server_uid != server['uid']):
+        return None, JSONResponse({'error': 'Server identity changed; refresh the inventory'}, status_code=409)
+    return server, None
+
+
+async def _finish_server_operation(operation):
+    """A disconnected HTTP caller must not abandon in-flight SSH mutations.
+
+    The worker owns SERVER_MUTATION_LOCK until cleanup and persistence finish;
+    cancellation is then propagated to the caller, including repeated cancels.
+    """
+    worker = asyncio.create_task(operation)
+    cancelled = False
+    while not worker.done():
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception:
+            break
+    if cancelled:
+        if not worker.cancelled():
+            worker.exception()
+        raise asyncio.CancelledError
+    return worker.result()
+
+
 @app.post('/api/servers/add', tags=["Servers"])
-def api_add_server(request: Request, req: AddServerRequest):
+@serialize_peer_lifecycle
+async def api_add_server(request: Request, req: AddServerRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
@@ -3271,13 +3560,17 @@ def api_add_server(request: Request, req: AddServerRequest):
         if not req.password and not req.private_key:
             return JSONResponse({'error': 'Password or SSH key is required'}, status_code=400)
 
-        ssh = SSHManager(host, req.ssh_port, username, req.password, req.private_key)
+        def verify():
+            ssh = SSHManager(host, req.ssh_port, username, req.password, req.private_key)
+            try:
+                ssh.connect()
+                return ssh.test_connection()
+            finally:
+                ssh.disconnect()
         try:
-            ssh.connect()
-            server_info = ssh.test_connection()
-            ssh.disconnect()
+            server_info = await asyncio.to_thread(verify)
         except Exception as e:
-            return JSONResponse({'error': f'Connection failed: {str(e)}'}, status_code=400)
+            return JSONResponse({'error': f'Connection failed: {e}'}, status_code=400)
 
         server = {
             'uid': uuid.uuid4().hex,
@@ -3286,75 +3579,81 @@ def api_add_server(request: Request, req: AddServerRequest):
             'private_key': req.private_key, 'server_info': server_info,
             'protocols': {},
         }
-        data = load_data()
-        data['servers'].append(server)
-        save_data(data)
-        return {'status': 'success', 'server_id': len(data['servers']) - 1, 'server_info': server_info}
+        async with SERVER_MUTATION_LOCK:
+            async with DATA_LOCK:
+                data = load_data()
+                data['servers'].append(server)
+                save_data(data)
+                server_id = len(data['servers']) - 1
+        return {'status': 'success', 'server_id': server_id, 'server_info': server_info}
     except Exception as e:
         logger.exception("Error adding server")
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
 @app.post('/api/servers/{server_id}/edit', tags=["Servers"])
-async def api_edit_server(request: Request, server_id: int, req: EditServerRequest):
-    """Update connection details for an existing server entry. Verifies the new
-    credentials by SSH-connecting before persisting, so a typo can't lock us out.
-    """
+@serialize_peer_lifecycle
+async def api_edit_server(request: Request, server_id: int, req: EditServerRequest,
+                          server_uid: Optional[str] = None):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
-    def edit():
-        try:
-            data = load_data()
-            if server_id >= len(data['servers']):
-                return JSONResponse({'error': 'Server not found'}, status_code=404)
-            server = data['servers'][server_id]
+    selected, error = _server_identity(server_id, server_uid)
+    if error is not None:
+        return error
+    uid = selected['uid']
 
-            new_host = (req.host or '').strip() or server['host']
-            new_user = (req.username or '').strip() or server['username']
-            new_port = int(req.ssh_port or server.get('ssh_port', 22))
-            new_name = (req.name or '').strip() or server.get('name') or new_host
-
-            # Credential resolution: a non-empty value in either field switches to
-            # that auth method (and clears the other). Both omitted => keep current.
-            if req.private_key:
-                new_pass, new_key = '', req.private_key
-            elif req.password:
-                new_pass, new_key = req.password, ''
-            else:
-                new_pass = server.get('password', '')
-                new_key = server.get('private_key', '')
-
-            if not new_pass and not new_key:
-                return JSONResponse({'error': 'Password or SSH key is required'}, status_code=400)
-
-            # Verify the new connection details before committing the change.
-            ssh = SSHManager(new_host, new_port, new_user, new_pass, new_key)
+    async def edit():
+        async with SERVER_MUTATION_LOCK:
             try:
-                ssh.connect()
-                server_info = ssh.test_connection()
-                ssh.disconnect()
+                async with DATA_LOCK:
+                    _, server = find_server_by_uid(load_data(), uid)
+                    if server is None:
+                        return JSONResponse({'error': 'Server not found'}, status_code=404)
+                    server = dict(server)
+                new_host = (req.host or '').strip() or server['host']
+                new_user = (req.username or '').strip() or server['username']
+                new_port = int(req.ssh_port or server.get('ssh_port', 22))
+                new_name = (req.name or '').strip() or server.get('name') or new_host
+                if req.private_key:
+                    new_pass, new_key = '', req.private_key
+                elif req.password:
+                    new_pass, new_key = req.password, ''
+                else:
+                    new_pass, new_key = server.get('password', ''), server.get('private_key', '')
+                if not new_pass and not new_key:
+                    return JSONResponse({'error': 'Password or SSH key is required'}, status_code=400)
+
+                def verify():
+                    ssh = SSHManager(new_host, new_port, new_user, new_pass, new_key)
+                    try:
+                        ssh.connect()
+                        return ssh.test_connection()
+                    finally:
+                        ssh.disconnect()
+                try:
+                    server_info = await asyncio.to_thread(verify)
+                except Exception as e:
+                    return JSONResponse({'error': f'Connection failed: {e}'}, status_code=400)
+
+                async with DATA_LOCK:
+                    data = load_data()
+                    _, current = find_server_by_uid(data, uid)
+                    if current is None or any(current.get(k) != server.get(k) for k in
+                                              ('host', 'ssh_port', 'username', 'password', 'private_key')):
+                        return JSONResponse({'error': 'Server changed during verification'}, status_code=409)
+                    current.update(name=new_name, host=new_host, ssh_port=new_port,
+                                   username=new_user, password=new_pass, private_key=new_key,
+                                   server_info=server_info)
+                    if req.self_service_enabled is not None:
+                        current['self_service_enabled'] = bool(req.self_service_enabled)
+                    save_data(data)
+                # Invalidate the OLD endpoint, not the just-written new address.
+                await _finish_locked_worker(lambda: drop_ssh(server))
+                return {'status': 'success', 'server_info': server_info}
             except Exception as e:
-                return JSONResponse({'error': f'Connection failed: {e}'}, status_code=400)
-
-            server['name'] = new_name
-            server['host'] = new_host
-            server['ssh_port'] = new_port
-            server['username'] = new_user
-            server['password'] = new_pass
-            server['private_key'] = new_key
-            server['server_info'] = server_info
-            if req.self_service_enabled is not None:
-                server['self_service_enabled'] = bool(req.self_service_enabled)
-            save_data(data)
-            # Drop the stale pooled connection: credentials/host may have changed.
-            drop_ssh(server)
-            return {'status': 'success', 'server_info': server_info}
-        except Exception as e:
-            logger.exception("Error editing server")
-            return JSONResponse({'error': str(e)}, status_code=500)
-
-    async with DATA_LOCK:
-        return await _finish_locked_worker(edit)
+                logger.exception("Error editing server")
+                return JSONResponse({'error': str(e)}, status_code=500)
+    return await _finish_server_operation(edit())
 
 
 @app.get('/api/servers/{server_id}/ping', tags=["Servers"])
@@ -3396,72 +3695,96 @@ async def api_server_ping(request: Request, server_id: int):
 
 
 @app.post('/api/servers/reorder', tags=["Servers"])
+@serialize_peer_lifecycle
 async def api_reorder_servers(request: Request, req: ReorderServersRequest):
-    """Persist a user-defined ordering of servers. Also remaps `server_id`
-    references in user_connections so existing assignments survive the move.
-    """
+    """Remap the latest connections by stable UID, rejecting stale inventories."""
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
-    async with DATA_LOCK:
-        data = load_data()
-        n = len(data['servers'])
-        order = req.order or []
-        if len(order) != n or sorted(order) != list(range(n)):
-            return JSONResponse(
-                {'error': f'Order must be a permutation of indices 0..{n - 1}'},
-                status_code=400,
-            )
-        new_servers = [data['servers'][i] for i in order]
-        # Map old index -> new index for user_connections remap
-        remap = {old: new for new, old in enumerate(order)}
-        for c in data.get('user_connections', []):
-            old_id = c.get('server_id')
-            if isinstance(old_id, int) and old_id in remap:
-                c['server_id'] = remap[old_id]
-        # Sync settings.sync.remnawave_server_id if it points at a moved server
-        sync_cfg = data.get('settings', {}).get('sync', {})
-        rsid = sync_cfg.get('remnawave_server_id')
-        if isinstance(rsid, int) and rsid in remap:
-            sync_cfg['remnawave_server_id'] = remap[rsid]
-        data['servers'] = new_servers
-        save_data(data)
+    servers = load_data()['servers']
+    n = len(servers)
+    order = req.order or []
+    if len(order) != n or sorted(order) != list(range(n)):
+        return JSONResponse({'error': f'Order must be a permutation of indices 0..{n - 1}'}, status_code=400)
+    requested = [servers[i].get('uid') for i in order]
+    if (any(not uid for uid in requested) or len(set(requested)) != n or
+            (req.server_uids is not None and req.server_uids != requested)):
+        return JSONResponse({'error': 'Server identity changed; refresh the inventory'}, status_code=409)
+    async with SERVER_MUTATION_LOCK:
+        async with DATA_LOCK:
+            data = load_data()
+            current = data['servers']
+            if len(current) != n or {s.get('uid') for s in current} != set(requested):
+                return JSONResponse({'error': 'Server inventory changed; refresh before reordering'}, status_code=409)
+            by_uid = {s['uid']: s for s in current}
+            new_index = {uid: i for i, uid in enumerate(requested)}
+            remap = {i: new_index[s['uid']] for i, s in enumerate(current)}
+            for c in data.get('user_connections', []):
+                old_id = c.get('server_id')
+                if isinstance(old_id, int) and old_id in remap:
+                    c['server_id'] = remap[old_id]
+            sync_cfg = data.get('settings', {}).get('sync', {})
+            rsid = sync_cfg.get('remnawave_server_id')
+            if isinstance(rsid, int) and rsid in remap:
+                sync_cfg['remnawave_server_id'] = remap[rsid]
+            data['servers'] = [by_uid[uid] for uid in requested]
+            save_data(data)
     return {'status': 'success'}
 
 
 @app.post('/api/servers/{server_id}/delete', tags=["Servers"])
-async def api_delete_server(request: Request, server_id: int):
+@serialize_peer_lifecycle
+async def api_delete_server(request: Request, server_id: int, server_uid: Optional[str] = None):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
-    try:
-        data = load_data()
-        if server_id >= len(data['servers']):
-            return JSONResponse({'error': 'Server not found'}, status_code=404)
-        server = data['servers'][server_id]
-        # Exit-node links: restore direct egress on entries routed through
-        # this server, and drop this server's own peers on the exits it used.
-        try:
-            if (server.get('protocols') or {}).get('exit'):
-                await exit_link_svc.detach_entries_for_exit(server.get('uid'), 'exit_server_deleted')
-            await exit_link_svc.forget_entry_peers(server)
-        except Exception as e:
-            logger.warning(f"exit-link cleanup before delete failed: {e}")
-        async with DATA_LOCK:
-            data = load_data()
-            if server_id >= len(data['servers']):
-                return JSONResponse({'error': 'Server not found'}, status_code=404)
-            server = data['servers'][server_id]
-            await _finish_locked_worker(lambda: drop_ssh(server))
-            data['servers'].pop(server_id)
-            # Clean up connections for this server
-            data['user_connections'] = [c for c in data.get('user_connections', []) if c.get('server_id') != server_id]
-            # Adjust server_ids for connections pointing to higher indices
-            for c in data.get('user_connections', []):
-                if c.get('server_id', 0) > server_id:
-                    c['server_id'] -= 1
-            save_data(data)
-            return {'status': 'success'}
-    except Exception as e:
-        return JSONResponse({'error': str(e)}, status_code=500)
+    selected, error = _server_identity(server_id, server_uid)
+    if error is not None:
+        return error
+    uid = selected['uid']
+    data = load_data()
+    guard = _traffic_removal_guard(data, server_id=server_id)
+    if guard is not None:
+        return guard
+
+    async def delete():
+        async with SERVER_MUTATION_LOCK:
+            cleanup_completed = False
+            deletion_committed = False
+            try:
+                async with DATA_LOCK:
+                    _, server = find_server_by_uid(load_data(), uid)
+                    if server is None:
+                        return {'status': 'success', 'already_deleted': True}
+                results = []
+                if (server.get('protocols') or {}).get('exit'):
+                    results.extend(await exit_link_svc.detach_entries_for_exit(uid, 'exit_server_deleted'))
+                results.extend(await exit_link_svc.forget_entry_peers(server))
+                if any(item.get('status') != 'success' for item in results):
+                    return JSONResponse({'error': 'Exit-link cleanup incomplete; server retained',
+                                         'cleanup_results': results, 'deletion_committed': False}, status_code=409)
+                cleanup_completed = True
+                async with DATA_LOCK:
+                    data = load_data()
+                    index, current = find_server_by_uid(data, uid)
+                    if current is None:
+                        return {'status': 'success', 'already_deleted': True}
+                    data['servers'].pop(index)
+                    data['user_connections'] = [c for c in data.get('user_connections', [])
+                                                if c.get('server_id') != index]
+                    for c in data['user_connections']:
+                        if c.get('server_id', 0) > index:
+                            c['server_id'] -= 1
+                    save_data(data)
+                    deletion_committed = True
+                await _finish_locked_worker(lambda: drop_ssh(server))
+                return {'status': 'success'}
+            except Exception as e:
+                # Remote cleanup is not transactional. Keep the server on a failed
+                # local commit, report the partial result, and allow a safe retry.
+                logger.exception("Error deleting server uid=%s; cleanup_completed=%s deletion_committed=%s",
+                                 uid, cleanup_completed, deletion_committed)
+                return JSONResponse({'error': str(e), 'cleanup_completed': cleanup_completed,
+                                     'deletion_committed': deletion_committed}, status_code=500)
+    return await _finish_server_operation(delete())
 
 
 @app.post('/api/servers/{server_id}/reboot', tags=["Servers"])
@@ -3490,29 +3813,50 @@ def api_reboot_server(request: Request, server_id: int):
 
 
 @app.post('/api/servers/{server_id}/clear', tags=["Servers"])
-async def api_clear_server(request: Request, server_id: int):
+@serialize_peer_lifecycle
+async def api_clear_server(request: Request, server_id: int, server_uid: Optional[str] = None):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
-    try:
-        data = load_data()
-        if server_id >= len(data['servers']):
-            return JSONResponse({'error': 'Server not found'}, status_code=404)
-        server = data['servers'][server_id]
+    data = load_data()
+    if not 0 <= server_id < len(data['servers']):
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    guard = _traffic_removal_guard(data, server_id=server_id)
+    if guard is not None:
+        return guard
+    selected = data['servers'][server_id]
+    uid = selected.get('uid')
+    if not uid or (server_uid is not None and server_uid != uid):
+        return JSONResponse({'error': 'Server identity changed; refresh before clearing'}, status_code=409)
+
+    def unchanged(current):
+        return current is not None and all(current.get(k) == selected.get(k)
+                                          for k in ('host', 'ssh_port', 'username', 'protocols'))
+
+    async def clear():
+        remote_completed = False
+        local_committed = False
         try:
+            async with DATA_LOCK:
+                _, server = find_server_by_uid(load_data(), uid)
+                if not unchanged(server):
+                    return JSONResponse({'error': 'Server changed before cleanup'}, status_code=409)
+            results = []
             if (server.get('protocols') or {}).get('exit'):
-                await exit_link_svc.detach_entries_for_exit(server.get('uid'), 'exit_cleared')
-            await exit_link_svc.forget_entry_peers(server)
-        except Exception as e:
-            logger.warning(f"exit-link cleanup before clear failed: {e}")
-        data = load_data()
-        server = data['servers'][server_id]
-        ssh = await asyncio.to_thread(get_ssh, server)
-        await asyncio.to_thread(ssh.connect)
-        # Match every Amnezia container by name prefix (catches awg/awg2/awg-legacy,
-        # wireguard, xray/ssxray, openvpn, dns, and any future amnezia-* protocol)
-        # plus the telemt container which doesn't share that prefix.
-        # Using a single script avoids one SSH round-trip per command.
-        cleanup_script = r"""
+                results.extend(await exit_link_svc.detach_entries_for_exit(uid, 'exit_cleared'))
+            results.extend(await exit_link_svc.forget_entry_peers(server))
+            if any(item.get('status') != 'success' for item in results):
+                return JSONResponse({'error': 'Exit-link cleanup incomplete; clear aborted',
+                                     'cleanup_results': results}, status_code=409)
+            async with DATA_LOCK:
+                _, server = find_server_by_uid(load_data(), uid)
+                if not unchanged(server):
+                    return JSONResponse({'error': 'Server changed during exit cleanup'}, status_code=409)
+
+            def run_remote():
+                ssh = get_ssh(server)
+                try:
+                    ssh.connect()
+                    cleanup_script = r"""
 for c in $(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E '^(amnezia-|telemt$)'); do
     docker stop "$c" >/dev/null 2>&1 || true
     docker rm -fv "$c" >/dev/null 2>&1 || true
@@ -3526,15 +3870,46 @@ done
 docker network rm amnezia-dns-net >/dev/null 2>&1 || true
 rm -rf /opt/amnezia
 """
-        await asyncio.to_thread(ssh.run_sudo_script, cleanup_script, timeout=120)
+                    return ssh.run_sudo_script(cleanup_script, timeout=120)
+                finally:
+                    ssh.disconnect()
+            result = await asyncio.to_thread(run_remote)
+            if not isinstance(result, (tuple, list)) or len(result) != 3 or result[2] != 0:
+                return JSONResponse({'error': 'Remote cleanup failed; protocol metadata retained',
+                                     'remote_cleanup_completed': False, 'local_commit_completed': False}, status_code=502)
+            remote_completed = True
+            async with DATA_LOCK:
+                data = load_data()
+                _, current = find_server_by_uid(data, uid)
+                if not unchanged(current):
+                    return JSONResponse({'error': 'Server changed after remote cleanup; refresh and reconcile',
+                                         'remote_cleanup_completed': True, 'local_commit_completed': False}, status_code=409)
+                current['protocols'] = {}
+                save_data(data)
+                local_committed = True
+            return {'status': 'success'}
+        except Exception as e:
+            logger.exception("Error clearing server uid=%s; remote_completed=%s local_committed=%s",
+                             uid, remote_completed, local_committed)
+            return JSONResponse({'error': str(e), 'remote_cleanup_completed': remote_completed,
+                                 'local_commit_completed': local_committed}, status_code=500)
 
-        server['protocols'] = {}
-        save_data(data)
-        ssh.disconnect()
-        return {'status': 'success'}
-    except Exception as e:
-        logger.exception("Error clearing server")
-        return JSONResponse({'error': str(e)}, status_code=500)
+    # Do not abandon a destructive worker on HTTP disconnect. Finish its local
+    # reconciliation before propagating cancellation; DATA_LOCK is free during SSH.
+    worker = asyncio.create_task(clear())
+    cancelled = False
+    while not worker.done():
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception:
+            break
+    if cancelled:
+        if not worker.cancelled():
+            worker.exception()
+        raise asyncio.CancelledError
+    return worker.result()
 
 
 @app.post('/api/servers/{server_id}/stats', tags=["Servers"])
@@ -3628,6 +4003,50 @@ def _rkn_record(server):
     return server.get('rknblock') or {}
 
 
+def _rkn_server_index(data, server_id, server_uid):
+    """Resolve a server after a long SSH call: uid survives reorder/delete,
+    the positional index is only a fallback for legacy records."""
+    if server_uid:
+        for idx, srv in enumerate(data.get('servers', [])):
+            if srv.get('uid') == server_uid:
+                return idx
+    if isinstance(server_id, int) and 0 <= server_id < len(data.get('servers', [])):
+        return server_id
+    return None
+
+
+async def _rkn_store_record(server_id, server_uid, mutate):
+    """Reload under DATA_LOCK after SSH and persist only the RKN record.
+
+    RKN install/enable/options take seconds and the old code saved a whole
+    data.json snapshot loaded before the SSH call. A background traffic save
+    or another admin action could then overwrite the new record with a stale
+    snapshot, leaving the card at "not installed" right after a successful
+    install.
+    """
+    async with DATA_LOCK:
+        data = load_data()
+        idx = _rkn_server_index(data, server_id, server_uid)
+        if idx is None:
+            return None
+        rec = dict(data['servers'][idx].get('rknblock') or {})
+        mutate(rec)
+        data['servers'][idx]['rknblock'] = rec
+        save_data(data)
+        return rec
+
+
+async def _rkn_drop_record(server_id, server_uid):
+    async with DATA_LOCK:
+        data = load_data()
+        idx = _rkn_server_index(data, server_id, server_uid)
+        if idx is None:
+            return False
+        data['servers'][idx].pop('rknblock', None)
+        save_data(data)
+        return True
+
+
 async def _rkn_ssh_run(server, cmd, timeout):
     ssh = await asyncio.to_thread(get_ssh, server)
     await asyncio.to_thread(ssh.connect)
@@ -3653,15 +4072,20 @@ async def api_rknblock_install(request: Request, server_id: int):
     if server_id >= len(data['servers']):
         return JSONResponse({'error': 'Server not found'}, status_code=404)
     server = data['servers'][server_id]
+    server_uid = server.get('uid')
     err = await _rkn_ssh_run(server, RKN_INSTALL_CMD, 420)
     if err is not None:
         return err
-    rec = dict(_rkn_record(server))
-    rec['installed'] = True
-    rec['enabled'] = True
-    server['rknblock'] = rec
-    save_data(data)
-    RKN_FLAG_CACHE.pop(server_id, None)
+
+    def mark(rec):
+        rec['installed'] = True
+        rec['enabled'] = True
+        rec['last_error'] = None
+
+    rec = await _rkn_store_record(server_id, server_uid, mark)
+    if rec is None:
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    RKN_FLAG_CACHE.clear()
     return {'status': 'success', 'installed': True, 'enabled': True}
 
 
@@ -3674,12 +4098,13 @@ async def api_rknblock_uninstall(request: Request, server_id: int):
     if server_id >= len(data['servers']):
         return JSONResponse({'error': 'Server not found'}, status_code=404)
     server = data['servers'][server_id]
+    server_uid = server.get('uid')
     err = await _rkn_ssh_run(server, _rkn_run_cmd('uninstall'), 180)
     if err is not None:
         return err
-    server.pop('rknblock', None)
-    save_data(data)
-    RKN_FLAG_CACHE.pop(server_id, None)
+    if not await _rkn_drop_record(server_id, server_uid):
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    RKN_FLAG_CACHE.clear()
     return {'status': 'success', 'installed': False}
 
 
@@ -3698,15 +4123,20 @@ async def api_rknblock_enable(request: Request, server_id: int, req: RknBlockEna
     server = data['servers'][server_id]
     if not _rkn_record(server).get('installed'):
         return JSONResponse({'error': 'App is not installed'}, status_code=409)
+    server_uid = server.get('uid')
     err = await _rkn_ssh_run(server, _rkn_run_cmd('on' if req.enabled else 'off'), 180)
     if err is not None:
         return err
-    rec = dict(_rkn_record(server))
-    rec['installed'] = True
-    rec['enabled'] = bool(req.enabled)
-    server['rknblock'] = rec
-    save_data(data)
-    RKN_FLAG_CACHE.pop(server_id, None)
+
+    def mark(rec):
+        rec['installed'] = True
+        rec['enabled'] = bool(req.enabled)
+        rec['last_error'] = None
+
+    rec = await _rkn_store_record(server_id, server_uid, mark)
+    if rec is None:
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    RKN_FLAG_CACHE.clear()
     return {'status': 'success', 'enabled': bool(req.enabled)}
 
 
@@ -3751,15 +4181,20 @@ async def api_rknblock_options(request: Request, server_id: int, req: RknBlockOp
         return JSONResponse({'error': 'App is not installed'}, status_code=409)
     values = req.model_dump()
     pairs = ' '.join(f'{k}={"on" if values[k] else "off"}' for k in RKN_OPTION_FLAGS)
+    server_uid = server.get('uid')
     err = await _rkn_ssh_run(server, _rkn_run_cmd(f'set {pairs}'), 120)
     if err is not None:
         return err
-    rec = dict(_rkn_record(server))
-    rec['installed'] = True
-    rec['flags'] = values
-    server['rknblock'] = rec
-    save_data(data)
-    RKN_FLAG_CACHE.pop(server_id, None)
+
+    def mark(rec):
+        rec['installed'] = True
+        rec['flags'] = values
+        rec['last_error'] = None
+
+    rec = await _rkn_store_record(server_id, server_uid, mark)
+    if rec is None:
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    RKN_FLAG_CACHE.clear()
     return {'status': 'success', 'flags': values}
 
 
@@ -3795,6 +4230,12 @@ def _parse_rkn_scan_output(out, flag_enabled):
     m = re.search(r'last_update:\s*(\S+)', status_part)
     if m and m.group(1) != '—':
         last_update = m.group(1)
+    # Новый статус печатает health: ok|failed после проверки наборов и правил.
+    # Старые версии строку не печатают; тогда здоровье определяется по sets.
+    health = None
+    m = re.search(r'health:\s*(\w+)', status_part)
+    if m:
+        health = m.group(1).lower()
     events = []
     for line in (log_part or '').splitlines():
         line = line.strip()
@@ -3828,9 +4269,21 @@ def _parse_rkn_scan_output(out, flag_enabled):
         except ValueError:
             pass
 
+    sets_ok = sets.get('in4', 0) > 0 and sets.get('out4', 0) > 0
+    problems = []
+    if agent_state != 'on':
+        problems.append('not_running')
+    if not sets_ok:
+        problems.append('lists_empty')
+    if health == 'failed':
+        problems.append('health_failed')
+
     return {
         'flag_enabled': bool(flag_enabled),
         'agent_state': agent_state,
+        'health': health,
+        'sets_ok': sets_ok,
+        'problems': problems,
         'sets': sets,
         'flags': flags,
         'last_update': last_update,
@@ -3871,8 +4324,14 @@ async def api_rkn_scans(request: Request, server_id: int):
     record = server.get('rknblock') or {}
     installed = bool(record.get('installed'))
     parsed = _parse_rkn_scan_output(out, installed)
+    live_on = parsed.get('agent_state') == 'on'
     parsed['installed'] = installed
     parsed['enabled'] = bool(record.get('enabled', True)) if installed else False
+    parsed['running'] = bool(installed and live_on)
+    parsed['healthy'] = bool(installed and live_on
+                             and parsed.get('sets_ok')
+                             and parsed.get('health') != 'failed')
+    parsed['last_error'] = record.get('last_error')
     return parsed
 
 
@@ -3925,12 +4384,19 @@ async def api_rkn_scan_flags(request: Request):
             return idx, cached['data']
         try:
             out = await _fetch_rkn_scan_output(srv)
-            parsed = _parse_rkn_scan_output(out, srv.get('rkn_block_enabled', False))
+            installed = bool((srv.get('rknblock') or {}).get('installed'))
+            parsed = _parse_rkn_scan_output(out, installed)
+            live_on = parsed.get('agent_state') == 'on'
             summary = {'agent_state': parsed['agent_state'],
+                       'running': bool(installed and live_on),
+                       'healthy': bool(installed and live_on
+                                       and parsed.get('sets_ok')
+                                       and parsed.get('health') != 'failed'),
+                       'problems': parsed.get('problems', []),
                        'events24': parsed['last_24h'],
                        'last': parsed['last_event'],
-                       'flag': parsed['flag_enabled'],
-                       'installed': parsed['flag_enabled'],
+                       'flag': bool(installed),
+                       'installed': bool(installed),
                        'sets': parsed['sets']}
         except Exception:
             summary = None
@@ -4177,6 +4643,7 @@ def api_used_ports(request: Request, server_id: int):
 
 
 @app.post('/api/servers/{server_id}/install', tags=["Protocols"])
+@serialize_peer_lifecycle
 async def api_install_protocol(request: Request, server_id: int, req: InstallProtocolRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -4542,6 +5009,10 @@ def _exit_link_error(e: ExitLinkError):
     return JSONResponse({'error': e.code, 'message': str(e)}, status_code=e.status_code)
 
 
+def _smartroute_error(e: SmartRouteError):
+    return JSONResponse({'error': e.code, 'message': str(e)}, status_code=e.status_code)
+
+
 @app.get('/api/exit-nodes', tags=["Servers"])
 def api_exit_nodes(request: Request):
     """Servers with an installed exit node, from data.json (no SSH)."""
@@ -4615,12 +5086,21 @@ async def api_exit_link_status(request: Request, server_id: int, req: ProtocolRe
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
-        return await exit_link_svc.status(server_id, req.protocol)
+        payload = await exit_link_svc.status(server_id, req.protocol)
     except ExitLinkError as e:
         return _exit_link_error(e)
     except Exception as e:
         logger.exception("Error reading exit link status")
         return JSONResponse({'error': str(e)}, status_code=500)
+    # Smart Route counters ride along best-effort: a probe failure must not
+    # hide the whole link status.
+    try:
+        payload['smartroute'] = await smartroute_svc.counters(server_id, req.protocol)
+    except Exception:
+        logger.debug("smartroute counters unavailable for server %s %s",
+                     server_id, req.protocol)
+        payload['smartroute'] = None
+    return payload
 
 
 @app.post('/api/servers/{server_id}/exit-link/check-egress', tags=["Protocols"])
@@ -4678,6 +5158,145 @@ async def api_exit_link_failover_check(request: Request, server_id: int, req: Pr
         return _exit_link_error(e)
     except Exception as e:
         logger.exception("Error running exit failover check")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/smartroute/install', tags=["Protocols"])
+async def api_smartroute_install(request: Request, server_id: int):
+    """Install the host-side Smart Route updater (lists + systemd timer)."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        return await smartroute_svc.install(server_id)
+    except SmartRouteError as e:
+        return _smartroute_error(e)
+    except Exception as e:
+        logger.exception("Error installing Smart Route")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/smartroute/uninstall', tags=["Protocols"])
+async def api_smartroute_uninstall(request: Request, server_id: int):
+    """Remove Smart Route: every split instance is rolled back to full
+    tunnel through the exit node first."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        return await smartroute_svc.uninstall(server_id)
+    except SmartRouteError as e:
+        return _smartroute_error(e)
+    except Exception as e:
+        logger.exception("Error uninstalling Smart Route")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/smartroute/update', tags=["Protocols"])
+async def api_smartroute_update(request: Request, server_id: int):
+    """Re-download the RU prefix lists and re-apply them now."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        return await smartroute_svc.run_update(server_id)
+    except SmartRouteError as e:
+        return _smartroute_error(e)
+    except Exception as e:
+        logger.exception("Error updating Smart Route lists")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/smartroute/own-subnets', tags=["Protocols"])
+async def api_smartroute_own_subnets(request: Request, server_id: int,
+                                     req: SmartRouteOwnSubnetsRequest):
+    """Own subnets routed directly (merged into every split instance)."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        return await smartroute_svc.set_own_subnets(server_id, req.cidrs)
+    except SmartRouteError as e:
+        return _smartroute_error(e)
+    except Exception as e:
+        logger.exception("Error saving Smart Route own subnets")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/smartroute/split', tags=["Protocols"])
+async def api_smartroute_split(request: Request, server_id: int,
+                               req: SmartRouteSplitRequest):
+    """Toggle RU-direct split routing for one exit-linked instance."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        return await smartroute_svc.set_split(server_id, req.protocol, req.enabled)
+    except SmartRouteError as e:
+        return _smartroute_error(e)
+    except Exception as e:
+        logger.exception("Error toggling Smart Route split")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/smartroute/dns', tags=["Protocols"])
+async def api_smartroute_dns(request: Request, server_id: int,
+                             req: SmartRouteDnsRequest):
+    """Resolve DNS at the exit node for all split instances of the server."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        return await smartroute_svc.set_dns_via_exit(server_id, req.enabled)
+    except SmartRouteError as e:
+        return _smartroute_error(e)
+    except Exception as e:
+        logger.exception("Error switching Smart Route DNS")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/smartroute/enable', tags=["Protocols"])
+async def api_smartroute_enable(request: Request, server_id: int,
+                                req: SmartRouteEnableRequest):
+    """Global pause/resume of Smart Route on the server (card toggle).
+
+    Pausing rolls the split routing out of every split instance (traffic
+    returns to the exit node); resuming re-applies it. Lists, timer and
+    per-instance preferences are preserved."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        return await smartroute_svc.set_enabled(server_id, req.enabled)
+    except SmartRouteError as e:
+        return _smartroute_error(e)
+    except Exception as e:
+        logger.exception("Error toggling Smart Route globally")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/smartroute/dns-servers', tags=["Protocols"])
+async def api_smartroute_dns_servers(request: Request, server_id: int,
+                                     req: SmartRouteDnsServersRequest):
+    """Resolver pair for split instances: the direct resolver is expected to
+    be a RU IP (routed directly), the exit resolver a foreign one (routed
+    through the exit node). Stored server-wide and pushed into every split
+    instance's client-config DNS line."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        return await smartroute_svc.set_dns_servers(server_id, req.direct, req.exit)
+    except SmartRouteError as e:
+        return _smartroute_error(e)
+    except Exception as e:
+        logger.exception("Error saving Smart Route DNS pair")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.get('/api/servers/{server_id}/smartroute/status', tags=["Protocols"])
+async def api_smartroute_status(request: Request, server_id: int):
+    """App state: host lists, timer, own subnets, DNS choice, split instances."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        return await smartroute_svc.status(server_id)
+    except SmartRouteError as e:
+        return _smartroute_error(e)
+    except Exception as e:
+        logger.exception("Error reading Smart Route status")
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
@@ -4758,13 +5377,17 @@ def api_awg_settings_save(request: Request, server_id: int, req: AwgSettingsRequ
 
 
 @app.post('/api/servers/{server_id}/uninstall', tags=["Protocols"])
+@serialize_peer_lifecycle
 async def api_uninstall_protocol(request: Request, server_id: int, req: ProtocolRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
         data = load_data()
-        if server_id >= len(data['servers']):
+        if server_id < 0 or server_id >= len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
+        guard = _traffic_removal_guard(data, server_id=server_id, protocol=req.protocol)
+        if guard is not None:
+            return guard
         server = data['servers'][server_id]
         base = protocol_base(req.protocol)
         if base in AWG_PROTOCOLS and ((server.get('protocols') or {}).get(req.protocol) or {}).get('exit_link'):
@@ -5001,6 +5624,7 @@ async def api_protocol_backup_upload(
 
 
 @app.post('/api/servers/{server_id}/backups/restore', tags=["Protocols"])
+@serialize_peer_lifecycle
 async def api_protocol_backup_restore(request: Request, server_id: int, req: BackupDownloadRequest):
     """Restore a protocol from a backup archive on the remote server."""
     if not _check_admin(request):
@@ -5015,6 +5639,9 @@ async def api_protocol_backup_restore(request: Request, server_id: int, req: Bac
         data = load_data()
         if server_id < 0 or server_id >= len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
+        guard = _traffic_removal_guard(data, server_id=server_id, protocol=req.protocol, include_archived=True)
+        if guard is not None:
+            return guard
         server = data['servers'][server_id]
         container = protocol_container_name(req.protocol)
         if not container:
@@ -5302,6 +5929,8 @@ async def api_set_protocol_public_endpoint(request: Request, server_id: int, req
     Both fields are optional and empty means "as before": the server's own
     address, the instance's listen port. Useful when an instance answers on a
     second IP of the same box, behind a port forward, or under a domain name.
+    A custom public port on this same box is published automatically: REDIRECT
+    rules in iptables/ip6tables send it to the instance's listen port.
     """
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -5320,6 +5949,8 @@ async def api_set_protocol_public_endpoint(request: Request, server_id: int, req
             return JSONResponse({'error': str(e)}, status_code=400)
 
         record = server['protocols'][proto]
+        old_public_port = str(record.get('public_port') or '').strip()
+        listen_port = str(record.get('port') or '').strip()
         for key, value in (('public_host', host), ('public_port', port)):
             if value:
                 record[key] = value
@@ -5327,33 +5958,291 @@ async def api_set_protocol_public_endpoint(request: Request, server_id: int, req
                 record.pop(key, None)
         save_data(data)
 
-        # Telemt composes its own tg:// links from config.toml, so for that
-        # protocol the override reaches clients only after the file on the
-        # server carries it. The record is saved either way: a box that is down
-        # right now must not lose the setting, and the next install re-applies
-        # it.
+        # The override reaches the server in two ways: telemt composes its own
+        # tg:// links from config.toml, and a custom public port on this same
+        # box needs an iptables REDIRECT to the listen port. The record is
+        # saved either way: a box that is down right now must not lose the
+        # setting, and the next save re-applies it.
         warning = ''
-        if protocol_base(proto) == 'telemt':
-            ssh = None
-            try:
+        ssh = None
+        try:
+            base = protocol_base(proto)
+            if base == 'telemt':
                 pub_host, pub_port = protocol_public_endpoint(server, proto)
                 ssh = await asyncio.to_thread(get_ssh, server)
                 await asyncio.to_thread(ssh.connect)
                 manager = get_protocol_manager(ssh, proto)
                 await asyncio.to_thread(
                     manager.set_public_endpoint, pub_host, pub_port or record.get('port', '443'))
-            except Exception as e:
-                logger.warning(f"Could not apply the public endpoint to {proto}: {e}")
-                warning = str(e)
-            finally:
-                if ssh is not None:
-                    ssh.disconnect()
+            fwd_host, _ = protocol_public_endpoint(server, proto)
+            fwd, fwd_warning = public_port_forward_commands(
+                proto, port, listen_port, old_public_port, fwd_host)
+            if fwd_warning and not warning:
+                warning = fwd_warning
+            if fwd is not None:
+                if ssh is None:
+                    ssh = await asyncio.to_thread(get_ssh, server)
+                    await asyncio.to_thread(ssh.connect)
+                for cmd in fwd:
+                    out, err, code = await asyncio.to_thread(ssh.run_sudo_command, cmd)
+                    if code != 0 and not warning:
+                        logger.warning(f"Public port forward command failed on {proto}: {cmd}: {err}")
+                        warning = f"forward command failed: {cmd}: {err}"
+                # Verify the rule exists for each address family when adding,
+                # scoped exactly like the rule that was installed.
+                if not warning and port and str(port) != str(listen_port):
+                    l4 = next((k for k, v in PUBLIC_FORWARD_L4.items() if base in v), None)
+                    if l4:
+                        fam, _ = _forward_family_dests(fwd_host)
+                        for ipt, fkey in (('iptables', 4), ('ip6tables', 6)):
+                            addrs = fam[fkey]
+                            if addrs == []:
+                                continue
+                            for addr in (addrs if addrs is not None else ['']):
+                                dest = f' -d {addr}' if addr else ''
+                                verify = (f'{ipt} -t nat -C PREROUTING -p {l4}{dest} --dport {port} '
+                                          f'-j REDIRECT --to-ports {listen_port}')
+                                vout, verr, vcode = await asyncio.to_thread(ssh.run_sudo_command, verify)
+                                if vcode != 0 and not warning:
+                                    logger.warning(f"Public port forward verification failed on {proto}: {ipt}: {verr}")
+                                    warning = f"forward verification failed: {ipt} REDIRECT to :{listen_port} not present"
+        except Exception as e:
+            logger.warning(f"Could not apply the public endpoint to {proto}: {e}")
+            warning = str(e)
+        finally:
+            if ssh is not None:
+                ssh.disconnect()
 
         return {'status': 'success', 'protocol': proto,
                 'public_host': host, 'public_port': port, 'warning': warning}
     except Exception as e:
         logger.exception("Error setting protocol public endpoint")
         return JSONResponse({'error': str(e)}, status_code=500)
+
+
+# Public ports are published on the box itself: UDP for the WireGuard family,
+# TCP for the rest. DNS resolvers and the exit node have nothing to publish.
+PUBLIC_FORWARD_L4 = {
+    'udp': ('awg', 'awg2', 'awg3', 'awg_legacy', 'wireguard'),
+    'tcp': ('xray', 'telemt', 'socks5', 'nginx'),
+}
+
+# Seconds before the startup re-apply touches SSH, so the panel is serving
+# first. Patched to 0 in tests.
+RESTORE_FORWARD_DELAY = 10
+
+# Seconds between periodic re-applies of the public-port forwards. A VPS can
+# reboot on its own while the panel keeps running, and hand-made iptables
+# rules do not come back - the panel owns putting them back, again and again.
+# Idempotency makes every round safe: -C-guarded additions never duplicate.
+RESTORE_FORWARD_INTERVAL = 6 * 3600
+
+
+async def restore_public_port_forwards():
+    """Re-apply public-port REDIRECT rules on every server at panel startup.
+
+    Hosts have no uniform persistence for hand-made iptables rules (netfilter
+    -persistent exists on some boxes only, docker restores only its own), so
+    after a server or panel restart the panel's own forwards were gone. The
+    panel owns these rules -- it puts them back. Idempotent: additions are
+    guarded by -C, so a double run never duplicates anything.
+    """
+    await asyncio.sleep(RESTORE_FORWARD_DELAY)  # let the panel finish booting
+    data = load_data()
+    for server in data.get('servers', []):
+        commands = []
+        for proto, record in (server.get('protocols') or {}).items():
+            if not isinstance(record, dict):
+                continue
+            public_port = str(record.get('public_port') or '').strip()
+            listen_port = str(record.get('port') or '').strip()
+            if not public_port or not listen_port:
+                continue
+            pub_host, _ = protocol_public_endpoint(server, proto)
+            cmds, fwd_warning = public_port_forward_commands(
+                proto, public_port, listen_port, public_ip=pub_host)
+            if fwd_warning:
+                logger.warning(f"Public port forward on "
+                               f"{server.get('name') or server.get('host')} {proto}: {fwd_warning}")
+            if cmds:
+                commands.extend(cmds)
+        if not commands:
+            continue
+        ssh = None
+        try:
+            ssh = get_ssh(server)
+            await asyncio.to_thread(ssh.connect)
+            failed = False
+            for cmd in commands:
+                out, err, code = await asyncio.to_thread(ssh.run_sudo_command, cmd)
+                if code != 0:
+                    logger.error(f"Failed to re-apply public port forward on "
+                                 f"{server.get('name') or server.get('host')}: {cmd}: {err}")
+                    failed = True
+            if not failed:
+                logger.info(f"Public port forwards re-applied on {server.get('name') or server.get('host')}")
+        except Exception as e:
+            logger.warning(f"Could not re-apply public port forwards on "
+                           f"{server.get('name') or server.get('host')}: {e}")
+        finally:
+            if ssh is not None:
+                ssh.disconnect()
+
+
+async def restore_public_port_forwards_loop():
+    """Re-apply the forwards periodically, not only at panel startup: a VPS
+    rebooted independently leaves its REDIRECT rules gone until someone
+    restarts the panel. Never raises - the next round retries."""
+    while True:
+        await asyncio.sleep(RESTORE_FORWARD_INTERVAL)
+        try:
+            await restore_public_port_forwards()
+        except Exception as e:
+            logger.warning(f"Periodic public port forward re-apply failed: {e}")
+
+
+def _forward_family_dests(public_ip):
+    """Per-address-family -d scoping for the REDIRECT rules.
+
+    Returns ({4: addrs|None, 6: addrs|None}, warning): None means the family
+    stays unrestricted, [] means the family is skipped entirely (a resolved
+    host with no addresses of that family publishes nothing there), a list
+    scopes every rule of that family to those addresses. An IP literal
+    restricts its own family only; a domain resolves on the panel machine.
+    An unresolvable domain falls back to unrestricted rules plus a warning
+    the API surfaces.
+    """
+    if not public_ip:
+        return {4: None, 6: None}, ''
+    host = str(public_ip).strip()
+    try:
+        addr = ipaddress.ip_address(host.strip('[]'))
+    except ValueError:
+        addr = None
+    if addr is not None:
+        fam = {4: [], 6: []}
+        fam[addr.version] = [str(addr)]
+        return fam, ''
+    v4, v6 = [], []
+    try:
+        for info in socket.getaddrinfo(host, None):
+            if info[0] == socket.AF_INET:
+                v4.append(info[4][0])
+            elif info[0] == socket.AF_INET6:
+                v6.append(info[4][0])
+    except OSError:
+        pass
+    v4, v6 = sorted(set(v4)), sorted(set(v6))
+    if not v4 and not v6:
+        return {4: None, 6: None}, (f'could not restrict the forward rule to the public IP: '
+                                    f'{host} does not resolve')
+    return {4: v4, 6: v6}, ''
+
+
+def public_port_forward_commands(protocol, public_port, listen_port, old_public_port='',
+                                 public_ip=''):
+    """iptables/ip6tables commands publishing a custom public port.
+
+    Returns (commands, warning); commands is None when nothing is needed.
+    A public port equal to the listen port (or empty) means "no rule"; any
+    previous rule for the same instance is removed. Idempotent: additions are
+    guarded by -C, removals loop -D until the rule is gone. Rules are scoped
+    to the public address (-d public_ip) so they redirect only the traffic
+    actually meant for this instance, not every packet hitting the port.
+    """
+    base = protocol_base(protocol)
+    l4 = next((k for k, v in PUBLIC_FORWARD_L4.items() if base in v), None)
+    if l4 is None:
+        return None, ''
+    fam, warning = _forward_family_dests(public_ip)
+    commands = []
+
+    def drop(port):
+        for ipt, fkey in (('iptables', 4), ('ip6tables', 6)):
+            addrs = fam[fkey]
+            if addrs == []:
+                continue  # nothing was ever published in this family
+            for addr in (addrs if addrs is not None else ['']):
+                dest = f' -d {addr}' if addr else ''
+                rule = (f'-t nat -D PREROUTING -p {l4}{dest} --dport {port} '
+                        f'-j REDIRECT --to-ports {listen_port}')
+                commands.append(f'for i in 1 2 3; do {ipt} {rule} 2>/dev/null || break; done')
+
+    for stale in {p for p in (old_public_port,) if p and p != public_port}:
+        drop(stale)
+    if public_port and public_port != listen_port:
+        for ipt, fkey in (('iptables', 4), ('ip6tables', 6)):
+            addrs = fam[fkey]
+            if addrs == []:
+                continue
+            for addr in (addrs if addrs is not None else ['']):
+                dest = f' -d {addr}' if addr else ''
+                rule = (f'-t nat -A PREROUTING -p {l4}{dest} --dport {public_port} '
+                        f'-j REDIRECT --to-ports {listen_port}')
+                commands.append(f'{ipt} {rule.replace("-A ", "-C ", 1)} 2>/dev/null || {ipt} {rule}')
+    return (commands or None), warning
+
+
+def _parse_ss_listeners(output):
+    """Turn `ss -tulpnH` output into [{proto, address, process, pid}]."""
+    listeners = []
+    for line in output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        fields = line.split(None, 5)
+        if len(fields) < 5 or fields[0] not in ('tcp', 'udp'):
+            continue
+        process, pid = '', ''
+        if len(fields) > 5:
+            m = re.search(r'\("([^"]+)",pid=(\d+)', fields[5])
+            if m:
+                process, pid = m.group(1), m.group(2)
+        listeners.append({'proto': fields[0], 'address': fields[4],
+                          'process': process, 'pid': pid})
+    return listeners
+
+
+@app.get('/api/servers/{server_id}/protocol/port-check', tags=["Protocols"])
+async def api_check_protocol_port(request: Request, server_id: int, port: str = ''):
+    """Who is listening on a candidate port on the server.
+
+    For the public-endpoint modal: before a custom port is published in
+    client configs the admin should see whether (and by what) it is taken.
+    """
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        port = normalize_public_port(port)
+    except ValueError as e:
+        return JSONResponse({'error': str(e)}, status_code=400)
+    if not port:
+        return JSONResponse({'error': 'Port is required'}, status_code=400)
+    data = load_data()
+    if server_id >= len(data['servers']):
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    server = data['servers'][server_id]
+    ssh = None
+    try:
+        ssh = get_ssh(server)
+        await asyncio.to_thread(ssh.connect)
+        out, _, _ = await asyncio.to_thread(
+            ssh.run_command, "ss -tulpnH '( sport = :%d )'" % int(port))
+        listeners = _parse_ss_listeners(out)
+        resp = {'port': int(port), 'in_use': bool(listeners), 'listeners': listeners}
+        if listeners:
+            foreign = [l for l in listeners
+                       if not re.match(r'^(docker-proxy|dockerd)$', l.get('process', ''))]
+            if not foreign:
+                resp['warning'] = (f'Port {port} is held by Docker; the REDIRECT rule may '
+                                   f'conflict unless the container publish is removed.')
+        return resp
+    except Exception as e:
+        logger.warning(f"Port check on server {server_id} failed: {e}")
+        return JSONResponse({'error': str(e)}, status_code=502)
+    finally:
+        if ssh is not None:
+            ssh.disconnect()
 
 
 @app.post('/api/servers/{server_id}/wgeasy/import', tags=["Protocols"])
@@ -5415,14 +6304,18 @@ def api_wgeasy_import(request: Request, server_id: int, req: WgEasyImportRequest
 
 
 @app.post('/api/servers/{server_id}/server_config/save', tags=["Protocols"])
+@serialize_peer_lifecycle
 def api_server_config_save(request: Request, server_id: int, req: ServerConfigSaveRequest):
     """Save the raw server-side WireGuard/Xray configuration and apply changes."""
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
         data = load_data()
-        if server_id >= len(data['servers']):
+        if server_id < 0 or server_id >= len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
+        guard = _traffic_removal_guard(data, server_id=server_id, protocol=req.protocol, include_archived=True)
+        if guard is not None:
+            return guard
         server = data['servers'][server_id]
         ssh = get_ssh(server)
         ssh.connect()
@@ -5546,6 +6439,7 @@ def api_get_connections(request: Request, server_id: int, protocol: str = Query(
 
 
 @app.post('/api/servers/{server_id}/connections/add', tags=["Connections"])
+@serialize_peer_lifecycle
 def api_add_connection(request: Request, server_id: int, req: AddConnectionRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -5601,34 +6495,96 @@ def api_add_connection(request: Request, server_id: int, req: AddConnectionReque
 
 
 @app.post('/api/servers/{server_id}/connections/remove', tags=["Connections"])
-def api_remove_connection(request: Request, server_id: int, req: ConnectionActionRequest):
+@serialize_peer_lifecycle
+async def api_remove_connection(request: Request, server_id: int, req: ConnectionActionRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
         data = load_data()
-        if server_id >= len(data['servers']):
+        if server_id < 0 or server_id >= len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
         if not req.client_id:
             return JSONResponse({'error': 'Client ID is required'}, status_code=400)
-        ssh = get_ssh(server)
-        ssh.connect()
-        manager = get_protocol_manager(ssh, req.protocol)
-        _manager_call(manager, 'remove_client', req.protocol, req.client_id)
-        ssh.disconnect()
-        # Remove from user_connections
-        data['user_connections'] = [
-            c for c in data.get('user_connections', [])
-            if not (c.get('client_id') == req.client_id and c.get('server_id') == server_id)
-        ]
-        save_data(data)
-        return {'status': 'success'}
+
+        try:
+            actor = str(get_current_user(request)['id'])
+        except Exception:
+            actor = 'admin'
+        operation_id = uuid.uuid4().hex
+
+        # An owned peer must be finalized; an unowned peer can be removed raw.
+        conn = find_connection(data, server_id, req.protocol, req.client_id)
+        if conn is None:
+            ssh = get_ssh(server)
+            await asyncio.to_thread(ssh.connect)
+            manager = get_protocol_manager(ssh, req.protocol)
+            await asyncio.to_thread(_manager_call, manager, 'remove_client',
+                                    req.protocol, req.client_id)
+            ssh.disconnect()
+            return {'status': 'success', 'finalized': False}
+
+        scope = connection_scope(conn, server)
+        kind = 'peer_remove'
+        intent = make_intent(scope, 'remove')
+
+        observed_bytes = None
+        quiescent = False
+        ssh = None
+        try:
+            ssh = get_ssh(server)
+            await asyncio.to_thread(ssh.connect)
+            manager = get_protocol_manager(ssh, req.protocol)
+            observed_bytes, quiescent = await asyncio.to_thread(
+                read_peer_state, manager, req.protocol, req.client_id)
+
+            if observed_bytes is None and not quiescent and not req.allow_unverified:
+                return JSONResponse({
+                    'error': 'Could not read the final traffic counter.',
+                    'code': 'final_counter_read_failed',
+                    'can_force': True,
+                }, status_code=409)
+
+            await asyncio.to_thread(_manager_call, manager, 'remove_client',
+                                    req.protocol, req.client_id)
+        except FinalizationError as exc:
+            return JSONResponse({'error': str(exc), 'code': exc.code,
+                                 'can_force': exc.can_force}, status_code=409)
+        except Exception as exc:
+            logger.exception("Error during peer removal SSH")
+            return JSONResponse({'error': str(exc), 'code': 'removal_ssh_failed'},
+                                status_code=502)
+        finally:
+            if ssh:
+                try:
+                    ssh.disconnect()
+                except Exception:
+                    pass
+
+        async with DATA_LOCK:
+            before = pathlib_read_data_bytes() if os.path.exists(DATA_FILE) else b''
+            data = load_data()
+            conn = find_connection(data, server_id, req.protocol, req.client_id)
+            if conn is None:
+                return JSONResponse({'error': 'Connection link disappeared during removal'},
+                                    status_code=409)
+            mode = 'delete_unverified' if observed_bytes is None else 'delete_finalized'
+            accounting = finalize_connection_record(
+                data, conn, server, observed_bytes, time.time(), mode,
+                operation_id, quiescent)
+            result = await asyncio.to_thread(
+                commit_finalize, DATA_FILE, operation_id, actor, kind, intent,
+                before, data)
+            result['accounting'] = accounting
+            result['finalized'] = True
+            return result
     except Exception as e:
         logger.exception("Error removing connection")
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
 @app.post('/api/servers/{server_id}/connections/edit', tags=["Connections"])
+@serialize_peer_lifecycle
 def api_edit_connection(request: Request, server_id: int, req: EditConnectionRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -5681,6 +6637,7 @@ def api_clear_conn_warnings(request: Request, server_id: int, req: ConnectionAct
 
 
 @app.post('/api/servers/{server_id}/connections/rename', tags=["Connections"])
+@serialize_peer_lifecycle
 async def api_rename_connection(request: Request, server_id: int, req: RenameConnectionRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -5789,6 +6746,7 @@ async def api_set_connection_speed(request: Request, server_id: int, req: Connec
 
 
 @app.post('/api/servers/{server_id}/connections/config/save', tags=["Connections"])
+@serialize_peer_lifecycle
 def api_save_connection_config(request: Request, server_id: int, req: SaveConnectionConfigRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -5854,6 +6812,7 @@ def api_get_connection_config(request: Request, server_id: int, req: ConnectionA
 
 
 @app.post('/api/servers/{server_id}/connections/toggle', tags=["Connections"])
+@serialize_peer_lifecycle
 def api_toggle_connection(request: Request, server_id: int, req: ToggleConnectionRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -5908,6 +6867,9 @@ def api_list_users(request: Request, search: str = '', page: int = 1, size: int 
         users.append({
             'id': u['id'], 'username': u['username'], 'role': u['role'],
             'enabled': u.get('enabled', True),
+            'disable_reasons': u.get('disable_reasons', [] if u.get('enabled', True) else ['legacy']),
+            'access_revision': u.get('access_revision', 0),
+            'access_sync_pending': u.get('access_sync_pending', False),
             'created_at': u.get('created_at', ''),
             'telegramId': u.get('telegramId'),
             'email': u.get('email'),
@@ -5934,6 +6896,7 @@ def api_list_users(request: Request, search: str = '', page: int = 1, size: int 
 
 
 @app.post('/api/users/add', tags=["Users"])
+@serialize_peer_lifecycle
 def api_add_user(request: Request, req: AddUserRequest):
     cur = get_current_user(request)
     if not cur or cur['role'] != 'admin':
@@ -6067,21 +7030,16 @@ async def api_update_user(request: Request, user_id: str, req: UpdateUserRequest
             if req.password:
                 user['password_hash'] = hash_password(req.password)
 
-            # Persist the complete local intent before SSH can yield. Never write
-            # this snapshot again after SSH: traffic accounting and other requests
-            # may have saved newer fields while the network operation was pending.
-            auto_reenable = (
-                req.traffic_limit is not None
-                and new_limit > 0
-                and user.get('traffic_used', 0) < new_limit
-                and not user.get('enabled', True)
-            )
-            if auto_reenable:
-                user['enabled'] = True
+            old_enabled = user.get('enabled', True)
+            if (req.traffic_limit is not None or req.traffic_reset_strategy is not None
+                    or 'expiration_date' in req_fields):
+                reconcile_user_state(user, datetime.now())
+            pending = user.get('access_sync_pending', False)
+            wait_for_ssh = pending and (old_enabled != user['enabled'] or user_id not in _USER_STATE_TASKS)
             save_data(data)
 
-        if auto_reenable:
-            await perform_toggle_user(data, user_id, True)
+        if wait_for_ssh and not await perform_toggle_user(data, user_id, user['enabled']):
+            return JSONResponse({'error': 'Access intent saved; SSH application pending'}, status_code=503)
 
         return {'status': 'success'}
     except Exception as e:
@@ -6090,6 +7048,7 @@ async def api_update_user(request: Request, user_id: str, req: UpdateUserRequest
 
 
 @app.post('/api/users/{user_id}/delete', tags=["Users"])
+@serialize_peer_lifecycle
 async def api_delete_user(request: Request, user_id: str):
     cur = get_current_user(request)
     if not cur or cur['role'] != 'admin':
@@ -6098,11 +7057,17 @@ async def api_delete_user(request: Request, user_id: str):
     if cur['id'] == user_id:
         return JSONResponse({'error': _t('cannot_delete_self', lang)}, status_code=400)
     try:
-        data = load_data()
-        success = await asyncio.to_thread(perform_delete_user, data, user_id)
-        if not success:
-            return JSONResponse({'error': 'User not found'}, status_code=404)
-        save_data(data)
+        # A linked user is rejected without SSH; deleting an empty user is a
+        # short local mutation. Resolve it under the lock so concurrent linking
+        # cannot disappear through the previous stale snapshot save.
+        async with DATA_LOCK:
+            data = load_data()
+            guard = _traffic_removal_guard(data, user_ids={user_id})
+            if guard is not None:
+                return guard
+            if not perform_delete_user(data, user_id):
+                return JSONResponse({'error': 'User not found'}, status_code=404)
+            save_data(data)
         return {'status': 'success'}
     except Exception as e:
         logger.exception("Error deleting user")
@@ -6120,30 +7085,36 @@ async def api_toggle_user(request: Request, user_id: str, req: ToggleUserRequest
             user = next((u for u in data['users'] if u['id'] == user_id), None)
             if not user:
                 return JSONResponse({'error': 'User not found'}, status_code=404)
-            user['enabled'] = req.enabled
+            reconcile_user_state(user, datetime.now(), manual=req.enabled)
             save_data(data)
         # SSH only propagates the committed intent; it must not save an old
         # full-data snapshot when it completes.
-        await perform_toggle_user(data, user_id, req.enabled)
-        return {'status': 'success', 'enabled': req.enabled}
+        if not await perform_toggle_user(data, user_id, user['enabled']):
+            return JSONResponse({'error': 'Access intent saved; SSH application pending'}, status_code=503)
+        current = load_data()
+        user = next((u for u in current['users'] if u['id'] == user_id), None)
+        return {'status': 'success', 'enabled': user['enabled'] if user else False}
     except Exception as e:
         logger.exception("Error toggling user")
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
 @app.post('/api/users/{user_id}/traffic/reset', tags=["Users"])
-def api_reset_user_traffic(request: Request, user_id: str):
+async def api_reset_user_traffic(request: Request, user_id: str):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
-        data = load_data()
-        user = next((u for u in data.get('users', []) if u.get('id') == user_id), None)
-        if not user:
-            return JSONResponse({'error': 'User not found'}, status_code=404)
-
-        user['traffic_used'] = 0
-        user['last_reset_at'] = datetime.now().isoformat()
-        save_data(data)
+        async with DATA_LOCK:
+            data = load_data()
+            user = next((u for u in data.get('users', []) if u.get('id') == user_id), None)
+            if not user:
+                return JSONResponse({'error': 'User not found'}, status_code=404)
+            user['traffic_used'] = 0
+            user['last_reset_at'] = datetime.now().isoformat()
+            reconcile_user_state(user, datetime.now())
+            save_data(data)
+        if user.get('access_sync_pending') and not await perform_toggle_user(data, user_id, user['enabled']):
+            return JSONResponse({'error': 'Traffic reset saved; SSH application pending'}, status_code=503)
         return {
             'status': 'success',
             'traffic_used': user['traffic_used'],
@@ -6155,10 +7126,23 @@ def api_reset_user_traffic(request: Request, user_id: str):
 
 
 @app.post('/api/users/{user_id}/connections/add', tags=["Users"])
+@serialize_peer_lifecycle
 async def api_add_user_connection(request: Request, user_id: str, req: AddUserConnectionRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
+        if not req.client_id and protocol_base(req.protocol) in ('awg', 'awg2', 'awg3', 'awg_legacy'):
+            result = await peer_creates.create(user_id, req.server_id, req.protocol,
+                                               req.name, req.operation_id)
+            data = load_data()
+            operation = peer_creates.journal.read()[result['operation_id']]
+            server = next(server for server in data['servers']
+                          if server.get('uid') == operation['identity'][1])
+            response = {'status': 'success', 'operation_id': result['operation_id']}
+            if result.get('config'):
+                response['config'] = result['config']
+                response.update(config_payloads(result['config'], server, req.protocol))
+            return response
         data = load_data()
         user = next((u for u in data['users'] if u['id'] == user_id), None)
         if not user:
@@ -6234,6 +7218,9 @@ async def api_add_user_connection(request: Request, user_id: str, req: AddUserCo
             resp['config'] = result['config']
             resp.update(config_payloads(result['config'], server, req.protocol))
         return resp
+    except PeerCreateError as error:
+        return JSONResponse({'error': str(error), 'operation_id': error.operation_id},
+                            status_code=error.status_code)
     except Exception as e:
         logger.exception("Error adding user connection")
         return JSONResponse({'error': str(e)}, status_code=500)
@@ -6243,28 +7230,107 @@ class UnlinkConnectionRequest(BaseModel):
     server_id: int
     protocol: str = 'awg'
     client_id: str = ''
+    stop: bool = False
+    allow_unverified: bool = False
 
 
 @app.post('/api/users/{user_id}/connections/unlink', tags=["Users"])
+@serialize_peer_lifecycle
 async def api_unlink_user_connection(request: Request, user_id: str, req: UnlinkConnectionRequest):
-    """Detach a connection from the user WITHOUT touching the peer on the
-    server: the key keeps working and the peer goes back to the pool of
-    linkable existing clients."""
+    """Unlink a peer from its owner, finalizing accounting first.
+
+    * Disabled/absent peers can be unlinked directly (no traffic is possible).
+    * Active peers require ``stop=True``; the endpoint disables the peer first.
+    * A failed final counter read returns 409 with ``can_force=True`` so the
+      UI can ask for explicit confirmation before ``allow_unverified=True``.
+    """
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
-    data = load_data()
-    before = len(data.get('user_connections', []))
-    data['user_connections'] = [
-        c for c in data.get('user_connections', [])
-        if not (c.get('user_id') == user_id
-                and c.get('server_id') == req.server_id
-                and c.get('protocol') == req.protocol
-                and c.get('client_id') == req.client_id)
-    ]
-    if len(data['user_connections']) == before:
-        return JSONResponse({'error': 'Connection link not found'}, status_code=404)
-    save_data(data)
-    return {'status': 'success'}
+
+    try:
+        actor = str(get_current_user(request)['id'])
+    except Exception:
+        actor = 'admin'
+    operation_id = uuid.uuid4().hex
+
+    async with DATA_LOCK:
+        data = load_data()
+        if req.server_id < 0 or req.server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][req.server_id]
+        conn = find_connection(data, req.server_id, req.protocol, req.client_id,
+                               user_id=user_id)
+        if conn is None:
+            return JSONResponse({'error': 'Connection link not found'}, status_code=404)
+        scope = connection_scope(conn, server)
+        kind = 'peer_unlink'
+        intent = make_intent(scope, 'unlink')
+
+    observed_bytes = None
+    quiescent = False
+    ssh = None
+    try:
+        ssh = get_ssh(server)
+        await asyncio.to_thread(ssh.connect)
+        manager = get_protocol_manager(ssh, req.protocol)
+        observed_bytes, quiescent = await asyncio.to_thread(
+            read_peer_state, manager, req.protocol, req.client_id)
+
+        if not quiescent and not req.stop:
+            return JSONResponse({
+                'error': 'Peer is active. Stop it first or use stop-and-unlink.',
+                'code': 'peer_active_stop_required',
+                'can_stop': True,
+            }, status_code=409)
+
+        if not quiescent and req.stop:
+            await asyncio.to_thread(_manager_call, manager, 'toggle_client',
+                                    req.protocol, req.client_id, False)
+            observed_bytes, quiescent = await asyncio.to_thread(
+                read_peer_state, manager, req.protocol, req.client_id)
+            if not quiescent:
+                return JSONResponse({
+                    'error': 'Peer could not be stopped; unlink aborted.',
+                    'code': 'peer_stop_failed',
+                }, status_code=409)
+
+        if observed_bytes is None and not quiescent and not req.allow_unverified:
+            return JSONResponse({
+                'error': 'Could not read the final traffic counter.',
+                'code': 'final_counter_read_failed',
+                'can_force': True,
+            }, status_code=409)
+    except FinalizationError as exc:
+        return JSONResponse({'error': str(exc), 'code': exc.code,
+                             'can_force': exc.can_force}, status_code=409)
+    except Exception as exc:
+        logger.exception("Error during unlink finalization SSH")
+        return JSONResponse({'error': str(exc), 'code': 'finalization_ssh_failed'},
+                            status_code=502)
+    finally:
+        if ssh:
+            try:
+                ssh.disconnect()
+            except Exception:
+                pass
+
+    async with DATA_LOCK:
+        before = pathlib_read_data_bytes() if os.path.exists(DATA_FILE) else b''
+        data = load_data()
+        conn = find_connection(data, req.server_id, req.protocol, req.client_id,
+                               user_id=user_id)
+        if conn is None:
+            return JSONResponse({'error': 'Connection link not found'},
+                                status_code=404)
+        mode = 'unlink_stopped' if req.stop else 'unlink_finalized'
+        accounting = finalize_connection_record(
+            data, conn, server, observed_bytes, time.time(), mode,
+            operation_id, quiescent)
+        result = await asyncio.to_thread(
+            commit_finalize, DATA_FILE, operation_id, actor, kind, intent,
+            before, data)
+        result['accounting'] = accounting
+        return result
 
 
 @app.get('/api/users/{user_id}/connections', tags=["Users"])
@@ -6611,12 +7677,14 @@ def settings_page(request: Request):
     if not user:
         return RedirectResponse('/login')
     data = load_data()
+    backup_csrf = request.session.setdefault('backup_csrf', secrets.token_urlsafe(32)) if user['role'] == 'admin' else ''
     return tpl(
         request,
         'settings.html',
         settings=data.get('settings', {}),
         servers=data.get('servers', []),
         current_version=CURRENT_VERSION,
+        backup_csrf=backup_csrf,
         self_service_protocol_choices=self_service_protocol_choices(),
     )
 
@@ -6985,6 +8053,9 @@ async def api_sync_delete(request: Request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     data = load_data()
     to_delete_ids = [u['id'] for u in data['users'] if u.get('remnawave_uuid')]
+    guard = _traffic_removal_guard(data, user_ids=set(to_delete_ids))
+    if guard is not None:
+        return guard
     if to_delete_ids:
         await perform_mass_operations(delete_uids=to_delete_ids)
     return {'status': 'success', 'count': len(to_delete_ids)}
@@ -7116,8 +8187,65 @@ def api_backup_download(request: Request):
     return FileResponse(DATA_FILE, media_type='application/json', filename='data.json')
 
 
+class PrivateBackupResponse(StreamingResponse):
+    def __init__(self, job):
+        self.job = job
+        job.file.seek(0, os.SEEK_END)
+        size = job.file.tell()
+        job.file.seek(0)
+        name = 'amnezia-panel-backup-' + datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S') + '.zip'
+        super().__init__(job.chunks(), media_type='application/zip', headers={
+            **PRIVATE_HEADERS, 'Content-Disposition': 'attachment; filename="' + name + '"',
+            'Content-Length': str(size)})
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self.job.close()
+
+
+@app.post('/api/settings/backup/archive', tags=['Settings'])
+async def api_backup_archive(request: Request):
+    # Unlike the legacy JSON endpoint, a complete archive is admin-only.
+    if not _ssh_trust_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403, headers=PRIVATE_HEADERS)
+    bearer = not get_current_user(request) and request.headers.get('authorization', '').lower().startswith('bearer ')
+    expected = request.session.get('backup_csrf', '')
+    if not bearer and (not expected or not secrets.compare_digest(expected.encode(), request.headers.get('x-backup-csrf', '').encode())):
+        return JSONResponse({'error': 'CSRF check failed'}, status_code=403, headers=PRIVATE_HEADERS)
+    if request.headers.get('content-type', '').split(';')[0].strip().lower() != 'application/json':
+        return JSONResponse({'error': 'JSON request required'}, status_code=415, headers=PRIVATE_HEADERS)
+    job = ArchiveJob()
+    try:
+        # Bounded queue admission. No DATA_LOCK is held over an SSH operation.
+        async with peer_lifecycle_lock.snapshot_interlock():
+            async with DATA_LOCK:
+                if not _ssh_trust_admin(request):
+                    return JSONResponse({'error': 'Forbidden'}, status_code=403, headers=PRIVATE_HEADERS)
+                await _finish_locked_worker(lambda: job.create(
+                    DATA_FILE, ssh_trust.trust_path(), CURRENT_VERSION,
+                    journal_lock=peer_creates.journal.lock, trust_lock=ssh_trust.LOCK,
+                    system_trust=os.path.expanduser('~/.ssh/known_hosts')))
+        return PrivateBackupResponse(job)
+    except peer_lifecycle_lock.PeerLifecycleBusy:
+        job.close()
+        return JSONResponse({'error': 'State is busy; retry after pending operations finish.',
+                             'code': 'panel_backup_busy'}, status_code=503, headers=PRIVATE_HEADERS)
+    except asyncio.CancelledError:
+        job.close()
+        raise
+    except Exception:
+        job.close()
+        logger.warning('Complete panel backup unavailable; inspect private storage permissions/state')
+        return JSONResponse({'error': 'Complete backup could not be created. No partial archive was returned.',
+                             'code': 'panel_backup_unavailable'}, status_code=503, headers=PRIVATE_HEADERS)
+
+
 @app.post('/api/settings/backup/restore', tags=["Settings"])
-async def api_backup_restore(request: Request, file: UploadFile = File(...)):
+@serialize_peer_lifecycle
+async def api_backup_restore(request: Request, file: UploadFile = File(...),
+                             operation_id: Optional[str] = Form(None)):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
@@ -7131,8 +8259,8 @@ async def api_backup_restore(request: Request, file: UploadFile = File(...)):
             return JSONResponse({'error': 'Empty file'}, status_code=400)
         
         try:
-            backup_data = json.loads(content)
-        except (json.JSONDecodeError, UnicodeDecodeError):
+            backup_data = validate_backup(content)
+        except (json.JSONDecodeError, UnicodeDecodeError, RecoveryError):
             return JSONResponse({'error': 'Invalid JSON format'}, status_code=400)
 
         # Basic structure validation
@@ -7151,13 +8279,162 @@ async def api_backup_restore(request: Request, file: UploadFile = File(...)):
         # so the file on disk is complete without waiting for the next restart.
         backfill_server_uids(backup_data['servers'])
         async with DATA_LOCK:
-            save_data(backup_data)
+            # Even identical-looking old backups can rewind traffic baselines.
+            current = load_data()
+            actor = str(get_current_user(request)['id'])
+            store = RecoveryStore(DATA_FILE)
+            op = operation_id if isinstance(operation_id, str) else secrets.token_hex(16)
+            intent = recovery_digest({'backup_sha256': hashlib.sha256(content).hexdigest()})
+            replay = store.replay(op, actor, 'ordinary_restore', intent)
+            if replay:
+                return replay
+            from peer_recovery import prepare_online_restore
+            try:
+                backup_data = prepare_online_restore(current, backup_data)
+            except RecoveryError:
+                return JSONResponse({
+                    'error': 'Online restore requires unchanged servers, connections and user policy; current traffic accounting is retained. Use the offline administrator disaster-recovery workflow for incompatible backups.',
+                    'code': 'traffic_finalization_required',
+                    'recovery': 'scripts/panel_recovery.py'}, status_code=409)
+            with STATE_FILE_LOCK:
+                check_create_journal(DATA_FILE, replacement=backup_data)
+                before = pathlib_read_data_bytes() if os.path.exists(DATA_FILE) else b''
+                result = store.commit(op, actor, 'ordinary_restore', intent, before, backup_data)
         
-        # In a real app we might want to restart or re-init background tasks
-        return {'status': 'success'}
+        # Full disaster recovery is deliberately separate and offline; see
+        # scripts/panel_recovery.py. Never use a force flag on this endpoint.
+        return result if isinstance(operation_id, str) else {'status': 'success'}
     except Exception as e:
         logger.exception("Error during restore")
         return JSONResponse({'error': str(e)}, status_code=500)
+
+
+class OrphanRecoveryRequest(BaseModel):
+    operation_id: str
+    connection_id: str
+    expected_digest: str
+    expected_peer_digest: str
+    mode: str
+    target_user_id: Optional[str] = None
+    confirmation: str
+
+
+@app.get('/api/recovery/status', tags=['Settings'])
+def api_recovery_status(request: Request):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    return peer_lifecycle_lock.diagnostics()
+
+
+def _read_orphan_peers(server, conn, strict_absence=False):
+    ssh = get_ssh(server)
+    try:
+        ssh.connect()
+        manager = get_protocol_manager(ssh, conn['protocol'])
+        clients = _manager_call(manager, 'get_clients', conn['protocol'])
+        if not isinstance(clients, list) or any(not isinstance(c, dict) or not isinstance(c.get('clientId'), str) for c in clients):
+            raise RecoveryError('incomplete_peer_state')
+        peers = [c for c in clients if c['clientId'] == conn['client_id']]
+        if len(peers) > 1:
+            raise RecoveryError('peer_identity_ambiguous')
+        if strict_absence:
+            verify_awg_peer_absent(ssh, conn['protocol'], conn['client_id'])
+        return peers
+    finally:
+        ssh.disconnect()
+
+
+@app.get('/api/recovery/orphans/{connection_id}', tags=['Settings'])
+def api_orphan_recovery_preview(request: Request, connection_id: str):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        conn, server, scope = orphan_scope(data, connection_id)
+        peers = _read_orphan_peers(server, conn)
+        return {'scope': scope, 'expected_digest': recovery_digest(data),
+                'expected_peer_digest': recovery_digest(peers),
+                'peer_status': 'present' if peers else 'absence_not_yet_verified',
+                'last_observed_bytes': conn.get('last_bytes'),
+                'counters_verified_final': False,
+                'warning': 'Restore ownership first. Emergency archival requires a verified absent peer; available counters are NOT a final receipt.'}
+    except RecoveryError as error:
+        return JSONResponse({'error': str(error)}, status_code=409)
+
+
+@app.post('/api/recovery/orphans', tags=['Settings'])
+@serialize_peer_lifecycle
+async def api_orphan_recovery(request: Request, req: OrphanRecoveryRequest):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    # A cross-origin browser must not turn confirmation strings into a CSRF bypass.
+    origin = request.headers.get('origin')
+    if origin and origin.rstrip('/') != str(request.base_url).rstrip('/'):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        actor = str(get_current_user(request)['id'])
+        phrases = {'repair': 'RESTORE OWNERSHIP; USAGE IS UNVERIFIED',
+                   'archive_absent': 'ARCHIVE ABSENT PEER; FINAL USAGE IS UNKNOWN'}
+        if req.mode not in phrases or req.confirmation != phrases[req.mode]:
+            raise RecoveryError('explicit_confirmation_required')
+        intent = recovery_digest(req.model_dump())
+        store = RecoveryStore(DATA_FILE)
+        async with DATA_LOCK:
+            with STATE_FILE_LOCK:
+                replay = store.replay(req.operation_id, actor, req.mode, intent)
+                if replay:
+                    return replay
+                data = load_data()
+                if recovery_digest(data) != req.expected_digest:
+                    raise RecoveryError('recovery_state_changed')
+                conn, server, scope = orphan_scope(data, req.connection_id)
+                check_create_journal(DATA_FILE, scope=scope)
+                if req.mode == 'repair':
+                    require_repair_target(data, req.target_user_id)
+        # Probe the exact physical protocol instance; no keys/config are returned
+        # to the caller and no DATA_LOCK is held over SSH.
+        peers = await asyncio.to_thread(_read_orphan_peers, server, conn, req.mode == 'archive_absent')
+        if recovery_digest(peers) != req.expected_peer_digest:
+            raise RecoveryError('peer_state_changed')
+        if req.mode == 'repair' and not peers:
+            raise RecoveryError('peer_state_unknown')
+        if req.mode == 'archive_absent' and peers:
+            raise RecoveryError('peer_still_present_restore_ownership_instead')
+        async with DATA_LOCK:
+            with STATE_FILE_LOCK:
+                current = load_data()
+                if recovery_digest(current) != req.expected_digest:
+                    raise RecoveryError('recovery_state_changed')
+                latest, latest_server, latest_scope = orphan_scope(current, req.connection_id)
+                if latest_scope != scope:
+                    raise RecoveryError('peer_identity_changed')
+                before = pathlib_read_data_bytes()
+                # Include the complete original row and last live observation in
+                # the protected snapshot/tombstone, never the public audit summary.
+                observed = (peers[0].get('userData') or {}) if peers else {}
+                counters = {k: observed[k] for k in ('dataReceivedBytes', 'dataSentBytes') if type(observed.get(k)) is int and observed[k] >= 0}
+                evidence = {'operation_id': req.operation_id, 'scope': scope,
+                            'connection': dict(latest), 'observed_counters': counters,
+                            'counters_verified_final': False}
+                current.setdefault('accounting_recoveries', []).append(evidence)
+                if req.mode == 'repair':
+                    latest['user_id'] = req.target_user_id
+                    latest['accounting_recovery_id'] = req.operation_id
+                else:
+                    current['user_connections'] = [c for c in current['user_connections'] if c['id'] != req.connection_id]
+                return store.commit(req.operation_id, actor, req.mode, intent, before, current)
+    except RecoveryError as error:
+        return JSONResponse({'error': str(error), 'code': 'recovery_not_completed'}, status_code=409)
+    except Exception:
+        logger.error('Orphan recovery failed; inspect owner-only recovery journal')
+        return JSONResponse({'error': 'Recovery did not complete. Retry the same operation ID.',
+                             'code': 'recovery_not_completed'}, status_code=503)
+
+
+def pathlib_read_data_bytes():
+    # Kept separate so failure injection can prove there is no destructive write.
+    with open(DATA_FILE, 'rb') as source:
+        return source.read()
 
 
 if __name__ == '__main__':

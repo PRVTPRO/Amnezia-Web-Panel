@@ -11,6 +11,7 @@
     </h1>
 </div>
 
+<div id="settings-nav-anchor" aria-hidden="true"></div>
 <nav class="settings-nav" aria-label="{{ _('settings_title') }}">
     <a href="#settings-appearance">{{ _('appearance') }}</a>
     <a href="#settings-captcha">{{ _('captcha_title') }}</a>
@@ -490,11 +491,15 @@
             <h3 class="card-title" style="margin-bottom: var(--space-lg);"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="margin-right: 6px; vertical-align: -2px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>{{ _('backup_title') }}</h3>
             <div style="display: flex; flex-direction: column; gap: var(--space-md);">
                 <div style="display: flex; gap: var(--space-sm);">
-                    <a href="/api/settings/backup/download" class="btn btn-secondary"
+                    <button type="button" id="downloadFullBackup" onclick="downloadFullBackup()" class="btn btn-secondary" {% if current_user.role != 'admin' %}disabled{% endif %}
                         style="flex:1; text-decoration:none; display:flex; align-items:center; justify-content:center; gap:var(--space-sm);">
                         <span>⬇️</span> {{ _('download_backup') }}
-                    </a>
+                    </button>
                 </div>
+                <p class="form-hint">{{ _('full_backup_warning') }}</p>
+                <p class="form-hint">{{ _('full_backup_scope') }}</p>
+                <p class="form-hint">{{ _('full_backup_offline') }}</p>
+                <a href="/api/settings/backup/download">{{ _('legacy_json_backup') }}</a>
                 <div style="border-top: 1px solid var(--border-color); padding-top: var(--space-md);">
                     <div style="display: flex; flex-direction: column; gap: var(--space-sm);">
                         <input type="file" id="backupFile" accept=".json" style="display: none;"
@@ -1187,6 +1192,31 @@
         }
     }
 
+    async function downloadFullBackup() {
+        const button = document.getElementById('downloadFullBackup');
+        if (button.disabled) return;
+        button.disabled = true;
+        const original = button.innerHTML;
+        button.textContent = _('loading');
+        let url;
+        try {
+            const response = await fetch('/api/settings/backup/archive', {
+                method: 'POST', headers: {'Content-Type':'application/json', 'X-Backup-CSRF':{{ backup_csrf | default('') | tojson }}}, body:'{}'
+            });
+            if (!response.ok) throw new Error(response.status === 503 ? _('full_backup_busy') : _('full_backup_error'));
+            if (!(response.headers.get('content-type') || '').includes('application/zip')) throw new Error(_('full_backup_error'));
+            url = URL.createObjectURL(await response.blob());
+            const link = document.createElement('a');
+            link.href = url; link.download = 'amnezia-panel-backup.zip';
+            document.body.appendChild(link); link.click(); link.remove();
+        } catch (error) {
+            showToast(error.message || _('full_backup_error'), 'error');
+        } finally {
+            if (url) setTimeout(() => URL.revokeObjectURL(url), 1000);
+            button.disabled = false; button.innerHTML = original;
+        }
+    }
+
     async function handleRestore(e) {
         const file = e.target.files[0];
         if (!file) return;
@@ -1392,4 +1422,5 @@
         tunnelStatusTimer = setInterval(loadTunnelStatus, 10000);
     });
 </script>
+<script src="/static/js/settings-nav.js?v={{ static_v }}" defer></script>
 {% endblock %}

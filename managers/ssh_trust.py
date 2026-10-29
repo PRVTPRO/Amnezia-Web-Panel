@@ -3,6 +3,7 @@ import base64
 import hashlib
 import hmac
 import json
+import ipaddress
 import os
 import secrets
 import socket
@@ -35,8 +36,15 @@ def trust_path():
 def identity(server):
     host = server.get('host', '')
     port = server.get('ssh_port', 22)
-    if not isinstance(host, str) or not host or any(c.isspace() for c in host) or any(c in host for c in ',|[]'):
+    if not isinstance(host, str) or not host or len(host) > 253 or any(c.isspace() or ord(c) < 32 for c in host) or any(c in host for c in ',|[]/\\'):
         raise ValueError('Invalid SSH host')
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        labels = host.rstrip('.').split('.')
+        if not all(label and len(label) <= 63 and label[0].isalnum() and label[-1].isalnum()
+                   and all(c.isascii() and (c.isalnum() or c == '-') for c in label) for label in labels):
+            raise ValueError('Invalid SSH host')
     if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
         raise ValueError('Invalid SSH port')
     return host, port
@@ -88,6 +96,14 @@ def _token(payload):
     return body + '.' + hmac.new(_SECRET, body.encode(), hashlib.sha256).hexdigest()
 
 
+def inventory_binding(server):
+    # Bind draft edits to saved connection settings without exposing credentials
+    # or a password-verifiable unkeyed hash in the browser's signed token.
+    values = {k: server.get(k) for k in
+              ('uid', 'host', 'ssh_port', 'username', 'password', 'private_key')}
+    return hmac.new(_SECRET, json.dumps(values, sort_keys=True).encode(), hashlib.sha256).hexdigest()
+
+
 def _trust_snapshot(name):
     return [[[k.get_name(), k.get_base64()] for k in (source.lookup(name) or {}).values()]
             for source in (system_keys(), panel_keys())]
@@ -114,13 +130,14 @@ def inspect(server):
         result = {'host': host, 'port': port, 'algorithm': key.get_name(),
                   'fingerprint': fingerprint(key), 'old_fingerprints': old, 'status': status}
         result['token'] = _token({'host': host, 'port': port, 'uid': server.get('uid'),
+                                  'context': server.get('enrollment_context'),
                                   'key': key.get_base64(), 'algorithm': key.get_name(),
                                   'trust': _trust_snapshot(name),
                                   'expires': time.time() + 300})
         return result
 
 
-def enroll(server, token, validate_endpoint=None):
+def _confirmation(server, token):
     host, port = identity(server)
     try:
         body, signature = token.split('.')
@@ -129,11 +146,32 @@ def enroll(server, token, validate_endpoint=None):
             raise ValueError()
         payload = json.loads(base64.urlsafe_b64decode(body))
         if (payload['expires'] < time.time() or payload['host'] != host or
-                payload['port'] != port or payload['uid'] != server.get('uid')):
+                payload['port'] != port or payload['uid'] != server.get('uid') or
+                payload.get('context') != server.get('enrollment_context')):
             raise ValueError()
     except Exception as exc:
         raise ValueError('Invalid or expired SSH confirmation; inspect again') from exc
+    return payload
+
+
+def prepare_enrollment(server, token):
+    """Re-probe without authentication or inventory locks; do not write trust."""
+    host, port = identity(server)
+    payload = _confirmation(server, token)
     key = probe(host, port)
+    if key.get_base64() != payload['key'] or key.get_name() != payload['algorithm']:
+        raise ValueError('SSH candidate changed; inspect and verify again')
+    return key
+
+
+def commit_enrollment(server, token, key, validate_endpoint=None):
+    """Short atomic commit. Caller must revalidate inventory after preparation.
+
+    Recheck the signed binding, expiry and trust snapshot even after waiting for
+    the inventory lock. Never perform a network operation under that lock.
+    """
+    host, port = identity(server)
+    payload = _confirmation(server, token)
     if key.get_base64() != payload['key'] or key.get_name() != payload['algorithm']:
         raise ValueError('SSH candidate changed; inspect and verify again')
     name = host_name(host, port)
@@ -170,3 +208,7 @@ def enroll(server, token, validate_endpoint=None):
             if os.path.exists(temporary):
                 os.unlink(temporary)
     return {'status': 'success'}
+
+
+def enroll(server, token, validate_endpoint=None):
+    return commit_enrollment(server, token, prepare_enrollment(server, token), validate_endpoint)

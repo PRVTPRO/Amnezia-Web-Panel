@@ -227,7 +227,9 @@ class ConnectionServiceTest(unittest.IsolatedAsyncioTestCase):
         })
         service, _, _ = self.make_service(data)
 
-        await service.delete_user_connection('user-1', 'conn-1', 'web')
+        with self.assertRaises(SelfServiceError) as guard:
+            await service.delete_user_connection('user-1', 'conn-1', 'web')
+        self.assertEqual(guard.exception.status_code, 409)
         with self.assertRaises(RateLimitError):
             await service.delete_user_connection('user-1', 'missing', 'web')
 

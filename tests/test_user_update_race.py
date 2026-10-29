@@ -15,6 +15,7 @@ import unittest
 
 from pydantic import BaseModel
 from fastapi.responses import JSONResponse
+from user_state import reconcile_user_state, traffic_server_identity
 
 SOURCE = Path(__file__).resolve().parents[1] / 'app.py'
 GIB = 1024 ** 3
@@ -25,6 +26,7 @@ def actual_code(path, data_file, request_type=object, response_type=JSONResponse
     names = {
         'load_data', 'save_data', 'perform_toggle_user', 'api_update_user',
         'api_toggle_user', 'UpdateUserRequest', 'ToggleUserRequest',
+        '_propagate_user_state', '_user_connection_identity',
     }
     tree = ast.parse(path.read_text(encoding='utf-8'))
     nodes = [node for node in tree.body if getattr(node, 'name', '') in names]
@@ -43,6 +45,8 @@ def actual_code(path, data_file, request_type=object, response_type=JSONResponse
         _t=lambda key, lang: key,
         _normalize_telegram_id=lambda value: value,
         hash_password=lambda value: 'test-hash',
+        reconcile_user_state=reconcile_user_state,
+        traffic_server_identity=traffic_server_identity, _USER_STATE_TASKS={},
     )
     exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])),
                  str(path), 'exec'), ns)
@@ -59,8 +63,10 @@ class SnapshotRace(unittest.IsolatedAsyncioTestCase):
         self.release = asyncio.Event()
         self.ssh_calls = []
         self.error = None
-        self.gate = True
-        user = dict(id='synthetic-a', username='alice', enabled=False,
+        self.gate = False
+        # These tests exercise recovery of a KNOWN automatic block. Unknown
+        # legacy blocks are covered separately and must not auto-enable.
+        user = dict(id='synthetic-a', username='alice', enabled=False, disable_reasons=['quota'],
                     traffic_used=430*GIB, traffic_total=900*GIB,
                     traffic_limit=500*GIB, expiration_date='2030-01-01T00:00:00',
                     email='alice@example.invalid', description='before',
@@ -83,9 +89,15 @@ class SnapshotRace(unittest.IsolatedAsyncioTestCase):
         self.ns['get_ssh'] = lambda server: SimpleNamespace(
             connect=lambda: None, disconnect=lambda: None)
         self.ns['get_protocol_manager'] = lambda ssh, protocol: object()
-        self.ns['_manager_call'] = lambda *args: self.ssh_calls.append(args[1:])
+        self.peer_enabled = False
+        def manager_call(manager, method, protocol, *args):
+            if method == 'get_clients':
+                return [{'clientId': 'mock-client', 'enabled': self.peer_enabled}]
+            self.ssh_calls.append((method, protocol, *args))
+            self.peer_enabled = args[-1]
+        self.ns['_manager_call'] = manager_call
         # Only this extracted module's asyncio.to_thread is mocked.
-        self.ns['asyncio'] = SimpleNamespace(to_thread=to_thread)
+        self.ns['asyncio'] = SimpleNamespace(**{k:v for k,v in vars(asyncio).items() if k!='to_thread'}, to_thread=to_thread)
 
     async def asyncTearDown(self):
         self.temp.cleanup()
@@ -111,6 +123,7 @@ class SnapshotRace(unittest.IsolatedAsyncioTestCase):
             self.ns['save_data'](data)
 
     async def race(self, operation, second=None):
+        self.gate = True
         task = asyncio.create_task(operation)
         try:
             await asyncio.wait_for(self.entered.wait(), timeout=2)
@@ -158,17 +171,29 @@ class SnapshotRace(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.user()['expiration_date'], '2032-01-01T00:00:00')
 
     async def test_later_disable_intent_is_not_overwritten(self):
+        saved = asyncio.Event()
+        original = self.ns['save_data']
+        def save(data):
+            original(data)
+            if 'manual' in data['users'][0].get('disable_reasons', []):
+                saved.set()
+        self.ns['save_data'] = save
+        tasks = []
         async def disable():
             self.gate = False
-            await self.ns['api_toggle_user'](self.request, 'synthetic-a',
-                self.ns['ToggleUserRequest'](enabled=False))
+            tasks.append(asyncio.create_task(self.ns['api_toggle_user'](self.request, 'synthetic-a',
+                self.ns['ToggleUserRequest'](enabled=False))))
+            await saved.wait()
         await self.race(self.update(traffic_limit=1000), disable)
+        await asyncio.gather(*tasks)
         self.assertFalse(self.user()['enabled'])
+        self.assertFalse(self.peer_enabled)
 
     async def test_ssh_failure_preserves_concurrent_data(self):
         self.error = OSError('synthetic SSH failure')
         result = await self.race(self.update(traffic_limit=1000))
-        self.assertEqual(result, {'status': 'success'})  # existing best-effort policy
+        self.assertEqual(result.status_code, 503)  # intent retained, SSH failure is explicit
+        self.assertTrue(self.user()['access_sync_pending'])
         self.assert_concurrent_fields()
         self.assertTrue(self.user()['enabled'])
         self.assertEqual(self.user()['traffic_limit'], 1000*GIB)
@@ -181,6 +206,7 @@ class SnapshotRace(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.user()['traffic_limit'], 1000*GIB)
 
     async def test_cancellation_preserves_committed_enable_and_quota(self):
+        self.gate = True
         task = asyncio.create_task(self.update(traffic_limit=1000))
         await asyncio.wait_for(self.entered.wait(), 2)
         await self.concurrent_change()
@@ -201,9 +227,11 @@ class SnapshotRace(unittest.IsolatedAsyncioTestCase):
 
     async def test_explicit_zero_still_means_unlimited(self):
         before = self.user()
+        self.gate = False
         await self.update(traffic_limit=0)
-        self.assertEqual(self.user(), dict(before, traffic_limit=0))
-        self.assertFalse(self.entered.is_set())
+        self.assertEqual(self.user(), dict(before, traffic_limit=0, enabled=True,
+            disable_reasons=[], access_revision=1, access_sync_pending=False))
+        self.assertEqual(self.ssh_calls, [('toggle_client', 'awg', 'mock-client', True)])
 
     async def test_explicit_null_quota_is_unchanged(self):
         before = self.user()

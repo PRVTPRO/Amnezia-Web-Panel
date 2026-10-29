@@ -39,7 +39,8 @@ def isolated_panel():
 
 STATUS_ON = ('rkn_extra_block: on\n'
              '  входящие (РКН, DROP NEW):  v4=1151 сетей  v6=21 сетей\n'
-             '  исходящие (VK/Max, REJECT): v4=204 сетей  v6=3 сетей')
+             '  исходящие (VK/Max, REJECT): v4=204 сетей  v6=3 сетей\n'
+             '  health: ok')
 EV_TPL = '{"t": "%s", "dir": "in", "ip": "87.240.135.44", "dpt": 22, "org": "VKONTAKTE-SPB-AS (LLC VK)"}'
 
 
@@ -65,6 +66,9 @@ class ParseTests(unittest.TestCase):
         old = (now - dt.timedelta(hours=25)).isoformat()
         d = self.parse(canned_output([fresh, fresh, old]), True)
         self.assertEqual(d['agent_state'], 'on')
+        self.assertEqual(d['health'], 'ok')
+        self.assertTrue(d['sets_ok'])
+        self.assertEqual(d['problems'], [])
         self.assertTrue(d['flag_enabled'])
         self.assertEqual(d['total_events'], 3)
         self.assertEqual(d['last_24h'], 2)
@@ -78,6 +82,15 @@ class ParseTests(unittest.TestCase):
         out = 'rkn_extra_block: on\n===LOG===\n'
         d = self.parse(out, False)
         self.assertEqual(d['sets'], {'in4': 0, 'in6': 0, 'out4': 0, 'out6': 0})
+        self.assertFalse(d['sets_ok'])
+        self.assertIn('lists_empty', d['problems'])
+
+    def test_health_failed_is_reported(self):
+        out = STATUS_ON.replace('health: ok', 'health: failed') + '\n===LOG===\n'
+        d = self.parse(out, True)
+        self.assertEqual(d['health'], 'failed')
+        self.assertIn('health_failed', d['problems'])
+        self.assertTrue(d['sets_ok'])
 
     def test_garbage_lines_are_skipped(self):
         out = STATUS_ON + '\n===LOG===\nnot json\n{"broken"\n' + EV_TPL % '2026-10-04T10:00:00+00:00'
@@ -106,7 +119,8 @@ class FlagsEndpointTests(unittest.TestCase):
         self.request = SimpleNamespace(session={'user_id': 'admin'}, headers={})
         recent = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)).isoformat()
         self.servers = [
-            {'name': 'A', 'protocols': {}, '_canned_out': canned_output([recent])},
+            {'name': 'A', 'protocols': {}, 'rknblock': {'installed': True},
+             '_canned_out': canned_output([recent])},
             {'name': 'B', 'protocols': {}, '_canned_out': '===LOG===\n'},
         ]
         self.panel['load_data'] = Mock(return_value={'servers': self.servers,
@@ -123,7 +137,11 @@ class FlagsEndpointTests(unittest.TestCase):
         self.assertIn('1', result)
         self.assertEqual(result['0']['events24'], 1)
         self.assertEqual(result['0']['agent_state'], 'on')
+        self.assertTrue(result['0']['running'])
+        self.assertTrue(result['0']['healthy'])
         self.assertEqual(result['1']['agent_state'], 'unknown')
+        self.assertFalse(result['1']['running'])
+        self.assertFalse(result['1']['healthy'])
 
     def test_results_are_cached(self):
         self.run_flags()
@@ -131,6 +149,14 @@ class FlagsEndpointTests(unittest.TestCase):
         self.servers[0]['_canned_out'] = '===LOG===\n'
         result = self.run_flags()
         self.assertEqual(result['0']['events24'], 1)
+
+    def test_installed_uses_rknblock_record_not_legacy_flag(self):
+        self.servers[0]['rknblock'] = {'installed': True}
+        result = self.run_flags()
+        self.assertTrue(result['0']['installed'])
+        self.assertTrue(result['0']['flag'])
+        self.assertTrue(result['0']['running'])
+        self.assertTrue(result['0']['healthy'])
 
     def test_forbidden_without_admin(self):
         self.panel['_check_admin'] = Mock(return_value=False)

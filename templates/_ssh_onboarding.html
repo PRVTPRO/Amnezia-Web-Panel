@@ -1,0 +1,12 @@
+<section style="flex-basis: 100%; min-width: 0;" aria-label="{{ _('ssh_trust_title') }}">
+    <p class="text-muted">{{ _('ssh_onboarding_hint') }}</p>
+    <button type="button" class="btn btn-secondary" id="{{ trust_kind }}-trust-inspect"
+        onclick="inspectOnboardingTrust('{{ trust_kind }}')">{{ _('ssh_trust_inspect') }}</button>
+    <pre id="{{ trust_kind }}-trust-details" aria-live="polite" style="white-space: pre-wrap; overflow-wrap: anywhere;"></pre>
+    <div id="{{ trust_kind }}-trust-confirmation" hidden>
+        <p>{{ _('ssh_trust_warning') }}</p>
+        <label><input type="checkbox" id="{{ trust_kind }}-trust-verified"> {{ _('ssh_trust_verified') }}</label>
+        <button type="button" class="btn btn-primary" id="{{ trust_kind }}-trust-save"
+            onclick="confirmOnboardingTrust('{{ trust_kind }}')">{{ _('ssh_trust_save') }}</button>
+    </div>
+</section>

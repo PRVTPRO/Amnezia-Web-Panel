@@ -1,6 +1,7 @@
 import json
 import re
 import unittest
+from unittest import mock
 
 from managers.awg_manager import AWGManager
 
@@ -43,6 +44,11 @@ class FakeSSH:
         self.files = dict(files)
         self.uploads = {}
         self.commands = []
+        # When True, `wg show` keeps reporting the config as it was at init,
+        # modelling a kernel interface that never picked up the new config.
+        self.stale_iface = False
+        self._config_at_init = next(
+            (v for k, v in self.files.items() if k.endswith('.conf')), '')
 
     def upload_file(self, content, remote_path):
         self.uploads[remote_path] = content
@@ -92,6 +98,13 @@ class FakeSSH:
             if m.group(1) in self.files:
                 return self.files[m.group(1)], '', 0
             return '', 'No such file or directory', 1
+
+        m = re.search(r"docker exec -i \S+ \S*wg show \S+", command)
+        if m:  # live-interface probe: report peers from the actual config file
+            if self.stale_iface:
+                return self._config_at_init, '', 0
+            return '\n'.join(
+                v for k, v in self.files.items() if k.endswith('.conf')), '', 0
 
         m = re.search(r"docker exec -i \S+ test -f (\S+)", command)
         if m:
@@ -164,6 +177,109 @@ class ServerConfigCacheTests(unittest.TestCase):
 
         self.assertIn('Jc = 7', self.manager._get_server_config('awg'))
 
+    def _table_with_peer_b(self, enabled=True):
+        return json.dumps([{
+            'clientId': 'PEER_B',
+            'userData': {'clientName': 'b', 'clientIp': '10.8.1.3', 'psk': 'PSK_B', 'enabled': enabled},
+        }])
+
+    def test_silent_config_copy_failure_aborts_disable(self):
+        """docker cp reports success but the peer stays in the container
+        config: the table must NOT be flipped to enabled=false (the
+        EUROBYTE half-disabled-peer incident)."""
+        self.ssh.files[CLIENTS_TABLE] = self._table_with_peer_b(enabled=True)
+        table_before = self.ssh.files[CLIENTS_TABLE]
+        real = self.ssh.run_sudo_command
+
+        def flaky(command, timeout=60):
+            if re.search(r"docker cp (\S+) \S+?:(\S+)", command):
+                return '', '', 0  # pretend success, do NOT copy
+            return real(command, timeout)
+
+        self.ssh.run_sudo_command = flaky
+        with self.assertRaises(RuntimeError):
+            self.manager.toggle_client('awg', 'PEER_B', False)
+        self.assertEqual(self.ssh.files[CLIENTS_TABLE], table_before)
+        self.assertIn('PEER_B', self.ssh.files[CONFIG_PATH])
+
+    def test_failed_syncconf_aborts_toggle(self):
+        """syncconf exiting non-zero must leave the clients table alone."""
+        self.ssh.files[CLIENTS_TABLE] = self._table_with_peer_b(enabled=True)
+        table_before = self.ssh.files[CLIENTS_TABLE]
+        real = self.ssh.run_sudo_command
+
+        def flaky(command, timeout=60):
+            if 'syncconf' in command:
+                return '', 'boom', 1
+            return real(command, timeout)
+
+        self.ssh.run_sudo_command = flaky
+        with self.assertRaises(RuntimeError):
+            self.manager.toggle_client('awg', 'PEER_B', False)
+        self.assertEqual(self.ssh.files[CLIENTS_TABLE], table_before)
+
+
+
+    def test_failed_syncconf_aborts_remove(self):
+        """syncconf exiting non-zero must leave the clients table alone."""
+        self.ssh.files[CLIENTS_TABLE] = self._table_with_peer_b(enabled=True)
+        table_before = self.ssh.files[CLIENTS_TABLE]
+        real = self.ssh.run_sudo_command
+
+        def flaky(command, timeout=60):
+            if 'syncconf' in command:
+                return '', 'boom', 1
+            return real(command, timeout)
+
+        self.ssh.run_sudo_command = flaky
+        with self.assertRaises(RuntimeError):
+            self.manager.remove_client('awg', 'PEER_B')
+        self.assertEqual(self.ssh.files[CLIENTS_TABLE], table_before)
+
+    def test_silent_config_copy_failure_aborts_remove(self):
+        """docker cp reports success but the peer stays in the container
+        config: the table must NOT drop it (removal did not land)."""
+        self.ssh.files[CLIENTS_TABLE] = self._table_with_peer_b(enabled=True)
+        table_before = self.ssh.files[CLIENTS_TABLE]
+        real = self.ssh.run_sudo_command
+
+        def flaky(command, timeout=60):
+            if re.search(r"docker cp (\S+) \S+?:(\S+)", command):
+                return '', '', 0  # pretend success, do NOT copy
+            return real(command, timeout)
+
+        self.ssh.run_sudo_command = flaky
+        with self.assertRaises(RuntimeError):
+            self.manager.remove_client('awg', 'PEER_B')
+        self.assertEqual(self.ssh.files[CLIENTS_TABLE], table_before)
+        self.assertIn('PEER_B', self.ssh.files[CONFIG_PATH])
+
+    def test_disable_aborts_when_interface_lags_config(self):
+        """Config file updated, but the live interface still serves the
+        peer: a file-only check would pass while clients stay connected —
+        the table must NOT flip to enabled=false."""
+        self.ssh.files[CLIENTS_TABLE] = self._table_with_peer_b(enabled=True)
+        table_before = self.ssh.files[CLIENTS_TABLE]
+        self.ssh.stale_iface = True
+
+        with mock.patch('managers.awg_manager.time.sleep', return_value=None):
+            with self.assertRaises(RuntimeError):
+                self.manager.toggle_client('awg', 'PEER_B', False)
+        self.assertEqual(self.ssh.files[CLIENTS_TABLE], table_before)
+        self.assertNotIn('PEER_B', self.ssh.files[CONFIG_PATH])
+
+    def test_remove_aborts_when_interface_lags_config(self):
+        """File removal landed, kernel still has the peer: dropping it from
+        the table would leave a live peer nobody can manage."""
+        self.ssh.files[CLIENTS_TABLE] = self._table_with_peer_b(enabled=True)
+        table_before = self.ssh.files[CLIENTS_TABLE]
+        self.ssh.stale_iface = True
+
+        with mock.patch('managers.awg_manager.time.sleep', return_value=None):
+            with self.assertRaises(RuntimeError):
+                self.manager.remove_client('awg', 'PEER_B')
+        self.assertEqual(self.ssh.files[CLIENTS_TABLE], table_before)
+        self.assertNotIn('PEER_B', self.ssh.files[CONFIG_PATH])
 
 if __name__ == '__main__':
     unittest.main()

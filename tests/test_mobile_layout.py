@@ -9,6 +9,13 @@ STYLE = (ROOT / 'static' / 'css' / 'style.css').read_text(encoding='utf-8')
 
 
 class TestMobileLayout(unittest.TestCase):
+    def test_navigation_containers_have_no_primary_background(self):
+        settings = re.search(r'\.settings-nav\s*\{([^}]*)\}', STYLE).group(1)
+        self.assertNotIn('background: var(--bg-primary)', settings)
+        mobile = STYLE.split('/* Sticky header', 1)[1]
+        header = re.search(r'\.app-header\s*\{([^}]*)\}', mobile).group(1)
+        self.assertNotIn('background: var(--bg-primary)', header)
+
     def test_no_minmax_400_in_templates(self):
         for path in TEMPLATES.glob('*.html'):
             src = path.read_text(encoding='utf-8')

@@ -38,11 +38,23 @@ systemctl enable --now rkn-extra-block.timer
 systemctl enable rkn-extra-block.service
 systemctl enable --now rkn-agent.timer
 
-# Первый запуск: подгрузить списки (включая nets.map для агента) и включить
-/usr/local/sbin/rkn-extra-block on
+# Первый запуск: подгрузить списки (включая nets.map для агента) и включить.
+# `on` now verifies sets and iptables jumps; a zero-list install must fail
+# instead of reporting a working contour that blocks nothing.
+if ! /usr/local/sbin/rkn-extra-block on; then
+    echo "ERROR: rkn-extra-block could not start (empty C24Be lists or iptables rules not applied)" >&2
+    /usr/local/sbin/rkn-extra-block status >&2 || true
+    exit 1
+fi
 
-# Статистике нужны LOG-правила: включаем журналирование (пересобирает цепочки)
-/usr/local/sbin/rkn-extra-block log on || true
+# Статистике нужны LOG-правила: включаем журналирование (пересобирает цепочки).
+# A failed logging rebuild also means the live rules may have been left
+# inconsistent, so do not report a successful install in that case.
+if ! /usr/local/sbin/rkn-extra-block log on; then
+    echo "ERROR: rkn-extra-block logging could not be enabled; blocking rules were not verified" >&2
+    /usr/local/sbin/rkn-extra-block status >&2 || true
+    exit 1
+fi
 
 touch /var/log/rkn-scans.json
 

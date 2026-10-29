@@ -58,7 +58,7 @@ Configuration panel for system parameters and preferences:
 
 ## 🚀 Key Features
 
-*   **⚡ VPN Protocols**:
+*   **⚡ Protocols**:
     *   **AmneziaWG (AWG 3.1 / AWG 2.0 / AWG Legacy)**: Advanced WireGuard-based protocol with S3/S4 obfuscation to bypass deep packet inspection (DPI). Three coexisting variants — modern AWG 2.0 with full junk-packet masking, and a legacy variant for older clients.
     *   **Dual-stack (IPv6)**: enabled automatically only when IPv6 works end-to-end — a global address on the host *and* an IPv6 default route inside the protocol container. Docker networks are IPv4-only unless the daemon is configured for IPv6, so a host-only check would hand clients an IPv6 address with no route out. Override with the `AWG_IPV6` environment variable: `auto` (default), `off` to keep every tunnel IPv4-only, `on` to force dual-stack.
     *   **Classic WireGuard**: Standard, high-performance WireGuard protocol for unmatched speed and broad device compatibility with traffic monitoring support.
@@ -202,6 +202,16 @@ docker pull ghcr.io/prvtpro/amnezia-panel:latest-warp
 The bundled `docker-compose.yml` sets `DATA_FILE=/app/data/data.json` so panel state lands on the
 `amnezia_data` volume and survives container rebuilds — see [Environment Variables](#-environment-variables)
 for the full list of knobs.
+
+
+
+AWG connections created through the admin user-connection endpoint also use
+`<DATA_FILE>.peer-creates.json`. Keep this mode-0600 operation journal on the
+same persistent volume and include it in filesystem backups alongside `data.json`.
+It contains private key material; do not publish it. The JSON settings export is
+not a substitute for this backup. Run one panel process, as required by the
+in-process mutation/data locks. Retry the same `operation_id` after an uncertain
+response; the standard user-connection dialog retains it until success.
 
 
 ### Initial Login

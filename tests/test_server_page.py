@@ -11,6 +11,50 @@ def read(*parts):
         return f.read()
 
 
+class PublicEndpointPortCheckTests(unittest.TestCase):
+    """The public-endpoint modal gates Save behind a port check: the checker
+    button and result element must exist, the JS must call the port-check API
+    and disable Save until a verdict, and every public_endpoint_* key must
+    exist in all locales."""
+
+    def setUp(self):
+        self.page = read('templates', 'server.html')
+
+    def test_checker_controls_present(self):
+        for el in ('publicEndpointCheckBtn', 'publicEndpointPortResult'):
+            self.assertIn(f'id="{el}"', self.page)
+        self.assertIn("onclick=\"checkPublicEndpointPort()\"", self.page)
+        self.assertIn("/protocol/port-check?port=", self.page)
+
+    def test_docker_holder_flow_warns_but_keeps_save(self):
+        # When only docker-proxy/dockerd hold the port, Save stays enabled
+        # (publicEndpointPortVerified = true) but a warning from the API is
+        # rendered in the result area with warning styling.
+        self.assertIn('data.warning', self.page)
+        self.assertIn("res.style.color = 'var(--warning, #fbbf24)'", self.page)
+        # the docker-only branch keeps verification true (Save enabled) and
+        # the text surfaces the holder list
+        idx = self.page.index('!foreign.length')
+        docker_section = self.page[idx:idx + 300]
+        self.assertIn('publicEndpointPortVerified = true', docker_section)
+        self.assertIn('warnText', docker_section)
+
+    def test_save_is_gated_by_the_check(self):
+        self.assertIn('publicEndpointPortVerified', self.page)
+        self.assertIn("btn.disabled = !!port && port !== publicEndpointSavedPort && !publicEndpointPortVerified",
+                      self.page)
+        self.assertIn("e.target.id === 'publicEndpointPort'", self.page)
+
+    def test_translations_in_all_languages(self):
+        keys = {'public_endpoint_check', 'public_endpoint_checking',
+                'public_endpoint_port_free', 'public_endpoint_port_docker',
+                'public_endpoint_port_busy', 'public_endpoint_port_invalid'}
+        for lang in ('en', 'ru', 'fr', 'fa', 'zh'):
+            data = json.loads(read('translations', f'{lang}.json'))
+            missing = sorted(k for k in keys if k not in data)
+            self.assertEqual(missing, [], f'{lang}: {missing}')
+
+
 class ExitNodeUiWiringTests(unittest.TestCase):
     """Text-level checks of the wiring that makes the exit-node UI appear at
     all (a card that is not in MARKETPLACE_APPS is never shown, an install
@@ -171,6 +215,123 @@ class RknBlockUiWiringTests(unittest.TestCase):
         self.assertIn("if (app.proto === 'rknblock') return;", self.page)
 
 
+
+class SmartRouteUiWiringTests(unittest.TestCase):
+    """Smart Route is a host-level marketplace app: its card must bypass the
+    protocol installer, the split toggle lives in the exit-link modal, and
+    every smartroute_* key must exist in all locales."""
+
+    def setUp(self):
+        self.page = read('templates', 'server.html')
+
+    def test_marketplace_card_and_modal(self):
+        self.assertRegex(self.page, r"\{ proto: 'smartroute', category: 'services'")
+        self.assertIn('id="smartRouteModal"', self.page)
+        self.assertIn("onclick=\"openSmartRouteModal()\"", self.page)
+        # the card button must not fall through to the protocol installer
+        self.assertNotIn("installFromMarketplace('smartroute'", self.page)
+
+    def test_exit_link_modal_wires_the_split_toggle(self):
+        self.assertIn('id="smartRouteToggle"', self.page)
+        self.assertIn('id="smartRouteCounters"', self.page)
+        self.assertIn('smartroute/split', self.page)
+        self.assertIn('smartroute/status', self.page)
+        self.assertIn('smart_route_lost', self.page)
+
+    def test_translations_carry_smartroute_keys_in_all_languages(self):
+        keys = set(re.findall(r"_\('(smartroute_[a-z0-9_]+)'\)", self.page))
+        keys |= set(re.findall(r"\{\{ _\('(smartroute_[a-z0-9_]+)'\) \}\}", self.page))
+        keys |= {'app_not_installed', 'protocol_not_awg', 'invalid_cidr', 'invalid_dns',
+                 'smartroute_paused', 'server_not_found'}
+        self.assertGreater(len(keys), 25)
+        for lang in ('en', 'ru', 'fr', 'fa', 'zh'):
+            data = json.loads(read('translations', f'{lang}.json'))
+            missing = sorted(k for k in keys if k not in data)
+            self.assertEqual(missing, [], f'{lang}: {missing}')
+
+    def test_server_page_card_with_global_toggle(self):
+        self.assertIn('id="proto-smartroute"', self.page)
+        self.assertIn('smartroute/enable', self.page)
+        self.assertIn('function toggleSmartRoute(', self.page)
+        self.assertIn('function renderSmartRouteCard(', self.page)
+        self.assertIn('smartroute-toggle-btn', self.page)
+        # the card must not be shown via the container-status path
+        self.assertIn("if (app.proto === 'smartroute') return;", self.page)
+
+    def test_card_dns_pair_inputs(self):
+        self.assertIn('id="smartroute-direct-dns"', self.page)
+        self.assertIn('id="smartroute-exit-dns"', self.page)
+        self.assertIn('smartroute/dns-servers', self.page)
+        self.assertIn('function saveSmartRouteDnsServers(', self.page)
+
+    def test_exit_modal_respects_global_pause(self):
+        self.assertIn('smartroute_paused_hint', self.page)
+        self.assertIn('srGloballyOn', self.page)
+
+class SmartRouteReadmeI18nTests(unittest.TestCase):
+    """The Smart Route README (ack modal) must be fully translated in every
+    panel language and must carry the security warnings raised in PR review."""
+
+    DOC_KEYS = [
+        'smartroute_doc_how_title', 'smartroute_doc_how',
+        'smartroute_doc_why_title', 'smartroute_doc_why',
+        'smartroute_doc_risk_title',
+        'smartroute_doc_risk_1', 'smartroute_doc_risk_2',
+        'smartroute_doc_risk_3', 'smartroute_doc_risk_4',
+        'smartroute_doc_risk_5', 'smartroute_doc_risk_6',
+        'smartroute_doc_security_title', 'smartroute_doc_security_intro',
+        'smartroute_doc_security_1', 'smartroute_doc_security_2',
+        'smartroute_doc_security_3', 'smartroute_doc_security_4',
+        'smartroute_doc_fit_title', 'smartroute_doc_fit_ok',
+        'smartroute_doc_fit_no',
+        'smartroute_doc_fail_title', 'smartroute_doc_fail',
+    ]
+
+    def setUp(self):
+        self.page = read('templates', 'server.html')
+        start = self.page.index('id="smartRouteAckModal"')
+        end = self.page.index('id="smartRouteModal"')
+        self.modal = self.page[start:end]
+        self.locales = {
+            lang: json.loads(read('translations', f'{lang}.json'))
+            for lang in ('ru', 'en', 'fr', 'zh', 'fa')
+        }
+
+    def test_modal_has_no_hardcoded_russian_text(self):
+        for key in self.DOC_KEYS:
+            self.assertIn("{{ _('%s') }}" % key, self.modal)
+        for fragment in ('Как это работает', 'Российские сайты', 'Компромиссы',
+                         'выходную ноду', 'Безопасность:'):
+            self.assertNotIn(fragment, self.modal)
+
+    def test_every_locale_has_the_doc(self):
+        for lang, data in self.locales.items():
+            missing = [k for k in self.DOC_KEYS if not data.get(k)]
+            self.assertEqual(missing, [], f'{lang}: {missing}')
+
+    def test_readme_label_is_localized(self):
+        labels = {lang: data.get('smartroute_ack_readme')
+                  for lang, data in self.locales.items()}
+        self.assertEqual(len(set(labels.values())), 5, labels)
+
+    def test_ack_controls_are_localized(self):
+        en = self.locales['en']
+        for lang in ('ru', 'fr', 'zh', 'fa'):
+            data = self.locales[lang]
+            for key in ('smartroute_ack_title', 'smartroute_ack_accept',
+                        'smartroute_ack_close'):
+                self.assertNotEqual(data[key], en[key], f'{lang}: {key}')
+
+    def test_security_warnings_are_present(self):
+        en = self.locales['en']
+        self.assertIn('pure relay', en['smartroute_doc_security_1'])
+        self.assertIn('split tunneling', en['smartroute_doc_security_2'])
+        self.assertIn('VPN marker', en['smartroute_doc_risk_2'])
+        self.assertIn('SORM', en['smartroute_doc_risk_5'])
+        self.assertIn('standalone egress', en['smartroute_doc_risk_6'])
+        ru = self.locales['ru']
+        self.assertIn('СОРМ', ru['smartroute_doc_risk_5'])
+        self.assertIn('split-tunneling', ru['smartroute_doc_security_2'])
 
 if __name__ == '__main__':
     unittest.main()

@@ -2,6 +2,8 @@
 import asyncio
 import io
 import json
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -86,9 +88,26 @@ class BackupUploadSecurityTests(unittest.TestCase):
         save.assert_not_called()
 
     def test_valid_backup_still_restores(self):
-        response, save = self.restore(json.dumps({'servers': [], 'users': []}).encode())
-        self.assertEqual(response, {'status': 'success'})
-        save.assert_called_once()
+        # Recovery now snapshots/audits and atomically writes the real file.
+        # Assert persisted state, not a mock call to the old writer.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'data.json'
+            before = b'{"servers": [], "users": [], "marker": "before"}'
+            path.write_bytes(before)
+            upload = UploadFile(file=io.BytesIO(b'{"servers":[],"users":[]}'), filename='data.json')
+            with patch.object(panel, 'DATA_FILE', str(path)), \
+                 patch.object(panel, '_check_admin', return_value=True), \
+                 patch.object(panel, 'get_current_user', return_value={'id': 'admin'}):
+                response = asyncio.run(panel.api_backup_restore(None, upload))
+            self.assertEqual(response, {'status': 'success'})
+            restored = json.loads(path.read_bytes())
+            self.assertEqual(restored['users'], [])
+            self.assertNotIn('marker', restored)
+            records = list(Path(str(path) + '.recovery').glob('*.json'))
+            self.assertEqual(len(records), 1)
+            record = json.loads(records[0].read_bytes())
+            self.assertEqual(__import__('base64').b64decode(record['before_base64']), before)
+            self.assertEqual(record['phase'], 'committed')
 
 
 if __name__ == '__main__':

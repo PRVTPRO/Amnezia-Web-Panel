@@ -5,6 +5,8 @@ serving it to anonymous visitors hands scanners a feature list. Only an
 admin session (cookie) or admin Bearer token may open it.
 """
 import json
+import os
+import tempfile
 import unittest
 
 from fastapi.testclient import TestClient
@@ -14,8 +16,17 @@ import app as panel
 
 class DocsAuthTests(unittest.TestCase):
     def setUp(self):
+        # Never write to the panel's real data.json: the suite may be run from
+        # a checkout that serves live traffic. Use an isolated temp file.
+        self._tmp = tempfile.TemporaryDirectory()
+        self._data_file = panel.DATA_FILE
+        panel.DATA_FILE = os.path.join(self._tmp.name, 'data.json')
         with open(panel.DATA_FILE, 'w', encoding='utf-8') as f:
             json.dump({'servers': [], 'users': [], 'user_connections': []}, f)
+
+    def tearDown(self):
+        panel.DATA_FILE = self._data_file
+        self._tmp.cleanup()
 
     def login(self, client):
         response = client.post('/api/auth/login',
