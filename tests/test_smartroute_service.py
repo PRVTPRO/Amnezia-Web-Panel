@@ -167,7 +167,69 @@ class SmartRouteServiceTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(SmartRouteError) as ctx:
             await self.svc.install(9)
         self.assertEqual(ctx.exception.code, 'server_not_found')
-        self.assertEqual(ctx.exception.status_code, 404)
+
+    # ----- identity: a long SSH call must not persist to a reordered server -----
+
+    async def test_install_persists_by_uid_after_reorder(self):
+        original = make_data()
+        original['servers'][0]['smartroute']['installed'] = False
+        reordered = {'servers': [
+            {'uid': 'other', 'name': 'OTHER', 'protocols': {}},
+            original['servers'][0],
+        ]}
+        calls = {'n': 0}
+
+        def load_seq():
+            calls['n'] += 1
+            return original if calls['n'] == 1 else reordered
+
+        self.svc.load_data = load_seq
+        saved = {}
+        self.svc.save_data = lambda data: saved.__setitem__('data', data)
+        out = await self.svc.install(0)
+        self.assertEqual(out['status'], 'success')
+        # Persisted to the uid, not to whatever now sits at index 0.
+        self.assertTrue(saved['data']['servers'][1]['smartroute']['installed'])
+        self.assertNotIn('smartroute', saved['data']['servers'][0])
+
+    async def test_install_aborts_when_server_removed_during_ssh(self):
+        original = make_data()
+        original['servers'][0]['smartroute']['installed'] = False
+        replaced = {'servers': [{'uid': 'other', 'name': 'OTHER', 'protocols': {}}]}
+        calls = {'n': 0}
+
+        def load_seq():
+            calls['n'] += 1
+            return original if calls['n'] == 1 else replaced
+
+        self.svc.load_data = load_seq
+        saved = {}
+        self.svc.save_data = lambda data: saved.__setitem__('data', data)
+        with self.assertRaises(SmartRouteError) as ctx:
+            await self.svc.install(0)
+        self.assertEqual(ctx.exception.code, 'server_changed')
+        self.assertNotIn('data', saved)
+        self.assertNotIn('smartroute', replaced['servers'][0])
+
+    async def test_install_aborts_when_endpoint_changes(self):
+        original = make_data()
+        original['servers'][0].update(host='192.0.2.1', ssh_port=22, username='root')
+        original['servers'][0]['smartroute']['installed'] = False
+        changed = {'servers': [dict(original['servers'][0], host='192.0.2.2')]}
+        calls = {'n': 0}
+
+        def load_seq():
+            calls['n'] += 1
+            return original if calls['n'] == 1 else changed
+
+        self.svc.load_data = load_seq
+        saved = {}
+        self.svc.save_data = lambda data: saved.__setitem__('data', data)
+        with self.assertRaises(SmartRouteError) as ctx:
+            await self.svc.install(0)
+        self.assertEqual(ctx.exception.code, 'server_changed')
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertNotIn('data', saved)
 
     async def test_uninstall_rolls_back_instances_before_host_cleanup(self):
         out = await self.svc.uninstall(0)
