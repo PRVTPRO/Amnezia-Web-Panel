@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 
 
 FUNCTIONS = {
-    'get_current_user', '_check_admin', 'api_get_connection_config',
+    'get_current_user', '_check_admin', '_request_user', 'api_get_connection_config',
     '_hash_api_token', '_resolve_api_token', 'protocol_base', 'protocol_instance',
 }
 
