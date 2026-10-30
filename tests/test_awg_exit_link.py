@@ -8,6 +8,7 @@ from managers.awg_manager import (
     DNS_NET,
     EGRESS_CHECK_URLS,
     EXIT_CONF,
+    EXIT_CONF_BACKUP,
     EXIT_HANDSHAKE_UP_SECONDS,
     EXIT_KEY,
     ENTRY_PRIVATE_KEY_PLACEHOLDER,
@@ -205,6 +206,33 @@ class ExitLinkMethodsTests(unittest.TestCase):
         apply_script = self.ssh.uploads['/tmp/_amnz_exit.sh']
         self.assertTrue(apply_script.endswith('x_link_down\nx_killswitch_off\nrm -f "$EXIT_CONF"\n'))
         self.assertNotIn('x_exit_sync\n', apply_script)
+
+    def test_backup_conf_copies_exit0_aside(self):
+        self.assertTrue(self.manager.exit_backup_conf('awg2'))
+        cmd = next(c for c in self.ssh.commands if EXIT_CONF_BACKUP in c)
+        self.assertIn(f'test -f {EXIT_CONF} || exit 9', cmd)
+        self.assertIn(f'cp -p {EXIT_CONF} {EXIT_CONF_BACKUP}', cmd)
+        self.assertIn('docker exec -i amnezia-awg2', cmd)
+
+    def test_backup_conf_raises_without_a_link_file(self):
+        self.ssh.answers[EXIT_CONF_BACKUP] = ('', '', 9)
+        with self.assertRaises(RuntimeError) as ctx:
+            self.manager.exit_backup_conf('awg2')
+        self.assertIn('no exit link file', str(ctx.exception))
+
+    def test_restore_conf_replaces_and_reapplies(self):
+        self.ssh.answers['_amnz_exit.sh'] = ('exit link up: 10.9.0.7/24 -> table 200', '', 0)
+        out = self.manager.exit_restore_conf('awg2')
+        self.assertEqual(out, 'exit link up: 10.9.0.7/24 -> table 200')
+        cmd = next(c for c in self.ssh.commands if f'cp -p {EXIT_CONF_BACKUP} {EXIT_CONF}' in c)
+        self.assertIn(f'test -f {EXIT_CONF_BACKUP} || exit 9', cmd)
+        self.assertTrue(self.ssh.uploads['/tmp/_amnz_exit.sh'].endswith('x_exit_sync\n'))
+
+    def test_restore_conf_raises_without_a_snapshot(self):
+        self.ssh.answers[EXIT_CONF_BACKUP] = ('', '', 9)
+        with self.assertRaises(RuntimeError) as ctx:
+            self.manager.exit_restore_conf('awg2')
+        self.assertIn('No failover snapshot', str(ctx.exception))
 
     def test_link_info_parses_metadata_only(self):
         self.ssh.answers['ExitUid|ExitName'] = (

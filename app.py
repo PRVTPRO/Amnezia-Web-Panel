@@ -2426,6 +2426,18 @@ class ExitDnsRequest(BaseModel):
     enabled: bool = False
 
 
+class ExitFailoverRequest(BaseModel):
+    protocol: str = 'awg'
+    enabled: bool = False
+    backup_uids: Optional[List[str]] = None
+    check_interval_seconds: Optional[int] = None
+    failure_threshold: Optional[int] = None
+    failback_stable_seconds: Optional[int] = None
+    handshake_max_age_seconds: Optional[int] = None
+    auto_failback: Optional[bool] = None
+    probe_egress: Optional[bool] = None
+
+
 class SmartRouteOwnSubnetsRequest(BaseModel):
     cidrs: list = []
 
@@ -2446,6 +2458,7 @@ class SmartRouteEnableRequest(BaseModel):
 class SmartRouteDnsServersRequest(BaseModel):
     direct: str = '77.88.8.8'
     exit: str = '1.1.1.1'
+
 
 
 class Socks5SettingsRequest(BaseModel):
@@ -2889,6 +2902,7 @@ async def startup():
 
     # Start periodic background tasks
     asyncio.create_task(periodic_background_tasks())
+    asyncio.create_task(exit_failover_background_loop())
 
     # Re-apply public-port forwards on the fleet: hand-made iptables rules do
     # not survive reboots on their own, and only some hosts persist them.
@@ -3131,6 +3145,26 @@ async def periodic_background_tasks():
             
         # Wait 10 minutes before next sync
         await asyncio.sleep(600)
+
+
+FAILOVER_SCHEDULER_SECONDS = 15
+_exit_failover_loop_enabled = True
+
+
+async def exit_failover_background_loop():
+    """Health-check opt-in exit-link failovers. Per-instance interval lives on
+    the protocol record (default ~45s); this loop only wakes the scheduler."""
+    if not _exit_failover_loop_enabled:
+        return
+    await asyncio.sleep(20)
+    while True:
+        if not _exit_failover_loop_enabled:
+            return
+        try:
+            await exit_link_svc.run_failover_pass()
+        except Exception as e:
+            logger.error(f"Error in exit_failover_background_loop: {e}")
+        await asyncio.sleep(FAILOVER_SCHEDULER_SECONDS)
 
 
 # ======================== PAGE ROUTES ========================
@@ -4626,6 +4660,9 @@ def api_check_server(request: Request, server_id: int):
                         merged.setdefault(key, db_proto[key])
             if protocol_base(proto) in AWG_PROTOCOLS and db_proto.get('exit_link'):
                 merged['exit_link'] = db_proto['exit_link']
+            if protocol_base(proto) in AWG_PROTOCOLS and db_proto.get('exit_failover'):
+                merged['exit_failover'] = exit_link_svc.failover_view(
+                    data, db_proto, server.get('uid'))
             return merged
 
         def should_preserve_saved_protocol(proto, result=None, err=None):
@@ -5271,6 +5308,49 @@ async def api_exit_link_check_egress(request: Request, server_id: int, req: Prot
         return _exit_link_error(e)
     except Exception as e:
         logger.exception("Error checking exit egress")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/exit-link/failover', tags=["Protocols"])
+async def api_exit_link_failover(request: Request, server_id: int, req: ExitFailoverRequest):
+    """Opt-in automatic failover for an AWG instance already linked to an
+    exit node. Disabled by default; backups are addressed by server uid."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        payload = req.model_dump()
+        protocol = payload.pop('protocol')
+        fields = {key: value for key, value in payload.items()
+                  if value is not None or key == 'enabled'}
+        return await exit_link_svc.configure_failover(server_id, protocol, **fields)
+    except ExitLinkError as e:
+        return _exit_link_error(e)
+    except Exception as e:
+        logger.exception("Error saving exit failover settings")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/exit-link/failover/check', tags=["Protocols"])
+async def api_exit_link_failover_check(request: Request, server_id: int, req: ProtocolRequest):
+    """Run one failover health-check now (same work as the background tick)."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        result = await exit_link_svc.tick_failover(server_id, req.protocol)
+        data = load_data()
+        try:
+            entry, rec = exit_link_svc._entry(data, server_id, req.protocol)
+        except ExitLinkError as e:
+            return {**result, 'exit_failover': None, 'error': e.code}
+        return {
+            **result,
+            'status': 'success',
+            'exit_failover': exit_link_svc.failover_view(data, rec, entry.get('uid')),
+        }
+    except ExitLinkError as e:
+        return _exit_link_error(e)
+    except Exception as e:
+        logger.exception("Error running exit failover check")
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
