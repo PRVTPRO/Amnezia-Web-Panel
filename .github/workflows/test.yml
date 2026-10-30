@@ -32,7 +32,7 @@ jobs:
     - name: Run unit tests
       run: python -m unittest discover -s tests -v
 
-    - name: Verify backup permission handling as root with isolated state
+    - name: Verify backup and peer regressions as root with isolated state
       run: |
         sudo "$(command -v python)" - <<'PY'
         import os, tempfile, unittest
@@ -42,6 +42,8 @@ jobs:
                               TUNNEL_STATE_FILE=state + '/tunnels.json',
                               SECRET_KEY='isolated-ci-fixture')
             suite = unittest.defaultTestLoader.discover('tests', pattern='test_panel_backup.py')
+            for pattern in ('test_rknblock_app.py', 'test_server_page_render.py', 'test_destructive_accounting_guards.py'):
+                suite.addTests(unittest.defaultTestLoader.discover('tests', pattern=pattern))
             result = unittest.TextTestRunner(verbosity=2).run(suite)
             if not result.wasSuccessful():
                 raise SystemExit(1)

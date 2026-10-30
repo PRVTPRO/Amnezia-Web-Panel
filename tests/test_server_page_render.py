@@ -77,6 +77,27 @@ class ServerPageRenderTests(unittest.TestCase):
             exits = client.get('/api/exit-nodes').json()
             self.assertEqual([n['uid'] for n in exits['exit_nodes']], ['exit-uid'])
 
+    def test_legacy_page_persists_uid_before_rendering_and_keeps_accounting(self):
+        with TestClient(panel.app) as client:
+            self.assertEqual(client.post('/api/auth/login', json={'username': 'admin', 'password': 'admin'}).status_code, 200)
+            data = panel.load_data()
+            data['servers'][0].pop('uid')  # Legacy state introduced after startup migration.
+            data['servers'][0]['rknblock'] = {'installed': True, 'enabled': True}
+            data['users'][0].update(traffic_used=450, traffic_total=700)
+            data['user_connections'] = [{'id': 'fixture', 'user_id': data['users'][0]['id'],
+                'server_id': 0, 'protocol': 'awg2', 'client_id': 'synthetic', 'last_bytes': 60}]
+            panel.save_data(data)
+            page = self.render(client, '/server/0')
+            migrated = panel.load_data()
+            uid = migrated['servers'][0]['uid']
+            self.assertTrue(uid)
+            self.assertIn('dataset.serverUid = ' + json.dumps(uid), page)
+            self.assertIn('"installed": true', page)
+            data['servers'][0]['uid'] = uid
+            self.assertEqual(migrated, data)
+            self.assertIn('dataset.serverUid = ' + json.dumps(uid), self.render(client, '/server/0'))
+            self.assertEqual(panel.load_data(), migrated)
+
 
 if __name__ == '__main__':
     unittest.main()

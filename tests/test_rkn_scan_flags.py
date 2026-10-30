@@ -9,7 +9,7 @@ from unittest.mock import Mock
 
 from fastapi.responses import JSONResponse
 
-FUNCTIONS = {'_parse_rkn_scan_output', 'api_rkn_scan_flags', 'api_rkn_scans',
+FUNCTIONS = {'_rkn_server_index', '_rkn_ssh_run', '_parse_rkn_scan_output', 'api_rkn_scan_flags', 'api_rkn_scans',
              'api_rkn_scans_clear'}
 
 
@@ -119,9 +119,9 @@ class FlagsEndpointTests(unittest.TestCase):
         self.request = SimpleNamespace(session={'user_id': 'admin'}, headers={})
         recent = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)).isoformat()
         self.servers = [
-            {'name': 'A', 'protocols': {}, 'rknblock': {'installed': True},
+            {'name': 'A', 'uid': 'node-a', 'protocols': {}, 'rknblock': {'installed': True},
              '_canned_out': canned_output([recent])},
-            {'name': 'B', 'protocols': {}, '_canned_out': '===LOG===\n'},
+            {'name': 'B', 'uid': 'node-b', 'protocols': {}, '_canned_out': '===LOG===\n'},
         ]
         self.panel['load_data'] = Mock(return_value={'servers': self.servers,
                                                      'users': [], 'user_connections': []})
@@ -180,7 +180,7 @@ class ClearEndpointTests(unittest.TestCase):
             run_sudo_command=lambda cmd, timeout=60: self.ran.append(cmd) or ('', '', 0))
         self.panel['get_ssh'] = Mock(return_value=ssh)
         self.panel['load_data'] = Mock(return_value={
-            'servers': [{'name': 'A', 'protocols': {}}], 'users': [], 'user_connections': []})
+            'servers': [{'name': 'A', 'uid': 'node-a', 'protocols': {}}], 'users': [], 'user_connections': []})
         self.panel['RKN_FLAG_CACHE'][0] = {'ts': 1, 'data': {'events24': 5}}
         self.panel['asyncio'] = __import__('asyncio')
 

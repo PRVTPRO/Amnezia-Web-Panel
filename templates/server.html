@@ -1677,7 +1677,9 @@
     // Smart Route app state (GET /api/servers/{id}/smartroute/status); null = not loaded.
     let smartRouteStatus = null;
     // RKN Block app state (GET /api/servers/{id}/rkn_scans); null = not loaded.
-    let rknBlockStatus = null;
+    let rknBlockStatus = {{ server.get('rknblock') | tojson }};
+    if (rknBlockStatus) rknBlockStatus = {...rknBlockStatus, available: false, agent_state: 'unknown', running: false, healthy: false};
+    let rknBlockLoadId = 0, rknBlockBusy = false;
 
     const AWG_PROTOCOLS = ['awg', 'awg2', 'awg3', 'awg_legacy'];
     // Protocols that hand out a client config or link, and therefore have an
@@ -1930,6 +1932,7 @@
                         ${apps.map(app => {
                             const isSmart = app.proto === 'smartroute';
                             const isRkn = app.proto === 'rknblock';
+                            const rknUnknown = isRkn && (!rknBlockStatus || rknBlockStatus.available === false);
                             const isHostApp = isSmart || isRkn;
                             const installed = isSmart ? !!(smartRouteStatus && smartRouteStatus.installed)
                                 : (isRkn ? !!(rknBlockStatus && rknBlockStatus.installed)
@@ -1938,12 +1941,12 @@
                             const action = isSmart
                                 ? `onclick="openSmartRouteModal()"`
                                 : (isRkn
-                                    ? (installed ? 'disabled' : `onclick="closeModal('marketplaceModal'); installRknBlock()"`)
+                                    ? (installed || rknUnknown ? 'disabled' : `onclick="closeModal('marketplaceModal'); installRknBlock()"`)
                                     : (installed && !canInstallAnother ? 'disabled' : `onclick="installFromMarketplace('${app.proto}', ${canInstallAnother ? 'true' : 'false'})"`));
                             const statusBadge = isHostApp
                                 ? (installed
                                     ? `<span class="badge badge-success"><span class="badge-dot"></span> ${_('installed')}</span>`
-                                    : `<span class="badge badge-warn"><span class="badge-dot"></span> ${_('not_installed')}</span>`)
+                                    : `<span class="badge badge-warn"><span class="badge-dot"></span> ${_(rknUnknown ? 'rknblock_state_unreachable' : 'not_installed')}</span>`)
                                 : marketplaceAppStatus(app.proto);
                             return `
                                 <div class="marketplace-app-card">
@@ -2148,6 +2151,7 @@
 
     // ========== Server Check ==========
     async function checkServer() {
+        loadRknBlock();
         setInstalledAppsLoading(true);
         const btn = document.getElementById('checkBtn');
         const text = document.getElementById('checkBtnText');
@@ -5002,10 +5006,16 @@
     }
 
     async function loadRknBlock() {
+        if (rknBlockBusy) return rknBlockStatus;
+        const loadId = ++rknBlockLoadId;
         try {
-            rknBlockStatus = await apiCall(`/api/servers/${SERVER_ID}/rkn_scans`, 'GET');
+            const status = await apiCall(`/api/servers/${SERVER_ID}/rkn_scans?server_uid=${encodeURIComponent(document.body.dataset.serverUid || '')}`, 'GET');
+            if (loadId !== rknBlockLoadId) return rknBlockStatus;
+            if (typeof status.installed !== 'boolean' || (status.server_uid !== undefined && status.server_uid !== document.body.dataset.serverUid)) throw new Error('Server identity changed');
+            rknBlockStatus = status;
         } catch (err) {
-            rknBlockStatus = null;
+            if (loadId !== rknBlockLoadId) return rknBlockStatus;
+            rknBlockStatus = {...(rknBlockStatus || {}), available: false, agent_state: 'unknown', running: false, healthy: false};
             console.warn('RKN block load failed:', err);
         }
         // Render failures must not escape: this runs during page init, and
@@ -5016,6 +5026,7 @@
             console.error('RKN block render failed:', err);
         }
         applyInstalledAppsVisibility();
+        renderMarketplace();
         return rknBlockStatus;
     }
 
@@ -5030,10 +5041,11 @@
         const installedActions = document.getElementById('rknblock-installed-actions');
         const toggleBtn = document.getElementById('rknblock-toggle-btn');
         const installed = !!(d && d.installed);
-        installActions.style.display = installed ? 'none' : '';
+        const unknown = !d || d.available === false;
+        installActions.style.display = installed || unknown ? 'none' : '';
         installedActions.style.display = installed ? '' : 'none';
         if (!installed) {
-            statusEl.innerHTML = `<span class="badge badge-warn"><span class="badge-dot"></span> ${_('not_installed')}</span>`;
+            statusEl.innerHTML = `<span class="badge badge-warn"><span class="badge-dot"></span> ${_(unknown ? 'rknblock_state_unreachable' : 'not_installed')}</span>`;
             infoEl.classList.add('hidden');
             if (location.hash === '#proto-rknblock' && card) {
                 setTimeout(() => card.scrollIntoView({ behavior: 'smooth', block: 'center' }), 300);
@@ -5153,7 +5165,7 @@
         const btn = document.getElementById('rknOptionsSaveBtn');
         if (btn) btn.disabled = true;
         try {
-            await apiCall(`/api/servers/${SERVER_ID}/rknblock/options`, 'POST', body);
+            await apiCall(`/api/servers/${SERVER_ID}/rknblock/options?server_uid=${encodeURIComponent(document.body.dataset.serverUid || '')}`, 'POST', body);
             closeModal('rknOptionsModal');
             showToast(_('rknblock_opts_saved'), 'success');
             await loadRknBlock();
@@ -5167,6 +5179,9 @@
     // Host-level install with the same progress UX as protocol installs:
     // the shared installModal switches to progress-only mode (form hidden).
     async function installRknBlock() {
+        if (rknBlockBusy || !rknBlockStatus || rknBlockStatus.available === false || rknBlockStatus.installed) return;
+        rknBlockBusy = true;
+        ++rknBlockLoadId;
         closeModal('marketplaceModal');
         const btn = document.getElementById('rknblock-install-btn');
         if (btn) btn.disabled = true;
@@ -5198,7 +5213,9 @@
             }
         }, 1500);
         try {
-            await apiCall(`/api/servers/${SERVER_ID}/rknblock/install`, 'POST');
+            await apiCall(`/api/servers/${SERVER_ID}/rknblock/install?server_uid=${encodeURIComponent(document.body.dataset.serverUid || '')}`, 'POST');
+            rknBlockStatus = {installed: true, available: false, agent_state: 'unknown', running: false, healthy: false};
+            rknBlockBusy = false;
             clearInterval(progressInterval);
             fillEl.style.width = '100%';
             fillEl.style.background = 'var(--success, #4ade80)';
@@ -5211,22 +5228,31 @@
             document.getElementById('installDone').style.display = '';
         } catch (err) {
             clearInterval(progressInterval);
+            rknBlockStatus = {...(rknBlockStatus || {}), available: false, agent_state: 'unknown', running: false, healthy: false};
+            applyInstalledAppsVisibility();
+            renderMarketplace();
             fillEl.style.background = 'var(--danger, #f85149)';
             logEl.innerHTML += `<div class="log-line error">${_('error')}: ${escapeHtml(err.message || err)}</div>`;
             logEl.scrollTop = logEl.scrollHeight;
             showToast(_('error') + ': ' + (err.message || err), 'error');
             document.getElementById('installDone').style.display = '';
         } finally {
+            rknBlockBusy = false;
             if (btn) btn.disabled = false;
         }
     }
 
     async function uninstallRknBlock() {
+        if (rknBlockBusy) return;
         if (!confirm(_('rknblock_uninstall_confirm'))) return;
+        rknBlockBusy = true;
+        ++rknBlockLoadId;
         const btn = document.getElementById('rknblock-uninstall-btn');
         btn.disabled = true;
         try {
-            await apiCall(`/api/servers/${SERVER_ID}/rknblock/uninstall`, 'POST');
+            await apiCall(`/api/servers/${SERVER_ID}/rknblock/uninstall?server_uid=${encodeURIComponent(document.body.dataset.serverUid || '')}`, 'POST');
+            rknBlockStatus = {installed: false, available: false};
+            rknBlockBusy = false;
             showToast(_('rknblock_uninstalled_toast'), 'success');
             await loadRknBlock();
             applyInstalledAppsVisibility();
@@ -5234,6 +5260,7 @@
         } catch (err) {
             showToast(_('error') + ': ' + (err.message || err), 'error');
         } finally {
+            rknBlockBusy = false;
             btn.disabled = false;
         }
     }
@@ -5242,7 +5269,7 @@
         const btn = document.getElementById('rknblock-toggle-btn');
         btn.disabled = true;
         try {
-            await apiCall(`/api/servers/${SERVER_ID}/rknblock/enable`, 'POST', { enabled: !!enable });
+            await apiCall(`/api/servers/${SERVER_ID}/rknblock/enable?server_uid=${encodeURIComponent(document.body.dataset.serverUid || '')}`, 'POST', { enabled: !!enable });
             showToast(_(enable ? 'rknblock_started_toast' : 'rknblock_stopped_toast'), 'success');
             await loadRknBlock();
         } catch (err) {
@@ -5256,7 +5283,7 @@
         const btn = document.getElementById('rknblock-update-btn');
         btn.disabled = true;
         try {
-            await apiCall(`/api/servers/${SERVER_ID}/rknblock/update`, 'POST');
+            await apiCall(`/api/servers/${SERVER_ID}/rknblock/update?server_uid=${encodeURIComponent(document.body.dataset.serverUid || '')}`, 'POST');
             showToast(_('rknblock_updated_toast'), 'success');
             await loadRknBlock();
         } catch (err) {
@@ -5271,7 +5298,7 @@
         const btn = document.getElementById('rknClearBtn');
         btn.disabled = true;
         try {
-            await apiCall(`/api/servers/${SERVER_ID}/rkn_scans/clear`, 'POST', {});
+            await apiCall(`/api/servers/${SERVER_ID}/rkn_scans/clear?server_uid=${encodeURIComponent(document.body.dataset.serverUid || '')}`, 'POST', {});
             await loadRknBlock();
             showToast(_('rkn_block_cleared'), 'success');
         } catch (err) {

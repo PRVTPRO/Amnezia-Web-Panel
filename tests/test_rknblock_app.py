@@ -4,11 +4,15 @@ The endpoints are AST-isolated out of app.py (same harness as
 test_rkn_scan_flags.py) and driven with a canned SSH double.
 """
 import ast
+import asyncio
+import copy
 import json
+import threading
+from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from fastapi.responses import JSONResponse
 
@@ -57,7 +61,7 @@ class SshCase(unittest.TestCase):
             disconnect=lambda: None,
             run_sudo_command=self._run_sudo)
         self.panel['get_ssh'] = Mock(return_value=ssh)
-        self.server = {'name': 'A', 'protocols': {}}
+        self.server = {'name': 'A', 'uid': 'node-a', 'host': '192.0.2.1', 'protocols': {}}
         self.panel['load_data'] = Mock(return_value={'servers': [self.server],
                                                      'users': [], 'user_connections': []})
         self.panel['RKN_FLAG_CACHE'][0] = {'ts': 1, 'data': {'events24': 5}}
@@ -109,9 +113,14 @@ class InstallTests(SshCase):
         self.server['uid'] = 'u1'
         initial = {'servers': [self.server], 'users': [], 'user_connections': []}
         fresh = {'servers': [{'name': 'B', 'uid': 'u2'},
-                             {'name': 'A', 'uid': 'u1'}],
+                             dict(self.server)],
                  'users': [], 'user_connections': []}
-        self.panel['load_data'] = Mock(side_effect=[initial, fresh])
+        self.panel['load_data'] = Mock(return_value=initial)
+        original_run = self.panel['get_ssh'].return_value.run_sudo_command
+        def run(*args):
+            self.panel['load_data'].return_value = fresh
+            return original_run(*args)
+        self.panel['get_ssh'].return_value.run_sudo_command = run
         result = self.call()
         self.assertEqual(result, {'status': 'success', 'installed': True, 'enabled': True})
         self.assertNotIn('rknblock', self.server)
@@ -122,6 +131,58 @@ class InstallTests(SshCase):
         self.panel['_check_admin'] = Mock(return_value=False)
         resp = self.call()
         self.assertEqual(resp.status_code, 403)
+        self.assertEqual(self.ran, [])
+
+    def test_missing_uid_never_falls_back_to_reused_index(self):
+        self.server['uid'] = 'removed'
+        fresh = {'servers': [{'uid': 'other', 'rknblock': {'installed': False}}]}
+        self.panel['get_ssh'].return_value.connect = lambda: setattr(self.panel['load_data'], 'return_value', fresh)
+        response = self.call()
+        self.assertEqual(fresh['servers'][0]['rknblock'], {'installed': False})
+        self.assertEqual(response.status_code, 409)
+        self.panel['save_data'].assert_not_called()
+
+    def test_legacy_missing_uid_and_explicit_empty_uid_never_start_ssh(self):
+        for value in ('', 'missing'):
+            response = self.panel['asyncio'].run(self.panel['api_rknblock_install'](self.request, 0, value))
+            self.assertEqual(response.status_code, 404)
+        self.server.pop('uid')
+        self.assertEqual(self.call().status_code, 404)
+        self.panel['get_ssh'].assert_not_called()
+        self.panel['save_data'].assert_not_called()
+
+    def test_duplicate_uid_is_ambiguous_even_for_legacy_index_request(self):
+        self.panel['load_data'].return_value['servers'].append(dict(self.server, name='B'))
+        self.assertEqual(self.call().status_code, 404)
+        self.panel['get_ssh'].assert_not_called()
+
+    def test_endpoint_changed_during_connect_does_not_run_remote_command(self):
+        self.panel['get_ssh'].return_value.connect = lambda: self.server.update(host='192.0.2.2')
+        self.assertEqual(self.call().status_code, 409)
+        self.assertEqual(self.ran, [])
+        self.panel['save_data'].assert_not_called()
+
+    def test_deleted_during_command_cannot_commit_to_reused_index(self):
+        def run(*args):
+            self.panel['load_data'].return_value = {'servers': [{'uid': 'replacement', 'rknblock': {'installed': False}}]}
+            return ('ok', '', 0)
+        self.panel['get_ssh'].return_value.run_sudo_command = run
+        self.assertEqual(self.call().status_code, 409)
+        self.assertFalse(self.panel['load_data'].return_value['servers'][0]['rknblock']['installed'])
+        self.panel['save_data'].assert_not_called()
+
+    def test_connection_failure_always_disconnects(self):
+        ssh = self.panel['get_ssh'].return_value
+        ssh.disconnect = Mock()
+        ssh.connect = Mock(side_effect=OSError('synthetic failure'))
+        with self.assertRaises(OSError):
+            self.call()
+        ssh.disconnect.assert_called_once()
+
+    def test_request_uid_is_checked_before_ssh(self):
+        self.server['uid'] = 'other'
+        response = self.panel['asyncio'].run(self.panel['api_rknblock_install'](self.request, 0, 'missing'))
+        self.assertEqual(response.status_code, 404)
         self.assertEqual(self.ran, [])
 
 
@@ -199,13 +260,14 @@ class UpdateTests(SshCase):
 class ScansResponseTests(unittest.TestCase):
     """api_rkn_scans exposes installed/enabled plus live running/healthy flags."""
 
-    def _run(self, parsed, record):
+    def _run(self, parsed, record, unavailable=False):
         path = Path(__file__).resolve().parents[1] / 'app.py'
         tree = ast.parse(path.read_text(encoding='utf-8'))
         nodes = [n for n in tree.body
-                 if isinstance(n, ast.AsyncFunctionDef) and n.name == 'api_rkn_scans']
-        assert len(nodes) == 1
-        nodes[0].decorator_list = []
+                 if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef)) and n.name in ('api_rkn_scans', '_rkn_server_index')]
+        assert len(nodes) == 2
+        for node in nodes:
+            node.decorator_list = []
         namespace = {
             'Request': object, 'JSONResponse': JSONResponse, 'logger': Mock(),
             'load_data': Mock(), '_check_admin': Mock(return_value=True),
@@ -214,11 +276,13 @@ class ScansResponseTests(unittest.TestCase):
         }
 
         async def fake_fetch(server):
-            return ''
+            if unavailable:
+                raise OSError('synthetic SSH outage')
+            return '===LOG==='  # Complete probe envelope, even for an empty scan log.
 
         namespace['_fetch_rkn_scan_output'] = fake_fetch
         exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), 'exec'), namespace)
-        server = {'name': 'A', 'rknblock': record}
+        server = {'name': 'A', 'uid': 'node-a', 'rknblock': record}
         namespace['load_data'] = Mock(return_value={'servers': [server]})
         request = SimpleNamespace(session={'user_id': 'admin'}, headers={})
         return namespace['asyncio'].run(
@@ -255,6 +319,87 @@ class ScansResponseTests(unittest.TestCase):
         self.assertFalse(result['healthy'])
         self.assertIn('lists_empty', result['problems'])
         self.assertIn('health_failed', result['problems'])
+
+    def test_ssh_outage_preserves_installed_record(self):
+        result = self._run({'agent_state': 'unknown'}, {'installed': True, 'enabled': True}, unavailable=True)
+        self.assertTrue(result['installed'])
+        self.assertFalse(result['available'])
+        self.assertFalse(result['running'])
+
+    def test_live_installation_is_not_offered_for_install_again(self):
+        result = self._run({'agent_state': 'on', 'sets_ok': True, 'health': 'ok'}, {})
+        self.assertTrue(result['installed'])
+
+
+class RknRequestRaces(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        import app
+        self.app = app
+        self.data = {'servers': [{'uid': 'fixture-node', 'host': '192.0.2.1'}],
+                     'users': [{'id': 'u', 'traffic_used': 450, 'traffic_total': 700}],
+                     'user_connections': [{'id': 'link', 'last_bytes': 60}]}
+        self.before = copy.deepcopy(self.data)
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.stack.enter_context(patch.object(app, '_check_admin', return_value=True))
+        self.stack.enter_context(patch.object(app, 'load_data', side_effect=lambda: copy.deepcopy(self.data)))
+        self.stack.enter_context(patch.object(app, 'save_data', side_effect=self.save))
+        self.ssh = Mock()
+        self.ssh.run_sudo_command.return_value = ('ok', '', 0)
+        self.stack.enter_context(patch.object(app, 'get_ssh', return_value=self.ssh))
+        self.request = SimpleNamespace()
+
+    def save(self, data):
+        self.data = copy.deepcopy(data)
+
+    def accounting_preserved(self):
+        for key in ('users', 'user_connections'):
+            self.assertEqual(self.data[key], self.before[key])
+
+    async def test_cancelled_install_retains_interlock_and_duplicate_never_runs(self):
+        entered, release = threading.Event(), threading.Event()
+        def run(*args):
+            entered.set()
+            if not release.wait(5):
+                raise TimeoutError('synthetic barrier')
+            return ('ok', '', 0)
+        self.ssh.run_sudo_command.side_effect = run
+        first = asyncio.create_task(self.app.api_rknblock_install(self.request, 0, 'fixture-node'))
+        try:
+            self.assertTrue(await asyncio.to_thread(entered.wait, 3))
+            first.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await first
+            second = asyncio.create_task(self.app.api_rknblock_install(self.request, 0, 'fixture-node'))
+        finally:
+            release.set()
+        self.assertEqual((await second).status_code, 409)
+        self.ssh.run_sudo_command.assert_called_once()
+        self.ssh.disconnect.assert_called_once()
+        self.assertTrue(self.data['servers'][0]['rknblock']['installed'])
+        self.accounting_preserved()
+
+    async def test_status_started_before_install_preserves_new_record_then_recovers(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def probe(server):
+            entered.set()
+            await release.wait()
+            return '===LOG==='  # Old response from before installation.
+        with patch.object(self.app, '_fetch_rkn_scan_output', side_effect=probe):
+            status = asyncio.create_task(self.app.api_rkn_scans(self.request, 0, 'fixture-node'))
+            await entered.wait()
+            self.assertEqual((await self.app.api_rknblock_install(self.request, 0, 'fixture-node'))['status'], 'success')
+            release.set()
+            result = await status
+        self.assertTrue(result['installed'])
+        self.assertFalse(result['available'])
+        for output in (OSError('synthetic outage'), 'rkn_extra_block: on\n===LOG==='):
+            with patch.object(self.app, '_fetch_rkn_scan_output', side_effect=output if isinstance(output, Exception) else None,
+                              return_value=output):
+                result = await self.app.api_rkn_scans(self.request, 0, 'fixture-node')
+            self.assertTrue(result['installed'])
+            self.assertEqual(result['available'], isinstance(output, str))
+        self.accounting_preserved()
 
 
 if __name__ == '__main__':
