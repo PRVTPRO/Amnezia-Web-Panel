@@ -2270,10 +2270,9 @@
             statusDiv.classList.remove('hidden');
             badges.innerHTML = `<span class="badge badge-danger"><span class="badge-dot"></span> ${_('server_connection_error')}</span>`;
         } finally {
-            // /check may have thrown before the await above; settle the probe
-            // here too so applyInstalledAppsVisibility() never paints against
-            // a half-loaded Smart Route status.
-            smartRouteStatus = await smartRouteProbe;
+            // Do not await the probe here: on the error path /check may have
+            // thrown before the settle above, and a slow probe must not keep
+            // the spinner and the retry button blocked.
             setInstalledAppsLoading(false);
             applyInstalledAppsVisibility();
             btn.disabled = false;

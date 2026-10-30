@@ -71,7 +71,8 @@ class TestServerTemplateIntegrity(unittest.TestCase):
         settled = body.index("smartRouteStatus = await smartRouteProbe")
         self.assertLess(probe, check)
         self.assertLess(settled, reveal)
-        self.assertGreater(body.rindex("smartRouteStatus = await smartRouteProbe"), reveal)
+        # A second settle in `finally` would block error recovery on a slow probe.
+        self.assertNotIn("smartRouteStatus = await smartRouteProbe", body[reveal:])
         self.assertNotIn("await loadSmartRouteStatus()", body)
 
     def test_wgeasy_preview_function_restores_button_state(self):
