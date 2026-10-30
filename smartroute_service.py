@@ -65,6 +65,44 @@ class SmartRouteService:
             raise SmartRouteError('server_not_found', 'Server not found', 404)
         return servers[server_id]
 
+    # A mutation spans several SSH calls; the inventory can be reordered or
+    # edited meanwhile. Persisting by the positional server_id then writes the
+    # result to whichever server now sits at that index. Capture the stable
+    # identity at request time and resolve the final write by it instead.
+    _IDENTITY_KEYS = ('uid', 'host', 'ssh_port', 'username')
+
+    @classmethod
+    def _identity(cls, server):
+        return {key: server.get(key) for key in cls._IDENTITY_KEYS}
+
+    def _resolve_identity(self, data, identity):
+        """Server with this uid whose endpoint still matches, or a stable error.
+
+        Never falls back to a positional index: a legacy record without a uid,
+        a duplicate uid, or an endpoint change fails closed (409) rather than
+        writing the result to the wrong server."""
+        uid = identity.get('uid')
+        if not uid:
+            raise SmartRouteError('server_not_found', 'Server has no stable id', 404)
+        matches = [srv for srv in data.get('servers', []) if srv.get('uid') == uid]
+        if len(matches) != 1:
+            raise SmartRouteError('server_changed',
+                                  'Server identity changed; refresh the inventory', 409)
+        server = matches[0]
+        if any(server.get(key) != identity.get(key) for key in self._IDENTITY_KEYS):
+            raise SmartRouteError('server_changed',
+                                  'Server identity changed; refresh the inventory', 409)
+        return server
+
+    @staticmethod
+    def _split_instances_of(server):
+        out = []
+        for proto, rec in (server.get('protocols') or {}).items():
+            link = (rec or {}).get('exit_link') or {}
+            if link.get('smart_route'):
+                out.append((proto, link))
+        return out
+
     def _settings(self, server):
         sm = server.setdefault('smartroute', {})
         sm.setdefault('own_subnets', [])
@@ -90,32 +128,31 @@ class SmartRouteService:
         except Exception:
             raise SmartRouteError('invalid_dns', f'{field} must be an IPv4 address')
 
-    def _dns_pair(self, data, server_id):
-        sm = (self._server(data, server_id).get('smartroute') or {})
+    def _dns_pair(self, server):
+        sm = (server.get('smartroute') or {})
         direct = (sm.get('direct_dns') or '77.88.8.8').strip()
         exit_ = (sm.get('exit_dns') or '1.1.1.1').strip()
         return f"{direct}, {exit_}"
 
-    async def _apply_dns_for_split(self, server_id, protocol, enabled):
+    async def _apply_dns_for_split(self, identity, protocol, enabled):
         """Point a split instance's client configs at the resolver pair, or
         restore what the instance had before its first split.
 
         Non-fatal by design: the routing works without it, so a failing DNS
         rewrite must not break the split toggle itself."""
-        data = self.load_data()
-        server = self._server(data, server_id)
-        rec = (server.get('protocols') or {}).get(protocol) or {}
-        link = rec.get('exit_link') or {}
-        awg = await self._awg(server)
         try:
+            server = self._resolve_identity(self.load_data(), identity)
+            rec = (server.get('protocols') or {}).get(protocol) or {}
+            link = rec.get('exit_link') or {}
+            awg = await self._awg(server)
             if enabled:
                 if 'smart_route_prev_dns' not in link:
                     current = await asyncio.to_thread(awg._read_config_key, protocol, 'DNS')
 
                     def remember(lk):
                         lk.setdefault('smart_route_prev_dns', current)
-                    await self._update_link(server_id, protocol, remember)
-                pair = self._dns_pair(self.load_data(), server_id)
+                    await self._update_link(identity, protocol, remember)
+                pair = self._dns_pair(server)
                 await asyncio.to_thread(awg.update_awg_settings, protocol, dns=pair)
             elif 'smart_route_prev_dns' in link:
                 prev = link.get('smart_route_prev_dns')
@@ -124,7 +161,9 @@ class SmartRouteService:
                     lk.pop('smart_route_prev_dns', None)
                 await asyncio.to_thread(awg.update_awg_settings, protocol,
                                         dns=prev if prev else '')
-                await self._update_link(server_id, protocol, forget)
+                await self._update_link(identity, protocol, forget)
+        except SmartRouteError:
+            raise
         except Exception as err:
             logger.warning("smartroute DNS %s of %s failed: %s",
                            'apply' if enabled else 'restore', protocol, err)
@@ -154,10 +193,11 @@ class SmartRouteService:
                 awg._resolve_config_path(protocol),
                 SmartRouteService._subnet_default())
 
-    async def _update_link(self, server_id, protocol, mutate):
+    async def _update_link(self, identity, protocol, mutate):
         async with self.data_lock:
             data = self.load_data()
-            rec = ((self._server(data, server_id).get('protocols') or {}).get(protocol)) or {}
+            server = self._resolve_identity(data, identity)
+            rec = ((server.get('protocols') or {}).get(protocol)) or {}
             link = rec.get('exit_link')
             if link is None:
                 return None
@@ -178,11 +218,12 @@ class SmartRouteService:
     async def install(self, server_id):
         data = self.load_data()
         server = self._server(data, server_id)
+        identity = self._identity(server)
         smartr = await self._smartr(server)
         log = await asyncio.to_thread(smartr.install)
         async with self.data_lock:
             data = self.load_data()
-            server = self._server(data, server_id)
+            server = self._resolve_identity(data, identity)
             self._settings(server)['installed'] = True
             self._settings(server)['enabled'] = True
             self.save_data(data)
@@ -191,7 +232,8 @@ class SmartRouteService:
     async def uninstall(self, server_id):
         data = self.load_data()
         server = self._server(data, server_id)
-        splits = split_instances(self.load_data(), server_id)
+        identity = self._identity(server)
+        splits = self._split_instances_of(server)
 
         # 1) Per-container rollback FIRST (containers still exist and are
         #    marked): throw routes out, accounting down, conntrack flushed.
@@ -203,7 +245,7 @@ class SmartRouteService:
                 container, config_path, subnet_default = await self._container_ctx(awg, proto)
                 smartr = await self._smartr(server)
                 await asyncio.to_thread(smartr.disable_instance, container, config_path, subnet_default)
-                await self._apply_dns_for_split(server_id, proto, False)
+                await self._apply_dns_for_split(identity, proto, False)
             except Exception as err:
                 logger.warning("smartroute rollback of %s failed: %s", proto, err)
                 rollback_failed.append({'protocol': proto, 'error': str(err)})
@@ -229,12 +271,12 @@ class SmartRouteService:
         # 3) Record the rollback so the UI badges every affected instance.
         async with self.data_lock:
             data = self.load_data()
-            server = self._server(data, server_id)
+            server = self._resolve_identity(data, identity)
             sm = server.get('smartroute') or {}
             sm['installed'] = False
             sm['enabled'] = False
             server['smartroute'] = sm
-            for proto, link in split_instances(data, server_id):
+            for proto, link in self._split_instances_of(server):
                 link['smart_route'] = False
                 link['smart_route_lost'] = True
             self.save_data(data)
@@ -277,6 +319,7 @@ class SmartRouteService:
         so a resume restores exactly what was paused."""
         data = self.load_data()
         server = self._server(data, server_id)
+        identity = self._identity(server)
         sm = server.get('smartroute') or {}
         if not sm.get('installed'):
             raise SmartRouteError('app_not_installed',
@@ -288,7 +331,7 @@ class SmartRouteService:
         awg = await self._awg(server)
         smartr = await self._smartr(server)
         applied, failed = [], []
-        for proto, _link in split_instances(data, server_id):
+        for proto, _link in self._split_instances_of(server):
             try:
                 container, config_path, subnet_default = await self._container_ctx(awg, proto)
                 if enabled:
@@ -296,7 +339,7 @@ class SmartRouteService:
                 else:
                     await asyncio.to_thread(smartr.disable_instance, container, config_path, subnet_default)
                 applied.append(proto)
-                await self._apply_dns_for_split(server_id, proto, enabled)
+                await self._apply_dns_for_split(identity, proto, enabled)
             except Exception as err:
                 logger.warning("smartroute %s of %s failed: %s",
                                'resume' if enabled else 'pause', proto, err)
@@ -317,7 +360,7 @@ class SmartRouteService:
 
         async with self.data_lock:
             data = self.load_data()
-            self._settings(self._server(data, server_id))['enabled'] = enabled
+            self._settings(self._resolve_identity(data, identity))['enabled'] = enabled
             self.save_data(data)
 
         return {'status': 'success', 'enabled': enabled,
@@ -334,18 +377,19 @@ class SmartRouteService:
         exit_ = self._validate_dns(exit_, 'exit_dns')
         data = self.load_data()
         server = self._server(data, server_id)
+        identity = self._identity(server)
         if not (server.get('smartroute') or {}).get('installed'):
             raise SmartRouteError('app_not_installed',
                                   'Install Smart Route from the marketplace first', 409)
         async with self.data_lock:
             data = self.load_data()
-            sm = self._settings(self._server(data, server_id))
+            sm = self._settings(self._resolve_identity(data, identity))
             sm['direct_dns'] = direct
             sm['exit_dns'] = exit_
             self.save_data(data)
         pair = f"{direct}, {exit_}"
         applied, failed = [], []
-        for proto, _link in split_instances(self.load_data(), server_id):
+        for proto, _link in self._split_instances_of(server):
             try:
                 awg = await self._awg(server)
                 await asyncio.to_thread(awg.update_awg_settings, proto, dns=pair)
@@ -368,14 +412,15 @@ class SmartRouteService:
         except ValueError as exc:
             raise SmartRouteError('invalid_cidr', str(exc))
         server = self._server(self.load_data(), server_id)
+        identity = self._identity(server)
         smartr = await self._smartr(server)
         await asyncio.to_thread(smartr.set_own_subnets, normalized)
         async with self.data_lock:
             data = self.load_data()
-            self._settings(self._server(data, server_id))['own_subnets'] = normalized
+            self._settings(self._resolve_identity(data, identity))['own_subnets'] = normalized
             self.save_data(data)
         # Refresh every split instance so the new subnets take effect now.
-        for proto, _link in split_instances(self.load_data(), server_id):
+        for proto, _link in self._split_instances_of(server):
             try:
                 awg = await self._awg(server)
                 container, _, _ = await self._container_ctx(awg, proto)
@@ -389,6 +434,7 @@ class SmartRouteService:
     async def set_split(self, server_id, protocol, enabled):
         data = self.load_data()
         server = self._server(data, server_id)
+        identity = self._identity(server)
         if not (server.get('smartroute') or {}).get('installed'):
             raise SmartRouteError('app_not_installed',
                                   'Install Smart Route from the marketplace first', 409)
@@ -413,8 +459,8 @@ class SmartRouteService:
                 lk['smart_route'] = enabled
                 if enabled:
                     lk['smart_route_lost'] = False
-            await self._update_link(server_id, protocol, mutate)
-            await self._apply_dns_for_split(server_id, protocol, enabled)
+            await self._update_link(identity, protocol, mutate)
+            await self._apply_dns_for_split(identity, protocol, enabled)
 
             # Apply the server-level DNS choice to the freshly split instance.
             if enabled and self.apply_dns_via_exit is not None:
@@ -431,14 +477,15 @@ class SmartRouteService:
     async def set_dns_via_exit(self, server_id, enabled):
         data = self.load_data()
         server = self._server(data, server_id)
+        identity = self._identity(server)
         self._settings(server)  # ensure shape (save below under lock)
         async with self.data_lock:
             data = self.load_data()
-            self._settings(self._server(data, server_id))['dns_via_exit'] = bool(enabled)
+            self._settings(self._resolve_identity(data, identity))['dns_via_exit'] = bool(enabled)
             self.save_data(data)
         results = []
         if self.apply_dns_via_exit is not None:
-            for proto, _link in split_instances(self.load_data(), server_id):
+            for proto, _link in self._split_instances_of(server):
                 try:
                     await self.apply_dns_via_exit(server_id, proto, bool(enabled))
                     results.append({'protocol': proto, 'status': 'success'})
