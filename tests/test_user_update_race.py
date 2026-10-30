@@ -25,7 +25,7 @@ def actual_code(path, data_file, request_type=object, response_type=JSONResponse
     """Extract unchanged production functions rather than copying their logic."""
     names = {
         'load_data', 'save_data', 'perform_toggle_user', 'api_update_user',
-        'api_toggle_user', 'UpdateUserRequest', 'ToggleUserRequest',
+        'api_toggle_user', '_request_user', 'UpdateUserRequest', 'ToggleUserRequest',
         '_propagate_user_state', '_user_connection_identity',
     }
     tree = ast.parse(path.read_text(encoding='utf-8'))
