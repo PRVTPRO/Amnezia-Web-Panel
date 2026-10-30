@@ -1,0 +1,582 @@
+{% extends "base.html" %}
+
+{% block page_class %}page page--server-new{% endblock %}
+{% block title_extra %}{{ _('server_new_title') }}{% endblock %}
+
+{% block content %}
+<section class="server-enroll" aria-labelledby="enrollPageTitle">
+    <div class="page-header">
+        <div>
+            <a class="back-link" href="/">{{ _('back_to_servers') }}</a>
+            <h1 class="section-title page-header__title" id="enrollPageTitle">
+                <span class="icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+                        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                        aria-hidden="true"><rect x="3" y="3" width="18" height="12" rx="2"/><line x1="7" y1="21" x2="17" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/><path d="M12 7v4"/><path d="M10 9h4"/></svg></span>
+                {{ _('server_new_title') }}
+            </h1>
+        </div>
+    </div>
+
+    <p class="text-muted enroll-intro">{{ _('enroll_credentials_kept') }}</p>
+
+    <noscript>
+        <div class="enroll-alert" role="alert">{{ _('wizard_js_required') }}</div>
+    </noscript>
+
+    <div class="card enroll-card">
+        <form id="enrollForm" novalidate onsubmit="return enrollFormSubmit(event)">
+            <div class="enroll-grid">
+                <div class="form-group enroll-grid__full">
+                    <label class="form-label" for="enrollName">
+                        {{ _('name') }}
+                        <span class="enroll-optional">({{ _('enroll_optional') }})</span>
+                    </label>
+                    <input class="form-input" type="text" id="enrollName" maxlength="120"
+                        placeholder="{{ _('wizard_name_placeholder') }}" autocomplete="off">
+                </div>
+
+                <div class="form-group enroll-grid__host">
+                    <label class="form-label" for="enrollHost">{{ _('ssh_host') }}</label>
+                    <input class="form-input" type="text" id="enrollHost" maxlength="253" required
+                        placeholder="192.0.2.10" autocomplete="off" autocapitalize="none" spellcheck="false">
+                </div>
+
+                <div class="form-group enroll-grid__port">
+                    <label class="form-label" for="enrollPort">{{ _('ssh_port') }}</label>
+                    <input class="form-input" type="number" id="enrollPort" min="1" max="65535"
+                        value="22" inputmode="numeric" required>
+                </div>
+
+                <div class="form-group enroll-grid__full">
+                    <label class="form-label" for="enrollUser">{{ _('ssh_user') }}</label>
+                    <input class="form-input" type="text" id="enrollUser" maxlength="120" required
+                        placeholder="root" autocomplete="off" autocapitalize="none" spellcheck="false">
+                </div>
+
+                <div class="form-group enroll-grid__full enroll-auth">
+                    <div class="tabs enroll-auth__tabs" role="tablist"
+                        aria-label="{{ _('enroll_password') }} / {{ _('enroll_private_key') }}">
+                        <button class="tab active" type="button" role="tab" id="enrollPasswordTab"
+                            aria-selected="true" aria-controls="authPassword"
+                            onclick="switchAuthTab('password', this)">{{ _('enroll_password') }}</button>
+                        <button class="tab" type="button" role="tab" id="enrollKeyTab"
+                            aria-selected="false" aria-controls="authKey"
+                            onclick="switchAuthTab('key', this)">{{ _('enroll_private_key') }}</button>
+                    </div>
+
+                    <div id="authPassword" role="tabpanel" aria-labelledby="enrollPasswordTab">
+                        <label class="form-label" for="enrollPassword">{{ _('enroll_password') }}</label>
+                        <input class="form-input" type="password" id="enrollPassword"
+                            autocomplete="off" autocapitalize="none" spellcheck="false">
+                    </div>
+
+                    <div id="authKey" role="tabpanel" aria-labelledby="enrollKeyTab" hidden>
+                        <label class="form-label" for="enrollKey">{{ _('enroll_private_key') }}</label>
+                        <textarea class="form-textarea" id="enrollKey" autocomplete="off"
+                            autocapitalize="none" spellcheck="false"></textarea>
+                        <div class="form-hint">{{ _('enroll_key_hint') }}</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="enroll-alert" id="enrollError" role="alert" hidden></div>
+
+            <div class="enroll-success" id="enrollSuccess" role="status" hidden>
+                <span class="badge badge-success">{{ _('enroll_host_key_label') }}</span>
+                <span id="enrollSuccessText"></span>
+            </div>
+
+            <div class="enroll-changed" id="enrollChanged" role="alert" hidden>
+                <h2 class="enroll-changed__title">{{ _('enroll_changed_title') }}</h2>
+                <p class="enroll-changed__help">{{ _('enroll_changed_help') }}</p>
+                <pre class="enroll-changed__details" id="enrollChangedDetails" dir="ltr"></pre>
+                <div class="enroll-check">
+                    <input type="checkbox" id="enrollChangedVerified" onchange="syncAcceptButton()">
+                    <label for="enrollChangedVerified">{{ _('enroll_accept_confirm') }}</label>
+                </div>
+                <button class="btn btn-secondary" type="button" id="enrollAcceptBtn"
+                    onclick="acceptChangedKey()" disabled>
+                    <span class="spinner" id="enrollChangedSpinner" hidden aria-hidden="true"></span>
+                    <span>{{ _('enroll_accept_new_key') }}</span>
+                </button>
+            </div>
+
+            <div class="form-hint enroll-hint" id="enrollTestHint" hidden>{{ _('enroll_form_changed') }}</div>
+
+            <div class="enroll-actions">
+                <a class="btn btn-secondary" href="/">{{ _('enroll_back') }}</a>
+                <div class="enroll-actions__end">
+                    <button class="btn btn-secondary" type="button" id="enrollTestBtn" onclick="testConnection()">
+                        <span class="spinner" id="enrollTestSpinner" hidden aria-hidden="true"></span>
+                        <span id="enrollTestBtnText">{{ _('enroll_test_connection') }}</span>
+                    </button>
+                    <button class="btn btn-primary" type="button" id="enrollAddBtn" onclick="addServer()" disabled>
+                        <span class="spinner" id="enrollAddSpinner" hidden aria-hidden="true"></span>
+                        <span id="enrollAddBtnText">{{ _('enroll_add_server') }}</span>
+                    </button>
+                </div>
+            </div>
+        </form>
+    </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    const enrollState = {
+        sequence: 0,
+        busy: false,
+        accepting: false,
+        authMethod: 'password',
+        testedSignature: null,
+        inflightSignature: null,
+        changedSignature: null,
+        changedToken: null,
+        changedHost: '',
+        changedPort: null,
+    };
+
+    function enrollEl(id) {
+        return document.getElementById(id);
+    }
+
+    function enrollShowError(message) {
+        const element = enrollEl('enrollError');
+        if (!element) return;
+        element.textContent = message || '';
+        element.hidden = !message;
+    }
+
+    function enrollHideError() {
+        enrollShowError('');
+    }
+
+    function enrollHideSuccess() {
+        const element = enrollEl('enrollSuccess');
+        if (element) element.hidden = true;
+        const text = enrollEl('enrollSuccessText');
+        if (text) text.textContent = '';
+    }
+
+    function enrollHideTestHint() {
+        const hint = enrollEl('enrollTestHint');
+        if (hint) hint.hidden = true;
+    }
+
+    function enrollReadForm() {
+        const portText = enrollEl('enrollPort').value.trim();
+        return {
+            name: enrollEl('enrollName').value.trim(),
+            host: enrollEl('enrollHost').value.trim(),
+            ssh_port: portText === '' ? NaN : Number(portText),
+            username: enrollEl('enrollUser').value.trim(),
+            password: enrollEl('enrollPassword').value,
+            private_key: enrollEl('enrollKey').value,
+        };
+    }
+
+    function enrollBuildPayload() {
+        const form = enrollReadForm();
+        return {
+            name: form.name,
+            host: form.host,
+            ssh_port: form.ssh_port,
+            username: form.username,
+            password: enrollState.authMethod === 'password' ? form.password : '',
+            private_key: enrollState.authMethod === 'key' ? form.private_key : '',
+        };
+    }
+
+    function enrollSignature() {
+        return JSON.stringify(enrollBuildPayload());
+    }
+
+    function enrollValidate() {
+        const payload = enrollBuildPayload();
+        if (!payload.host || payload.host.length > 253 ||
+            /[\s,|\[\]\/\\]/.test(payload.host) || payload.host.includes('://')) {
+            enrollShowError(_('enroll_error_validation'));
+            enrollEl('enrollHost').focus();
+            return false;
+        }
+        if (!Number.isInteger(payload.ssh_port) ||
+            payload.ssh_port < 1 || payload.ssh_port > 65535) {
+            enrollShowError(_('enroll_error_validation'));
+            enrollEl('enrollPort').focus();
+            return false;
+        }
+        if (!payload.username) {
+            enrollShowError(_('enroll_error_validation'));
+            enrollEl('enrollUser').focus();
+            return false;
+        }
+        if (enrollState.authMethod === 'password') {
+            if (!payload.password) {
+                enrollShowError(_('enroll_error_validation'));
+                enrollEl('enrollPassword').focus();
+                return false;
+            }
+        } else if (!payload.private_key.trim()) {
+            enrollShowError(_('enroll_error_validation'));
+            enrollEl('enrollKey').focus();
+            return false;
+        }
+        return true;
+    }
+
+    function enrollSetTestBusy(busy) {
+        const button = enrollEl('enrollTestBtn');
+        const text = enrollEl('enrollTestBtnText');
+        const spinner = enrollEl('enrollTestSpinner');
+        if (button) button.disabled = busy;
+        if (text) text.textContent = busy ? _('enroll_testing') : _('enroll_test_connection');
+        if (spinner) spinner.hidden = !busy;
+    }
+
+    function enrollSetAddBusy(busy) {
+        const text = enrollEl('enrollAddBtnText');
+        const spinner = enrollEl('enrollAddSpinner');
+        if (text) text.textContent = busy ? _('enroll_adding') : _('enroll_add_server');
+        if (spinner) spinner.hidden = !busy;
+        if (busy) enrollEl('enrollAddBtn').disabled = true;
+    }
+
+    function enrollSetAcceptBusy(busy) {
+        const spinner = enrollEl('enrollChangedSpinner');
+        if (spinner) spinner.hidden = !busy;
+        if (busy) enrollEl('enrollAcceptBtn').disabled = true;
+        else enrollSyncAcceptButton();
+    }
+
+    function enrollSyncAddButton() {
+        const button = enrollEl('enrollAddBtn');
+        if (!button) return;
+        const ready = Boolean(enrollState.testedSignature) &&
+            enrollState.testedSignature === enrollSignature() &&
+            !enrollState.busy && !enrollState.accepting;
+        button.disabled = !ready;
+    }
+
+    function enrollSyncAcceptButton() {
+        const button = enrollEl('enrollAcceptBtn');
+        const checkbox = enrollEl('enrollChangedVerified');
+        if (!button) return;
+        button.disabled = !(checkbox && checkbox.checked &&
+            enrollState.changedToken && !enrollState.accepting && !enrollState.busy);
+    }
+
+    // Kept for the inline checkbox handler.
+    function syncAcceptButton() {
+        enrollSyncAcceptButton();
+    }
+
+    function enrollHideChanged() {
+        const changed = enrollEl('enrollChanged');
+        if (changed) changed.hidden = true;
+        const checkbox = enrollEl('enrollChangedVerified');
+        if (checkbox) checkbox.checked = false;
+        const details = enrollEl('enrollChangedDetails');
+        if (details) details.textContent = '';
+        enrollState.changedToken = null;
+        enrollState.changedHost = '';
+        enrollState.changedPort = null;
+        enrollState.changedSignature = null;
+        enrollSetAcceptBusy(false);
+    }
+
+    function enrollShowSuccess(hostKey) {
+        const status = hostKey.status === 'pinned'
+            ? _('enroll_test_success_pinned')
+            : _('enroll_test_success_trusted');
+        const message = _('enroll_test_success')
+            .replace('{algorithm}', hostKey.algorithm || '')
+            .replace('{fingerprint}', hostKey.fingerprint || '')
+            .replace('{status}', status);
+        enrollEl('enrollSuccessText').textContent = message;
+        enrollEl('enrollSuccess').hidden = false;
+    }
+
+    function enrollShowChanged(hostKey) {
+        // A changed key invalidates any previous successful test: the server
+        // must be tested again after the new key is explicitly accepted.
+        enrollState.testedSignature = null;
+        enrollHideSuccess();
+        enrollHideTestHint();
+        const oldKeys = Array.isArray(hostKey.old_fingerprints) ? hostKey.old_fingerprints : [];
+        const host = hostKey.host || enrollEl('enrollHost').value.trim();
+        const port = hostKey.port || enrollEl('enrollPort').value.trim();
+        const lines = [];
+        if (host) lines.push(host + ':' + port);
+        lines.push(_('ssh_trust_new') + ': ' + (hostKey.algorithm || '') + ' ' + (hostKey.fingerprint || ''));
+        if (oldKeys.length) {
+            lines.push(_('ssh_trust_old') + ':');
+            oldKeys.forEach(key => {
+                lines.push('  ' + (key.algorithm || '') + ' ' + (key.fingerprint || ''));
+            });
+        }
+        enrollEl('enrollChangedDetails').textContent = lines.join('\n');
+        enrollState.changedToken = hostKey.token || null;
+        enrollState.changedHost = host;
+        enrollState.changedSignature = enrollSignature();
+        const portNumber = Number(port);
+        enrollState.changedPort = Number.isInteger(portNumber) ? portNumber : null;
+        enrollEl('enrollChangedVerified').checked = false;
+        enrollEl('enrollChanged').hidden = false;
+        enrollSyncAcceptButton();
+    }
+
+    function enrollClassifyError(error) {
+        const payload = error && error.payload;
+        if (payload && typeof payload.error_code === 'string' && payload.error_code) {
+            return payload.error_code;
+        }
+        // fetch() rejects with TypeError when the request itself fails.
+        if (error instanceof TypeError) {
+            const message = String(error.message || '').toLowerCase();
+            if (message.includes('fetch') || message.includes('network') ||
+                message.includes('load failed')) {
+                return 'network_error';
+            }
+        }
+        return 'internal_error';
+    }
+
+    function enrollTestErrorMessage(code) {
+        switch (code) {
+            case 'validation_error': return _('enroll_error_validation');
+            case 'authentication_failed': return _('enroll_error_auth');
+            case 'network_error': return _('enroll_error_network');
+            case 'forbidden': return _('enroll_error_forbidden');
+            case 'host_key_changed': return _('enroll_error_host_key');
+            default: return _('enroll_error_test');
+        }
+    }
+
+    function enrollAddErrorMessage(code) {
+        switch (code) {
+            case 'validation_error': return _('enroll_error_validation');
+            case 'authentication_failed': return _('enroll_error_auth');
+            case 'network_error': return _('enroll_error_network');
+            case 'forbidden': return _('enroll_error_forbidden');
+            case 'host_key_changed': return _('enroll_error_host_key');
+            default: return _('enroll_error_generic');
+        }
+    }
+
+    function enrollHandleTestError(error) {
+        const code = enrollClassifyError(error);
+        const payload = error && error.payload;
+        if (code === 'host_key_changed') {
+            if (payload && payload.host_key) enrollShowChanged(payload.host_key);
+            enrollShowError(_('enroll_error_host_key'));
+            return;
+        }
+        enrollShowError(enrollTestErrorMessage(code));
+    }
+
+    function enrollHandleAddError(error) {
+        const code = enrollClassifyError(error);
+        const payload = error && error.payload;
+        if (code === 'host_key_changed') {
+            if (payload && payload.host_key) {
+                enrollShowChanged(payload.host_key);
+                enrollShowError(_('enroll_error_host_key'));
+            } else {
+                invalidateTest(true);
+                enrollShowError(_('enroll_error_host_key'));
+            }
+            return;
+        }
+        enrollShowError(enrollAddErrorMessage(code));
+    }
+
+    // Any edit invalidates a previous successful test. This is the single
+    // place that clears the tested signature and resets the result UI.
+    function invalidateTest(force) {
+        const signature = enrollSignature();
+        if (!force) {
+            // A blur can fire `change` with unchanged values; that must not
+            // cancel a running test, a finished test, or a changed-key panel.
+            const known = enrollState.inflightSignature ||
+                enrollState.testedSignature || enrollState.changedSignature;
+            if (known && signature === known) return;
+        }
+        enrollState.sequence += 1;
+        enrollState.busy = false;
+        enrollState.accepting = false;
+        enrollState.testedSignature = null;
+        enrollState.inflightSignature = null;
+        enrollHideError();
+        enrollHideSuccess();
+        enrollHideChanged();
+        enrollSetTestBusy(false);
+        enrollSetAddBusy(false);
+        enrollEl('enrollTestBtn').disabled = false;
+        enrollSyncAddButton();
+        const hint = enrollEl('enrollTestHint');
+        if (hint) hint.hidden = false;
+    }
+
+    async function testConnection() {
+        if (enrollState.busy || enrollState.accepting) return;
+        if (!enrollValidate()) return;
+
+        const signature = enrollSignature();
+        const sequence = ++enrollState.sequence;
+        const body = enrollBuildPayload();
+        enrollState.busy = true;
+        enrollState.testedSignature = null;
+        enrollState.inflightSignature = signature;
+        enrollSetTestBusy(true);
+        enrollSetAddBusy(false);
+        enrollHideError();
+        enrollHideSuccess();
+        enrollHideChanged();
+        enrollHideTestHint();
+        enrollSyncAddButton();
+
+        try {
+            const data = await apiCall('/api/servers/test', 'POST', body);
+            if (sequence !== enrollState.sequence || signature !== enrollSignature()) return;
+            if (!data || data.status !== 'success' || !data.host_key) {
+                enrollShowError(_('enroll_error_test'));
+                return;
+            }
+            enrollState.testedSignature = signature;
+            enrollShowSuccess(data.host_key);
+        } catch (error) {
+            if (sequence !== enrollState.sequence || signature !== enrollSignature()) return;
+            enrollHandleTestError(error);
+        } finally {
+            if (sequence === enrollState.sequence) {
+                enrollState.busy = false;
+                enrollState.inflightSignature = null;
+                enrollSetTestBusy(false);
+                enrollSyncAddButton();
+            }
+        }
+    }
+
+    async function acceptChangedKey() {
+        if (enrollState.busy || enrollState.accepting) return;
+        const checkbox = enrollEl('enrollChangedVerified');
+        if (!checkbox || !checkbox.checked) return;
+        if (!enrollState.changedToken || !enrollState.changedHost ||
+            !Number.isInteger(enrollState.changedPort)) return;
+
+        const sequence = enrollState.sequence;
+        const signature = enrollSignature();
+        enrollState.accepting = true;
+        enrollState.inflightSignature = signature;
+        enrollSetAcceptBusy(true);
+        enrollHideError();
+
+        try {
+            await apiCall('/api/ssh-trust/onboarding/confirm', 'POST', {
+                host: enrollState.changedHost,
+                ssh_port: enrollState.changedPort,
+                token: enrollState.changedToken,
+                confirmed: true,
+            });
+            if (sequence !== enrollState.sequence) return;
+            if (signature !== enrollSignature()) {
+                invalidateTest();
+                return;
+            }
+            enrollState.accepting = false;
+            enrollSetAcceptBusy(false);
+            await testConnection();
+        } catch (error) {
+            if (sequence !== enrollState.sequence) return;
+            enrollShowError(_('enroll_error_accept'));
+        } finally {
+            if (sequence === enrollState.sequence) {
+                enrollState.accepting = false;
+                enrollState.inflightSignature = null;
+                enrollSetAcceptBusy(false);
+            }
+        }
+    }
+
+    async function addServer() {
+        if (enrollState.busy || enrollState.accepting) return;
+        if (!enrollState.testedSignature) {
+            enrollShowError(_('enroll_test_required'));
+            return;
+        }
+        if (enrollState.testedSignature !== enrollSignature()) {
+            invalidateTest(true);
+            enrollShowError(_('enroll_test_required'));
+            return;
+        }
+        if (!enrollValidate()) return;
+
+        const body = enrollBuildPayload();
+        const sequence = ++enrollState.sequence;
+        enrollState.busy = true;
+        enrollState.inflightSignature = enrollState.testedSignature;
+        enrollSetAddBusy(true);
+        enrollEl('enrollTestBtn').disabled = true;
+        enrollHideError();
+
+        try {
+            const result = await apiCall('/api/servers/add', 'POST', body);
+            if (sequence !== enrollState.sequence) return;
+            if (!result || !Number.isInteger(result.server_id)) {
+                enrollShowError(_('enroll_error_generic'));
+                return;
+            }
+            enrollClearCredentials();
+            window.location.href = '/server/' + result.server_id;
+        } catch (error) {
+            if (sequence !== enrollState.sequence) return;
+            enrollHandleAddError(error);
+        } finally {
+            if (sequence === enrollState.sequence) {
+                enrollState.busy = false;
+                enrollState.inflightSignature = null;
+                enrollSetAddBusy(false);
+                enrollEl('enrollTestBtn').disabled = false;
+                enrollSyncAddButton();
+                enrollSyncAcceptButton();
+            }
+        }
+    }
+
+    function switchAuthTab(method) {
+        enrollState.authMethod = method === 'key' ? 'key' : 'password';
+        const usePassword = enrollState.authMethod === 'password';
+        const passwordTab = enrollEl('enrollPasswordTab');
+        const keyTab = enrollEl('enrollKeyTab');
+        passwordTab.classList.toggle('active', usePassword);
+        keyTab.classList.toggle('active', !usePassword);
+        passwordTab.setAttribute('aria-selected', usePassword ? 'true' : 'false');
+        keyTab.setAttribute('aria-selected', usePassword ? 'false' : 'true');
+        enrollEl('authPassword').hidden = !usePassword;
+        enrollEl('authKey').hidden = usePassword;
+        invalidateTest();
+    }
+
+    function enrollClearCredentials() {
+        enrollEl('enrollPassword').value = '';
+        enrollEl('enrollKey').value = '';
+    }
+
+    function enrollFormSubmit(event) {
+        event.preventDefault();
+        if (!enrollEl('enrollAddBtn').disabled) addServer();
+        else testConnection();
+        return false;
+    }
+
+    ['enrollName', 'enrollHost', 'enrollPort', 'enrollUser',
+        'enrollPassword', 'enrollKey'].forEach(id => {
+        const field = enrollEl(id);
+        if (!field) return;
+        field.addEventListener('input', () => invalidateTest());
+        field.addEventListener('change', () => invalidateTest());
+    });
+
+    window.addEventListener('pagehide', enrollClearCredentials);
+</script>
+{% endblock %}

@@ -21,6 +21,7 @@ from typing import List, Optional
 
 FUNCTIONS = {'load_data', 'save_data', 'find_server_by_uid', '_finish_locked_worker',
              '_finish_server_operation', '_server_identity',
+             '_classify_ssh_error', '_exception_text',
              'api_add_server', 'api_edit_server', 'api_reorder_servers', 'api_delete_server'}
 MODELS = {'AddServerRequest', 'EditServerRequest', 'ReorderServersRequest'}
 
