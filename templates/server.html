@@ -2613,7 +2613,7 @@
         const name = getProtoTitle(proto);
         try {
             showToast(_('loading'), 'info');
-            const res = await apiCall(`/api/servers/${SERVER_ID}/server_config`, 'POST', { protocol: proto });
+            const res = await apiCall(`/api/servers/${SERVER_ID}/server_config?server_uid=${encodeURIComponent(document.body.dataset.serverUid || '')}`, 'POST', { protocol: proto });
             document.getElementById('serverConfigModalTitle').textContent = `${_('server_config')} — ${name}`;
             document.getElementById('serverConfigProto').value = proto;
             setEditorValue('serverConfigText', res.config || '', { mode: editorModeFor('server', proto) });
@@ -2967,7 +2967,7 @@
         btn.textContent = _('saving') || 'Saving...';
 
         try {
-            await apiCall(`/api/servers/${SERVER_ID}/server_config/save`, 'POST', {
+            await apiCall(`/api/servers/${SERVER_ID}/server_config/save?server_uid=${encodeURIComponent(document.body.dataset.serverUid || '')}`, 'POST', {
                 protocol: proto,
                 config: newConfig
             });
