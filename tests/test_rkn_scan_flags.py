@@ -177,7 +177,7 @@ class ClearEndpointTests(unittest.TestCase):
         ssh = SimpleNamespace(
             connect=lambda: None,
             disconnect=lambda: None,
-            run_sudo_command=lambda cmd, timeout=60: self.ran.append(cmd) or ('', '', 0))
+            run_sudo_script=lambda cmd, timeout=60: self.ran.append(cmd) or ('', '', 0))
         self.panel['get_ssh'] = Mock(return_value=ssh)
         self.panel['load_data'] = Mock(return_value={
             'servers': [{'name': 'A', 'uid': 'node-a', 'protocols': {}}], 'users': [], 'user_connections': []})

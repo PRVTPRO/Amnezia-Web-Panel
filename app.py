@@ -4137,8 +4137,10 @@ RKN_RAW_BASE = ('https://raw.githubusercontent.com/PRVTPRO/Amnezia-Web-Panel/'
                 'main/scripts/rknblock')
 
 RKN_INSTALL_CMD = (
+    'tmp_dir=$(mktemp -d /tmp/amnezia-rkn.XXXXXXXXXX) || exit $?; '
+    'trap \'rm -rf -- "$tmp_dir"\' EXIT; '
     f'curl -fsSL {RKN_RAW_BASE}/install-rkn-extra.sh '
-    '-o /tmp/rkn-install.sh && bash /tmp/rkn-install.sh'
+    '-o "$tmp_dir/rkn-install.sh" && bash "$tmp_dir/rkn-install.sh"'
 )
 
 RKN_SCRIPT_URL = f'{RKN_RAW_BASE}/rkn-extra-block.sh'
@@ -4151,10 +4153,12 @@ def _rkn_run_cmd(subcommand):
     always driving a fresh copy keeps every server able to run every
     subcommand regardless of the version it was installed with.
     """
-    return (f'curl -fsSL {RKN_SCRIPT_URL} -o /tmp/rkn-extra-block-run.sh '
-            f'&& install -m 0755 /tmp/rkn-extra-block-run.sh /usr/local/sbin/rkn-extra-block '
-            f'&& bash /tmp/rkn-extra-block-run.sh {subcommand}; '
-            f'rc=$?; rm -f /tmp/rkn-extra-block-run.sh; exit $rc')
+    return ('tmp_dir=$(mktemp -d /tmp/amnezia-rkn.XXXXXXXXXX) || exit $?; '
+            'trap \'rm -rf -- "$tmp_dir"\' EXIT; '
+            f'curl -fsSL {RKN_SCRIPT_URL} -o "$tmp_dir/rkn-extra-block-run.sh" '
+            '&& install -m 0755 "$tmp_dir/rkn-extra-block-run.sh" /usr/local/sbin/rkn-extra-block '
+            f'&& bash "$tmp_dir/rkn-extra-block-run.sh" {subcommand}; '
+            'rc=$?; exit $rc')
 
 
 def _rkn_record(server):
@@ -4215,7 +4219,7 @@ async def _rkn_ssh_run(server, cmd, timeout):
         await asyncio.to_thread(ssh.connect)
         if _rkn_server_index(load_data(), None, server.get('uid'), server) is None:
             return JSONResponse({'error': 'Server identity changed; refresh the inventory'}, status_code=409)
-        out, err, code = await asyncio.to_thread(ssh.run_sudo_command, cmd, timeout)
+        out, err, code = await asyncio.to_thread(ssh.run_sudo_script, cmd, timeout)
     finally:
         try:
             ssh.disconnect()

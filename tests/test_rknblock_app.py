@@ -7,6 +7,10 @@ import ast
 import asyncio
 import copy
 import json
+import os
+import shlex
+import shutil
+import subprocess
 import threading
 from contextlib import ExitStack
 from pathlib import Path
@@ -15,6 +19,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from fastapi.responses import JSONResponse
+from managers.ssh_manager import SSHManager
 
 FUNCTIONS = {'_rkn_ssh_run', '_rkn_run_cmd', '_rkn_record',
              '_rkn_server_index', '_rkn_store_record', '_rkn_drop_record',
@@ -59,7 +64,7 @@ class SshCase(unittest.TestCase):
         ssh = SimpleNamespace(
             connect=lambda: None,
             disconnect=lambda: None,
-            run_sudo_command=self._run_sudo)
+            run_sudo_script=self._run_sudo)
         self.panel['get_ssh'] = Mock(return_value=ssh)
         self.server = {'name': 'A', 'uid': 'node-a', 'host': '192.0.2.1', 'protocols': {}}
         self.panel['load_data'] = Mock(return_value={'servers': [self.server],
@@ -82,9 +87,104 @@ class RunCmdTests(SshCase):
     def test_run_cmd_fetches_fresh_script_to_tmp(self):
         cmd = self.panel['_rkn_run_cmd']('uninstall')
         self.assertIn('curl -fsSL https://example.test/rkn.sh', cmd)
-        self.assertIn('-o /tmp/rkn-extra-block-run.sh', cmd)
-        self.assertIn('bash /tmp/rkn-extra-block-run.sh uninstall', cmd)
-        self.assertIn('rm -f /tmp/rkn-extra-block-run.sh', cmd)
+        self.assertIn('mktemp -d /tmp/amnezia-rkn.', cmd)
+        self.assertIn('bash "$tmp_dir/rkn-extra-block-run.sh" uninstall', cmd)
+        self.assertIn('trap \'rm -rf -- "$tmp_dir"\' EXIT', cmd)
+
+
+class SudoExecutionTests(SshCase):
+    def test_compound_payload_uses_the_existing_script_helper(self):
+        payload = 'first && second; third'
+        for username, password in [('root', None), ('admin', None), ('admin', 'synthetic-secret')]:
+            with self.subTest(username=username, password_sudo=bool(password)):
+                ssh = SSHManager('example.test', 22, username, password=password)
+                ssh.connect = Mock()
+                ssh.disconnect = Mock()
+                ssh.upload_file = Mock()
+                ssh.run_command = Mock(return_value=('/tmp/amnezia-private.fixture', '', 0))
+                self.panel['get_ssh'].return_value = ssh
+                self.assertIsNone(asyncio.run(self.panel['_rkn_ssh_run'](self.server, payload, 42)))
+                if username == 'root':
+                    ssh.run_command.assert_called_once_with(payload, timeout=42)
+                    ssh.upload_file.assert_not_called()
+                else:
+                    ssh.upload_file.assert_called_once_with(payload, '/tmp/amnezia-private.fixture/script.sh')
+                    call = ssh.run_command.call_args_list[1]
+                    argv = shlex.split(call.args[0])
+                    self.assertEqual(argv[-2:], ['bash', '/tmp/amnezia-private.fixture/script.sh'])
+                    self.assertEqual(argv[0], 'sudo')
+                    self.assertEqual(call.kwargs['timeout'], 42)
+                    self.assertEqual(call.kwargs.get('stdin_input'), password + '\n' if password else None)
+                    self.assertNotIn('synthetic-secret', call.args[0])
+                    self.assertEqual(ssh.run_command.call_args_list[-1].args[0], 'rm -rf -- /tmp/amnezia-private.fixture')
+                ssh.disconnect.assert_called_once()
+
+    def test_sudo_failure_and_timeout_are_not_success(self):
+        ssh = Mock()
+        self.panel['get_ssh'].return_value = ssh
+        for result in [('', 'sudo denied', 1), ('', 'SSH timed out', -1), ('failure on stdout', '', 7)]:
+            with self.subTest(code=result[2]):
+                ssh.run_sudo_script.return_value = result
+                response = asyncio.run(self.panel['_rkn_ssh_run'](self.server, 'first && second', 42))
+                self.assertEqual(response.status_code, 500)
+                self.assertIn(result[1] or result[0], json.loads(response.body)['error'])
+        self.assertEqual(ssh.disconnect.call_count, 3)
+
+    def test_script_exception_always_disconnects(self):
+        ssh = Mock()
+        ssh.run_sudo_script.side_effect = TimeoutError('synthetic timeout')
+        self.panel['get_ssh'].return_value = ssh
+        with self.assertRaises(TimeoutError):
+            asyncio.run(self.panel['_rkn_ssh_run'](self.server, 'first && second', 42))
+        ssh.disconnect.assert_called_once()
+
+    @unittest.skipUnless(os.name == 'posix' and shutil.which('bash'), 'requires POSIX bash')
+    def test_real_shell_chain_with_synthetic_non_root_sudo(self):
+        # No real sudo, SSH, installer or network: the shell function emulates
+        # a privilege boundary only in its child process, like actual sudo.
+        class ShellSSH(SSHManager):
+            def run_command(self, command, timeout=60, **kwargs):
+                bootstrap = '''sudo() {
+                    while [ "$#" -gt 0 ]; do
+                        case "$1" in -S) shift;; -p) shift 2;; *) break;; esac
+                    done
+                    (export RKN_TEST_ROOT=1; "$@")
+                };
+                curl() {
+                    [ "$RKN_TEST_ROOT" = 1 ] || return 71
+                    printf '%s\\n' '[ "$RKN_TEST_ROOT" = 1 ] || exit 72' 'printf script-root' > "${@: -1}"
+                };
+                install() { [ "$RKN_TEST_ROOT" = 1 ]; };
+                export -f curl install; '''
+                env = dict(os.environ, RKN_TEST_ROOT='1' if self._is_root else '0')
+                p = subprocess.run(['bash', '-c', bootstrap + command], env=env,
+                                   capture_output=True, text=True, timeout=timeout)
+                return p.stdout.strip(), p.stderr.strip(), p.returncode
+
+            def upload_file(self, content, path):
+                Path(path).write_text(content, encoding='utf-8')
+
+        payload = '[ "$RKN_TEST_ROOT" = 1 ] && printf first; [ "$RKN_TEST_ROOT" = 1 ] && printf second'
+        for username, password in [('root', None), ('admin', None), ('admin', 'synthetic-secret')]:
+            with self.subTest(username=username, password_sudo=bool(password)):
+                ssh = ShellSSH('example.test', 22, username, password=password)
+                ssh.connect = Mock()
+                ssh.disconnect = Mock()
+                self.panel['get_ssh'].return_value = ssh
+                if username != 'root':
+                    self.assertNotEqual(ssh.run_sudo_command(payload)[2], 0)
+                self.assertIsNone(asyncio.run(self.panel['_rkn_ssh_run'](self.server, payload, 5)))
+                # Execute the actual command builders with inert download and
+                # install doubles: no remote script or system path is touched.
+                tree = ast.parse((Path(__file__).resolve().parents[1] / 'app.py').read_text(encoding='utf-8'))
+                constants = [n for n in tree.body if isinstance(n, ast.Assign)
+                             and any(isinstance(t, ast.Name) and t.id in ('RKN_RAW_BASE', 'RKN_INSTALL_CMD') for t in n.targets)]
+                namespace = {}
+                exec(compile(ast.Module(body=constants, type_ignores=[]), '<rkn-constants>', 'exec'), namespace)
+                scripts = [namespace['RKN_INSTALL_CMD']] + [self.panel['_rkn_run_cmd'](sub)
+                    for sub in ('uninstall', 'on', 'off', 'update', 'set block_in=on block_out=off log_in=on log_out=off')]
+                for script in scripts:
+                    self.assertEqual(ssh.run_sudo_script(script, timeout=5), ('script-root', '', 0))
 
 
 class InstallTests(SshCase):
@@ -116,11 +216,11 @@ class InstallTests(SshCase):
                              dict(self.server)],
                  'users': [], 'user_connections': []}
         self.panel['load_data'] = Mock(return_value=initial)
-        original_run = self.panel['get_ssh'].return_value.run_sudo_command
+        original_run = self.panel['get_ssh'].return_value.run_sudo_script
         def run(*args):
             self.panel['load_data'].return_value = fresh
             return original_run(*args)
-        self.panel['get_ssh'].return_value.run_sudo_command = run
+        self.panel['get_ssh'].return_value.run_sudo_script = run
         result = self.call()
         self.assertEqual(result, {'status': 'success', 'installed': True, 'enabled': True})
         self.assertNotIn('rknblock', self.server)
@@ -166,7 +266,7 @@ class InstallTests(SshCase):
         def run(*args):
             self.panel['load_data'].return_value = {'servers': [{'uid': 'replacement', 'rknblock': {'installed': False}}]}
             return ('ok', '', 0)
-        self.panel['get_ssh'].return_value.run_sudo_command = run
+        self.panel['get_ssh'].return_value.run_sudo_script = run
         self.assertEqual(self.call().status_code, 409)
         self.assertFalse(self.panel['load_data'].return_value['servers'][0]['rknblock']['installed'])
         self.panel['save_data'].assert_not_called()
@@ -345,7 +445,7 @@ class RknRequestRaces(unittest.IsolatedAsyncioTestCase):
         self.stack.enter_context(patch.object(app, 'load_data', side_effect=lambda: copy.deepcopy(self.data)))
         self.stack.enter_context(patch.object(app, 'save_data', side_effect=self.save))
         self.ssh = Mock()
-        self.ssh.run_sudo_command.return_value = ('ok', '', 0)
+        self.ssh.run_sudo_script.return_value = ('ok', '', 0)
         self.stack.enter_context(patch.object(app, 'get_ssh', return_value=self.ssh))
         self.request = SimpleNamespace()
 
@@ -356,6 +456,18 @@ class RknRequestRaces(unittest.IsolatedAsyncioTestCase):
         for key in ('users', 'user_connections'):
             self.assertEqual(self.data[key], self.before[key])
 
+    async def test_options_emit_only_validated_fixed_flags_via_script(self):
+        self.data['servers'][0]['rknblock'] = {'installed': True}
+        req = self.app.RknBlockOptionsRequest(block_in=False, log_out=False)
+        result = await self.app.api_rknblock_options(self.request, 0, req, 'fixture-node')
+        self.assertEqual(result['status'], 'success')
+        script, timeout = self.ssh.run_sudo_script.call_args.args
+        self.assertIn('set block_in=off block_out=on log_in=on log_out=off;', script)
+        self.assertEqual(timeout, 120)
+        with self.assertRaises(ValueError):
+            self.app.RknBlockOptionsRequest(block_in='on; id')
+        self.accounting_preserved()
+
     async def test_cancelled_install_retains_interlock_and_duplicate_never_runs(self):
         entered, release = threading.Event(), threading.Event()
         def run(*args):
@@ -363,7 +475,7 @@ class RknRequestRaces(unittest.IsolatedAsyncioTestCase):
             if not release.wait(5):
                 raise TimeoutError('synthetic barrier')
             return ('ok', '', 0)
-        self.ssh.run_sudo_command.side_effect = run
+        self.ssh.run_sudo_script.side_effect = run
         first = asyncio.create_task(self.app.api_rknblock_install(self.request, 0, 'fixture-node'))
         try:
             self.assertTrue(await asyncio.to_thread(entered.wait, 3))
@@ -374,7 +486,7 @@ class RknRequestRaces(unittest.IsolatedAsyncioTestCase):
         finally:
             release.set()
         self.assertEqual((await second).status_code, 409)
-        self.ssh.run_sudo_command.assert_called_once()
+        self.ssh.run_sudo_script.assert_called_once()
         self.ssh.disconnect.assert_called_once()
         self.assertTrue(self.data['servers'][0]['rknblock']['installed'])
         self.accounting_preserved()

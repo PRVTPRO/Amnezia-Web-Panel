@@ -73,6 +73,24 @@ class ManagerSecurityTests(unittest.TestCase):
             ssh.run_sudo_script('echo ok')
         ssh.upload_file.assert_not_called()
 
+    def test_sudo_script_cleans_staging_on_upload_or_execution_exception(self):
+        for method in ('upload_file', 'run_sudo_command'):
+            with self.subTest(method=method):
+                ssh = self.make_ssh()
+                getattr(ssh, method).side_effect = TimeoutError('synthetic timeout')
+                with self.assertRaises(TimeoutError):
+                    ssh.run_sudo_script('first && second')
+                self.assertEqual(ssh.run_command.call_args.args[0],
+                                 'rm -rf -- /tmp/amnezia-private.ABC123')
+
+    def test_sudo_script_preserves_failure_result_and_timeout(self):
+        ssh = self.make_ssh()
+        ssh.run_sudo_command.return_value = ('partial stdout', 'sudo denied', 1)
+        self.assertEqual(ssh.run_sudo_script('first && second', timeout=17),
+                         ('partial stdout', 'sudo denied', 1))
+        ssh.run_sudo_command.assert_called_once_with(
+            'bash /tmp/amnezia-private.ABC123/script.sh', timeout=17)
+
     def test_root_admin_script_is_not_filtered(self):
         ssh = self.make_ssh()
         ssh._is_root = True
