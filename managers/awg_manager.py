@@ -1778,6 +1778,16 @@ if [ -f {bwlimits_path} ]; then
 )
 fi
 
+# Watchdog: a kernel-module reload (DKMS update) removes every amneziawg
+# interface while the container keeps running. Recreate it from the on-disk
+# config instead of waiting for the next panel operation or a manual restart.
+# One netlink check per interval; "up" runs only when the interface is gone.
+(
+  while sleep 30; do
+    ip link show "$IFACE" >/dev/null 2>&1 || {quick_bin} up {config_path} >/dev/null 2>&1 || true
+  done
+) &
+
 {extra}tail -f /dev/null
 """
 
@@ -3257,9 +3267,7 @@ AllowedIPs = {allowed_ips}
         self._insert_peer_sorted(protocol_type, peer_section)
 
         # Sync config without restart
-        self.ssh.run_sudo_command(
-            f"docker exec -i {container_name} bash -c '{wg_bin} syncconf {iface} <({wg_bin}-quick strip {config_path})'"
-        )
+        self._syncconf_with_heal(protocol_type)
 
         # Update clients table — store keys for config reconstruction
         clients_table = self._get_clients_table(protocol_type)
@@ -3579,9 +3587,7 @@ PersistentKeepalive = 25
             self._invalidate_config_cache(protocol_type)
 
         # Sync config
-        _, sync_err, sync_code = self.ssh.run_sudo_command(
-            f"docker exec -i {container_name} bash -c '{wg_bin} syncconf {iface} <({wg_bin}-quick strip {config_path})'"
-        )
+        _, sync_err, sync_code = self._syncconf_with_heal(protocol_type)
         if sync_code != 0:
             # A failed sync with an already-updated clients table is exactly
             # how a peer ends up half-toggled (working in wg but shown off, or
@@ -3680,9 +3686,7 @@ PersistentKeepalive = 25
         self._invalidate_config_cache(protocol_type)
 
         # Sync config
-        _, rm_err, rm_code = self.ssh.run_sudo_command(
-            f"docker exec -i {container_name} bash -c '{wg_bin} syncconf {iface} <({wg_bin}-quick strip {config_path})'"
-        )
+        _, rm_err, rm_code = self._syncconf_with_heal(protocol_type)
         if rm_code != 0:
             raise RuntimeError(
                 f"syncconf failed for {container_name} (exit {rm_code}): "
@@ -3915,25 +3919,32 @@ PersistentKeepalive = 25
         if code != 0:
             raise RuntimeError(f"Failed to restart {container_name}: {err or out}")
 
-    def _sync_server_config(self, protocol_type):
-        """Apply the on-disk server config to the running interface.
+    def _syncconf_with_heal(self, protocol_type):
+        """Apply the on-disk config, recreating the interface if it vanished.
 
         A kernel-module reload (DKMS update) removes every amneziawg interface
         while the container keeps running, so `syncconf` then fails with
         "No such device". Bring the interface back up from the on-disk config
         first; that also heals an interface lost after a host reboot.
+
+        Every live-config call site goes through here: add_client, client
+        toggle, remove_client and _sync_server_config. Returns the SSH tuple.
         """
         container_name = self._container_name(protocol_type)
         wg_bin = self._wg_binary(protocol_type)
         quick_bin = self._quick_binary(protocol_type)
         config_path = self._resolve_config_path(protocol_type)
         iface = self._interface_name(protocol_type, config_path)
-        out, err, code = self.ssh.run_sudo_command(
+        return self.ssh.run_sudo_command(
             f"docker exec -i {container_name} bash -c "
             f"'chmod 600 {config_path} 2>/dev/null || true; "
             f"ip link show {iface} >/dev/null 2>&1 || {quick_bin} up {config_path}; "
             f"{wg_bin} syncconf {iface} <({quick_bin} strip {config_path})'"
         )
+
+    def _sync_server_config(self, protocol_type):
+        """Apply the on-disk server config to the running interface."""
+        out, err, code = self._syncconf_with_heal(protocol_type)
         if code != 0:
             raise RuntimeError(f"Failed to apply config: {err or out}")
 

@@ -20,9 +20,12 @@ Both checks are offline: the SSH managers are local recorders.
 import ipaddress
 import re
 import unittest
+from pathlib import Path
 
 from managers.awg_manager import AWGManager
 from managers.exit_manager import ExitManager
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class RecordingSSH:
@@ -106,6 +109,53 @@ class SyncServerConfigGuardTests(unittest.TestCase):
         self.assertIn('ip link show wg0', cmd)
         self.assertIn('wg-quick up %s' % legacy_config, cmd)
         self.assertIn('wg syncconf wg0', cmd)
+
+
+class SyncconfCallSiteTests(unittest.TestCase):
+    """Every live-config write goes through the healing helper."""
+
+    def test_only_the_guard_helper_calls_syncconf(self):
+        source = (ROOT / 'managers' / 'awg_manager.py').read_text(encoding='utf-8')
+        # One raw invocation (inside the helper), no stragglers in call sites.
+        self.assertEqual(source.count('syncconf {iface} <('), 1)
+        # add_client, toggle, remove_client, _sync_server_config.
+        self.assertGreaterEqual(source.count('self._syncconf_with_heal('), 4)
+
+    def test_helper_heals_before_syncing(self):
+        ssh = RecordingSSH()
+        manager = AWGManager(ssh)
+        manager._syncconf_with_heal('awg3')
+        cmd = ssh.commands[-1]
+        config = manager._config_path('awg3')
+        iface = manager._interface_name('awg3', config)
+        quick = manager._quick_binary('awg3')
+        wg = manager._wg_binary('awg3')
+        self.assertIn('chmod 600 %s' % config, cmd)
+        self.assertLess(cmd.index('chmod 600'), cmd.index('ip link show %s' % iface))
+        self.assertIn('ip link show %s >/dev/null 2>&1 || %s up %s' % (iface, quick, config), cmd)
+        self.assertLess(cmd.index('%s up %s' % (quick, config)), cmd.index('%s syncconf %s' % (wg, iface)))
+
+
+class InterfaceWatchdogTests(unittest.TestCase):
+    """start.sh keeps a lightweight guard against a kernel-module reload."""
+
+    def test_awg_start_script_has_the_watchdog(self):
+        script = AWGManager(None)._render_start_script('awg3')
+        self.assertIn('while sleep 30; do', script)
+        self.assertIn('ip link show "$IFACE" >/dev/null 2>&1 || awg-quick up', script)
+        self.assertIn('|| true', script)
+        # The loop must survive as a background job before PID 1 parks.
+        self.assertLess(script.index('while sleep 30'), script.index('tail -f /dev/null'))
+        self.assertEqual(script.count('tail -f /dev/null'), 1)
+
+    def test_legacy_and_exit_use_their_own_quick_binary(self):
+        legacy = AWGManager(None)._render_start_script('awg_legacy')
+        self.assertIn('while sleep 30; do', legacy)
+        self.assertIn('|| wg-quick up', legacy)
+
+        exit_script = ExitManager(None)._render_start_script()
+        self.assertIn('while sleep 30; do', exit_script)
+        self.assertIn('|| awg-quick up /opt/amnezia/exit/transit0.conf', exit_script)
 
 
 class ExitPeerPreservationTests(unittest.TestCase):
