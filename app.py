@@ -47,6 +47,15 @@ except ImportError:
 from managers.ssh_manager import SSHManager
 from managers import ssh_trust
 from managers.awg_manager import AWGManager, normalize_special_junk
+from managers.awg_plugin_updater import (
+    COMPONENTS as AWG_PLUGIN_COMPONENTS,
+    KERNEL_MODULE as AWG_PLUGIN_KERNEL,
+    USERSPACE as AWG_PLUGIN_USERSPACE,
+    TOTAL_STEPS as AWG_PLUGIN_TOTAL_STEPS,
+    AwgPluginUpdater,
+    PluginUpdateError,
+    stage_step as awg_plugin_stage_step,
+)
 from managers.xray_manager import XrayManager
 from managers.wireguard_manager import WireGuardManager
 from managers.backup_manager import BackupManager
@@ -5491,6 +5500,283 @@ async def api_smartroute_status(request: Request, server_id: int):
     except Exception as e:
         logger.exception("Error reading Smart Route status")
         return JSONResponse({'error': str(e)}, status_code=500)
+
+
+# ===== AmneziaWG plugin (kernel module / userspace) updates =====
+#
+# A plugin update is a long SSH operation (DKMS builds take minutes), so it
+# runs as a background task and the page polls a journal. The registry is
+# process-local on purpose: an update must never be resumed by another worker
+# that does not own the SSH session.
+
+AWG_PLUGIN_OP_TTL = 60 * 60
+AWG_PLUGIN_OP_KEEP = 20
+_awg_plugin_ops = {}
+_awg_plugin_active = {}
+_awg_plugin_loaded = {'done': False}
+
+
+def _awg_plugin_store_path():
+    """Journal file next to data.json; an update outlives a panel restart."""
+    return os.path.join(os.path.dirname(DATA_FILE), 'awg_plugin_ops.json')
+
+
+def _awg_plugin_save():
+    path = _awg_plugin_store_path()
+    tmp = path + '.tmp'
+    try:
+        with open(tmp, 'w', encoding='utf-8') as handle:
+            json.dump(list(_awg_plugin_ops.values()), handle, ensure_ascii=False)
+        os.replace(tmp, path)
+    except Exception:
+        # Persistence is a convenience: never fail the update because the
+        # journal file cannot be written.
+        logger.warning("Cannot persist AWG plugin operations", exc_info=True)
+
+
+def _awg_plugin_load():
+    if _awg_plugin_loaded['done']:
+        return
+    _awg_plugin_loaded['done'] = True
+    path = _awg_plugin_store_path()
+    try:
+        with open(path, encoding='utf-8') as handle:
+            stored = json.load(handle)
+    except Exception:
+        return
+    if not isinstance(stored, list):
+        return
+    for op in stored:
+        if not isinstance(op, dict) or not op.get('id'):
+            continue
+        if op.get('state') == 'running':
+            # The process that owned the SSH session is gone. Never report a
+            # killed update as success; the admin must verify the version.
+            op['state'] = 'failed'
+            op['error'] = {
+                'code': 'interrupted',
+                'message': 'the panel restarted during the update; check the installed version',
+            }
+            op.setdefault('lines', []).append({
+                'ts': datetime.now().isoformat(timespec='seconds'),
+                'stage': 'error',
+                'text': 'panel restarted before the operation finished',
+            })
+            op['finished_at'] = datetime.now().isoformat(timespec='seconds')
+            op['finished_ts'] = datetime.now().timestamp()
+        _awg_plugin_ops[op['id']] = op
+    _awg_plugin_prune()
+
+
+class AwgPluginUpdateRequest(BaseModel):
+    component: str
+    target: str | None = None
+    allow_interrupt: bool = False
+
+
+def _awg_plugin_updater(server_id):
+    data = load_data()
+    if not 0 <= server_id < len(data.get('servers', [])):
+        raise PluginUpdateError('server_not_found', 'Server not found')
+    return AwgPluginUpdater(get_ssh(data['servers'][server_id]))
+
+
+def _awg_plugin_error(exc, status_code=400):
+    return JSONResponse({'error': exc.message, 'code': exc.code}, status_code=status_code)
+
+
+def _awg_plugin_prune():
+    now = datetime.now().timestamp()
+    for op_id, op in list(_awg_plugin_ops.items()):
+        if op.get('finished_ts') and now - op['finished_ts'] > AWG_PLUGIN_OP_TTL:
+            _awg_plugin_ops.pop(op_id, None)
+    if len(_awg_plugin_ops) > AWG_PLUGIN_OP_KEEP:
+        finished = sorted(
+            (op for op in _awg_plugin_ops.values() if op.get('finished_ts')),
+            key=lambda op: op['finished_ts'],
+        )
+        for op in finished[:len(_awg_plugin_ops) - AWG_PLUGIN_OP_KEEP]:
+            _awg_plugin_ops.pop(op['id'], None)
+
+
+@app.get('/api/servers/{server_id}/awg-plugin/status', tags=["Protocols"])
+async def api_awg_plugin_status(request: Request, server_id: int):
+    """Installed and published versions of the AWG components of this server."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    _awg_plugin_load()
+    try:
+        updater = await asyncio.to_thread(_awg_plugin_updater, server_id)
+        result = await asyncio.to_thread(updater.status)
+        return result
+    except PluginUpdateError as e:
+        return _awg_plugin_error(e, 502)
+    except Exception as e:
+        logger.exception("Error reading AWG plugin status")
+        return JSONResponse({'error': str(e), 'code': 'internal_error'}, status_code=500)
+
+
+@app.get('/api/servers/{server_id}/awg-plugin/changelog', tags=["Protocols"])
+async def api_awg_plugin_changelog(request: Request, server_id: int, component: str, version: str):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if component not in AWG_PLUGIN_COMPONENTS:
+        return JSONResponse({'error': 'Unknown component', 'code': 'unsupported'}, status_code=400)
+    try:
+        updater = await asyncio.to_thread(_awg_plugin_updater, server_id)
+        entries = await asyncio.to_thread(updater.changelog, component, version)
+        return {'component': component, 'version': version, 'entries': entries}
+    except PluginUpdateError as e:
+        return _awg_plugin_error(e, 502)
+
+
+@app.post('/api/servers/{server_id}/awg-plugin/update', tags=["Protocols"])
+async def api_awg_plugin_update(request: Request, server_id: int, req: AwgPluginUpdateRequest):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if req.component not in AWG_PLUGIN_COMPONENTS:
+        return JSONResponse({'error': 'Unknown component', 'code': 'unsupported'}, status_code=400)
+    _awg_plugin_load()
+    _awg_plugin_prune()
+    key = (server_id, req.component)
+    if key in _awg_plugin_active:
+        return JSONResponse(
+            {'error': 'An update of this component is already running',
+             'code': 'update_in_progress'},
+            status_code=409,
+        )
+
+    op_id = uuid.uuid4().hex
+    op = {
+        'id': op_id,
+        'server_id': server_id,
+        'component': req.component,
+        'target': req.target,
+        'state': 'running',
+        'lines': [],
+        'result': None,
+        'error': None,
+        'cancel_requested': False,
+        'step': 0,
+        'total': AWG_PLUGIN_TOTAL_STEPS,
+        'percent': 0,
+        'started_at': datetime.now().isoformat(timespec='seconds'),
+    }
+    _awg_plugin_ops[op_id] = op
+    _awg_plugin_save()
+    _awg_plugin_active[key] = op_id
+    asyncio.create_task(_run_awg_plugin_update(
+        op_id, server_id, req.component, req.target, bool(req.allow_interrupt),
+    ))
+    return {'operation_id': op_id}
+
+
+async def _run_awg_plugin_update(op_id, server_id, component, target, allow_interrupt):
+    op = _awg_plugin_ops[op_id]
+
+    def log(stage, message):
+        op['lines'].append({
+            'ts': datetime.now().isoformat(timespec='seconds'),
+            'stage': stage,
+            'text': str(message)[-2000:],
+        })
+        mapped = awg_plugin_stage_step(op['component'], stage)
+        if mapped:
+            step, total = mapped
+            if step > op.get('step', 0):
+                op['step'] = step
+                op['total'] = total
+                op['percent'] = int(round(step * 100.0 / total))
+        _awg_plugin_save()
+
+    try:
+        updater = await asyncio.to_thread(_awg_plugin_updater, server_id)
+        if not target:
+            latest = await asyncio.to_thread(updater.latest_versions)
+            target = latest.get(component)
+        op['target'] = target
+        if not target:
+            raise PluginUpdateError('unsupported', 'no published version to update to')
+        log('start', 'updating %s to %s' % (component, target))
+        result = await asyncio.to_thread(
+            updater.update, component, target,
+            allow_interrupt=allow_interrupt, log=log,
+            should_cancel=lambda: bool(op.get('cancel_requested')),
+        )
+        op['result'] = result
+        op['state'] = 'manual_step_required' if result.get('state') == 'manual_step_required' else 'success'
+        log('done', 'state: %s' % op['state'])
+    except PluginUpdateError as e:
+        op['state'] = 'cancelled' if e.code == 'cancelled' else 'failed'
+        op['error'] = {'code': e.code, 'message': e.message}
+        log('error', '%s: %s' % (e.code, e.message))
+    except Exception as e:
+        logger.exception("AWG plugin update failed")
+        op['state'] = 'failed'
+        op['error'] = {'code': 'internal_error', 'message': str(e)}
+        log('error', str(e))
+    finally:
+        op['finished_at'] = datetime.now().isoformat(timespec='seconds')
+        op['finished_ts'] = datetime.now().timestamp()
+        _awg_plugin_active.pop((server_id, component), None)
+        _awg_plugin_save()
+
+
+@app.post('/api/servers/{server_id}/awg-plugin/update/{op_id}/cancel', tags=["Protocols"])
+def api_awg_plugin_update_cancel(request: Request, server_id: int, op_id: str):
+    """Ask a running update to stop at the next safe boundary.
+
+    The DKMS build itself cannot be interrupted; the operation aborts before
+    the module switch or between containers, leaving the installed version in
+    place.
+    """
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    _awg_plugin_load()
+    op = _awg_plugin_ops.get(op_id)
+    if not op or op['server_id'] != server_id:
+        return JSONResponse({'error': 'Operation not found', 'code': 'not_found'}, status_code=404)
+    if op['state'] != 'running':
+        return JSONResponse({'error': 'Operation is not running', 'code': 'not_running'}, status_code=409)
+    op['cancel_requested'] = True
+    op['lines'].append({
+        'ts': datetime.now().isoformat(timespec='seconds'),
+        'stage': 'cancel',
+        'text': 'cancellation requested; stopping at the next safe boundary',
+    })
+    _awg_plugin_save()
+    return {'status': 'cancelling'}
+
+
+@app.get('/api/servers/{server_id}/awg-plugin/update/{op_id}', tags=["Protocols"])
+def api_awg_plugin_update_status(request: Request, server_id: int, op_id: str):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    _awg_plugin_load()
+    op = _awg_plugin_ops.get(op_id)
+    if not op or op['server_id'] != server_id:
+        return JSONResponse({'error': 'Operation not found', 'code': 'not_found'}, status_code=404)
+    try:
+        offset = max(0, int(request.query_params.get('offset', 0)))
+    except (TypeError, ValueError):
+        offset = 0
+    lines = op['lines']
+    return {
+        'operation_id': op_id,
+        'component': op['component'],
+        'target': op['target'],
+        'state': op['state'],
+        'step': op.get('step', 0),
+        'total': op.get('total', AWG_PLUGIN_TOTAL_STEPS),
+        'percent': op.get('percent', 0),
+        'result': op['result'],
+        'error': op['error'],
+        'started_at': op['started_at'],
+        'finished_at': op.get('finished_at'),
+        'lines': lines[offset:],
+        'next_offset': len(lines),
+    }
+
 
 
 @app.post('/api/servers/{server_id}/awg/settings', tags=["Protocols"])
