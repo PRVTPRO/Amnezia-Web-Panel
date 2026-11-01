@@ -655,7 +655,7 @@
             </button>
         </div>
         <div id="rknblock-installed-actions" style="display:none;">
-            <button class="btn btn-secondary btn-sm" onclick="toggleRknBlockApp(false)" id="rknblock-toggle-btn"
+            <button class="btn btn-secondary btn-sm" id="rknblock-toggle-btn"
                 style="flex:1">
                 {{ _('rknblock_stop') }}
             </button>
@@ -5290,6 +5290,9 @@
         }
         statusEl.innerHTML = badge;
         toggleBtn.textContent = liveOn ? _('rknblock_stop') : _('rknblock_start');
+        // The button used to be hardwired to `false`, so "Start" sent "disable"
+        // and the contour could never be turned back on.
+        toggleBtn.onclick = () => toggleRknBlockApp(!liveOn);
 
         // Card keeps only the short summary; full details live in the modal.
         const flags = d.flags || {};
