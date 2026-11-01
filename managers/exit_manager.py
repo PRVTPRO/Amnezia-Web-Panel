@@ -158,13 +158,30 @@ class ExitManager(AWGManager):
         )
 
     def _configure_exit_container(self, port, net, awg_params):
-        """Generate the key pair (kept if present) and write transit0.conf."""
+        """Generate the key pair (kept if present) and write transit0.conf.
+
+        The file is rewritten from scratch, but the [Peer] sections are carried
+        over: they only exist in this file (the panel's peersTable has no PSKs),
+        so dropping them would silently break every exit link on the next
+        reinstall or settings change.
+
+        The script body is embedded in ``bash -c '...'``, so it must not contain
+        a single quote: only double quotes are safe in here.
+        """
         script = f"""
+set -e
 mkdir -p {self.CONFIG_DIR} && cd {self.CONFIG_DIR} && umask 077
 [ -s wireguard_server_private_key.key ] || awg genkey > wireguard_server_private_key.key
 awg pubkey < wireguard_server_private_key.key > wireguard_server_public_key.key
+PEERS=""
+if [ -f {self.CONFIG_PATH} ]; then
+  PEERS=$(awk "/^\\[Peer\\]/{{inside=1}} inside" {self.CONFIG_PATH})
+fi
 cat > {self.CONFIG_PATH} <<EOF
 {self._transit_config(port, net, awg_params)}EOF
+if [ -n "$PEERS" ]; then
+  printf "%s\\n" "$PEERS" >> {self.CONFIG_PATH}
+fi
 """
         out, err, code = self.ssh.run_sudo_command(
             f"docker exec -i {self.CONTAINER_NAME} bash -c '{script}'"

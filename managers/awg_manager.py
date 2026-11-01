@@ -3916,7 +3916,13 @@ PersistentKeepalive = 25
             raise RuntimeError(f"Failed to restart {container_name}: {err or out}")
 
     def _sync_server_config(self, protocol_type):
-        """Apply the on-disk server config to the running interface."""
+        """Apply the on-disk server config to the running interface.
+
+        A kernel-module reload (DKMS update) removes every amneziawg interface
+        while the container keeps running, so `syncconf` then fails with
+        "No such device". Bring the interface back up from the on-disk config
+        first; that also heals an interface lost after a host reboot.
+        """
         container_name = self._container_name(protocol_type)
         wg_bin = self._wg_binary(protocol_type)
         quick_bin = self._quick_binary(protocol_type)
@@ -3924,7 +3930,9 @@ PersistentKeepalive = 25
         iface = self._interface_name(protocol_type, config_path)
         out, err, code = self.ssh.run_sudo_command(
             f"docker exec -i {container_name} bash -c "
-            f"'{wg_bin} syncconf {iface} <({quick_bin} strip {config_path})'"
+            f"'chmod 600 {config_path} 2>/dev/null || true; "
+            f"ip link show {iface} >/dev/null 2>&1 || {quick_bin} up {config_path}; "
+            f"{wg_bin} syncconf {iface} <({quick_bin} strip {config_path})'"
         )
         if code != 0:
             raise RuntimeError(f"Failed to apply config: {err or out}")
