@@ -1779,6 +1779,132 @@ a:hover {
     color: var(--info);
 }
 
+/* ===== Peer action queue ===== */
+.peer-queue-toast {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+    padding: 13px 14px 12px;
+    min-width: 260px;
+    max-width: 360px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    position: relative;
+    overflow: hidden;
+}
+
+.peer-queue-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 10px;
+}
+
+.peer-queue-peer {
+    font-weight: 650;
+    font-size: 0.85rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.peer-queue-percent {
+    font-weight: 700;
+    font-size: 0.78rem;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+    flex: 0 0 auto;
+}
+
+.peer-queue-action {
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+}
+
+.peer-queue-track {
+    height: 4px;
+    border-radius: 999px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    overflow: hidden;
+}
+
+.peer-queue-fill {
+    height: 100%;
+    width: 0;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--accent), var(--success));
+    transition: width 0.5s ease;
+    position: relative;
+    overflow: hidden;
+}
+
+.peer-queue-fill::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.35), transparent);
+    transform: translateX(-100%);
+    animation: peerQueueShimmer 1.6s infinite;
+}
+
+@keyframes peerQueueShimmer {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
+}
+
+.peer-queue-failed .peer-queue-fill {
+    background: var(--danger);
+}
+
+.peer-queue-error {
+    font-size: 0.72rem;
+    color: var(--danger);
+    word-break: break-word;
+}
+
+.peer-queue-close {
+    align-self: flex-end;
+    border: 0;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 1.1rem;
+    line-height: 1;
+    padding: 0 2px;
+}
+
+.peer-queue-close:hover {
+    color: var(--text-primary);
+}
+
+.peer-queue-fade {
+    opacity: 0;
+    transform: translateX(100%);
+    transition: all 0.3s ease;
+}
+
+.client-item.peer-queue-queued { border-color: var(--warning); }
+.client-item.peer-queue-running { border-color: var(--accent); }
+.client-item.peer-queue-done { border-color: var(--success); }
+.client-item.peer-queue-failed { border-color: var(--danger); }
+
+.peer-queue-badge {
+    font-size: 0.65rem;
+    font-weight: 650;
+    padding: 1px 6px;
+    border-radius: 999px;
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.peer-queue-queued .peer-queue-badge { color: var(--warning); }
+.peer-queue-running .peer-queue-badge { color: var(--accent); }
+.peer-queue-done .peer-queue-badge { color: var(--success); }
+.peer-queue-failed .peer-queue-badge { color: var(--danger); }
+
 @keyframes toast-in {
     from {
         transform: translateX(100%);

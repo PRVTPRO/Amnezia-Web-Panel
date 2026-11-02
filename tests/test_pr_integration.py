@@ -90,7 +90,8 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn('await loadConnections(true, true)', editor)
         self.assertLess(editor.index('connections/add'), editor.index('await loadConnections(true, true)'))
         self.assertIn("if (isPoll && !force && listEl.querySelector('.rename-editor')) return;", source)
-        self.assertIn("btn.classList.toggle('peer-toggle-off', !enable)", source)
+        self.assertIn("PeerQueue.enqueue({", source)
+        self.assertIn("action: enable ? 'enable' : 'disable'", source)
 
     def test_no_duplicate_top_level_python_definitions(self):
         for path in [ROOT / 'app.py', *sorted((ROOT / 'managers').glob('*.py'))]:

@@ -4946,7 +4946,7 @@
                 const canShowConfig = proto === 'xray' || true; // always show 📄 button
 
                 listEl.innerHTML += `
-                    <div class="client-item" style="${disabledStyle}" data-maxspeed="${maxSpeed}" data-assigned-user="${client.assigned_user_id || ''}">
+                    <div class="client-item" style="${disabledStyle}" data-maxspeed="${maxSpeed}" data-assigned-user="${client.assigned_user_id || ''}" data-server-id="${SERVER_ID}" data-protocol="${escapeHtml(proto)}" data-client-id="${escapeHtml(client.clientId).replace(/"/g, '&quot;')}" data-peer-name="${escapeHtml(name).replace(/"/g, '&quot;')}">
                         <div class="client-info">
                             <div class="client-avatar${client._online ? ' avatar-online' : ''}">${initial}</div>
                             <div>
@@ -4970,6 +4970,7 @@
             showToast(_('connections_load_error') + ': ' + err.message, 'error');
         } finally {
             window.connLoading = false;
+            PeerQueue.reapplyRowStates();
             highlightPeerFromQuery();
             // A switch was requested mid-flight: load the currently selected
             // protocol now (the stale response above was dropped).
@@ -5122,33 +5123,21 @@
         }
     }
 
-    async function removeConnection(clientId, enabled) {
+    function peerRow(clientId, proto) {
+        return document.querySelector(
+            `.client-item[data-server-id="${SERVER_ID}"]` +
+            `[data-protocol="${CSS.escape(proto)}"]` +
+            `[data-client-id="${CSS.escape(String(clientId))}"]`);
+    }
+
+    function removeConnection(clientId, enabled) {
         if (!confirm(_('delete_connection_confirm'))) return;
         const proto = document.getElementById('connProtoSelect').value;
-        try {
-            await apiCall(`/api/servers/${SERVER_ID}/connections/remove`, 'POST', {
-                protocol: proto, client_id: clientId,
-            });
-            showToast(_('connection_deleted'), 'success');
-            loadConnections();
-        } catch (err) {
-            if (err.payload && err.payload.code === 'final_counter_read_failed' && err.payload.can_force) {
-                if (confirm(_('delete_unverified_confirm'))) {
-                    try {
-                        await apiCall(`/api/servers/${SERVER_ID}/connections/remove`, 'POST', {
-                            protocol: proto, client_id: clientId,
-                            allow_unverified: true,
-                        });
-                        showToast(_('connection_deleted'), 'success');
-                        loadConnections();
-                    } catch (retryErr) {
-                        showToast(_('error') + ': ' + retryErr.message, 'error');
-                    }
-                }
-                return;
-            }
-            showToast(_('error') + ': ' + err.message, 'error');
-        }
+        const row = peerRow(clientId, proto);
+        PeerQueue.enqueue({
+            serverId: SERVER_ID, protocol: proto, clientId: clientId,
+            peerName: row ? row.dataset.peerName : clientId, action: 'delete',
+        });
     }
 
     // Clear connection-flood (torrent) warnings history for a peer
@@ -5382,67 +5371,17 @@
         }
     }
 
-    async function toggleConnection(clientId, enable, btn) {
+    function toggleConnection(clientId, enable, btn) {
         const proto = document.getElementById('connProtoSelect').value;
-        // One toggle at a time across the whole instance: parallel toggles of
-        // DIFFERENT peers race the same server config file (each rewrites
-        // wg0.conf/awg0.conf wholesale) and trip the read-back verification.
-        if (window.peerToggling) {
-            showToast(_('conn_toggle_busy'), 'info');
-            return;
-        }
-        window.peerToggling = true;
-        const action = enable ? _('enable_connection_progress') : _('disable_connection_progress');
-        // Lock the whole client row and swap the bulb for a spinner until done
-        const row = btn ? btn.closest('.client-item') : null;
-        let originalContent = null;
-        if (row) {
-            row.classList.add('client-toggling');
-            row.querySelectorAll('button').forEach(b => b.disabled = true);
-        }
-        if (btn) {
-            originalContent = btn.innerHTML;
-            btn.innerHTML = '<span class="spinner"></span>';
-        }
-        const restore = () => {
-            if (row) {
-                row.classList.remove('client-toggling');
-                row.querySelectorAll('button').forEach(b => b.disabled = false);
-            }
-            if (btn && originalContent !== null) btn.innerHTML = originalContent;
-        };
-        try {
-            showToast(action, 'info');
-            await apiCall(`/api/servers/${SERVER_ID}/connections/toggle`, 'POST', {
-                protocol: proto, client_id: clientId, enable: enable,
-            });
-            showToast(enable ? _('connection_enabled') : _('connection_disabled'), 'success');
-            // Update just this row in place — no full list reload. The 5s
-            // poll reconciles speeds/badges anyway.
-            if (row && btn) {
-                row.style.opacity = enable ? '' : '0.5';
-                btn.classList.toggle('peer-toggle-off', !enable);
-                btn.title = enable ? _('stop') : _('starting');
-                btn.setAttribute('onclick', `toggleConnection('${escapeJs(clientId)}', ${!enable}, this)`);
-                const meta = row.querySelector('.client-meta');
-                if (meta) {
-                    const offBadge = meta.querySelector('.badge-danger');
-                    if (!enable && !offBadge) {
-                        meta.insertAdjacentHTML('afterbegin', `<span class="badge badge-danger" style="font-size:0.65rem">${_('stop')}</span>`);
-                    } else if (enable && offBadge) {
-                        offBadge.remove();
-                    }
-                }
-            }
-        } catch (err) {
-            showToast(_('error') + ': ' + err.message, 'error');
-        } finally {
-            window.peerToggling = false;
-            // Also on success: if loadConnections() fails the row it was
-            // supposed to rebuild would stay disabled with a spinning bulb.
-            restore();
-        }
+        const row = btn && btn.closest('.client-item');
+        PeerQueue.enqueue({
+            serverId: SERVER_ID, protocol: proto, clientId: clientId,
+            peerName: row ? row.dataset.peerName : clientId,
+            action: enable ? 'enable' : 'disable',
+        });
     }
+
+    window.peerQueueOnIdle = function () { loadConnections(); };
 
     // ========== Config Tabs ==========
     function switchConfigTab(tab) {
