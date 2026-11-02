@@ -180,7 +180,25 @@ async def docs_auth_middleware(request, call_next):
         return RedirectResponse('/login')
     return await call_next(request)
 
-# Sessions must wrap every other middleware: docs_auth_middleware above
+@app.middleware("http")
+async def api_auth_status_middleware(request, call_next):
+    """Distinguish expired browser sessions from authenticated API denials.
+
+    Public login/share flows and Bearer integrations keep their own status
+    contracts. Only a denied panel API request with no valid browser user is
+    normalized; successful/public responses are never gated here.
+    """
+    response = await call_next(request)
+    path = request.url.path
+    if (response.status_code == 403 and path.startswith('/api/')
+            and not path.startswith(('/api/auth/', '/api/share/'))
+            and not request.headers.get('authorization', '').lower().startswith('bearer ')
+            and get_current_user(request) is None):
+        return JSONResponse({'error': 'Session expired'}, status_code=401)
+    return response
+
+
+# Sessions must wrap every other middleware: the auth middleware above
 # reads request.session, so SessionMiddleware has to sit outside it.
 app.add_middleware(SessionMiddleware, secret_key=os.environ.get('SECRET_KEY', secrets.token_hex(32)))
 
