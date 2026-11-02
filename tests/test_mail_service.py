@@ -137,7 +137,7 @@ def make_service(data, smtp_client=None, dead_hosts=(), **kwargs):
         config_payloads=lambda config, server, protocol: {
             'config': config, 'vpn_link': 'vpn://KEY-' + protocol, 'vpn_qr_chunks': [],
             'vpn_name': protocol},
-        protocol_display_name=lambda protocol: protocol.upper(),
+        protocol_display_name=lambda protocol, *metadata: protocol.upper(),
         protocol_base=lambda protocol: protocol.rstrip('0123456789') or protocol,
         translate=lambda key, lang='en': key,
         smtp_factory=lambda settings: client,

@@ -126,7 +126,7 @@ class ServerPageTests(unittest.TestCase):
             self.login(client)
             page = client.get('/server/0').text
         self.assertIn('<div class="protocol-name">AmneziaWG 3.x (amnezia-awg2)</div>', page)
-        self.assertIn('"awg2": true,', page)
+        self.assertIn('AmneziaWG 3.x (amnezia-awg2)', page)
 
     def test_page_keeps_awg2_card_name(self):
         self.seed(False)
@@ -158,11 +158,23 @@ class ServerPageTests(unittest.TestCase):
             self.login(client)
             page = client.get('/server/0').text
             self.assertIn('<div class="protocol-name">AmneziaWG 3.1 (amnezia-awg2)</div>', page)
-            self.assertIn('"awg2": "3.1",', page)
+            self.assertIn('const PROTOCOL_LABELS = {"awg2": "AmneziaWG 3.1 (amnezia-awg2)"}', page)
             self.assertIn('AWG3.1', client.get('/').text)
         live, saved = self.check(True, '3.x')
         self.assertEqual(live['display_name'], 'AmneziaWG 3.x (amnezia-awg2)')
         self.assertEqual(saved['protocol_version'], '3.x')
+
+    def test_partial_modern_result_retains_minor_and_legacy_result_clears_it(self):
+        self.seed(True)
+        self.check(True, '3.1')
+        live, saved = self.check(True)
+        self.assertEqual(live['protocol_version'], '3.1')
+        self.assertEqual(saved['protocol_version'], '3.1')
+        self.assertEqual(live['display_name'], saved['display_name'])
+        live, saved = self.check(False)
+        self.assertEqual(live['protocol_version'], '2.0')
+        self.assertEqual(saved['protocol_version'], '2.0')
+        self.assertEqual(live['display_name'], 'AmneziaWG 2.0')
 
     def test_check_persists_detection_both_ways(self):
         self.seed(False)

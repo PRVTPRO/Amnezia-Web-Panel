@@ -72,7 +72,9 @@ class ExitNodeUiWiringTests(unittest.TestCase):
     def test_protocol_sets(self):
         self.assertRegex(self.page, r"const SERVICE_PROTOS = \[.*'exit'.*\];")
         self.assertRegex(self.page, r"const UDP_INSTALL_PROTOS = new Set\(\[.*'exit'.*\]\);")
-        self.assertIn("case 'exit': title = 'Exit Node'; break;", self.page)
+        from protocol_names import protocol_display_name
+        self.assertEqual(protocol_display_name('exit'), 'Exit Node')
+        self.assertIn('DEFAULT_PROTOCOL_LABELS[base]', self.page)
         # never a client protocol
         self.assertNotRegex(self.page, r"const isVPN = \[[^\]]*'exit'")
 

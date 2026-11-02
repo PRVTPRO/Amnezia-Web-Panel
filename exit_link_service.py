@@ -321,7 +321,9 @@ class ExitLinkService:
                                               lambda r: (r.get('exit_link') or {}).__setitem__('stale', reason))
                 return False
 
-            name = f"{entry.get('name') or entry.get('host', '')} / {self.protocol_display_name(protocol)}"
+            record = (entry.get('protocols') or {}).get(protocol, {})
+            label = self.protocol_display_name(protocol, record.get('header_protection'), record.get('protocol_version'))
+            name = f"{entry.get('name') or entry.get('host', '')} / {label}"
             peer = await asyncio.to_thread(exit_manager.add_peer, peer_id, name, entry_pub)
             link = {
                 'exit_uid': exit_uid,

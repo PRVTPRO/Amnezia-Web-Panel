@@ -2110,17 +2110,9 @@
         {{ proto|tojson }}: {{ info.get('custom_name')|tojson }},
         {%- endfor %}
     };
-    // AWG 3.x installed by the official Amnezia client lives in amnezia-awg2.
-    const AWG3_IN_AWG2 = {
-        {%- for proto, info in (server.get('protocols') or {}).items() if info.get('header_protection') %}
-        {{ proto|tojson }}: true,
-        {%- endfor %}
-    };
-    const PROTOCOL_VERSIONS = {
-        {%- for proto, info in (server.get('protocols') or {}).items() if info.get('protocol_version') %}
-        {{ proto|tojson }}: {{ info.get('protocol_version')|tojson }},
-        {%- endfor %}
-    };
+    // Labels come from the shared Python helper; never infer versions in JS.
+    const PROTOCOL_LABELS = {{ server_protocol_names(server) | tojson }};
+    const DEFAULT_PROTOCOL_LABELS = {{ default_protocol_labels | tojson }};
     // Per-instance public address. Absent = the instance is reached at the
     // server's own address and its listen port.
     const PUBLIC_ENDPOINTS = {
@@ -2577,22 +2569,8 @@
         if (CUSTOM_PROTO_NAMES[proto]) return CUSTOM_PROTO_NAMES[proto];
         const base = protoBase(proto);
         const idx = protoInstance(proto);
-        let title;
-        switch (base) {
-            case 'awg': title = 'AmneziaWG'; break;
-            case 'awg2': title = PROTOCOL_VERSIONS[proto] === '3.1' ? 'AmneziaWG 3.1 (amnezia-awg2)' : (AWG3_IN_AWG2[proto] ? 'AmneziaWG 3.x (amnezia-awg2)' : 'AmneziaWG 2.0'); break;
-            case 'awg3': title = 'AmneziaWG 3.1'; break;
-            case 'awg_legacy': title = 'AmneziaWG Legacy'; break;
-            case 'xray': title = 'Xray'; break;
-            case 'telemt': title = 'Telemt'; break;
-            case 'wireguard': title = 'WireGuard'; break;
-            case 'dns': title = 'AmneziaDNS'; break;
-            case 'socks5': title = 'SOCKS5 Proxy'; break;
-            case 'adguard': title = 'AdGuard Home'; break;
-            case 'nginx': title = 'NGINX'; break;
-            case 'exit': title = 'Exit Node'; break;
-            default: title = proto;
-        }
+        if (PROTOCOL_LABELS[proto]) return PROTOCOL_LABELS[proto];
+        const title = DEFAULT_PROTOCOL_LABELS[base] || base;
         return idx > 1 ? `${title} #${idx}` : title;
     }
 
@@ -2897,15 +2875,15 @@
     function updateProtocolCard(proto, info) {
         ensureProtocolCard(proto);
         const protoKey = protoDomKey(proto);
-        if (protoBase(proto) === 'awg2' && 'header_protection' in info) {
-            if ('protocol_version' in info) PROTOCOL_VERSIONS[proto] = info.protocol_version;
-            if (info.header_protection) AWG3_IN_AWG2[proto] = true; else delete AWG3_IN_AWG2[proto];
-            const nameEl = document.querySelector(`#proto-${protoKey} .protocol-name`);
-            if (nameEl && !CUSTOM_PROTO_NAMES[proto]) {
-                const pencil = nameEl.querySelector('.proto-rename');
-                nameEl.textContent = getProtoTitle(proto);
-                if (pencil) nameEl.appendChild(pencil);
-            }
+        // Replace on every response, including downgrade/partial results.
+        // A missing label must not resurrect an old 3.1 label from this page.
+        delete PROTOCOL_LABELS[proto];
+        if (info.display_name) PROTOCOL_LABELS[proto] = info.display_name;
+        const cardNameEl = document.querySelector(`#proto-${protoKey} .protocol-name`);
+        if (cardNameEl && !CUSTOM_PROTO_NAMES[proto]) {
+            const pencil = cardNameEl.querySelector('.proto-rename');
+            cardNameEl.textContent = getProtoTitle(proto);
+            if (pencil) cardNameEl.appendChild(pencil);
         }
         const statusEl = document.getElementById(`${protoKey}-status`);
         const infoEl = document.getElementById(`${protoKey}-info`);
