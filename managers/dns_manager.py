@@ -68,6 +68,16 @@ COPY forward-records.conf /opt/unbound/etc/unbound/forward-records.conf
     def get_server_status(self, protocol_type='dns'):
         """Check if AmneziaDNS container is running."""
         try:
+            snapshot = getattr(self.ssh, 'docker_container_state', None)
+            try:
+                state = snapshot('amnezia-dns') if snapshot else None
+            except Exception:
+                state = None
+            if state is not None:
+                return {
+                    'container_exists': state[0], 'container_running': state[1],
+                    'port': '53', 'protocol': protocol_type,
+                }
             out, _, _ = self.ssh.run_sudo_command("docker ps --filter name=^amnezia-dns$ --format '{{.Status}}'")
             is_running = 'Up' in out
             

@@ -7,6 +7,7 @@ link-local stay excluded), and the page renders a second mono line under
 
 import json
 import os
+import re
 import shutil
 import tempfile
 import unittest
@@ -59,7 +60,11 @@ class ServerStatsIpv6Tests(unittest.TestCase):
                     if addr.startswith('fd') or (plen and int(plen) > 64):
                         continue
                     kept.append(addr)
-                return '\n'.join(kept) + ('\n' if kept else ''), '', 0
+                marker = re.search(r'@@HOST_STATS_[0-9a-f]+@@', cmd)[0]
+                fields = {'cpu': '0', 'ram': '0 0', 'disk': '0 0', 'network': '0 0',
+                          'uptime': '', 'ipv6': '\n'.join(kept)}
+                output = '\n'.join(marker + ':' + name + '\n' + value for name, value in fields.items())
+                return output + '\n' + marker + ':done\n', '', 0
             return '0', '', 0
 
         ssh.run_command.side_effect = run_command

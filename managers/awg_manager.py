@@ -824,11 +824,12 @@ class AWGManager:
 
     def check_docker_installed(self):
         """Check if Docker is installed and running."""
-        out, err, code = self.ssh.run_command("docker --version 2>/dev/null")
+        out, err, code = self.ssh.run_command(
+            "docker --version 2>/dev/null && "
+            "(systemctl is-active docker 2>/dev/null || service docker status 2>/dev/null)")
         if code != 0:
             return False
-        out2, _, code2 = self.ssh.run_command("systemctl is-active docker 2>/dev/null || service docker status 2>/dev/null")
-        return 'active' in out2 or 'running' in out2.lower()
+        return 'active' in out or 'running' in out.lower()
 
     def install_docker(self):
         """Install Docker on the server (mirrors install_docker.sh)."""
