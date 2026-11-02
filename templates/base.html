@@ -313,7 +313,10 @@
 
             const res = await fetch(url, opts);
 
-            if (res.status === 401 || res.status === 403) {
+            // A forbidden optional feature is not an expired session. For
+            // example self-service may be disabled or a proxy may deny tunnels.
+            // Keep the page open and let the caller handle that 403 response.
+            if (res.status === 401) {
                 window.location.href = '/login';
                 throw new Error('Session expired');
             }
