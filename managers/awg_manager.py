@@ -4040,6 +4040,17 @@ PersistentKeepalive = 25
                     # The official Amnezia client installs AWG 3.x into the
                     # amnezia-awg2 container, so only the config tells 2.0 and 3.x apart.
                     info['header_protection'] = bool(info['awg_params'].get('header_protection_key'))
+                    # HeaderProtectionKey alone only proves 3.x. RandomTrailers
+                    # and DisableCookies were added in 3.1; explicit "off" also
+                    # identifies that config format. Do not use the container
+                    # name or the tools/daemon build number as a protocol version.
+                    if any(str(info['awg_params'].get(key, '')).strip()
+                           for key in ('random_trailers', 'disable_cookies')):
+                        info['protocol_version'] = '3.1'
+                    elif info['header_protection']:
+                        info['protocol_version'] = '3.x'
+                    elif self._base_protocol(protocol_type) == self.AWG2:
+                        info['protocol_version'] = '2.0'
                     # Count ALL peers, not only clientsTable rows: peers that
                     # exist in awg0.conf but not in the table (shown as
                     # 'External' in the list) are still real connections.
