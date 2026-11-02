@@ -282,6 +282,8 @@ peer_lifecycle_lock.configure(DATA_FILE)
 _panel_lease = None
 
 DATA_LOCK = asyncio.Lock()
+# One in-flight access propagation task per user id (perform_toggle_user).
+_USER_STATE_TASKS = {}
 # Serialize overlapping traffic collection/commit cycles.
 _TRAFFIC_SYNC_LOCK = asyncio.Lock()
 # Inventory/identity operations may await SSH; unrelated JSON updates stay free.
@@ -3359,6 +3361,31 @@ def _check_admin(request):
             return token_user
 
     return None
+
+
+def _request_user(request):
+    """Resolve the caller for handlers that apply their own role checks.
+
+    Admin/support sessions and Bearer tokens resolve exactly as in
+    _check_admin; otherwise the plain session user is returned so owner-only
+    access keeps working. A token carries its owner's role, so admin-only
+    handlers still reject support tokens.
+    """
+    actor = _check_admin(request)
+    if isinstance(actor, dict):
+        return actor
+    return get_current_user(request)
+
+
+def _actor_id(request, actor):
+    """Audit id for a caller authorized by _check_admin.
+
+    Bearer requests have no session: the token owner is the actor.
+    """
+    if isinstance(actor, dict) and actor.get('id'):
+        return str(actor['id'])
+    user = get_current_user(request)
+    return str(user['id']) if user and user.get('id') else 'admin'
 
 
 class SSHTrustConfirmation(BaseModel):
@@ -6824,7 +6851,8 @@ def api_add_connection(request: Request, server_id: int, req: AddConnectionReque
 @app.post('/api/servers/{server_id}/connections/remove', tags=["Connections"])
 @serialize_peer_lifecycle
 async def api_remove_connection(request: Request, server_id: int, req: ConnectionActionRequest):
-    if not _check_admin(request):
+    admin = _check_admin(request)
+    if not admin:
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
         data = load_data()
@@ -6834,10 +6862,7 @@ async def api_remove_connection(request: Request, server_id: int, req: Connectio
         if not req.client_id:
             return JSONResponse({'error': 'Client ID is required'}, status_code=400)
 
-        try:
-            actor = str(get_current_user(request)['id'])
-        except Exception:
-            actor = 'admin'
+        actor = _actor_id(request, admin)
         operation_id = uuid.uuid4().hex
 
         # An owned peer must be finalized; an unowned peer can be removed raw.
@@ -7100,7 +7125,7 @@ def api_save_connection_config(request: Request, server_id: int, req: SaveConnec
 
 @app.post('/api/servers/{server_id}/connections/config', tags=["Connections"])
 def api_get_connection_config(request: Request, server_id: int, req: ConnectionActionRequest):
-    user = get_current_user(request)
+    user = _request_user(request)
     if not user:
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
@@ -7225,7 +7250,7 @@ def api_list_users(request: Request, search: str = '', page: int = 1, size: int 
 @app.post('/api/users/add', tags=["Users"])
 @serialize_peer_lifecycle
 def api_add_user(request: Request, req: AddUserRequest):
-    cur = get_current_user(request)
+    cur = _request_user(request)
     if not cur or cur['role'] != 'admin':
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
@@ -7377,7 +7402,7 @@ async def api_update_user(request: Request, user_id: str, req: UpdateUserRequest
 @app.post('/api/users/{user_id}/delete', tags=["Users"])
 @serialize_peer_lifecycle
 async def api_delete_user(request: Request, user_id: str):
-    cur = get_current_user(request)
+    cur = _request_user(request)
     if not cur or cur['role'] != 'admin':
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     lang = request.cookies.get('lang', 'ru')
@@ -7403,7 +7428,7 @@ async def api_delete_user(request: Request, user_id: str):
 
 @app.post('/api/users/{user_id}/toggle', tags=["Users"])
 async def api_toggle_user(request: Request, user_id: str, req: ToggleUserRequest):
-    cur = get_current_user(request)
+    cur = _request_user(request)
     if not cur or cur['role'] != 'admin':
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
@@ -7571,13 +7596,11 @@ async def api_unlink_user_connection(request: Request, user_id: str, req: Unlink
     * A failed final counter read returns 409 with ``can_force=True`` so the
       UI can ask for explicit confirmation before ``allow_unverified=True``.
     """
-    if not _check_admin(request):
+    admin = _check_admin(request)
+    if not admin:
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
 
-    try:
-        actor = str(get_current_user(request)['id'])
-    except Exception:
-        actor = 'admin'
+    actor = _actor_id(request, admin)
     operation_id = uuid.uuid4().hex
 
     async with DATA_LOCK:
@@ -7662,7 +7685,7 @@ async def api_unlink_user_connection(request: Request, user_id: str, req: Unlink
 
 @app.get('/api/users/{user_id}/connections', tags=["Users"])
 def api_get_user_connections(request: Request, user_id: str):
-    user = get_current_user(request)
+    user = _request_user(request)
     if not user:
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     # Users can only see their own, admin/support can see all
@@ -8710,14 +8733,15 @@ def api_orphan_recovery_preview(request: Request, connection_id: str):
 @app.post('/api/recovery/orphans', tags=['Settings'])
 @serialize_peer_lifecycle
 async def api_orphan_recovery(request: Request, req: OrphanRecoveryRequest):
-    if not _check_admin(request):
+    admin = _check_admin(request)
+    if not admin:
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     # A cross-origin browser must not turn confirmation strings into a CSRF bypass.
     origin = request.headers.get('origin')
     if origin and origin.rstrip('/') != str(request.base_url).rstrip('/'):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
-        actor = str(get_current_user(request)['id'])
+        actor = _actor_id(request, admin)
         phrases = {'repair': 'RESTORE OWNERSHIP; USAGE IS UNVERIFIED',
                    'archive_absent': 'ARCHIVE ABSENT PEER; FINAL USAGE IS UNKNOWN'}
         if req.mode not in phrases or req.confirmation != phrases[req.mode]:
