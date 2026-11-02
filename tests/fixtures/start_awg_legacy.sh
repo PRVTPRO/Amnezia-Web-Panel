@@ -182,6 +182,16 @@ done < "$BW"
 )
 fi
 
+# Watchdog: a kernel-module reload (DKMS update) removes every amneziawg
+# interface while the container keeps running. Recreate it from the on-disk
+# config instead of waiting for the next panel operation or a manual restart.
+# One netlink check per interval; "up" runs only when the interface is gone.
+(
+  while sleep 30; do
+    ip link show "$IFACE" >/dev/null 2>&1 || wg-quick up /opt/amnezia/awg/wg0.conf >/dev/null 2>&1 || true
+  done
+) &
+
 # ---- Exit-node link: bring it up now that the client tunnel exists ----
 if [ -f "$EXIT_CONF" ]; then x_link_up || echo "! exit link not applied, clients stay on the kill-switch"; fi
 
