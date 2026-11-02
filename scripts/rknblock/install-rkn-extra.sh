@@ -3,12 +3,30 @@
 # Скачивает скрипты из репозитория панели и ставит их + systemd-юниты.
 set -euo pipefail
 
+# An interactive prompt (needrestart, tzdata, ...) would hang the panel's SSH run.
+export DEBIAN_FRONTEND=noninteractive
+
 RAW="https://raw.githubusercontent.com/PRVTPRO/Amnezia-Web-Panel/main/scripts/rknblock"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
+# A half-configured package left by an earlier failure makes every subsequent
+# apt-get call fail with "dpkg returned an error code (1)". Report the real
+# cause instead of apport noise, and do not try to repair the host silently.
+AUDIT=$(dpkg --audit 2>&1 || true)
+if [ -n "$AUDIT" ]; then
+    echo "ERROR: dpkg is in an inconsistent state. Run 'sudo dpkg --configure -a' on the server, then retry." >&2
+    echo "$AUDIT" >&2
+    exit 1
+fi
+
 apt-get update -qq
-apt-get install -y -qq ipset iptables curl util-linux >/dev/null
+APT_LOG="$TMP/apt.log"
+if ! apt-get install -y -qq ipset iptables curl util-linux >"$APT_LOG" 2>&1; then
+    echo "ERROR: package installation failed (ipset iptables curl util-linux)." >&2
+    tail -n 30 "$APT_LOG" >&2
+    exit 1
+fi
 command -v flock >/dev/null || { echo "flock not found (util-linux)" >&2; exit 1; }
 
 mkdir -p "$TMP/repo"

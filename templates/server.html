@@ -5880,21 +5880,15 @@
         fillEl.style.background = '';
         logEl.innerHTML = `<div class="log-line info">${_('install_starting')}</div>`;
         openModal('installModal');
-        const steps = [
-            { pct: 25, msg: _('rknblock_step_download') },
-            { pct: 45, msg: _('rknblock_step_sets') },
-            { pct: 65, msg: _('rknblock_step_rules') },
-            { pct: 85, msg: _('rknblock_step_agent') },
-        ];
-        let stepIdx = 0;
+        // The install is one long SSH call; its internals are not observable
+        // here. Do not invent per-stage progress, just say it takes a while.
+        logEl.innerHTML += `<div class="log-line info">${_('rknblock_install_wait')}</div>`;
+        logEl.scrollTop = logEl.scrollHeight;
+        let pct = 10;
         const progressInterval = setInterval(() => {
-            if (stepIdx < steps.length) {
-                fillEl.style.width = steps[stepIdx].pct + '%';
-                logEl.innerHTML += `<div class="log-line info">${steps[stepIdx].msg}</div>`;
-                logEl.scrollTop = logEl.scrollHeight;
-                stepIdx++;
-            }
-        }, 1500);
+            pct = Math.min(90, pct + 2);
+            fillEl.style.width = pct + '%';
+        }, 2000);
         try {
             await apiCall(`/api/servers/${SERVER_ID}/rknblock/install?server_uid=${encodeURIComponent(document.body.dataset.serverUid || '')}`, 'POST');
             rknBlockStatus = {installed: true, available: false, agent_state: 'unknown', running: false, healthy: false};

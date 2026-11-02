@@ -4343,7 +4343,12 @@ async def _rkn_ssh_run(server, cmd, timeout):
     if _rkn_server_index(load_data(), None, server.get('uid'), server) is None:
         return JSONResponse({'error': 'Server identity changed; refresh the inventory'}, status_code=409)
     if code != 0:
-        return JSONResponse({'error': f'command failed: {(err or out or "").strip()[-500:]}'},
+        detail = (err or out or '').strip()
+        hint = ''
+        if ('dpkg is in an inconsistent state' in detail
+                or 'dpkg returned an error code' in detail):
+            hint = " Run 'sudo dpkg --configure -a' on the server, then retry."
+        return JSONResponse({'error': f'command failed: {detail[-1500:]}{hint}'},
                             status_code=500)
     return None
 

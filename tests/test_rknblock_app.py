@@ -130,6 +130,21 @@ class SudoExecutionTests(SshCase):
                 self.assertIn(result[1] or result[0], json.loads(response.body)['error'])
         self.assertEqual(ssh.disconnect.call_count, 3)
 
+    def test_dpkg_failure_returns_actionable_hint_and_full_detail(self):
+        ssh = Mock()
+        self.panel['get_ssh'].return_value = ssh
+        detail = ('No apport report written because the error message indicates '
+                  'its a followup error from a previous failure.\n'
+                  + 'x' * 700 + '\nE: Sub-process /usr/bin/dpkg returned an error code (1)')
+        ssh.run_sudo_script.return_value = ('', detail, 100)
+        response = asyncio.run(self.panel['_rkn_ssh_run'](self.server, 'install', 420))
+        self.assertEqual(response.status_code, 500)
+        error = json.loads(response.body)['error']
+        self.assertIn('dpkg returned an error code', error)
+        self.assertIn("dpkg --configure -a", error)
+        # The panel used to cut the detail to 500 chars, hiding the real cause.
+        self.assertIn('x' * 700, error)
+
     def test_script_exception_always_disconnects(self):
         ssh = Mock()
         ssh.run_sudo_script.side_effect = TimeoutError('synthetic timeout')
