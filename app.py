@@ -3949,7 +3949,8 @@ async def api_delete_server(request: Request, server_id: int, server_uid: Option
     tombstones, but only after each peer is verified stopped or absent on the
     live server. Rows are never dropped without that explicit evidence.
     """
-    if not _check_admin(request):
+    authorized = _check_admin(request)
+    if not authorized:
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     selected, error = _server_identity(server_id, server_uid)
     if error is not None:
@@ -4018,10 +4019,7 @@ async def api_delete_server(request: Request, server_id: int, server_uid: Option
                     if current_blocked:
                         before = pathlib_read_data_bytes()
                         operation_id = uuid.uuid4().hex
-                        try:
-                            actor = str(get_current_user(request)['id'])
-                        except Exception:
-                            actor = 'admin'
+                        actor = _actor_id(request, authorized)
                         for conn in current_blocked:
                             finalize_connection_record(
                                 data, conn, current, archive_states.get(conn.get('id')),
