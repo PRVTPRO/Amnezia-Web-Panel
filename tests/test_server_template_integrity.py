@@ -85,6 +85,84 @@ class TestServerTemplateIntegrity(unittest.TestCase):
         self.assertIn("btn.disabled = false", function)
         self.assertIn("btn.textContent = oldText", function)
 
+    def test_awg_plugin_button_sits_next_to_the_server_actions(self):
+        """The entry point must live in the existing header action row."""
+        source = SERVER_TEMPLATE.read_text(encoding="utf-8")
+        header = source.index('class="page-header__actions"')
+        check_btn = source.index('id="checkBtn"', header)
+        plugin_btn = source.index('id="awgPluginBtn"', header)
+        self.assertLess(plugin_btn, check_btn)
+        self.assertIn('onclick="openAwgPluginModal()"', source[plugin_btn:check_btn])
+        self.assertIn('class="awg-plugin-dot"', source[plugin_btn:check_btn])
+
+    def test_awg_plugin_modal_uses_the_shared_modal_shell(self):
+        source = SERVER_TEMPLATE.read_text(encoding="utf-8")
+        start = source.index('<div class="modal-backdrop" id="awgPluginModal">')
+        end = source.index('<script>', start)
+        block = source[start:end]
+        self.assertIn('class="modal-backdrop"', block)
+        self.assertIn('class="modal"', block)
+        self.assertIn('class="modal-header"', block)
+        self.assertIn('class="modal-title"', block)
+        self.assertIn('class="modal-footer"', block)
+
+    def test_awg_plugin_button_only_pulses_while_an_update_exists(self):
+        source = SERVER_TEMPLATE.read_text(encoding="utf-8")
+        self.assertIn('.awg-plugin-btn.is-update .awg-plugin-dot', source)
+        self.assertIn('@keyframes awgPluginPulse', source)
+        self.assertIn('prefers-reduced-motion: reduce', source)
+        self.assertIn("btn.classList.remove('is-update')", source)
+        self.assertIn("btn.classList.add('is-update')", source)
+
+    def test_awg_plugin_log_is_polled_with_offset(self):
+        source = SERVER_TEMPLATE.read_text(encoding="utf-8")
+        start = source.index('async function pollAwgPluginUpdate')
+        body = source[start:start + 3000]
+        self.assertIn('/awg-plugin/update/', body)
+        self.assertIn('?offset=', body)
+        self.assertIn('data.next_offset', body)
+        self.assertIn('setTimeout', body)
+
+    def test_awg_plugin_progress_shows_stage_numbers(self):
+        """A slow DKMS build must show "step N of M" and a moving percentage."""
+        source = SERVER_TEMPLATE.read_text(encoding="utf-8")
+        self.assertIn('awg-progress-fill', source)
+        self.assertIn('awgProgressShimmer', source)
+        self.assertIn("labelsStep(op.step, op.total)", source)
+        self.assertIn("replace('{step}', step || 0)", source)
+        self.assertIn("replace('{total}', total || 10)", source)
+        self.assertIn('prefers-reduced-motion', source)
+        self.assertIn('setAwgProgress(component, data.step, data.total, data.percent', source)
+
+    def test_awg_plugin_translations_exist_in_every_locale(self):
+        import json as _json
+        keys = [
+            'awg_plugin_button', 'awg_plugin_button_update', 'awg_plugin_button_ok',
+            'awg_plugin_title', 'awg_plugin_intro', 'awg_plugin_loading',
+            'awg_plugin_kernel_module', 'awg_plugin_kernel_module_desc',
+            'awg_plugin_userspace', 'awg_plugin_userspace_desc',
+            'awg_plugin_installed', 'awg_plugin_available', 'awg_plugin_whats_new',
+            'awg_plugin_update', 'awg_plugin_update_running', 'awg_plugin_update_success',
+            'awg_plugin_update_failed', 'awg_plugin_kept_working',
+            'awg_plugin_requires_confirmation', 'awg_plugin_manual_step',
+            'awg_plugin_no_update', 'awg_plugin_check_failed', 'awg_plugin_log',
+            'awg_plugin_rollback_failed', 'awg_plugin_unknown_version', 'awg_plugin_close',
+            'awg_plugin_cancel', 'awg_plugin_cancelling', 'awg_plugin_cancelled',
+            'awg_plugin_step',
+        ]
+        for lang in ('en', 'ru', 'fr', 'zh', 'fa'):
+            data = _json.loads((ROOT / 'translations' / ('%s.json' % lang)).read_text(encoding='utf-8'))
+            missing = [key for key in keys if key not in data]
+            self.assertEqual(missing, [], '%s misses %s' % (lang, missing))
+
+    def test_awg_plugin_template_uses_only_known_translation_keys(self):
+        source = SERVER_TEMPLATE.read_text(encoding="utf-8")
+        used = set(re.findall(r"awg_plugin_[a-z_]+", source))
+        import json as _json
+        data = _json.loads((ROOT / 'translations' / 'en.json').read_text(encoding='utf-8'))
+        unknown = sorted(key for key in used if key not in data)
+        self.assertEqual(unknown, [], 'template uses unknown keys: %s' % unknown)
+
 
 if __name__ == "__main__":
     unittest.main()

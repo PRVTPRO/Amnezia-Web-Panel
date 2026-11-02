@@ -154,6 +154,45 @@
     .ssh-trust-dot.is-danger { background: var(--danger); animation: sshTrustPulse .9s infinite; }
     .ssh-trust-dot.is-ok { background: var(--success); }
     @keyframes sshTrustPulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .35; transform: scale(1.35); } }
+    /* AmneziaWG plugin updates: the green dot is the only thing that pulses,
+       and only while an update is actually available. */
+    .awg-plugin-btn { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; }
+    .awg-plugin-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); flex: 0 0 auto; }
+    .awg-plugin-btn.is-update { border-color: var(--success-border); background: var(--success-bg); color: var(--success); }
+    .awg-plugin-btn.is-update .awg-plugin-dot { background: var(--success); animation: awgPluginPulse 1.6s infinite; }
+    @keyframes awgPluginPulse {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, .55); }
+        50% { box-shadow: 0 0 0 6px rgba(34, 197, 94, 0); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+        .awg-plugin-btn.is-update .awg-plugin-dot { animation: none; }
+    }
+    .awg-plugin-component { border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: var(--space-md); margin-bottom: var(--space-md); background: var(--bg-secondary); }
+    .awg-plugin-component-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-sm); margin-bottom: var(--space-xs); }
+    .awg-plugin-version { font-family: 'SF Mono', 'Fira Code', monospace; font-size: .82rem; }
+    .awg-plugin-updated { color: var(--success); font-weight: 700; }
+    .awg-plugin-log { font-family: 'SF Mono', 'Fira Code', monospace; font-size: .72rem; background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: var(--radius-sm); padding: var(--space-sm); max-height: 180px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
+    .awg-plugin-stage { color: var(--text-muted); }
+    .awg-plugin-details { margin-top: var(--space-sm); }
+    .awg-plugin-details > summary { cursor: pointer; color: var(--text-muted); font-size: .8rem; user-select: none; list-style: none; }
+    .awg-plugin-details > summary::-webkit-details-marker { display: none; }
+    .awg-plugin-details > summary::before { content: '▸'; display: inline-block; width: 1em; transition: transform var(--transition-fast); }
+    .awg-plugin-details[open] > summary::before { transform: rotate(90deg); }
+    .awg-plugin-details > summary:hover { color: var(--text-primary); }
+    .awg-plugin-details[open] > summary { margin-bottom: 6px; }
+    /* Progress: the bar creeps inside the current stage so a multi-minute
+       DKMS build never looks frozen. */
+    .awg-progress { margin-top: var(--space-sm); }
+    .awg-progress-head { display: flex; justify-content: space-between; align-items: baseline; font-size: .8rem; color: var(--text-muted); margin-bottom: 6px; }
+    .awg-progress-percent { font-weight: 700; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+    .awg-progress-track { height: 4px; border-radius: 999px; background: var(--bg-primary); border: 1px solid var(--border-color); overflow: hidden; }
+    .awg-progress-fill { height: 100%; width: 0; border-radius: 999px; background: linear-gradient(90deg, var(--accent), var(--success)); transition: width .5s ease; position: relative; overflow: hidden; }
+    .awg-progress-fill::after { content: ''; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .35), transparent); transform: translateX(-100%); animation: awgProgressShimmer 1.6s infinite; }
+    @keyframes awgProgressShimmer { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
+    @media (prefers-reduced-motion: reduce) {
+        .awg-progress-fill { transition: none; }
+        .awg-progress-fill::after { animation: none; }
+    }
 </style>
 {% endblock %}
 
@@ -245,6 +284,397 @@
     }
     document.addEventListener('DOMContentLoaded', loadSSHTrustStatus);
 </script>
+
+<!-- ===== AmneziaWG plugin updates ===== -->
+<div class="modal-backdrop" id="awgPluginModal">
+    <div class="modal" style="max-width: 640px;">
+        <div class="modal-header">
+            <h2 class="modal-title">{{ _('awg_plugin_title') }}</h2>
+            <button class="modal-close" type="button" onclick="closeAwgPluginModal()">×</button>
+        </div>
+        <p class="text-muted" style="margin-top: 0;">{{ _('awg_plugin_intro') }}</p>
+        <div id="awgPluginComponents" aria-live="polite">
+            <p class="text-muted">{{ _('awg_plugin_loading') }}</p>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" type="button" onclick="closeAwgPluginModal()">{{ _('awg_plugin_close') }}</button>
+        </div>
+    </div>
+</div>
+<script>
+    let awgPluginStatus = null;
+    const awgPluginOps = {};
+
+    function awgPluginLabel(key) {
+        return {{ {
+            'button': _('awg_plugin_button'),
+            'update': _('awg_plugin_button_update'),
+            'ok': _('awg_plugin_button_ok'),
+            'kernel': _('awg_plugin_kernel_module'),
+            'userspace': _('awg_plugin_userspace'),
+            'kernel_desc': _('awg_plugin_kernel_module_desc'),
+            'userspace_desc': _('awg_plugin_userspace_desc'),
+            'installed': _('awg_plugin_installed'),
+            'available': _('awg_plugin_available'),
+            'whats_new': _('awg_plugin_whats_new'),
+            'update_btn': _('awg_plugin_update'),
+            'running': _('awg_plugin_update_running'),
+            'success': _('awg_plugin_update_success'),
+            'failed': _('awg_plugin_update_failed'),
+            'kept': _('awg_plugin_kept_working'),
+            'confirm': _('awg_plugin_requires_confirmation'),
+            'manual': _('awg_plugin_manual_step'),
+            'no_update': _('awg_plugin_no_update'),
+            'error': _('awg_plugin_check_failed'),
+            'log': _('awg_plugin_log'),
+            'rollback': _('awg_plugin_rollback_failed'),
+            'cancel': _('awg_plugin_cancel'),
+            'cancelling': _('awg_plugin_cancelling'),
+            'cancelled': _('awg_plugin_cancelled'),
+            'step': _('awg_plugin_step'),
+            'unknown': _('awg_plugin_unknown_version')
+        } | tojson }};
+    }
+
+    function setAwgPluginButton(state) {
+        const btn = document.getElementById('awgPluginBtn');
+        const text = document.getElementById('awgPluginBtnText');
+        if (!btn || !text) return;
+        btn.classList.remove('is-update');
+        btn.dataset.state = state;
+        const labels = awgPluginLabel();
+        if (state === 'update') {
+            btn.classList.add('is-update');
+            text.textContent = labels.update;
+        } else if (state === 'ok') {
+            text.textContent = labels.ok;
+        } else {
+            text.textContent = labels.button;
+        }
+    }
+
+    async function loadAwgPluginStatus() {
+        try {
+            awgPluginStatus = await apiCall('/api/servers/{{ server_id }}/awg-plugin/status');
+            const components = Object.values(awgPluginStatus.components || {});
+            setAwgPluginButton(components.some(item => item.update_available) ? 'update' : 'ok');
+        } catch (error) {
+            awgPluginStatus = null;
+            setAwgPluginButton('unknown');
+            const btn = document.getElementById('awgPluginBtn');
+            if (btn) btn.title = error.message;
+        }
+        return awgPluginStatus;
+    }
+
+    function openAwgPluginModal() {
+        openModal('awgPluginModal');
+        renderAwgPluginModal();
+        if (!awgPluginStatus) loadAwgPluginStatus().then(renderAwgPluginModal);
+    }
+
+    function closeAwgPluginModal() {
+        Object.values(awgPluginOps).forEach(op => {
+            if (op.timer) clearTimeout(op.timer);
+            if (op.creep) clearInterval(op.creep);
+        });
+        closeModal('awgPluginModal');
+    }
+
+    function awgPluginElement(tag, className, text) {
+        const node = document.createElement(tag);
+        if (className) node.className = className;
+        if (text !== undefined) node.textContent = text;
+        return node;
+    }
+
+    function renderAwgPluginModal() {
+        const host = document.getElementById('awgPluginComponents');
+        if (!host) return;
+        host.textContent = '';
+        const labels = awgPluginLabel();
+        if (!awgPluginStatus) {
+            host.appendChild(awgPluginElement('p', 'text-muted', labels.error));
+            return;
+        }
+        const descriptions = {kernel_module: labels.kernel_desc, userspace: labels.userspace_desc};
+        const titles = {kernel_module: labels.kernel, userspace: labels.userspace};
+        Object.entries(awgPluginStatus.components || {}).forEach(([component, info]) => {
+            // A component the server does not use at all (e.g. no userspace
+            // containers) is not offered for install or update.
+            if (info.applicable === false) return;
+            const block = awgPluginElement('div', 'awg-plugin-component');
+            const head = awgPluginElement('div', 'awg-plugin-component-head');
+            head.appendChild(awgPluginElement('strong', '', titles[component] || component));
+            const badge = awgPluginElement('span',
+                'badge ' + (info.update_available ? 'badge-success' : 'badge-info'));
+            badge.id = 'awgPluginBadge-' + component;
+            badge.appendChild(awgPluginElement('span', 'badge-dot'));
+            badge.appendChild(document.createTextNode(
+                ' ' + (info.update_available ? labels.available : labels.no_update)));
+            head.appendChild(badge);
+            block.appendChild(head);
+            block.appendChild(awgPluginElement('div', 'text-muted', descriptions[component] || ''));
+            const versions = awgPluginElement('div', 'awg-plugin-version');
+            versions.id = 'awgPluginVersions-' + component;
+            versions.appendChild(document.createTextNode(
+                labels.installed + ': ' + (info.installed || labels.unknown)));
+            if (info.update_available && info.available) {
+                versions.appendChild(document.createTextNode('  →  ' + labels.available + ': '));
+                versions.appendChild(awgPluginElement('span', 'awg-plugin-updated', info.available));
+            }
+            block.appendChild(versions);
+
+            // "What changed" is a spoiler that loads its content on first open.
+            const changelog = awgPluginElement('details', 'awg-plugin-details');
+            changelog.id = 'awgChangelogBox-' + component;
+            changelog.appendChild(awgPluginElement('summary', '', labels.whats_new));
+            const changelogBody = awgPluginElement('div', 'awg-plugin-log awg-plugin-changelog', '…');
+            changelog.appendChild(changelogBody);
+            changelog.addEventListener('toggle', () => {
+                if (changelog.open && !changelog.dataset.loaded) {
+                    changelog.dataset.loaded = '1';
+                    loadAwgPluginChangelog(component, info.available, changelogBody);
+                }
+            });
+            block.appendChild(changelog);
+
+            const actions = awgPluginElement('div', 'flex gap-sm');
+            actions.style.marginTop = 'var(--space-sm)';
+            if (info.update_available && info.available) {
+                const run = awgPluginElement('button', 'btn btn-primary btn-sm', labels.update_btn);
+                run.type = 'button';
+                run.dataset.component = component;
+                run.id = 'awgPluginUpdate-' + component;
+                run.onclick = () => startAwgPluginUpdate(component, run);
+                actions.appendChild(run);
+            }
+            if (actions.childNodes.length) block.appendChild(actions);
+            const progress = awgPluginElement('div', 'awg-plugin-progress hidden');
+            progress.id = 'awgPluginProgress-' + component;
+            block.appendChild(progress);
+            host.appendChild(block);
+            const running = awgPluginOps[component];
+            if (running && running.opId) renderAwgPluginProgress(component);
+        });
+    }
+
+    async function loadAwgPluginChangelog(component, version, box) {
+        const labels = awgPluginLabel();
+        if (!box || !version) return;
+        box.textContent = '…';
+        try {
+            const data = await apiCall('/api/servers/{{ server_id }}/awg-plugin/changelog?component=' +
+                encodeURIComponent(component) + '&version=' + encodeURIComponent(version));
+            const entries = data.entries || [];
+            box.textContent = entries.length
+                ? entries.map(entry => entry.sha + '  ' + entry.subject).join('\n')
+                : labels.no_update;
+        } catch (error) {
+            box.textContent = error.message;
+        }
+    }
+
+    async function startAwgPluginUpdate(component, button) {
+        const labels = awgPluginLabel();
+        if (!window.confirm(labels.confirm)) return;
+        button.disabled = true;
+        try {
+            const data = await apiCall('/api/servers/{{ server_id }}/awg-plugin/update', 'POST', {
+                component: component,
+                allow_interrupt: true
+            });
+            awgPluginOps[component] = {opId: data.operation_id, offset: 0, timer: null};
+            renderAwgPluginProgress(component);
+            pollAwgPluginUpdate(component);
+        } catch (error) {
+            button.disabled = false;
+            const block = button.closest('.awg-plugin-component');
+            if (block) {
+                const box = awgPluginElement('div', 'awg-plugin-log', error.message);
+                box.style.marginTop = 'var(--space-sm)';
+                block.appendChild(box);
+            }
+        }
+    }
+
+    function renderAwgPluginProgress(component) {
+        const host = document.getElementById('awgPluginProgress-' + component);
+        if (!host) return;
+        host.classList.remove('hidden');
+        host.textContent = '';
+        const labels = awgPluginLabel();
+        const progress = awgPluginElement('div', 'awg-progress');
+        const head = awgPluginElement('div', 'awg-progress-head');
+        head.appendChild(awgPluginElement('span', '', labels.step));
+        const percent = awgPluginElement('span', 'awg-progress-percent', '0%');
+        percent.id = 'awgProgressPercent-' + component;
+        head.appendChild(percent);
+        progress.appendChild(head);
+        const track = awgPluginElement('div', 'awg-progress-track');
+        track.setAttribute('role', 'progressbar');
+        track.setAttribute('aria-valuemin', '0');
+        track.setAttribute('aria-valuemax', '100');
+        track.setAttribute('aria-valuenow', '0');
+        track.id = 'awgProgressTrack-' + component;
+        const fill = awgPluginElement('div', 'awg-progress-fill');
+        fill.id = 'awgProgressFill-' + component;
+        track.appendChild(fill);
+        progress.appendChild(track);
+        host.appendChild(progress);
+        host.appendChild(awgPluginElement('div', 'awg-plugin-stage', labels.running));
+        // The journal is a spoiler: collapsed by default so a long build does
+        // not push the rest of the modal away.
+        const logBox = awgPluginElement('details', 'awg-plugin-details');
+        logBox.id = 'awgPluginLogBox-' + component;
+        logBox.appendChild(awgPluginElement('summary', '', labels.log));
+        const log = awgPluginElement('div', 'awg-plugin-log');
+        log.id = 'awgPluginLog-' + component;
+        log.setAttribute('aria-live', 'polite');
+        logBox.appendChild(log);
+        host.appendChild(logBox);
+        const actions = awgPluginElement('div', 'flex gap-sm');
+        actions.style.marginTop = 'var(--space-sm)';
+        const cancel = awgPluginElement('button', 'btn btn-secondary btn-sm', labels.cancel);
+        cancel.type = 'button';
+        cancel.id = 'awgPluginCancel-' + component;
+        cancel.onclick = () => cancelAwgPluginUpdate(component, cancel);
+        actions.appendChild(cancel);
+        host.appendChild(actions);
+        setAwgProgress(component, 0, 10, 0, true);
+    }
+
+    function setAwgProgress(component, step, total, percent, running) {
+        const op = awgPluginOps[component] || {};
+        awgPluginOps[component] = op;
+        const fill = document.getElementById('awgProgressFill-' + component);
+        const label = document.getElementById('awgProgressPercent-' + component);
+        const track = document.getElementById('awgProgressTrack-' + component);
+        if (!fill || !label || !track) return;
+        op.step = step || op.step || 0;
+        op.total = total || op.total || 10;
+        op.percent = Math.max(op.percent || 0, percent || 0);
+        if (running) {
+            // Do not creep into the next stage's slot: one step is 10%.
+            op.cap = Math.min(99, op.percent + 9);
+            if (!op.creep) {
+                op.creep = setInterval(() => {
+                    const current = awgPluginOps[component];
+                    if (!current || !current.creepRunning || current.display >= current.cap) return;
+                    current.display = Math.min(current.cap, (current.display || 0) + 1);
+                    const bar = document.getElementById('awgProgressFill-' + component);
+                    const text = document.getElementById('awgProgressPercent-' + component);
+                    const rail = document.getElementById('awgProgressTrack-' + component);
+                    if (bar) bar.style.width = current.display + '%';
+                    if (text) text.textContent = current.display + '%';
+                    if (rail) rail.setAttribute('aria-valuenow', String(current.display));
+                }, 900);
+            }
+            op.creepRunning = true;
+            op.display = Math.max(op.display || 0, op.percent);
+        } else {
+            op.creepRunning = false;
+            if (op.creep) { clearInterval(op.creep); op.creep = null; }
+            op.display = op.percent;
+        }
+        if (label) label.textContent = (op.display || 0) + '%';
+        fill.style.width = (op.display || 0) + '%';
+        track.setAttribute('aria-valuenow', String(op.display || 0));
+        const head = track.parentElement && track.parentElement.querySelector('.awg-progress-head span');
+        if (head) head.textContent = labelsStep(op.step, op.total);
+    }
+
+    function labelsStep(step, total) {
+        const template = awgPluginLabel().step;
+        return template.replace('{step}', step || 0).replace('{total}', total || 10);
+    }
+
+    async function cancelAwgPluginUpdate(component, button) {
+        const op = awgPluginOps[component];
+        if (!op) return;
+        button.disabled = true;
+        const log = document.getElementById('awgPluginLog-' + component);
+        try {
+            await apiCall('/api/servers/{{ server_id }}/awg-plugin/update/' +
+                encodeURIComponent(op.opId) + '/cancel', 'POST', {});
+            if (log) log.textContent += awgPluginLabel().cancelling + '\n';
+        } catch (error) {
+            button.disabled = false;
+            if (log) log.textContent += error.message + '\n';
+        }
+    }
+
+    async function pollAwgPluginUpdate(component) {
+        const op = awgPluginOps[component];
+        if (!op) return;
+        const log = document.getElementById('awgPluginLog-' + component);
+        try {
+            const data = await apiCall('/api/servers/{{ server_id }}/awg-plugin/update/' +
+                encodeURIComponent(op.opId) + '?offset=' + op.offset);
+            op.offset = data.next_offset;
+            setAwgProgress(component, data.step, data.total, data.percent, data.state === 'running');
+            (data.lines || []).forEach(line => {
+                if (log) log.textContent += '[' + line.ts + '] ' + line.stage + ': ' + line.text + '\n';
+                if (log) log.scrollTop = log.scrollHeight;
+            });
+            if (data.state === 'running') {
+                op.timer = setTimeout(() => pollAwgPluginUpdate(component), 1000);
+                return;
+            }
+            const labels = awgPluginLabel();
+            const stage = document.querySelector('#awgPluginProgress-' + component + ' .awg-plugin-stage');
+            if (stage) {
+                if (data.state === 'success') {
+                    stage.textContent = labels.success + ' — ' + (data.result && data.result.installed || '');
+                    stage.className = 'awg-plugin-stage awg-plugin-updated';
+                } else if (data.state === 'manual_step_required') {
+                    stage.textContent = labels.manual;
+                } else if (data.state === 'cancelled') {
+                    stage.textContent = labels.cancelled;
+                } else {
+                    const code = data.error && data.error.code;
+                    stage.textContent = labels.failed + ': ' +
+                        (code === 'rollback_failed' ? labels.rollback : (data.error && data.error.message || ''));
+                    stage.style.color = 'var(--danger)';
+                }
+            }
+            if (data.state === 'success' && data.result) {
+                const versions = document.getElementById('awgPluginVersions-' + component);
+                if (versions) versions.textContent = labels.installed + ': ' + (data.result.installed || '');
+                const badge = document.getElementById('awgPluginBadge-' + component);
+                if (badge) {
+                    badge.className = 'badge badge-info';
+                    badge.textContent = labels.no_update;
+                }
+                const button = document.getElementById('awgPluginUpdate-' + component);
+                if (button) button.remove();
+            }
+            // Any terminal state must leave the modal usable: a disabled
+            // "Update" button or a lingering "Cancel" looks like a hang.
+            const updateButton = document.getElementById('awgPluginUpdate-' + component);
+            if (updateButton) updateButton.disabled = false;
+            const cancelButton = document.getElementById('awgPluginCancel-' + component);
+            if (cancelButton) cancelButton.remove();
+            if (data.state === 'success') {
+                setAwgProgress(component, 10, 10, 100, false);
+            }
+            if (data.state === 'failed' || data.state === 'cancelled') {
+                // Show the reason without an extra click.
+                const logBox = document.getElementById('awgPluginLogBox-' + component);
+                if (logBox) logBox.open = true;
+            }
+            if (data.state === 'success' || data.state === 'manual_step_required') {
+                await loadAwgPluginStatus();
+            }
+            delete awgPluginOps[component];
+        } catch (error) {
+            if (log) log.textContent += error.message + '\n';
+            op.timer = setTimeout(() => pollAwgPluginUpdate(component), 3000);
+        }
+    }
+
+    document.addEventListener('DOMContentLoaded', loadAwgPluginStatus);
+</script>
 {% endif %}
 <a href="/" class="back-link page-back-link">{{ _('back_to_servers') }}</a>
 
@@ -266,6 +696,11 @@
             <button class="btn btn-sm ssh-trust-btn" type="button" id="sshTrustBtn" onclick="openSSHTrustModal()">
                 <span class="ssh-trust-dot" id="sshTrustDot"></span>
                 <span id="sshTrustBtnText">{{ _('ssh_trust_button') }}</span>
+            </button>
+            <button class="btn btn-sm awg-plugin-btn" type="button" id="awgPluginBtn" onclick="openAwgPluginModal()"
+                    data-state="unknown">
+                <span class="awg-plugin-dot" id="awgPluginDot"></span>
+                <span id="awgPluginBtnText">{{ _('awg_plugin_button') }}</span>
             </button>
             {% endif %}
             <button class="btn btn-secondary btn-sm" onclick="checkServer()" id="checkBtn">
