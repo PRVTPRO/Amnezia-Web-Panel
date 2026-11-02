@@ -2610,11 +2610,13 @@
             const stats = await apiCall(`/api/servers/${SERVER_ID}/stats`, 'POST');
             const el = document.getElementById('serverStats');
             el.style.display = '';
+            const failed = stats.errors || {};
+            const percent = (field, value) => field in failed ? '—' : `${value || 0}%`;
             el.innerHTML = `
-                <span class="stat-pill" title="CPU">⚡ ${stats.cpu || 0}%</span>
-                <span class="stat-pill" title="RAM: ${formatBytes(stats.ram_used)} / ${formatBytes(stats.ram_total)}">🧠 ${stats.ram_percent || 0}%</span>
-                <span class="stat-pill" title="Disk: ${formatBytes(stats.disk_used)} / ${formatBytes(stats.disk_total)}">💾 ${stats.disk_percent || 0}%</span>
-                <span class="stat-pill" title="Network">🌐 ↓${formatBytes(stats.net_rx)} ↑${formatBytes(stats.net_tx)}</span>
+                <span class="stat-pill" title="CPU">⚡ ${percent('cpu', stats.cpu)}</span>
+                <span class="stat-pill" title="RAM: ${formatBytes(stats.ram_used)} / ${formatBytes(stats.ram_total)}">🧠 ${percent('ram', stats.ram_percent)}</span>
+                <span class="stat-pill" title="Disk: ${formatBytes(stats.disk_used)} / ${formatBytes(stats.disk_total)}">💾 ${percent('disk', stats.disk_percent)}</span>
+                <span class="stat-pill" title="Network">🌐 ${'network' in failed ? '—' : `↓${formatBytes(stats.net_rx)} ↑${formatBytes(stats.net_tx)}`}</span>
             `;
             const ipv6 = Array.isArray(stats.ipv6) ? stats.ipv6 : [];
             const ipv6El = document.getElementById('serverIpv6');

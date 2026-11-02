@@ -1,6 +1,7 @@
 """Collect the existing host statistics with one read-only SSH command."""
 import shlex
 import uuid
+import math
 
 
 HOST_STATS_COMMANDS = {
@@ -24,50 +25,84 @@ HOST_STATS_COMMANDS = {
 }
 
 
+HOST_STATS_TIMEOUT = 30
+
+
 def collect_host_stats(ssh):
+    """One Bash probe (supported Ubuntu hosts), with partial results on failure.
+
+    Completed, independently framed fields survive a truncated SSH response.
+    Missing Bash, timeouts and failed fields are reported in errors, never as
+    a successful zero reading. No retry storm of individual SSH commands.
+    """
     marker = '@@HOST_STATS_' + uuid.uuid4().hex + '@@'
-    script = []
+    script = ['export LC_ALL=C', 'set -o pipefail']
     for name, command in HOST_STATS_COMMANDS.items():
-        script.extend([f"printf '\\n%s\\n' '{marker}:{name}'", '{ ' + command + '; }'])
+        script.extend([f"printf '\\n%s\\n' '{marker}:{name}'", '( ' + command + ' )',
+                       'field_status=$?',
+                       f"printf '\\n%s:%s\\n' '{marker}:end:{name}' \"$field_status\""])
     script.append(f"printf '\\n%s\\n' '{marker}:done'")
-    # The existing CPU fallback uses Bash process substitution. One shell
-    # preserves it while avoiding six remote channel round trips.
-    out, _, code = ssh.run_command('bash -c ' + shlex.quote('\n'.join(script)))
-    if code != 0:
-        raise RuntimeError('Host statistics batch failed')
-    sections = {}
-    current = None
-    complete = False
-    for line in out.splitlines():
+    command = 'command -v bash >/dev/null 2>&1 && bash -c ' + shlex.quote('\n'.join(script))
+    try:
+        out, _, code = ssh.run_command(command, timeout=HOST_STATS_TIMEOUT)
+    except Exception:
+        out, code = '', -1
+    sections, errors = {}, {}
+    current, lines, complete = None, [], False
+    for line in (out or '').splitlines():
         if line == marker + ':done':
             complete = True
             break
-        if line.startswith(marker + ':'):
-            current = line[len(marker) + 1:]
-            if current not in HOST_STATS_COMMANDS or current in sections:
-                raise RuntimeError('Invalid host statistics batch')
-            sections[current] = []
-        elif current:
-            sections[current].append(line)
-    if not complete or set(sections) != set(HOST_STATS_COMMANDS):
-        raise RuntimeError('Incomplete host statistics batch')
-    sections = {name: '\n'.join(lines).strip() for name, lines in sections.items()}
+        if line.startswith(marker + ':end:'):
+            parts = line[len(marker + ':end:'):].split(':')
+            if len(parts) != 2 or parts[0] != current or not parts[1].isdigit():
+                errors['batch'] = 'invalid_framing'
+                break
+            if parts[1] == '0':
+                sections[current] = '\n'.join(lines).strip()
+            else:
+                errors[current] = 'probe_failed'
+            current, lines = None, []
+        elif line.startswith(marker + ':'):
+            name = line[len(marker) + 1:]
+            if current is not None or name not in HOST_STATS_COMMANDS or name in sections or name in errors:
+                errors['batch'] = 'invalid_framing'
+                break
+            current, lines = name, []
+        elif current is not None:
+            lines.append(line)
+    if code != 0:
+        errors['batch'] = 'command_failed'
+    elif not complete:
+        errors.setdefault('batch', 'incomplete_response')
+    for name in HOST_STATS_COMMANDS:
+        if name not in sections:
+            errors.setdefault(name, 'unavailable')
+            sections[name] = ''
     stats = {}
     try:
-        stats['cpu'] = round(float(sections['cpu'].split('\n')[0]), 1)
+        cpu = float(sections['cpu'].split('\n')[0])
+        if not math.isfinite(cpu):
+            raise ValueError('Non-finite CPU reading')
+        stats['cpu'] = round(cpu, 1)
     except (ValueError, IndexError):
         stats['cpu'] = 0
+        errors.setdefault('cpu', 'invalid_value')
     for field in ('ram', 'disk'):
         try:
             used, total = map(int, sections[field].split())
             percent = round(used / total * 100, 1) if total > 0 else 0
         except (ValueError, IndexError):
             used, total, percent = 0, 0, 0
+            errors.setdefault(field, 'invalid_value')
         stats.update({field + '_used': used, field + '_total': total, field + '_percent': percent})
     try:
         stats['net_rx'], stats['net_tx'] = map(int, sections['network'].split())
     except (ValueError, IndexError):
         stats['net_rx'] = stats['net_tx'] = 0
+        errors.setdefault('network', 'invalid_value')
     stats['uptime'] = sections['uptime']
     stats['ipv6'] = [line.strip() for line in sections['ipv6'].splitlines() if line.strip()]
+    if errors:
+        stats['errors'] = errors
     return stats

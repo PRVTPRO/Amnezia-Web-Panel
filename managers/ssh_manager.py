@@ -211,13 +211,17 @@ class SSHManager:
     DOCKER_PS_TTL = 10.0
 
     def docker_ps_snapshot(self):
-        """Dict {container_name: state} from one `docker ps -a` command."""
+        """Dict {container_name: state}, or None when the probe fails."""
         now = time.time()
         cached = getattr(self, '_docker_ps_cache', None)
         if cached and now - cached[0] < self.DOCKER_PS_TTL:
             return cached[1]
         out, err, code = self.run_sudo_command(
             "docker ps -a --format '{{.Names}}\t{{.State}}'", timeout=30)
+        if code != 0:
+            # A denied/timed-out probe is unknown, not a successful empty list.
+            # Do not poison the shared cache or suppress per-container fallback.
+            return None
         states = {}
         if code == 0:
             for line in (out or '').splitlines():
@@ -235,6 +239,8 @@ class SSHManager:
         try:
             states = self.docker_ps_snapshot()
         except Exception:
+            return None
+        if states is None:
             return None
         return (name in states, states.get(name) == 'running')
 
