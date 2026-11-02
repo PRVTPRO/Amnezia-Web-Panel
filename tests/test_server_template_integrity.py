@@ -55,6 +55,26 @@ class TestServerTemplateIntegrity(unittest.TestCase):
         between = source[import_button:rename_modal]
         self.assertIn("</div>\n    </div>\n</div>", between)
 
+    def test_smartroute_probe_settles_before_the_grid_is_revealed(self):
+        """The host-level Smart Route probe must start together with /check and
+        settle before updateStatusCounts() reveals the grid. A serial probe
+        after the reveal makes the card pop in a round-trip after every other
+        badge (the owner-reported flicker)."""
+        source = SERVER_TEMPLATE.read_text(encoding="utf-8")
+        start = source.index("async function checkServer()")
+        end = source.index("function updateStatusCounts", start)
+        body = source[start:end]
+
+        probe = body.index("const smartRouteProbe = loadSmartRouteStatus()")
+        check = body.index("await apiCall(")
+        reveal = body.index("updateStatusCounts(data.protocols")
+        settled = body.index("smartRouteStatus = await smartRouteProbe")
+        self.assertLess(probe, check)
+        self.assertLess(settled, reveal)
+        # A second settle in `finally` would block error recovery on a slow probe.
+        self.assertNotIn("smartRouteStatus = await smartRouteProbe", body[reveal:])
+        self.assertNotIn("await loadSmartRouteStatus()", body)
+
     def test_wgeasy_preview_function_restores_button_state(self):
         source = SERVER_TEMPLATE.read_text(encoding="utf-8")
         start = source.index("async function wgeasyPreview()")

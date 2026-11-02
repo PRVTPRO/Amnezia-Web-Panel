@@ -2204,6 +2204,11 @@
         btn.disabled = true;
         text.textContent = _('server_checking');
         spinner.classList.remove('hidden');
+        // Smart Route is host-level: its status is a separate probe, not part
+        // of the /check payload. Start it in parallel with the check and
+        // settle it before updateStatusCounts() reveals the grid, otherwise
+        // the card pops in one round-trip after every other badge.
+        const smartRouteProbe = loadSmartRouteStatus().catch(() => null);
         try {
             const data = await apiCall(`/api/servers/${SERVER_ID}/check`, 'POST');
             const statusDiv = document.getElementById('serverStatus');
@@ -2252,14 +2257,11 @@
                     loadConnections();
                 }
             }
+            // Settle the parallel probe before the grid is revealed, so the
+            // Smart Route card is painted with its final badge together with
+            // the protocol cards instead of appearing later.
+            smartRouteStatus = await smartRouteProbe;
             updateStatusCounts(data.protocols || {});
-            // Smart Route is host-level: its status is a separate probe.
-            // A failure here must not fail the whole server check.
-            try {
-                smartRouteStatus = await loadSmartRouteStatus();
-            } catch (e) {
-                smartRouteStatus = null;
-            }
             showToast(_('server_check_complete'), 'success');
         } catch (err) {
             showToast(_('error') + ': ' + err.message, 'error');
@@ -2268,6 +2270,9 @@
             statusDiv.classList.remove('hidden');
             badges.innerHTML = `<span class="badge badge-danger"><span class="badge-dot"></span> ${_('server_connection_error')}</span>`;
         } finally {
+            // Do not await the probe here: on the error path /check may have
+            // thrown before the settle above, and a slow probe must not keep
+            // the spinner and the retry button blocked.
             setInstalledAppsLoading(false);
             applyInstalledAppsVisibility();
             btn.disabled = false;
