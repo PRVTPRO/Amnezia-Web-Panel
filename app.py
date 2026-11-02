@@ -273,7 +273,7 @@ load_translations()
 # Global lock for data.json access to prevent race conditions during async operations
 from peer_lifecycle_lock import serialize_peer_lifecycle
 import peer_lifecycle_lock
-from peer_accounting import guard_user_deletions
+from peer_accounting import guard_user_deletions, ownership_rows
 from peer_recovery import (RecoveryStore, RecoveryError, PanelLease, STATE_FILE_LOCK,
                            GENERATION, digest as recovery_digest, orphan_scope, validate_backup)
 from peer_recovery import verify_awg_peer_absent, check_create_journal, require_repair_target, DISASTER_HOLD
@@ -1878,12 +1878,24 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
 
 
+def _blocking_row_public(conn):
+    """Non-secret description of a leftover accounting row (admin-only API)."""
+    return {'connection_id': conn.get('id'), 'user_id': conn.get('user_id'),
+            'protocol': conn.get('protocol'), 'client_id': conn.get('client_id')}
+
+
 def _traffic_removal_guard(data, **scope):
     from peer_accounting import TrafficFinalizationRequired, require_unowned
     try:
         require_unowned(data, **scope)
     except TrafficFinalizationRequired as error:
-        return JSONResponse({'error': str(error), 'code': error.code}, status_code=409)
+        payload = {'error': str(error), 'code': error.code}
+        if scope.get('server_id') is not None:
+            # A generic message gives an admin no way to find the leftover row
+            # in the UI, so name the exact ownership records that block us.
+            payload['blocking'] = [_blocking_row_public(c)
+                                   for c in ownership_rows(data, **scope)]
+        return JSONResponse(payload, status_code=409)
     return None
 
 
@@ -3927,7 +3939,16 @@ async def api_reorder_servers(request: Request, req: ReorderServersRequest):
 
 @app.post('/api/servers/{server_id}/delete', tags=["Servers"])
 @serialize_peer_lifecycle
-async def api_delete_server(request: Request, server_id: int, server_uid: Optional[str] = None):
+async def api_delete_server(request: Request, server_id: int, server_uid: Optional[str] = None,
+                            archive_blocking: bool = False):
+    """Remove a server from the panel inventory.
+
+    A leftover ``user_connections`` row is accounting ownership and normally
+    blocks deletion (possibly forever, when its peer no longer exists). With
+    ``archive_blocking=true`` an admin may archive those rows as unverified
+    tombstones, but only after each peer is verified stopped or absent on the
+    live server. Rows are never dropped without that explicit evidence.
+    """
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     selected, error = _server_identity(server_id, server_uid)
@@ -3936,7 +3957,7 @@ async def api_delete_server(request: Request, server_id: int, server_uid: Option
     uid = selected['uid']
     data = load_data()
     guard = _traffic_removal_guard(data, server_id=server_id)
-    if guard is not None:
+    if guard is not None and not archive_blocking:
         return guard
 
     async def delete():
@@ -3945,7 +3966,7 @@ async def api_delete_server(request: Request, server_id: int, server_uid: Option
             deletion_committed = False
             try:
                 async with DATA_LOCK:
-                    _, server = find_server_by_uid(load_data(), uid)
+                    index, server = find_server_by_uid(load_data(), uid)
                     if server is None:
                         return {'status': 'success', 'already_deleted': True}
                 results = []
@@ -3956,21 +3977,79 @@ async def api_delete_server(request: Request, server_id: int, server_uid: Option
                     return JSONResponse({'error': 'Exit-link cleanup incomplete; server retained',
                                          'cleanup_results': results, 'deletion_committed': False}, status_code=409)
                 cleanup_completed = True
+
+                blocked = []
+                archive_states = {}
+                if archive_blocking:
+                    async with DATA_LOCK:
+                        blocked = ownership_rows(load_data(), server_id=index)
+                    for conn in blocked:
+                        observed, quiescent = await asyncio.to_thread(
+                            _probe_blocking_peer, server, conn)
+                        if not quiescent:
+                            return JSONResponse({
+                                'error': 'A peer linked to this server is still active; '
+                                         'stop or remove it before archiving its accounting.',
+                                'code': 'blocked_peer_still_active',
+                                'blocking': [_blocking_row_public(conn)],
+                            }, status_code=409)
+                        archive_states[conn.get('id')] = observed
+
                 async with DATA_LOCK:
                     data = load_data()
                     index, current = find_server_by_uid(data, uid)
                     if current is None:
                         return {'status': 'success', 'already_deleted': True}
-                    data['servers'].pop(index)
-                    data['user_connections'] = [c for c in data.get('user_connections', [])
-                                                if c.get('server_id') != index]
-                    for c in data['user_connections']:
-                        if c.get('server_id', 0) > index:
-                            c['server_id'] -= 1
-                    save_data(data)
+                    current_blocked = ownership_rows(data, server_id=index)
+                    if current_blocked and not archive_blocking:
+                        # A connection row appeared after the outer guard; never
+                        # drop accounting ownership without the archive opt-in.
+                        return JSONResponse({
+                            'error': 'Connection accounting changed; refresh the server page and retry.',
+                            'code': 'traffic_finalization_required',
+                            'blocking': [_blocking_row_public(c) for c in current_blocked],
+                        }, status_code=409)
+                    if archive_blocking and [c.get('id') for c in current_blocked] != [c.get('id') for c in blocked]:
+                        return JSONResponse({
+                            'error': 'Connection accounting changed; refresh the server page and retry.',
+                            'code': 'traffic_finalization_required',
+                            'blocking': [_blocking_row_public(c) for c in current_blocked],
+                        }, status_code=409)
+                    if current_blocked:
+                        before = pathlib_read_data_bytes()
+                        operation_id = uuid.uuid4().hex
+                        try:
+                            actor = str(get_current_user(request)['id'])
+                        except Exception:
+                            actor = 'admin'
+                        for conn in current_blocked:
+                            finalize_connection_record(
+                                data, conn, current, archive_states.get(conn.get('id')),
+                                time.time(), 'archive_blocking_absent', operation_id, True)
+                        data['servers'].pop(index)
+                        data['user_connections'] = [c for c in data.get('user_connections', [])
+                                                    if c.get('server_id') != index]
+                        for c in data['user_connections']:
+                            if c.get('server_id', 0) > index:
+                                c['server_id'] -= 1
+                        commit_finalize(DATA_FILE, operation_id, actor, 'server_archive_delete',
+                                        recovery_digest({'server_uid': uid,
+                                                         'mode': 'archive_blocking_absent'}),
+                                        before, data)
+                    else:
+                        data['servers'].pop(index)
+                        data['user_connections'] = [c for c in data.get('user_connections', [])
+                                                    if c.get('server_id') != index]
+                        for c in data['user_connections']:
+                            if c.get('server_id', 0) > index:
+                                c['server_id'] -= 1
+                        save_data(data)
                     deletion_committed = True
                 await _finish_locked_worker(lambda: drop_ssh(server))
-                return {'status': 'success'}
+                response = {'status': 'success'}
+                if blocked:
+                    response['archived'] = len(blocked)
+                return response
             except Exception as e:
                 # Remote cleanup is not transactional. Keep the server on a failed
                 # local commit, report the partial result, and allow a safe retry.
@@ -8982,6 +9061,34 @@ def api_recovery_status(request: Request):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     return peer_lifecycle_lock.diagnostics()
+
+
+def _probe_blocking_peer(server, conn):
+    """Return (observed_bytes, quiescent) for a leftover accounting row.
+
+    ``quiescent`` is True only when the peer is absent from the live protocol
+    instance or is explicitly disabled there.  Unknown state is NOT quiescent.
+    """
+    ssh = get_ssh(server)
+    try:
+        ssh.connect()
+        manager = get_protocol_manager(ssh, conn['protocol'])
+        clients = _manager_call(manager, 'get_clients', conn['protocol'])
+        if not isinstance(clients, list):
+            raise RecoveryError('incomplete_peer_state')
+        peers = [c for c in clients
+                 if isinstance(c, dict) and c.get('clientId') == conn.get('client_id')]
+        if len(peers) > 1:
+            raise RecoveryError('peer_identity_ambiguous')
+        if not peers:
+            return None, True
+        ud = peers[0].get('userData') or {}
+        rx, tx = ud.get('dataReceivedBytes'), ud.get('dataSentBytes')
+        observed = (rx + tx if type(rx) is int and type(tx) is int
+                    and rx >= 0 and tx >= 0 else None)
+        return observed, not bool(ud.get('enabled', True))
+    finally:
+        ssh.disconnect()
 
 
 def _read_orphan_peers(server, conn, strict_absence=False):

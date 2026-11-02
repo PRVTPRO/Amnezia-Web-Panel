@@ -57,6 +57,7 @@ class CrudTests(unittest.IsolatedAsyncioTestCase):
                       DATA_LOCK=asyncio.Lock(), SERVER_MUTATION_LOCK=asyncio.Lock(),
                       _check_admin=lambda r: r.headers.get('x-role', 'admin') == 'admin',
                       _traffic_removal_guard=lambda *a, **k: None,
+                      ownership_rows=lambda *a, **k: [],
                       serialize_peer_lifecycle=lambda f: f,
                       SSHManager=Mock(return_value=self.ssh), drop_ssh=Mock(), exit_link_svc=self.exit)
         exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), 'exec'), self.p)

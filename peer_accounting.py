@@ -39,9 +39,9 @@ def _protocol_scope(protocol):
     return base, index
 
 
-def require_unowned(data, *, server_id=None, protocol=None, client_id=None,
-                    user_ids=None, include_archived=False):
-    """Reject a destructive scope containing any accounting ownership record.
+def ownership_rows(data, *, server_id=None, protocol=None, client_id=None,
+                   user_ids=None, include_archived=False):
+    """Return the accounting ownership records matched by a destructive scope.
 
     Match the exact protocol instance, not its base name. A dangling user ID is
     still ownership: deleting a user elsewhere is not finalization evidence.
@@ -53,6 +53,7 @@ def require_unowned(data, *, server_id=None, protocol=None, client_id=None,
             uid = recovery['scope']['server_uid']
             conn['server_id'] = next((i for i, s in enumerate(data.get('servers', [])) if s.get('uid') == uid), None)
             connections.append(conn)
+    matched = []
     for conn in connections:
         if server_id is not None and conn.get('server_id') != server_id:
             continue
@@ -62,6 +63,13 @@ def require_unowned(data, *, server_id=None, protocol=None, client_id=None,
             continue
         if user_ids is not None and conn.get('user_id') not in user_ids:
             continue
+        matched.append(conn)
+    return matched
+
+
+def require_unowned(data, **scope):
+    """Reject a destructive scope containing any accounting ownership record."""
+    if ownership_rows(data, **scope):
         raise TrafficFinalizationRequired()
 
 
