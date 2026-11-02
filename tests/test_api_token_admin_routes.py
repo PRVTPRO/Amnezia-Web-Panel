@@ -161,7 +161,10 @@ class ApiTokenAdminRouteTests(unittest.TestCase):
                         client.post('/api/servers/0/connections/config', headers=headers,
                                     json={'protocol': 'awg2', 'client_id': 'alice-key'}),
                     ]
-                    self.assertEqual({r.status_code for r in responses}, {403},
+                    # Browser requests without a session now have an explicit
+                    # 401 contract; rejected Bearer tokens retain their 403.
+                    expected = 403 if headers else 401
+                    self.assertEqual({r.status_code for r in responses}, {expected},
                                      [r.text for r in responses])
         self.assertEqual(self.usernames(), {'admin', 'support', 'alice', 'bob'})
 
