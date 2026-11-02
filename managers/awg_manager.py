@@ -1053,13 +1053,21 @@ fi
         v = self.AWG_MODULE_VERSION
         script = f"""
 CUR=$(modinfo amneziawg 2>/dev/null | awk '/^version:/{{print $2; exit}}')
-if [ -n "$CUR" ] && [ "$CUR" = "{v}" ]; then
-    echo "KERNEL_MODULE: ok: already present ($CUR)"
-    exit 0
+if [ -n "$CUR" ]; then
+    # Never downgrade: a newer (or equal) module is left untouched.
+    NEWEST=$(printf '%s\\n%s\\n' "$CUR" "{v}" | sort -V | tail -1)
+    if [ "$NEWEST" = "$CUR" ]; then
+        echo "KERNEL_MODULE: ok: already present ($CUR)"
+        exit 0
+    fi
 fi
 if [ -n "$CUR" ]; then
-    # An older/newer module is present: upgrade. The module can only be
+    # An older module is present: upgrade. The module can only be
     # unloaded when no tunnel uses it; otherwise defer the upgrade.
+    if docker ps --format '{{{{.Names}}}}' 2>/dev/null | grep -q '^amnezia-awg'; then
+        echo "KERNEL_MODULE: skipped: $CUR installed, {v} wanted; stop the AWG containers to upgrade"
+        exit 0
+    fi
     if ! modprobe -r amneziawg 2>/dev/null; then
         echo "KERNEL_MODULE: skipped: version $CUR present but in use by running tunnels; stop all AWG containers and reinstall to upgrade to {v}"
         exit 0
@@ -1089,6 +1097,10 @@ if ! git clone --depth 1 --branch v{v} {self.AWG_MODULE_REPO} /tmp/awg-module >>
 fi
 cd /tmp/awg-module/src
 sed -i 's/^PACKAGE_VERSION=.*/PACKAGE_VERSION="{v}"/' dkms.conf
+if dkms status -m amneziawg -v "{v}" 2>/dev/null | grep -q .; then
+    # A stale DKMS tree entry for the target version breaks `dkms add`.
+    dkms remove "amneziawg/{v}" --all >/dev/null 2>&1 || true
+fi
 if ! dkms add . >>/tmp/awg-kmod.log 2>&1; then
     echo "KERNEL_MODULE: failed: dkms add failed: $(tail -3 /tmp/awg-kmod.log | tr '\\n' ' ' | cut -c1-300)"
     exit 1
