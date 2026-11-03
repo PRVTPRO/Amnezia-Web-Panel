@@ -1168,7 +1168,7 @@
                 // frames this peer's card there.
                 const serverLink = `/server/${sid}?protocol=${encodeURIComponent(proto)}&highlight=${encodeURIComponent(c.client_id)}`;
                 listEl.innerHTML += `
-                    <div class="client-item" data-maxspeed="${maxSpeed}">
+                    <div class="client-item" data-maxspeed="${maxSpeed}" data-server-id="${sid}" data-protocol="${escapeHtml(proto)}" data-client-id="${escapeHtml(c.client_id)}" data-peer-name="${escapeHtml(name)}">
                         <div class="client-info" style="${disabledStyle}">
                             <div class="client-avatar">${escapeHtml((name[0] || '🔗').toUpperCase())}</div>
                             <div>
@@ -1193,10 +1193,15 @@
                     </div>
                 `;
             });
+            PeerQueue.reapplyRowStates();
         } catch (err) {
             listEl.innerHTML = `<div style="color:#ef4444;padding:var(--space-md);">${_('error')}: ${err.message}</div>`;
         }
     }
+
+    window.peerQueueOnIdle = function () {
+        if (currentConnsUserId !== null) viewUserConnections(currentConnsUserId, currentConnsUsername);
+    };
 
     async function unlinkUserConnection(serverId, clientId, proto, name, enabled) {
         if (!confirm(_('unlink_confirm'))) return;
@@ -1229,30 +1234,13 @@
         }
     }
 
-    function lockConnRow(btn, lock) {
-        const row = btn ? btn.closest('.client-item') : null;
-        if (!row) return null;
-        row.classList.toggle('client-toggling', lock);
-        row.querySelectorAll('button').forEach(b => b.disabled = lock);
-        return row;
-    }
-
-    async function toggleUserConnection(serverId, clientId, proto, enable, btn) {
-        const original = btn.innerHTML;
-        lockConnRow(btn, true);
-        btn.innerHTML = '<span class="spinner"></span>';
-        try {
-            showToast(enable ? _('enable_connection_progress') : _('disable_connection_progress'), 'info');
-            await apiCall(`/api/servers/${serverId}/connections/toggle`, 'POST', {
-                protocol: proto, client_id: clientId, enable: enable,
-            });
-            showToast(enable ? _('connection_enabled') : _('connection_disabled'), 'success');
-            viewUserConnections(currentConnsUserId, currentConnsUsername);
-        } catch (err) {
-            lockConnRow(btn, false);
-            btn.innerHTML = original;
-            showToast(`${_('error')}: ` + err.message, 'error');
-        }
+    function toggleUserConnection(serverId, clientId, proto, enable, btn) {
+        const row = btn && btn.closest('.client-item');
+        PeerQueue.enqueue({
+            serverId: serverId, protocol: proto, clientId: clientId,
+            peerName: row ? row.dataset.peerName : clientId,
+            action: enable ? 'enable' : 'disable',
+        });
     }
 
     async function renameUserConnection(serverId, clientId, proto, oldName) {
@@ -1269,31 +1257,12 @@
         }
     }
 
-    async function removeUserConnection(serverId, clientId, proto, name, enabled) {
+    function removeUserConnection(serverId, clientId, proto, name, enabled) {
         if (!confirm(`${_('delete')}: ${name}?`)) return;
-        const payload = {
-            protocol: proto, client_id: clientId,
-        };
-        try {
-            await apiCall(`/api/servers/${serverId}/connections/remove`, 'POST', payload);
-            showToast(_('success'), 'success');
-            viewUserConnections(currentConnsUserId, currentConnsUsername);
-        } catch (err) {
-            if (err.payload && err.payload.code === 'final_counter_read_failed' && err.payload.can_force) {
-                if (!confirm(_('delete_unverified_confirm'))) return;
-                payload.allow_unverified = true;
-            } else {
-                showToast(`${_('error')}: ` + err.message, 'error');
-                return;
-            }
-            try {
-                await apiCall(`/api/servers/${serverId}/connections/remove`, 'POST', payload);
-                showToast(_('success'), 'success');
-                viewUserConnections(currentConnsUserId, currentConnsUsername);
-            } catch (retryErr) {
-                showToast(`${_('error')}: ` + retryErr.message, 'error');
-            }
-        }
+        PeerQueue.enqueue({
+            serverId: serverId, protocol: proto, clientId: clientId,
+            peerName: name, action: 'delete',
+        });
     }
 
     // Config tabs

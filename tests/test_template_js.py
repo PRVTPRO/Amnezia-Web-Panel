@@ -77,6 +77,11 @@ class TemplateJsSyntaxTests(unittest.TestCase):
         self.assertIn('server.html', checked)
         self.assertGreaterEqual(len(checked), 5, f'only {checked} carried inline JS')
 
+    def test_peer_queue_script_parses(self):
+        path = os.path.join(os.path.dirname(TEMPLATES), 'static', 'js', 'peer-queue.js')
+        result = subprocess.run(['node', '--check', path], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()
