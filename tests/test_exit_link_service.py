@@ -182,7 +182,7 @@ class Harness:
             exit_manager_factory=lambda host: self.exits.setdefault(host, FakeExit(host, self.events)),
             protocol_base=protocol_base,
             awg_protocols=AWG_PROTOCOLS,
-            protocol_display_name=lambda p: {'awg2': 'AmneziaWG 2.0'}.get(p, p),
+            protocol_display_name=lambda p, *metadata: {'awg2': 'AmneziaWG 2.0'}.get(p, p),
             find_server_by_uid=find_server_by_uid,
             sleep=sleep,
             time_fn=lambda: self.now,

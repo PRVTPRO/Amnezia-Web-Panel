@@ -70,6 +70,7 @@ from mail_service import (
     MailService,
     merge_mail_settings,
 )
+from protocol_names import protocol_display_name, server_protocol_names
 from pwa import build_manifest
 from captcha_challenges import captcha_challenges
 from user_state import reconcile_user_state, apply_traffic_samples, traffic_server_identity
@@ -1172,36 +1173,8 @@ def next_protocol_key(protocols: dict, base: str) -> str:
     return protocol_key(base, idx)
 
 
-# The official Amnezia client has no separate AWG 3 container: it installs
-# AWG 3.x into amnezia-awg2 and only the config (HeaderProtectionKey) differs.
-AWG3_IN_AWG2_NAME = 'AmneziaWG 3 (amnezia-awg2)'
-
-
 def is_awg3_in_awg2(protocol: str, header_protection=False) -> bool:
     return protocol_base(protocol) == 'awg2' and bool(header_protection)
-
-
-def protocol_display_name(protocol: str, header_protection=False) -> str:
-    base = protocol_base(protocol)
-    idx = protocol_instance(protocol)
-    if is_awg3_in_awg2(protocol, header_protection):
-        return AWG3_IN_AWG2_NAME if idx <= 1 else f'{AWG3_IN_AWG2_NAME} #{idx}'
-    names = {
-        'awg': 'AmneziaWG',
-        'awg2': 'AmneziaWG 2.0',
-        'awg3': 'AmneziaWG 3.1',
-        'awg_legacy': 'AmneziaWG Legacy',
-        'xray': 'Xray',
-        'telemt': 'Telemt',
-        'dns': 'AmneziaDNS',
-        'wireguard': 'WireGuard',
-        'socks5': 'SOCKS5',
-        'adguard': 'AdGuard Home',
-        'nginx': 'NGINX',
-        'exit': 'Exit Node',
-    }
-    name = names.get(base, base)
-    return name if idx <= 1 else f'{name} #{idx}'
 
 
 def protocol_container_name(protocol: str) -> Optional[str]:
@@ -1394,11 +1367,13 @@ AWG_CONFIG_KEYS = (
 )
 
 
-def protocol_short_name(protocol: str, header_protection=False) -> str:
+def protocol_short_name(protocol: str, header_protection=False, protocol_version=None) -> str:
     """Short protocol tag for the server name, e.g. `AWG3`."""
     base = protocol_base(protocol)
     idx = protocol_instance(protocol)
-    if is_awg3_in_awg2(protocol, header_protection):
+    if base == 'awg2' and protocol_version == '3.1':
+        return 'AWG3.1' if idx <= 1 else f'AWG3.1#{idx}'
+    if base == 'awg2' and (protocol_version == '3.x' or (protocol_version is None and header_protection)):
         base = 'awg3'
     names = {
         'awg': 'AWG',
@@ -1422,7 +1397,7 @@ def connection_display_name(server=None, protocol=None) -> str:
     """`<node> <container>`, e.g. `nl-01 AWG3` -- the name the client will show."""
     node = str((server or {}).get('name') or (server or {}).get('host') or '').strip()
     record = ((server or {}).get('protocols') or {}).get(protocol) or {} if protocol else {}
-    tag = protocol_short_name(protocol, record.get('header_protection')) if protocol else ''
+    tag = protocol_short_name(protocol, record.get('header_protection'), record.get('protocol_version')) if protocol else ''
     return ' '.join(part for part in (node, tag) if part)
 
 
@@ -2313,6 +2288,11 @@ def tpl(request, template, **kwargs):
         'request': request,
         'static_v': static_version(),
         'current_user': get_current_user(request),
+        'protocol_display_name': protocol_display_name,
+        'server_protocol_names': server_protocol_names,
+        'server_protocol_labels': [server_protocol_names(s) for s in kwargs.get('servers', [])],
+        'default_protocol_labels': {p: protocol_display_name(p) for p in BASE_PROTOCOLS},
+        'protocol_short_name': protocol_short_name,
         'site_settings': data.get('settings', {}).get('appearance', {}),
         'captcha_settings': data.get('settings', {}).get('captcha', {}),
         'telegram_settings': data.get('settings', {}).get('telegram', {}),
@@ -4778,9 +4758,14 @@ def api_check_server(request: Request, server_id: int):
                 merged['awg_params'] = db_proto.get('awg_params')
             merged['base_protocol'] = db_proto.get('base_protocol') or protocol_base(proto)
             merged['instance'] = db_proto.get('instance') or protocol_instance(proto)
-            merged['display_name'] = db_proto.get('display_name') or protocol_display_name(proto)
-            if protocol_base(proto) == 'awg2' and 'header_protection' in merged:
-                merged['display_name'] = protocol_display_name(proto, merged['header_protection'])
+            if 'protocol_version' not in merged:
+                # An explicit legacy result clears 3.x; a partial modern
+                # response retains the last detected minor version.
+                merged['protocol_version'] = ('2.0' if merged.get('header_protection') is False
+                                              else db_proto.get('protocol_version'))
+            merged['display_name'] = protocol_display_name(
+                proto, merged.get('header_protection', db_proto.get('header_protection')),
+                merged.get('protocol_version'))
             merged['container_name'] = db_proto.get('container_name') or protocol_container_name(proto)
             if protocol_base(proto) == 'adguard':
                 for key in ('web_port', 'mode', 'internal_ip', 'expose_web'):
@@ -4865,7 +4850,7 @@ def api_check_server(request: Request, server_id: int):
                         'awg_params': result.get('awg_params', {}),
                         'base_protocol': protocol_base(proto),
                         'instance': protocol_instance(proto),
-                        'display_name': protocol_display_name(proto, result.get('header_protection')),
+                        'display_name': protocol_display_name(proto, result.get('header_protection'), result.get('protocol_version')),
                         'container_name': protocol_container_name(proto),
                     }
                     if protocol_base(proto) == 'adguard':
@@ -4891,9 +4876,14 @@ def api_check_server(request: Request, server_id: int):
                 record = server['protocols'][proto]
                 if protocol_base(proto) == 'awg2' and 'header_protection' in result:
                     header_protection = bool(result['header_protection'])
-                    if bool(record.get('header_protection')) != header_protection:
+                    name = protocol_display_name(proto, header_protection, result.get('protocol_version'))
+                    if (bool(record.get('header_protection')) != header_protection
+                            or record.get('display_name') != name
+                            or ('protocol_version' in result and record.get('protocol_version') != result['protocol_version'])):
                         record['header_protection'] = header_protection
-                        record['display_name'] = protocol_display_name(proto, header_protection)
+                        record['display_name'] = name
+                        if 'protocol_version' in result:
+                            record['protocol_version'] = result['protocol_version']
                         changed = True
             else:
                 if proto in server['protocols']:
@@ -6918,7 +6908,9 @@ def api_wgeasy_import(request: Request, server_id: int, req: WgEasyImportRequest
             'awg_params': {},
             'base_protocol': protocol_base(target),
             'instance': protocol_instance(target),
-            'display_name': protocol_display_name(target),
+            # wg-easy imports only AWG 2.0 parameters, not 3.x config keys.
+            'protocol_version': '2.0' if protocol_base(target) == 'awg2' else None,
+            'display_name': protocol_display_name(target, protocol_version='2.0'),
             'container_name': protocol_container_name(target),
         }
         save_data(data)
@@ -8099,6 +8091,7 @@ def api_get_user_connections(request: Request, user_id: str):
         sid = c.get('server_id', 0)
         if sid < len(data['servers']):
             c['server_name'] = data['servers'][sid].get('name', '')
+            c['protocol_name'] = server_protocol_names(data['servers'][sid]).get(c.get('protocol', 'awg'), '')
 
     # Enrich with live peer data (IP, enabled, handshake, transfer, speed
     # limit) from each server the user has connections on. One SSH session
@@ -8157,9 +8150,13 @@ def api_my_connections(request: Request):
         sid = c.get('server_id', 0)
         if sid < len(data['servers']):
             c['server_name'] = data['servers'][sid].get('name', '')
+            c['protocol_name'] = server_protocol_names(data['servers'][sid]).get(c.get('protocol', 'awg'), '')
         else:
             c['server_name'] = 'Unknown'
-        c['protocol_name'] = protocol_display_name(c.get('protocol', ''))
+        record = {}
+        if 0 <= sid < len(data['servers']):
+            record = (data['servers'][sid].get('protocols') or {}).get(c.get('protocol')) or {}
+        c['protocol_name'] = protocol_display_name(c.get('protocol', ''), record.get('header_protection'), record.get('protocol_version'))
     return {'connections': conns}
 
 

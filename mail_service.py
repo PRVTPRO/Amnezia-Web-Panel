@@ -510,6 +510,11 @@ class MailService:
                 errors.append(f"{name}: server {sid} not found")
                 continue
             server = servers[sid]
+            record = (server.get('protocols') or {}).get(protocol, {})
+            protocol_name = self._protocol_display_name(
+                protocol, record.get('header_protection'), record.get('protocol_version'))
+            if not conn.get('name'):
+                name = protocol_name
             try:
                 proto_info = (server.get('protocols', {}) or {}).get(protocol, {}) or {}
                 port = proto_info.get('port', '55424')
@@ -534,7 +539,7 @@ class MailService:
                 'connection_id': conn.get('id', ''),
                 'name': name,
                 'protocol': protocol,
-                'protocol_name': self._protocol_display_name(protocol),
+                'protocol_name': protocol_name,
                 'server_name': server.get('name') or server.get('host', ''),
                 'config': '',
                 'link': '',

@@ -3,6 +3,7 @@ from peer_accounting import serialize_peer_lifecycle
 import logging
 import time
 import uuid
+from protocol_names import protocol_display_name
 from collections import defaultdict
 from datetime import datetime
 
@@ -16,17 +17,6 @@ SELF_SERVICE_PROTOCOL_ORDER = (
 )
 
 SELF_SERVICE_PROTOCOLS = frozenset(SELF_SERVICE_PROTOCOL_ORDER)
-
-_PROTOCOL_DISPLAY_NAMES = {
-    'awg': 'AmneziaWG',
-    'awg2': 'AmneziaWG 2.0',
-    'awg3': 'AmneziaWG 3.1',
-    'awg_legacy': 'AmneziaWG Legacy',
-    'xray': 'Xray',
-    'telemt': 'Telemt',
-    'wireguard': 'WireGuard',
-}
-
 
 def protocol_base(protocol: str) -> str:
     return str(protocol or 'awg').split('__', 1)[0]
@@ -53,16 +43,15 @@ def sanitize_allowed_protocols(allowed) -> list:
     return result
 
 
-def self_service_protocol_display_name(protocol: str) -> str:
-    base = protocol_base(protocol)
-    idx = protocol_instance(protocol)
-    name = _PROTOCOL_DISPLAY_NAMES.get(base, base)
-    return name if idx <= 1 else f'{name} #{idx}'
+def self_service_protocol_display_name(protocol: str, record=None) -> str:
+    record = record or {}
+    return protocol_display_name(protocol, record.get('header_protection'), record.get('protocol_version'))
 
 
 def self_service_protocol_choices():
     return [
-        {'id': proto, 'name': self_service_protocol_display_name(proto)}
+        # This is a family-wide permission, not a particular installed config.
+        {'id': proto, 'name': 'AmneziaWG 2.0 / 3.x' if proto == 'awg2' else self_service_protocol_display_name(proto)}
         for proto in SELF_SERVICE_PROTOCOL_ORDER
     ]
 
@@ -142,7 +131,8 @@ class ConnectionService:
             if not server.get('self_service_enabled', False):
                 continue
             protocols = [
-                {'protocol': protocol, 'name': self_service_protocol_display_name(protocol)}
+                {'protocol': protocol, 'name': self_service_protocol_display_name(
+                    protocol, server['protocols'][protocol])}
                 for protocol in server_self_service_protocols(server, allowed_bases)
             ]
             if protocols:

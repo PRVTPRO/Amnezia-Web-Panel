@@ -28,6 +28,15 @@ def status_for(config):
 
 
 class HeaderProtectionStatusTests(unittest.TestCase):
+    def test_minor_version_requires_31_parameters(self):
+        self.assertEqual(status_for(AWG3_SERVER_CONFIG)['protocol_version'], '3.x')
+        self.assertEqual(status_for(SERVER_CONFIG)['protocol_version'], '2.0')
+        for key in ('RandomTrailers', 'DisableCookies'):
+            for value in ('on', 'off'):
+                with self.subTest(key=key, value=value):
+                    config = AWG3_SERVER_CONFIG.replace('[Peer]', f'{key} = {value}\n\n[Peer]', 1)
+                    self.assertEqual(status_for(config)['protocol_version'], '3.1')
+
     def test_awg3_config_in_awg2_container_is_flagged(self):
         self.assertTrue(status_for(AWG3_SERVER_CONFIG)['header_protection'])
 
@@ -36,10 +45,18 @@ class HeaderProtectionStatusTests(unittest.TestCase):
 
 
 class NamingTests(unittest.TestCase):
+    def test_31_names_use_detected_version_not_container_name(self):
+        self.assertEqual(panel.protocol_display_name('awg2', True, '3.1'), 'AmneziaWG 3.1 (amnezia-awg2)')
+        self.assertEqual(panel.protocol_display_name('awg2__2', True, '3.1'), 'AmneziaWG 3.1 (amnezia-awg2) #2')
+        self.assertEqual(panel.protocol_short_name('awg2', True, '3.1'), 'AWG3.1')
+        self.assertEqual(panel.protocol_short_name('awg2__2', True, '3.1'), 'AWG3.1#2')
+        server = {'name': 'node', 'protocols': {'awg2': {'header_protection': True, 'protocol_version': '3.1'}}}
+        self.assertEqual(panel.connection_display_name(server, 'awg2'), 'node AWG3.1')
+
     def test_display_name(self):
         self.assertEqual(panel.protocol_display_name('awg2'), 'AmneziaWG 2.0')
-        self.assertEqual(panel.protocol_display_name('awg2', True), 'AmneziaWG 3 (amnezia-awg2)')
-        self.assertEqual(panel.protocol_display_name('awg2__2', True), 'AmneziaWG 3 (amnezia-awg2) #2')
+        self.assertEqual(panel.protocol_display_name('awg2', True), 'AmneziaWG 3.x (amnezia-awg2)')
+        self.assertEqual(panel.protocol_display_name('awg2__2', True), 'AmneziaWG 3.x (amnezia-awg2) #2')
         # the flag only means something for the amnezia-awg2 container
         self.assertEqual(panel.protocol_display_name('awg3', True), 'AmneziaWG 3.1')
         self.assertEqual(panel.protocol_display_name('awg', True), 'AmneziaWG')
@@ -64,8 +81,9 @@ def seed_servers(header_protection):
 
 
 class FakeCheckManager:
-    def __init__(self, header_protection):
+    def __init__(self, header_protection, protocol_version=None):
         self.header_protection = header_protection
+        self.protocol_version = protocol_version
 
     def check_docker_installed(self):
         return True
@@ -73,9 +91,12 @@ class FakeCheckManager:
     def get_server_status(self, protocol_type):
         if protocol_type != 'awg2':
             return {'container_exists': False, 'container_running': False, 'protocol': protocol_type}
-        return {'container_exists': True, 'container_running': True, 'protocol': protocol_type,
+        result = {'container_exists': True, 'container_running': True, 'protocol': protocol_type,
                 'port': '55424', 'awg_params': {}, 'clients_count': 0,
                 'header_protection': self.header_protection}
+        if self.protocol_version is not None:
+            result['protocol_version'] = self.protocol_version
+        return result
 
 
 class ServerPageTests(unittest.TestCase):
@@ -104,8 +125,8 @@ class ServerPageTests(unittest.TestCase):
         with TestClient(panel.app) as client:
             self.login(client)
             page = client.get('/server/0').text
-        self.assertIn('<div class="protocol-name">AmneziaWG 3 (amnezia-awg2)</div>', page)
-        self.assertIn('"awg2": true,', page)
+        self.assertIn('<div class="protocol-name">AmneziaWG 3.x (amnezia-awg2)</div>', page)
+        self.assertIn('AmneziaWG 3.x (amnezia-awg2)', page)
 
     def test_page_keeps_awg2_card_name(self):
         self.seed(False)
@@ -115,23 +136,52 @@ class ServerPageTests(unittest.TestCase):
         self.assertIn('<div class="protocol-name">AmneziaWG 2.0</div>', page)
         self.assertNotIn('"awg2": true,', page)
 
-    def check(self, header_protection):
+    def check(self, header_protection, protocol_version=None):
         ssh = mock.Mock()
         with mock.patch.object(panel, 'get_ssh', return_value=ssh), \
                 mock.patch.object(panel, 'get_protocol_manager',
-                                  return_value=FakeCheckManager(header_protection)):
+                                  return_value=FakeCheckManager(header_protection, protocol_version)):
             with TestClient(panel.app) as client:
                 self.login(client)
                 response = client.post('/api/servers/0/check')
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()['protocols']['awg2'], panel.load_data()['servers'][0]['protocols']['awg2']
 
+    def test_minor_version_refreshes_even_when_header_protection_is_unchanged(self):
+        self.seed(True)
+        live, saved = self.check(True, '3.1')
+        self.assertEqual(live['display_name'], 'AmneziaWG 3.1 (amnezia-awg2)')
+        self.assertEqual(saved['protocol_version'], '3.1')
+        self.assertEqual(saved['display_name'], live['display_name'])
+        self.assertEqual(saved['container_name'], 'amnezia-awg2')
+        with TestClient(panel.app) as client:
+            self.login(client)
+            page = client.get('/server/0').text
+            self.assertIn('<div class="protocol-name">AmneziaWG 3.1 (amnezia-awg2)</div>', page)
+            self.assertIn('const PROTOCOL_LABELS = {"awg2": "AmneziaWG 3.1 (amnezia-awg2)"}', page)
+            self.assertIn('AWG3.1', client.get('/').text)
+        live, saved = self.check(True, '3.x')
+        self.assertEqual(live['display_name'], 'AmneziaWG 3.x (amnezia-awg2)')
+        self.assertEqual(saved['protocol_version'], '3.x')
+
+    def test_partial_modern_result_retains_minor_and_legacy_result_clears_it(self):
+        self.seed(True)
+        self.check(True, '3.1')
+        live, saved = self.check(True)
+        self.assertEqual(live['protocol_version'], '3.1')
+        self.assertEqual(saved['protocol_version'], '3.1')
+        self.assertEqual(live['display_name'], saved['display_name'])
+        live, saved = self.check(False)
+        self.assertEqual(live['protocol_version'], '2.0')
+        self.assertEqual(saved['protocol_version'], '2.0')
+        self.assertEqual(live['display_name'], 'AmneziaWG 2.0')
+
     def test_check_persists_detection_both_ways(self):
         self.seed(False)
         live, saved = self.check(True)
-        self.assertEqual(live['display_name'], 'AmneziaWG 3 (amnezia-awg2)')
+        self.assertEqual(live['display_name'], 'AmneziaWG 3.x (amnezia-awg2)')
         self.assertTrue(saved['header_protection'])
-        self.assertEqual(saved['display_name'], 'AmneziaWG 3 (amnezia-awg2)')
+        self.assertEqual(saved['display_name'], 'AmneziaWG 3.x (amnezia-awg2)')
         self.assertEqual(saved['container_name'], 'amnezia-awg2')
 
         live, saved = self.check(False)

@@ -426,6 +426,7 @@
     let searchTimeout = null;
 
     const serversData = {{ servers | tojson }};
+    const protocolLabels = {{ server_protocol_labels | tojson }};
 
     function populateTimeSelect(selectId) {
         const select = document.getElementById(selectId);
@@ -796,7 +797,7 @@
             if (info.installed && key !== 'exit') {  // exit node has no client connections
                 const opt = document.createElement('option');
                 opt.value = key;
-                opt.textContent = key === 'awg' ? 'AmneziaWG' : (key === 'awg2' ? 'AmneziaWG 2.0' : (key === 'awg_legacy' ? 'AWG Legacy' : (key === 'xray' ? 'Xray' : key.toUpperCase())));
+                opt.textContent = (protocolLabels[serverId] || {})[key] || key;
                 select.appendChild(opt);
                 count++;
             }
@@ -1174,7 +1175,7 @@
                                 <div class="client-name">${escapeHtml(name)}${ip ? ` <span class="client-ip">${escapeHtml(ip)}</span>` : ''}</div>
                                 <div class="client-meta">
                                     <span>🖥 <a href="${serverLink}" target="_blank" rel="noopener" style="color:var(--primary); text-decoration:underline;">${escapeHtml(c.server_name || '')}</a></span>
-                                    <span>${escapeHtml(proto === 'awg' ? 'AmneziaWG' : (proto === 'awg2' ? 'AmneziaWG 2.0' : (proto === 'awg_legacy' ? 'AWG Legacy' : (proto === 'xray' ? 'Xray' : (proto === 'wireguard' ? 'WireGuard' : proto.toUpperCase())))))}</span>
+                                    <span>${escapeHtml(c.protocol_name || (protocolLabels[sid] || {})[proto] || proto)}</span>
                                     ${dateStr ? `<span>📅 ${dateStr}</span>` : ''}
                                     <span class="traffic-badge traffic-limit" title="${_('max_speed')}">${maxSpeed > 0 ? '🐢 ' + maxSpeed + ' Mbps' : '⚡<span style="font-size:1.25em; line-height:0;">∞</span>'}</span>
                                     ${c.data_sent ? `<span class="traffic-badge traffic-down">↓ ${escapeHtml(c.data_sent)}</span>` : ''}

@@ -474,7 +474,7 @@
                                 <option value="awg" {% if settings.sync.remnawave_protocol=='awg' %}selected{% endif %}>
                                     AmneziaWG</option>
                                 <option value="awg2" {% if settings.sync.remnawave_protocol=='awg2' %}selected{% endif %}>
-                                    AmneziaWG 2.0</option>
+                                    AmneziaWG 2.0 / 3.x</option>
                                 <option value="awg_legacy" {% if settings.sync.remnawave_protocol=='awg_legacy' %}selected{% endif %}>
                                     AWG Legacy</option>
                                 <option value="xray" {% if settings.sync.remnawave_protocol=='xray' %}selected{% endif %}>
@@ -716,6 +716,7 @@
 
 <script>
     const serversData = {{ servers | tojson }};
+    const protocolLabels = {{ server_protocol_labels | tojson }};
     const botCurrentlyRunning = {{ 'true' if bot_running else 'false' }};
 
     function updateProtocolsForSync() {
@@ -732,7 +733,7 @@
             if (info.installed && key !== 'exit') {  // exit node has no client connections
                 const opt = document.createElement('option');
                 opt.value = key;
-                opt.textContent = key === 'awg' ? 'AmneziaWG' : (key === 'awg2' ? 'AmneziaWG 2.0' : (key === 'awg_legacy' ? 'AWG Legacy' : (key === 'xray' ? 'Xray' : key.toUpperCase())));
+                opt.textContent = (protocolLabels[serverIdx] || {})[key] || key;
                 if (key === "{{ settings.sync.remnawave_protocol }}") opt.selected = true;
                 protoSelect.appendChild(opt);
                 count++;

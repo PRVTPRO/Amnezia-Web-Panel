@@ -141,8 +141,12 @@
                 {% if proto_val.get('installed') %}
                 <span class="badge badge-success">
                     <span class="badge-dot"></span>
+                    {% if proto_key.split('__')[0] == 'awg2' %}
+                    {{ protocol_short_name(proto_key, proto_val.get('header_protection'), proto_val.get('protocol_version')) }}
+                    {% else %}
                     {{ 'AWG' if proto_key == 'awg' else ('AWG-Legacy' if proto_key == 'awg_legacy' else ('Xray' if
                     proto_key == 'xray' else ('Exit' if proto_key == 'exit' else proto_key | upper))) }}
+                    {% endif %}
                 </span>
                 {% endif %}
                 {% endfor %}

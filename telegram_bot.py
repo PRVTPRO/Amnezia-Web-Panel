@@ -4,6 +4,7 @@ Uses raw Telegram Bot API via httpx — no library version conflicts.
 Runs as a background asyncio task alongside the FastAPI app.
 """
 from peer_accounting import serialize_peer_lifecycle
+from protocol_names import server_protocol_names
 import asyncio
 import html
 import logging
@@ -390,7 +391,9 @@ def _format_bytes(value) -> str:
     return f"{value:.2f} {units[idx]}"
 
 
-def _protocol_display_name(protocol: str) -> str:
+def _protocol_display_name(protocol: str, server=None) -> str:
+    if server is not None:
+        return server_protocol_names(server).get(protocol, self_service_protocol_display_name(protocol))
     base = protocol_base(protocol)
     if base in SELF_SERVICE_PROTOCOLS:
         return self_service_protocol_display_name(protocol)
@@ -483,7 +486,7 @@ def _user_create_server_keyboard(eligible, lang: str = "en") -> dict:
     rows = []
     for sid, server, protos in eligible:
         name = server.get("name") or server.get("host") or f"Server {sid + 1}"
-        proto_text = ", ".join(self_service_protocol_display_name(p) for p in protos)
+        proto_text = ", ".join(self_service_protocol_display_name(p, server.get("protocols", {}).get(p)) for p in protos)
         rows.append([{"text": f"🖥 {name} ({proto_text})", "callback_data": _ref("user_create_server", {"sid": sid})}])
     rows.append([{"text": f"❌ {_tt(lang, 'btn_cancel')}", "callback_data": "user_create_cancel"}])
     return {"inline_keyboard": rows}
@@ -610,7 +613,7 @@ def _protocols_keyboard(server_id: int, server: dict, lang: str = "en") -> dict:
     protocols = server.get("protocols", {}) or {}
     for proto, info in protocols.items():
         installed = "✅" if info.get("installed", True) else ""
-        rows.append([{"text": f"{installed}{_protocol_status_icon(info)} {_protocol_display_name(proto)}", "callback_data": _ref("proto", {"sid": server_id, "proto": proto})}])
+        rows.append([{"text": f"{installed}{_protocol_status_icon(info)} {_protocol_display_name(proto, server)}", "callback_data": _ref("proto", {"sid": server_id, "proto": proto})}])
     if not rows:
         rows.append([{"text": _tt(lang, "btn_no_installed_protocols"), "callback_data": f"noop"}])
     rows.append([{"text": f"️ {_tt(lang, 'btn_servers')}", "callback_data": "adm:servers"}])
@@ -1037,7 +1040,7 @@ async def _admin_protocol_detail(api: TelegramAPI, chat_id: int, message_id: int
         await api.edit_message(chat_id, message_id, f"❌ {_tt(lang, 'protocol_not_found')}")
         return
     lines = [
-        f" <b>{_e(_protocol_display_name(proto))}</b>",
+        f" <b>{_e(_protocol_display_name(proto, server))}</b>",
         f"{_tt(lang, 'servers_title')}: <b>{_e(server.get('name') or server.get('host'))}</b>",
         f"{_tt(lang, 'protocol_status')}: <b>{_protocol_status_text(info, lang)}</b>",
     ]
@@ -1122,13 +1125,13 @@ async def _admin_clients(api: TelegramAPI, chat_id: int, message_id: int, server
             rows.append([{"text": f" {name}{assigned}{traffic}", "callback_data": _ref("client", {"sid": server_id, "proto": proto, "client_id": client_id, "name": name, "client": c})}])
         rows.append([{"text": f"➕ {_tt(lang, 'btn_create_connection')}", "callback_data": _ref("add_client", {"sid": server_id, "proto": proto})}])
         rows.append([{"text": f"⬅️ {_tt(lang, 'btn_protocol')}", "callback_data": _ref("proto", {"sid": server_id, "proto": proto})}])
-        await api.edit_message(chat_id, message_id, f"👥 <b>{_e(_protocol_display_name(proto))} {_tt(lang, 'connections_count')}</b> ({len(clients)})", reply_markup={"inline_keyboard": rows})
+        await api.edit_message(chat_id, message_id, f"👥 <b>{_e(_protocol_display_name(proto, server))} {_tt(lang, 'connections_count')}</b> ({len(clients)})", reply_markup={"inline_keyboard": rows})
     except Exception as e:
         logger.exception("Bot admin: load clients failed")
         await api.edit_message(chat_id, message_id, f"❌ {_tt(lang, 'error')}: {_e(e)}", reply_markup={"inline_keyboard": [[{"text": f"️ {_tt(lang, 'btn_protocol')}", "callback_data": _ref("proto", {"sid": server_id, "proto": proto})}]]})
 
 
-async def _admin_client_detail(api: TelegramAPI, chat_id: int, message_id: int, server_id: int, proto: str, client: dict, lang: str = "en"):
+async def _admin_client_detail(api: TelegramAPI, chat_id: int, message_id: int, server_id: int, proto: str, client: dict, lang: str = "en", server=None):
     client_id = client.get("clientId") or client.get("client_id") or client.get("id") or ""
     name = _client_display_name(client)
     user_data = client.get("userData") or {}
@@ -1140,7 +1143,7 @@ async def _admin_client_detail(api: TelegramAPI, chat_id: int, message_id: int, 
     enabled_text = f"{_tt(lang, 'enabled_label')} ✅" if (enabled is None or enabled) else f"{_tt(lang, 'disabled_label')} 🚫"
     text = (
         f"👤 <b>{_e(name)}</b>\n"
-        f"{_tt(lang, 'protocol_label')}: <b>{_e(_protocol_display_name(proto))}</b>\n"
+        f"{_tt(lang, 'protocol_label')}: <b>{_e(_protocol_display_name(proto, server))}</b>\n"
         f"Client ID: <code>{_e(client_id)}</code>\n"
         f"{_tt(lang, 'client_status')}: <b>{enabled_text}</b>"
     )
@@ -1150,6 +1153,8 @@ async def _admin_client_detail(api: TelegramAPI, chat_id: int, message_id: int, 
 
 
 async def _admin_add_client(api: TelegramAPI, chat_id: int, message_id: int, server_id: int, proto: str, panel_user: dict, load_data_fn: Callable, save_data_fn: Optional[Callable], generate_vpn_link_fn: Callable, lang: str = "en", tg_id: Optional[str] = None):
+    servers = load_data_fn().get("servers", [])
+    server = servers[server_id] if 0 <= server_id < len(servers) else {}
     if not save_data_fn:
         await api.edit_message(chat_id, message_id, f"❌ {_tt(lang, 'saving_not_available')}")
         return
@@ -1164,7 +1169,7 @@ async def _admin_add_client(api: TelegramAPI, chat_id: int, message_id: int, ser
         chat_id,
         message_id,
         f"➕ <b>{_tt(lang, 'create_new_connection')}</b>\n\n"
-        f"{_tt(lang, 'servers_title')}/{_tt(lang, 'protocol_label')}: <b>{_e(_protocol_display_name(proto))}</b>\n\n"
+        f"{_tt(lang, 'servers_title')}/{_tt(lang, 'protocol_label')}: <b>{_e(_protocol_display_name(proto, server))}</b>\n\n"
         f"{_tt(lang, 'send_connection_name')}",
         reply_markup={"inline_keyboard": [[{"text": f"❌ {_tt(lang, 'btn_cancel')}", "callback_data": _ref("clients", {"sid": server_id, "proto": proto})}]]},
     )
@@ -1450,7 +1455,7 @@ async def _user_create_server(api: TelegramAPI, chat_id: int, message_id: int, c
     server_name = server.get("name") or server.get("host") or f"Server {server_id + 1}"
     rows = []
     for proto in available_protos:
-        rows.append([{"text": _protocol_display_name(proto), "callback_data": _ref("user_create_protocol", {"sid": server_id, "proto": proto})}])
+        rows.append([{"text": _protocol_display_name(proto, server), "callback_data": _ref("user_create_protocol", {"sid": server_id, "proto": proto})}])
     rows.append([{"text": f" {_tt(lang, 'btn_back')}", "callback_data": "user_create"}])
 
     await api.edit_message(
@@ -1462,6 +1467,8 @@ async def _user_create_server(api: TelegramAPI, chat_id: int, message_id: int, c
 
 
 async def _user_create_protocol(api: TelegramAPI, chat_id: int, message_id: int, callback_id: str, tg_id: str, tg_username: Optional[str], server_id: int, proto: str, load_data_fn: Callable, lang: str = "en"):
+    servers = load_data_fn().get("servers", [])
+    server = servers[server_id] if 0 <= server_id < len(servers) else {}
     panel_user = _find_user(load_data_fn, tg_id, tg_username)
     if not panel_user:
         await api.answer_callback(callback_id, text="Access denied")
@@ -1481,7 +1488,7 @@ async def _user_create_protocol(api: TelegramAPI, chat_id: int, message_id: int,
         chat_id,
         message_id,
         f"➕ <b>{_tt(lang, 'btn_create_connection')}</b>\n\n"
-        f"{_tt(lang, 'protocol_label')}: <b>{_e(_protocol_display_name(proto))}</b>\n\n"
+        f"{_tt(lang, 'protocol_label')}: <b>{_e(_protocol_display_name(proto, server))}</b>\n\n"
         f"{_tt(lang, 'send_device_name')}\n"
         f"{_tt(lang, 'example_label')}: <code>Ivan iPhone</code>\n\n"
         f"{_tt(lang, 'cancel_instruction')}",
@@ -1816,7 +1823,9 @@ async def _dispatch(api: TelegramAPI, update: dict, load_data_fn: Callable, gene
             elif action == "clients":
                 await _admin_clients(api, chat_id, message_id, sid, proto, load_data_fn, lang)
             elif action == "client":
-                await _admin_client_detail(api, chat_id, message_id, sid, proto, payload.get("client", {}), lang)
+                servers = load_data_fn().get("servers", [])
+                server = servers[sid] if 0 <= sid < len(servers) else {}
+                await _admin_client_detail(api, chat_id, message_id, sid, proto, payload.get("client", {}), lang, server=server)
             elif action == "client_cfg":
                 if not _is_private_chat(chat):
                     await _reject_non_private(api, chat_id, lang, callback_id)
