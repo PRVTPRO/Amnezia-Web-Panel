@@ -64,14 +64,33 @@ COPY forward-records.conf /opt/unbound/etc/unbound/forward-records.conf
         except Exception as e:
             logger.exception("Error installing DNS")
             return {"status": "error", "message": str(e)}
+        finally:
+            self._invalidate_snapshot()
+
+    def _invalidate_snapshot(self):
+        invalidate = getattr(self.ssh, 'docker_ps_invalidate', None)
+        if invalidate:
+            invalidate()
 
     def get_server_status(self, protocol_type='dns'):
         """Check if AmneziaDNS container is running."""
         try:
-            out, _, _ = self.ssh.run_sudo_command("docker ps --filter name=^amnezia-dns$ --format '{{.Status}}'")
+            snapshot = getattr(self.ssh, 'docker_container_state', None)
+            try:
+                state = snapshot('amnezia-dns') if snapshot else None
+            except Exception:
+                state = None
+            if state is not None:
+                return {
+                    'container_exists': state[0], 'container_running': state[1],
+                    'port': '53', 'protocol': protocol_type,
+                }
+            out, _, running_code = self.ssh.run_sudo_command("docker ps --filter name=^amnezia-dns$ --format '{{.Status}}'")
             is_running = 'Up' in out
             
-            out_exists, _, _ = self.ssh.run_sudo_command("docker ps -a --filter name=^amnezia-dns$ --format '{{.Names}}'")
+            out_exists, _, exists_code = self.ssh.run_sudo_command("docker ps -a --filter name=^amnezia-dns$ --format '{{.Names}}'")
+            if running_code != 0 or exists_code != 0:
+                return {'error': 'Unable to inspect DNS container', 'protocol': protocol_type}
             container_exists = 'amnezia-dns' in out_exists.strip().split('\n')
             
             return {
@@ -85,6 +104,9 @@ COPY forward-records.conf /opt/unbound/etc/unbound/forward-records.conf
 
     def remove_container(self, protocol_type='dns'):
         """Remove AmneziaDNS container."""
-        self.ssh.run_sudo_command("docker stop amnezia-dns || true")
-        self.ssh.run_sudo_command("docker rm amnezia-dns || true")
-        self.ssh.run_sudo_command("rm -rf /opt/amnezia/dns")
+        try:
+            self.ssh.run_sudo_command("docker stop amnezia-dns || true")
+            self.ssh.run_sudo_command("docker rm amnezia-dns || true")
+            self.ssh.run_sudo_command("rm -rf /opt/amnezia/dns")
+        finally:
+            self._invalidate_snapshot()
