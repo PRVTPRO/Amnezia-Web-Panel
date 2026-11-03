@@ -27,6 +27,15 @@ class ScriptVerificationTests(unittest.TestCase):
         self.assertIn('if ! /usr/local/sbin/rkn-extra-block on; then', INSTALL)
         self.assertIn('exit 1', INSTALL)
 
+    def test_installer_reports_broken_dpkg_instead_of_apport_noise(self):
+        # A half-configured package must fail with an actionable hint, and the
+        # real apt error must not be swallowed.
+        self.assertIn('export DEBIAN_FRONTEND=noninteractive', INSTALL)
+        self.assertIn('dpkg --audit', INSTALL)
+        self.assertIn("dpkg --configure -a", INSTALL)
+        self.assertIn('util-linux >"$APT_LOG"', INSTALL)
+        self.assertIn('tail -n 30 "$APT_LOG"', INSTALL)
+
     def test_boot_unit_can_be_enabled(self):
         # Without [Install] the service is not started after reboot, and the
         # ipset/iptables state (not persistent by itself) stays empty while
@@ -46,6 +55,16 @@ class UiHealthTests(unittest.TestCase):
         self.assertIn('d.healthy !== false', SERVER_PAGE)
         self.assertIn('rkn_block_not_ready', SERVER_PAGE)
         self.assertIn('rkn_block_sets_empty', SERVER_PAGE)
+
+    def test_install_progress_does_not_invent_stages(self):
+        # The install is a single SSH call; per-stage messages were fabricated.
+        self.assertNotIn('rknblock_step_download', SERVER_PAGE)
+        self.assertIn('rknblock_install_wait', SERVER_PAGE)
+        import json
+        for lang in ('en', 'ru', 'fr', 'fa', 'zh'):
+            data = json.loads((ROOT / 'translations' / f'{lang}.json').read_text(encoding='utf-8'))
+            self.assertIn('rknblock_install_wait', data, lang)
+            self.assertNotIn('rknblock_step_download', data, lang)
 
     def test_all_locales_have_not_ready_key(self):
         import json

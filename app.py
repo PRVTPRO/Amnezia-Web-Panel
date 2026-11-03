@@ -3949,7 +3949,8 @@ async def api_delete_server(request: Request, server_id: int, server_uid: Option
     tombstones, but only after each peer is verified stopped or absent on the
     live server. Rows are never dropped without that explicit evidence.
     """
-    if not _check_admin(request):
+    authorized = _check_admin(request)
+    if not authorized:
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     selected, error = _server_identity(server_id, server_uid)
     if error is not None:
@@ -4018,10 +4019,7 @@ async def api_delete_server(request: Request, server_id: int, server_uid: Option
                     if current_blocked:
                         before = pathlib_read_data_bytes()
                         operation_id = uuid.uuid4().hex
-                        try:
-                            actor = str(get_current_user(request)['id'])
-                        except Exception:
-                            actor = 'admin'
+                        actor = _actor_id(request, authorized)
                         for conn in current_blocked:
                             finalize_connection_record(
                                 data, conn, current, archive_states.get(conn.get('id')),
@@ -4343,7 +4341,12 @@ async def _rkn_ssh_run(server, cmd, timeout):
     if _rkn_server_index(load_data(), None, server.get('uid'), server) is None:
         return JSONResponse({'error': 'Server identity changed; refresh the inventory'}, status_code=409)
     if code != 0:
-        return JSONResponse({'error': f'command failed: {(err or out or "").strip()[-500:]}'},
+        detail = (err or out or '').strip()
+        hint = ''
+        if ('dpkg is in an inconsistent state' in detail
+                or 'dpkg returned an error code' in detail):
+            hint = " Run 'sudo dpkg --configure -a' on the server, then retry."
+        return JSONResponse({'error': f'command failed: {detail[-1500:]}{hint}'},
                             status_code=500)
     return None
 
