@@ -229,6 +229,21 @@ class LinkTests(unittest.TestCase):
         self.assertEqual(result['warnings'], [])
         self.assertFalse(result['ipv6_refused'])
 
+    def test_relink_keeps_smart_route_preferences(self):
+        h = Harness()
+        h.data['servers'][0]['protocols']['awg2']['exit_link'] = {
+            'exit_uid': 'exit-a',
+            'dns_via_exit': False,
+            'smart_route': True,
+            'smart_route_lost': False,
+            'smart_route_prev_dns': '9.9.9.9',
+        }
+        run(h.service.link(0, 'awg2', 'exit-a'))
+        saved = h.record()['exit_link']
+        self.assertTrue(saved['smart_route'])
+        self.assertFalse(saved['smart_route_lost'])
+        self.assertEqual(saved['smart_route_prev_dns'], '9.9.9.9')
+
     def test_validation_errors(self):
         h = Harness()
         with self.assertRaises(ExitLinkError) as ctx:
