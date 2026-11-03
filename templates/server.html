@@ -1103,6 +1103,10 @@
                 style="flex:1">
                 {{ _('rknblock_options') }}
             </button>
+            <button class="btn btn-primary btn-sm" onclick="repairRknBoot()" id="rknblock-repair-btn"
+                style="flex:1; display:none;" title="{{ _('rknblock_boot_warning') }}">
+                {{ _('rknblock_repair_boot') }}
+            </button>
             <button class="btn btn-danger btn-sm" onclick="uninstallRknBlock()" id="rknblock-uninstall-btn"
                 style="flex:1">
                 {{ _('rknblock_delete') }}
@@ -5646,6 +5650,7 @@
         const installActions = document.getElementById('rknblock-actions');
         const installedActions = document.getElementById('rknblock-installed-actions');
         const toggleBtn = document.getElementById('rknblock-toggle-btn');
+        const repairBtn = document.getElementById('rknblock-repair-btn');
         const installed = !!(d && d.installed);
         const unknown = !d || d.available === false;
         installActions.style.display = installed || unknown ? 'none' : '';
@@ -5683,7 +5688,13 @@
                 onclick="openRknScansModal()"
                 title="${escapeHtml(_('rkn_block_recent'))}">⚠ ${escapeHtml(_('rkn_scan_alert'))} (${d.last_24h}) · ${escapeHtml(_('rkn_scans_more'))}</button>`;
         }
+        // Boot-restore is separate from "is it on right now": a legacy unit
+        // passes every live check and still loses all rules at reboot.
+        if (d.boot_enabled === false && d.available !== false) {
+            badge += ` <span class="badge badge-danger" title="${escapeHtml(_('rknblock_boot_warning'))}">⚠ ${escapeHtml(_('rknblock_boot_warning_short'))}</span>`;
+        }
         statusEl.innerHTML = badge;
+        if (repairBtn) repairBtn.style.display = d.repair_available ? '' : 'none';
         toggleBtn.textContent = liveOn ? _('rknblock_stop') : _('rknblock_start');
         // The button used to be hardwired to `false`, so "Start" sent "disable"
         // and the contour could never be turned back on.
@@ -5699,7 +5710,8 @@
             <div class="text-sm">${_('rkn_block_agent')}: ${escapeHtml(d.agent_state)} •
                 ${_('rkn_block_lists')}: ${_('rkn_block_in_short')} ${inN}, ${_('rkn_block_out_short')} ${outN}` +
                 (setsEmpty ? ` ⚠️ ${_('rkn_block_sets_empty')}` : '') +
-                (flagBits.length ? ` • ⚠️ ${_('rknblock_disabled_short')}: ${escapeHtml(flagBits.join(', '))}` : '') + `</div>`;
+                (flagBits.length ? ` • ⚠️ ${_('rknblock_disabled_short')}: ${escapeHtml(flagBits.join(', '))}` : '') +
+                (d.boot_enabled === false && d.available !== false ? `<div class="text-sm" style="color:var(--warning,#d29922)">⚠ ${escapeHtml(_('rknblock_boot_warning'))}</div>` : '') + `</div>`;
         infoEl.classList.remove('hidden');
         if (location.hash === '#proto-rknblock') {
             setTimeout(() => card.scrollIntoView({ behavior: 'smooth', block: 'center' }), 300);
@@ -5865,6 +5877,27 @@
         } finally {
             rknBlockBusy = false;
             btn.disabled = false;
+        }
+    }
+
+    async function repairRknBoot() {
+        if (rknBlockBusy) return;
+        rknBlockBusy = true;
+        ++rknBlockLoadId;
+        const btn = document.getElementById('rknblock-repair-btn');
+        if (btn) { btn.disabled = true; btn.textContent = _('rknblock_repairing'); }
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/rknblock/repair?server_uid=${encodeURIComponent(document.body.dataset.serverUid || '')}`, 'POST', {});
+            rknBlockBusy = false;
+            showToast(_('rknblock_boot_repaired'), 'success');
+            await loadRknBlock();
+        } catch (err) {
+            rknBlockBusy = false;
+            showToast(_('rknblock_boot_repair_failed') + ': ' + (err.message || err), 'error');
+            await loadRknBlock();
+        } finally {
+            rknBlockBusy = false;
+            if (btn) { btn.disabled = false; btn.textContent = _('rknblock_repair_boot'); }
         }
     }
 

@@ -54,6 +54,14 @@ EOF
 systemctl daemon-reload
 systemctl enable --now rkn-extra-block.timer
 systemctl enable rkn-extra-block.service
+# A unit without [Install] makes `systemctl enable` a no-op that reports
+# "static": the timer is fine, but nothing restores the rules after a reboot.
+ENABLED_STATE=$(systemctl is-enabled rkn-extra-block.service 2>/dev/null || true)
+if [ "$ENABLED_STATE" != "enabled" ]; then
+    echo "ERROR: rkn-extra-block.service is not enabled after install (state: ${ENABLED_STATE:-unknown})." >&2
+    echo "       Boot restore would not run; check /etc/systemd/system/rkn-extra-block.service for [Install]." >&2
+    exit 1
+fi
 systemctl enable --now rkn-agent.timer
 
 # Первый запуск: подгрузить списки (включая nets.map для агента) и включить.
