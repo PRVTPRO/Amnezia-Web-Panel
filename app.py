@@ -2931,6 +2931,9 @@ async def startup():
     asyncio.create_task(restore_public_port_forwards())
     # ... and keep re-applying: a VPS can reboot while the panel keeps running.
     asyncio.create_task(restore_public_port_forwards_loop())
+    # One-shot: old RKN installs have no [Install] in the unit and lose their
+    # rules at reboot. Runs in the background, never blocks startup.
+    asyncio.create_task(rkn_boot_restore_migration())
 
     # Start Telegram bot if enabled
     tg_cfg = data.get('settings', {}).get('telegram', {})
@@ -4213,6 +4216,47 @@ RKN_INSTALL_CMD = (
 
 RKN_SCRIPT_URL = f'{RKN_RAW_BASE}/rkn-extra-block.sh'
 
+# Repair ships the files bundled with this panel checkout, not a GitHub fetch:
+# a host whose boot restore is broken may also be unable to reach the internet.
+RKN_BLOCK_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             'scripts', 'rknblock')
+RKN_REPAIR_FILES = (
+    ('rkn-extra-block.sh', '/usr/local/sbin/rkn-extra-block', '0755'),
+    ('rkn-extra-block.service', '/etc/systemd/system/rkn-extra-block.service', '0644'),
+    ('rkn-extra-block.timer', '/etc/systemd/system/rkn-extra-block.timer', '0644'),
+)
+
+
+def _rkn_repair_script():
+    """Remote script: back up, install bundled units/script, enable, restore.
+
+    Files are embedded as base64 so the same payload works over both root and
+    sudo SSH (run_sudo_script) without extra SFTP privileges for /etc.
+    """
+    payload = []
+    for name, dest, mode in RKN_REPAIR_FILES:
+        with open(os.path.join(RKN_BLOCK_DIR, name), 'r', encoding='utf-8') as fh:
+            content = fh.read().replace('\r\n', '\n')
+        encoded = base64.b64encode(content.encode('utf-8')).decode('ascii')
+        payload.append(f"printf '%s' '{encoded}' | base64 -d > '{dest}.amnezia-tmp'")
+        payload.append(f"chmod {mode} '{dest}.amnezia-tmp'")
+        payload.append(f"mv -f '{dest}.amnezia-tmp' '{dest}'")
+    install = '\n'.join(payload)
+    return f"""set -eu
+ts=$(date -u +%Y%m%d-%H%M%S)
+bak="/root/backups-rkn-repair-$ts"
+mkdir -p "$bak"
+for f in /usr/local/sbin/rkn-extra-block /etc/systemd/system/rkn-extra-block.service /etc/systemd/system/rkn-extra-block.timer; do
+    if [ -f "$f" ]; then cp -a "$f" "$bak"/; fi
+done
+{install}
+systemctl daemon-reload
+systemctl enable rkn-extra-block.timer
+systemctl enable --now rkn-extra-block.timer
+systemctl enable rkn-extra-block.service
+/usr/local/sbin/rkn-extra-block repair
+"""
+
 
 def _rkn_run_cmd(subcommand):
     """Fetch the current script to /tmp, refresh the host copy, run a subcommand.
@@ -4411,6 +4455,79 @@ async def api_rknblock_update(request: Request, server_id: int, server_uid: str 
     return {'status': 'success', 'updated': True}
 
 
+def _rkn_status_after_repair(out, installed=True):
+    """Parse a post-repair probe and derive the boot fields the UI needs."""
+    parsed = _parse_rkn_scan_output(out, installed)
+    parsed['boot_enabled'] = parsed.get('boot_restore') == 'enabled'
+    parsed['repair_available'] = bool(
+        installed and (not parsed['boot_enabled'] or parsed.get('unit') == 'legacy'))
+    return parsed
+
+
+@app.post('/api/servers/{server_id}/rknblock/repair', tags=["Servers"])
+@serialize_peer_lifecycle
+async def api_rknblock_repair(request: Request, server_id: int, server_uid: str | None = None):
+    """Restore boot restore on a host: bundled units/script, enable, rules.
+
+    Idempotent. Only touches rkn-extra-block files and systemd state; VPN
+    containers, docker and data.json secrets are left alone.
+    """
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    data = load_data()
+    server_id = _rkn_server_index(data, server_id, server_uid)
+    if server_id is None:
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    server = dict(data['servers'][server_id])
+    if not _rkn_record(server).get('installed'):
+        return JSONResponse({'error': 'App is not installed'}, status_code=409)
+    server_uid = server.get('uid')
+
+    try:
+        script = _rkn_repair_script()
+    except OSError as e:
+        logger.error(f"RKN repair payload unavailable: {e}")
+        return JSONResponse({'error': f'repair payload unavailable: {e}'},
+                            status_code=500)
+    err = await _rkn_ssh_run(server, script, 300)
+    now = datetime.now(timezone.utc).isoformat()
+    if err is not None:
+        detail = ''
+        try:
+            detail = json.loads(err.body).get('error', '')[:500]
+        except Exception:
+            pass
+
+        def mark_fail(rec):
+            rec['last_repair_at'] = now
+            rec['last_repair_error'] = detail or 'repair failed'
+
+        await _rkn_store_record(server_id, server_uid, mark_fail, server)
+        RKN_FLAG_CACHE.pop(server_id, None)
+        return err
+
+    out = ''
+    try:
+        out = await _fetch_rkn_scan_output(server)
+    except Exception as e:
+        logger.warning(f"RKN repair status probe failed on {server.get('host')}: {e}")
+    parsed = _rkn_status_after_repair(out, True)
+
+    def mark(rec):
+        rec['boot_restore'] = parsed.get('boot_restore') or 'unknown'
+        rec['last_repair_at'] = now
+        rec['last_repair_error'] = None
+
+    rec = await _rkn_store_record(server_id, server_uid, mark, server)
+    if rec is None:
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    RKN_FLAG_CACHE.pop(server_id, None)
+    parsed['status'] = 'success'
+    parsed['last_repair_at'] = now
+    parsed['last_repair_error'] = None
+    return parsed
+
+
 RKN_OPTION_FLAGS = ('block_in', 'block_out', 'log_in', 'log_out')
 
 
@@ -4453,7 +4570,7 @@ async def api_rknblock_options(request: Request, server_id: int, req: RknBlockOp
     return {'status': 'success', 'flags': values}
 
 
-RKN_SCAN_SSH_CMD = ("rkn-extra-block status 2>/dev/null | head -10; "
+RKN_SCAN_SSH_CMD = ("rkn-extra-block status 2>/dev/null | head -30; "
                       "echo '===LOG==='; tail -n 2000 /var/log/rkn-scans.json 2>/dev/null")
 
 
@@ -4491,6 +4608,17 @@ def _parse_rkn_scan_output(out, flag_enabled):
     m = re.search(r'health:\s*(\w+)', status_part)
     if m:
         health = m.group(1).lower()
+    # boot_restore: enabled|disabled|unknown — will systemd run `boot` after a
+    # reboot. unit: ok when the service file carries [Install], legacy for the
+    # 2026-10 installs whose unit had none (is-enabled=static -> disabled).
+    boot_restore = None
+    m = re.search(r'boot_restore:\s*(\w+)', status_part)
+    if m:
+        boot_restore = m.group(1).lower()
+    unit = None
+    m = re.search(r'unit:\s*(\w+)', status_part)
+    if m:
+        unit = m.group(1).lower()
     events = []
     for line in (log_part or '').splitlines():
         line = line.strip()
@@ -4537,6 +4665,8 @@ def _parse_rkn_scan_output(out, flag_enabled):
         'flag_enabled': bool(flag_enabled),
         'agent_state': agent_state,
         'health': health,
+        'boot_restore': boot_restore,
+        'unit': unit,
         'sets_ok': sets_ok,
         'problems': problems,
         'sets': sets,
@@ -4609,6 +4739,13 @@ async def api_rkn_scans(request: Request, server_id: int, server_uid: str | None
                              and parsed.get('sets_ok')
                              and parsed.get('health') != 'failed')
     parsed['last_error'] = record.get('last_error')
+    # Older scripts do not print boot_restore/unit at all: absence of the lines
+    # is itself a signal to offer the repair (the host predates the fix).
+    boot_enabled = parsed.get('boot_restore') == 'enabled'
+    parsed['boot_enabled'] = bool(installed and boot_enabled)
+    parsed['repair_available'] = bool(
+        installed and available and parsed.get('agent_state') in ('on', 'off')
+        and (not boot_enabled or parsed.get('unit') == 'legacy'))
     return parsed
 
 
@@ -4676,6 +4813,127 @@ async def api_rkn_scan_flags(request: Request):
     results = await asyncio.gather(
         *[collect(i, s) for i, s in enumerate(data['servers'])])
     return {str(i): s for i, s in results if s}
+
+
+# --- one-shot boot-restore migration ----------------------------------------
+# Hosts installed before the unit gained [Install] report is-enabled=static and
+# never run `boot`, so their iptables rules vanish at reboot. New installs are
+# already correct; this runs once after a panel upgrade and repairs the old
+# ones without apt, VPN reinstall or manual steps.
+RKN_AUTO_REPAIR = os.environ.get('RKN_AUTO_REPAIR', '1').lower() not in (
+    '0', 'false', 'no', 'off')
+RKN_AUTO_REPAIR_DELAY = 15  # let the panel start serving first; tests patch to 0
+RKN_AUTO_REPAIR_TIMEOUT = 300
+RKN_MIGRATION_KEY = 'rkn_boot_restore_v1'
+
+
+def _rkn_migration_record(data):
+    return (data.setdefault('panel_migrations', {})
+            .setdefault(RKN_MIGRATION_KEY, {}))
+
+
+async def _rkn_note_boot_state(uid, boot_restore, error=None):
+    """Persist only boot/repair fields of one server's rknblock record."""
+    async with DATA_LOCK:
+        data = load_data()
+        idx = _rkn_server_index(data, None, uid)
+        if idx is None:
+            return False
+        rec = dict(data['servers'][idx].get('rknblock') or {})
+        if boot_restore is not None:
+            rec['boot_restore'] = boot_restore
+        if error is not None:
+            rec['last_repair_error'] = error
+        elif error is None and boot_restore == 'enabled':
+            rec['last_repair_error'] = None
+        data['servers'][idx]['rknblock'] = rec
+        save_data(data)
+        return True
+
+
+async def rkn_boot_restore_migration():
+    """Repair legacy RKN installs once, after the panel has started.
+
+    Never raises: one unreachable host must not affect the others or the
+    panel. A failed host leaves the migration incomplete, so the next panel
+    restart retries it; fixed hosts are skipped by the status probe.
+    """
+    if not RKN_AUTO_REPAIR:
+        logger.info("RKN boot-restore migration disabled by RKN_AUTO_REPAIR")
+        return
+    await asyncio.sleep(RKN_AUTO_REPAIR_DELAY)
+    try:
+        data = load_data()
+    except Exception as e:
+        logger.warning(f"RKN boot-restore migration: cannot read data: {e}")
+        return
+    if _rkn_migration_record(data).get('done_at'):
+        return
+    targets = [srv for srv in data.get('servers', [])
+               if (srv.get('rknblock') or {}).get('installed')]
+    if not targets:
+        await _rkn_migration_finish(0)
+        return
+
+    pending = 0
+    for srv in targets:
+        uid = srv.get('uid')
+        label = srv.get('name') or srv.get('host') or uid
+        try:
+            out = await _fetch_rkn_scan_output(srv)
+            parsed = _parse_rkn_scan_output(out, True)
+            boot = parsed.get('boot_restore')
+            unit = parsed.get('unit')
+            if boot is None or unit is None:
+                # Old script (no status fields) or an empty probe: repair is
+                # still safe and installs the current script first.
+                if not out.strip():
+                    raise RuntimeError('empty status probe')
+            if boot == 'enabled' and unit == 'ok':
+                await _rkn_note_boot_state(uid, 'enabled')
+                continue
+
+            err = await _rkn_ssh_run(srv, _rkn_repair_script(), RKN_AUTO_REPAIR_TIMEOUT)
+            if err is not None:
+                detail = 'repair failed'
+                try:
+                    detail = json.loads(err.body).get('error', detail)[:500]
+                except Exception:
+                    pass
+                await _rkn_note_boot_state(uid, boot or 'unknown', detail)
+                logger.warning(f"RKN boot-restore repair failed on {label}: {detail}")
+                pending += 1
+                continue
+
+            out = await _fetch_rkn_scan_output(srv)
+            parsed = _parse_rkn_scan_output(out, True)
+            boot = parsed.get('boot_restore') or 'unknown'
+            await _rkn_note_boot_state(uid, boot)
+            if boot != 'enabled':
+                pending += 1
+                logger.warning(f"RKN boot-restore still not enabled on {label}")
+            else:
+                logger.info(f"RKN boot-restore repaired on {label}")
+        except Exception as e:
+            pending += 1
+            try:
+                await _rkn_note_boot_state(uid, None, str(e)[:500])
+            except Exception:
+                pass
+            logger.warning(f"RKN boot-restore migration failed on {label}: {e}")
+
+    await _rkn_migration_finish(pending)
+
+
+async def _rkn_migration_finish(pending):
+    async with DATA_LOCK:
+        data = load_data()
+        rec = _rkn_migration_record(data)
+        rec['last_attempt_at'] = datetime.now(timezone.utc).isoformat()
+        rec['pending'] = pending
+        if pending == 0:
+            rec['done_at'] = rec['last_attempt_at']
+        save_data(data)
 
 
 @app.post('/api/servers/{server_id}/check', tags=["Servers"])

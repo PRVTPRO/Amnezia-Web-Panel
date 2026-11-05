@@ -5,12 +5,16 @@
 #   OUT (RKN_EXTRA_OUT): сети VK/Max/OK — ИСХОДЯЩИЕ (OUTPUT + FORWARD, REJECT tcp-reset)
 # Списки обновляются ежедневно (systemd timer), заливка в ipset атомарная (temp -> swap).
 #
-# Команды: on | off | status | update | boot | set флаг=on|off... | log on|off|status | scan [файлы...]
+# Команды: on | off | status | update | boot | repair | set флаг=on|off... | log on|off|status | scan [файлы...]
 #   on      — включить (подгрузить списки если пустые, повесить прыжки в цепочки)
 #   off     — выключить (снять прыжки; наборы ipset сохраняются для мгновенного on)
-#   status  — состояние, размеры наборов, флаги, дата обновления баз, наличие правил
+#   status  — состояние, размеры наборов, флаги, дата обновления баз, наличие правил,
+#             автозапуск (boot_restore) и формат юнита (unit)
 #   update  — скачать свежие списки и атомарно перезалить наборы (пишет last_update)
 #   boot    — вызывается systemd при старте (update + восстановить прыжки если state=on)
+#   repair  — идемпотентно восстановить юниты с [Install], enable и живые правила
+#             (нужен для хостов, установленных до появления [Install]: после
+#             ребута boot-restore у них не запускался)
 #   set     — раздельные флаги block_in|block_out|log_in|log_out = on|off (по умолчанию on)
 #   log on  — журналировать срабатывания (journalctl -k -g RKN_EXTRA), по умолчанию ВЫКЛ
 #   scan    — ретроспектива: найти IP из списков в логах (по умолчанию nginx/auth)
@@ -23,6 +27,8 @@ LOG_STATE_FILE="$CONF_DIR/log_state"
 LOG_FILE="/var/log/rkn-extra-block.log"
 LOCK_FILE="/run/rkn-extra-block.lock"
 CONFIG_FILE="$CONF_DIR/config"
+UNIT_SERVICE="/etc/systemd/system/rkn-extra-block.service"
+UNIT_TIMER="/etc/systemd/system/rkn-extra-block.timer"
 
 IN_CHAIN="RKN_EXTRA_IN"
 OUT_CHAIN="RKN_EXTRA_OUT"
@@ -175,6 +181,56 @@ build_map() {
     return 0
 }
 
+# life-of-a-chain helpers ------------------------------------------------------
+# iptables-nft refuses to touch a chain that belongs to the legacy backend and
+# says so with "incompatible". Merely ignoring that error left the chain empty
+# (the lists were intact, the rules were not). Recreate such a chain through
+# nft itself and retry once; every other failure is reported and propagated.
+_chain_recreate() { # $1=iptables|ip6tables $2=ip|ip6 $3=chain
+    local bin="$1" fam="$2" ch="$3"
+    log "CHAIN-RECREATE $fam/$ch: incompatible backend, recreating via nft"
+    nft delete chain "$fam" filter "$ch" 2>>"$LOG_FILE" || true
+    "$bin" -N "$ch" 2>>"$LOG_FILE" || true
+}
+
+chain_ready() { # $1=bin $2=family $3=chain ; flush/create and report failure
+    local bin="$1" fam="$2" ch="$3" err
+    "$bin" -N "$ch" 2>/dev/null || true
+    if err=$("$bin" -F "$ch" 2>&1); then
+        return 0
+    fi
+    case "$err" in
+        *incompatible*)
+            _chain_recreate "$bin" "$fam" "$ch"
+            if "$bin" -F "$ch" 2>>"$LOG_FILE"; then
+                log "CHAIN-OK $fam/$ch: recreated"
+                return 0
+            fi
+            ;;
+    esac
+    log "CHAIN-FAIL $fam/$ch: $err"
+    return 1
+}
+
+add_rule() { # $1=bin $2=family $3=chain $4=description, rest = iptables args
+    local bin="$1" fam="$2" ch="$3" desc="$4"; shift 4
+    local err
+    if err=$("$bin" -A "$ch" "$@" 2>&1); then
+        return 0
+    fi
+    case "$err" in
+        *incompatible*)
+            _chain_recreate "$bin" "$fam" "$ch"
+            if err=$("$bin" -A "$ch" "$@" 2>&1); then
+                log "RULE-RETRY-OK $desc"
+                return 0
+            fi
+            ;;
+    esac
+    log "RULE-FAIL $desc: $err"
+    return 1
+}
+
 apply_jumps() {
     local rc=0
     if ! iptables -C INPUT -j "$IN_CHAIN" 2>/dev/null; then
@@ -268,18 +324,32 @@ cmd_verify() {
 }
 
 remove_jumps() {
-    while iptables -C INPUT -j "$IN_CHAIN" 2>/dev/null; do iptables -D INPUT -j "$IN_CHAIN"; done
-    while iptables -C OUTPUT -j "$OUT_CHAIN" 2>/dev/null; do iptables -D OUTPUT -j "$OUT_CHAIN"; done
-    while iptables -C FORWARD -j "$OUT_CHAIN" 2>/dev/null; do iptables -D FORWARD -j "$OUT_CHAIN"; done
+    local rc=0
+    while iptables -C INPUT -j "$IN_CHAIN" 2>/dev/null; do
+        iptables -D INPUT -j "$IN_CHAIN" || { log "JUMP-DEL-FAIL INPUT -> $IN_CHAIN"; rc=1; break; }
+    done
+    while iptables -C OUTPUT -j "$OUT_CHAIN" 2>/dev/null; do
+        iptables -D OUTPUT -j "$OUT_CHAIN" || { log "JUMP-DEL-FAIL OUTPUT -> $OUT_CHAIN"; rc=1; break; }
+    done
+    while iptables -C FORWARD -j "$OUT_CHAIN" 2>/dev/null; do
+        iptables -D FORWARD -j "$OUT_CHAIN" || { log "JUMP-DEL-FAIL FORWARD -> $OUT_CHAIN"; rc=1; break; }
+    done
     if have6; then
-        while ip6tables -C INPUT -j "$IN_CHAIN" 2>/dev/null; do ip6tables -D INPUT -j "$IN_CHAIN"; done
-        while ip6tables -C OUTPUT -j "$OUT_CHAIN" 2>/dev/null; do ip6tables -D OUTPUT -j "$OUT_CHAIN"; done
-        while ip6tables -C FORWARD -j "$OUT_CHAIN" 2>/dev/null; do ip6tables -D FORWARD -j "$OUT_CHAIN"; done
+        while ip6tables -C INPUT -j "$IN_CHAIN" 2>/dev/null; do
+            ip6tables -D INPUT -j "$IN_CHAIN" || { log "JUMP-DEL-FAIL v6 INPUT -> $IN_CHAIN"; rc=1; break; }
+        done
+        while ip6tables -C OUTPUT -j "$OUT_CHAIN" 2>/dev/null; do
+            ip6tables -D OUTPUT -j "$OUT_CHAIN" || { log "JUMP-DEL-FAIL v6 OUTPUT -> $OUT_CHAIN"; rc=1; break; }
+        done
+        while ip6tables -C FORWARD -j "$OUT_CHAIN" 2>/dev/null; do
+            ip6tables -D FORWARD -j "$OUT_CHAIN" || { log "JUMP-DEL-FAIL v6 FORWARD -> $OUT_CHAIN"; rc=1; break; }
+        done
     fi
+    return "$rc"
 }
 
 build_chains() {
-    local log_in="no" log_out="no" blk_in="no" blk_out="no"
+    local log_in="no" log_out="no" blk_in="no" blk_out="no" rc=0
     log_flag "log_in" && log_in="yes"
     log_flag "log_out" && log_out="yes"
     block_flag "block_in" && blk_in="yes"
@@ -287,59 +357,80 @@ build_chains() {
 
     # Правила ссылаются на наборы ipset: если набора нет (контур не установлен
     # или набор ещё не создан), цепочка остаётся пустой — без мусора в stderr.
-    iptables -N "$IN_CHAIN" 2>/dev/null || true
-    iptables -F "$IN_CHAIN"
-    if ipset list "$IN_SET4" >/dev/null 2>&1; then
-        if [ "$log_in" = "yes" ]; then
-            iptables -A "$IN_CHAIN" -m set --match-set "$IN_SET4" src -m conntrack --ctstate NEW \
-                -m limit --limit 10/min -j LOG --log-prefix "RKN_EXTRA_IN " --log-level 4
+    if chain_ready iptables ip "$IN_CHAIN"; then
+        if ipset list "$IN_SET4" >/dev/null 2>&1; then
+            if [ "$log_in" = "yes" ]; then
+                add_rule iptables ip "$IN_CHAIN" "IN log v4" -m set --match-set "$IN_SET4" src \
+                    -m conntrack --ctstate NEW -m limit --limit 10/min \
+                    -j LOG --log-prefix "RKN_EXTRA_IN " --log-level 4 || rc=1
+            fi
+            # Входящие от РКН-подсетей: тишина (DROP), только новые соединения
+            if [ "$blk_in" = "yes" ]; then
+                add_rule iptables ip "$IN_CHAIN" "IN drop v4" -m set --match-set "$IN_SET4" src \
+                    -m conntrack --ctstate NEW -j DROP || rc=1
+            fi
+        else
+            log "CHAIN-WARN $IN_CHAIN: набор $IN_SET4 отсутствует, цепочка пуста"
         fi
-        # Входящие от РКН-подсетей: тишина (DROP), только новые соединения
-        if [ "$blk_in" = "yes" ]; then
-            iptables -A "$IN_CHAIN" -m set --match-set "$IN_SET4" src -m conntrack --ctstate NEW -j DROP
-        fi
+    else
+        rc=1
     fi
 
-    iptables -N "$OUT_CHAIN" 2>/dev/null || true
-    iptables -F "$OUT_CHAIN"
-    if ipset list "$OUT_SET4" >/dev/null 2>&1; then
-        if [ "$log_out" = "yes" ]; then
-            iptables -A "$OUT_CHAIN" -p tcp -m set --match-set "$OUT_SET4" dst \
-                -m limit --limit 10/min -j LOG --log-prefix "RKN_EXTRA_OUT " --log-level 4
+    if chain_ready iptables ip "$OUT_CHAIN"; then
+        if ipset list "$OUT_SET4" >/dev/null 2>&1; then
+            if [ "$log_out" = "yes" ]; then
+                add_rule iptables ip "$OUT_CHAIN" "OUT log v4" -p tcp -m set --match-set "$OUT_SET4" dst \
+                    -m limit --limit 10/min -j LOG --log-prefix "RKN_EXTRA_OUT " --log-level 4 || rc=1
+            fi
+            # Исходящие к VK/Max/OK: штатный обрыв как в amnezia-blocker (REJECT)
+            if [ "$blk_out" = "yes" ]; then
+                add_rule iptables ip "$OUT_CHAIN" "OUT reject tcp v4" -p tcp -m set \
+                    --match-set "$OUT_SET4" dst -j REJECT --reject-with tcp-reset || rc=1
+                add_rule iptables ip "$OUT_CHAIN" "OUT reject v4" -m set \
+                    --match-set "$OUT_SET4" dst -j REJECT || rc=1
+            fi
+        else
+            log "CHAIN-WARN $OUT_CHAIN: набор $OUT_SET4 отсутствует, цепочка пуста"
         fi
-        # Исходящие к VK/Max/OK: штатный обрыв как в amnezia-blocker (REJECT)
-        if [ "$blk_out" = "yes" ]; then
-            iptables -A "$OUT_CHAIN" -p tcp -m set --match-set "$OUT_SET4" dst -j REJECT --reject-with tcp-reset
-            iptables -A "$OUT_CHAIN" -m set --match-set "$OUT_SET4" dst -j REJECT
-        fi
+    else
+        rc=1
     fi
 
     if have6; then
-        ip6tables -N "$IN_CHAIN" 2>/dev/null || true
-        ip6tables -F "$IN_CHAIN" 2>/dev/null
-        if ipset list "$IN_SET6" >/dev/null 2>&1; then
-            if [ "$log_in" = "yes" ]; then
-                ip6tables -A "$IN_CHAIN" -m set --match-set "$IN_SET6" src -m conntrack --ctstate NEW \
-                    -m limit --limit 10/min -j LOG --log-prefix "RKN_EXTRA_IN6 " --log-level 4 2>/dev/null
+        if chain_ready ip6tables ip6 "$IN_CHAIN"; then
+            if ipset list "$IN_SET6" >/dev/null 2>&1; then
+                if [ "$log_in" = "yes" ]; then
+                    add_rule ip6tables ip6 "$IN_CHAIN" "IN log v6" -m set --match-set "$IN_SET6" src \
+                        -m conntrack --ctstate NEW -m limit --limit 10/min \
+                        -j LOG --log-prefix "RKN_EXTRA_IN6 " --log-level 4 || rc=1
+                fi
+                if [ "$blk_in" = "yes" ]; then
+                    add_rule ip6tables ip6 "$IN_CHAIN" "IN drop v6" -m set --match-set "$IN_SET6" src \
+                        -m conntrack --ctstate NEW -j DROP || rc=1
+                fi
             fi
-            if [ "$blk_in" = "yes" ]; then
-                ip6tables -A "$IN_CHAIN" -m set --match-set "$IN_SET6" src -m conntrack --ctstate NEW -j DROP 2>/dev/null
-            fi
+        else
+            rc=1
         fi
 
-        ip6tables -N "$OUT_CHAIN" 2>/dev/null || true
-        ip6tables -F "$OUT_CHAIN" 2>/dev/null
-        if ipset list "$OUT_SET6" >/dev/null 2>&1; then
-            if [ "$log_out" = "yes" ]; then
-                ip6tables -A "$OUT_CHAIN" -p tcp -m set --match-set "$OUT_SET6" dst \
-                    -m limit --limit 10/min -j LOG --log-prefix "RKN_EXTRA_OUT6 " --log-level 4 2>/dev/null
+        if chain_ready ip6tables ip6 "$OUT_CHAIN"; then
+            if ipset list "$OUT_SET6" >/dev/null 2>&1; then
+                if [ "$log_out" = "yes" ]; then
+                    add_rule ip6tables ip6 "$OUT_CHAIN" "OUT log v6" -p tcp -m set --match-set "$OUT_SET6" dst \
+                        -m limit --limit 10/min -j LOG --log-prefix "RKN_EXTRA_OUT6 " --log-level 4 || rc=1
+                fi
+                if [ "$blk_out" = "yes" ]; then
+                    add_rule ip6tables ip6 "$OUT_CHAIN" "OUT reject tcp v6" -p tcp -m set \
+                        --match-set "$OUT_SET6" dst -j REJECT --reject-with tcp-reset || rc=1
+                    add_rule ip6tables ip6 "$OUT_CHAIN" "OUT reject v6" -m set \
+                        --match-set "$OUT_SET6" dst -j REJECT || rc=1
+                fi
             fi
-            if [ "$blk_out" = "yes" ]; then
-                ip6tables -A "$OUT_CHAIN" -p tcp -m set --match-set "$OUT_SET6" dst -j REJECT --reject-with tcp-reset 2>/dev/null
-                ip6tables -A "$OUT_CHAIN" -m set --match-set "$OUT_SET6" dst -j REJECT 2>/dev/null
-            fi
+        else
+            rc=1
         fi
     fi
+    return "$rc"
 }
 
 # --- commands ----------------------------------------------------------------
@@ -392,7 +483,10 @@ cmd_on() {
         fi
     fi
 
-    build_chains
+    if ! build_chains; then
+        set_state off
+        die "cannot enable: failed to rebuild iptables chains (see $LOG_FILE)"
+    fi
     if ! apply_jumps; then
         set_state off
         die "cannot enable: failed to install iptables jumps"
@@ -408,7 +502,11 @@ cmd_on() {
 }
 
 cmd_off() {
-    remove_jumps
+    if ! remove_jumps; then
+        log "OFF-FAIL: some iptables jumps could not be removed"
+        echo "ERROR: could not remove all iptables jumps" >&2
+        return 1
+    fi
     set_state off
     if iptables -C INPUT -j "$IN_CHAIN" 2>/dev/null \
             || iptables -C OUTPUT -j "$OUT_CHAIN" 2>/dev/null \
@@ -438,6 +536,25 @@ cmd_status() {
     else
         echo "  health: off"
     fi
+    echo "  boot_restore: $(boot_restore_state)"
+    if unit_has_install; then echo "  unit: ok"; else echo "  unit: legacy"; fi
+}
+
+# enabled = systemd will run `boot` after a reboot. Older installs shipped a
+# unit without [Install] (systemctl is-enabled -> static), so their rules were
+# silently not restored after reboot even though the lists stayed intact.
+boot_restore_state() {
+    local en
+    en=$(systemctl is-enabled rkn-extra-block.service 2>/dev/null || true)
+    case "$en" in
+        enabled|enabled-runtime) echo enabled ;;
+        disabled|masked|masked-runtime) echo disabled ;;
+        *) echo unknown ;;
+    esac
+}
+
+unit_has_install() {
+    [ -f "$UNIT_SERVICE" ] && grep -qs '^\[Install\]' "$UNIT_SERVICE"
 }
 
 cmd_status_short() {
@@ -452,7 +569,10 @@ cmd_boot() {
         exit 1
     fi
     if [ "$(get_state)" = "on" ]; then
-        build_chains
+        if ! build_chains; then
+            log "BOOT-FAIL: iptables chains could not be rebuilt"
+            exit 1
+        fi
         if ! apply_jumps; then
             log "BOOT-FAIL: iptables jumps could not be restored"
             exit 1
@@ -489,7 +609,11 @@ cmd_log() {
             echo on > "$LOG_STATE_FILE"
             echo on > "$CONF_DIR/log_in"
             echo on > "$CONF_DIR/log_out"
-            build_chains   # пересобрать цепочки с LOG-правилами (прыжки не трогаем)
+            if ! build_chains; then   # пересобрать цепочки с LOG-правилами (прыжки не трогаем)
+                set_state off
+                log "LOG-FAIL: chains could not be rebuilt"
+                return 1
+            fi
             if ! ensure_live_if_on; then
                 set_state off
                 log "LOG-FAIL: logging change was not applied"
@@ -503,7 +627,11 @@ cmd_log() {
             mkdir -p "$CONF_DIR"
             echo off > "$CONF_DIR/log_in"
             echo off > "$CONF_DIR/log_out"
-            build_chains
+            if ! build_chains; then
+                set_state off
+                log "LOG-FAIL: chains could not be rebuilt"
+                return 1
+            fi
             if ! ensure_live_if_on; then
                 set_state off
                 log "LOG-FAIL: logging change was not applied"
@@ -533,7 +661,11 @@ cmd_set() {
             *) die "set: неизвестная пара '$pair' (нужно block_in|block_out|log_in|log_out = on|off)" ;;
         esac
     done
-    build_chains
+    if ! build_chains; then
+        set_state off
+        log "SET-FAIL: flags were saved but chains could not be rebuilt"
+        return 1
+    fi
     if ! ensure_live_if_on; then
         set_state off
         log "SET-FAIL: flags were saved but rules are not active"
@@ -617,6 +749,76 @@ cmd_clearscans() {
     echo "журнал сканирований обнулён (старое из kernel-журнала повторно подхвачено не будет)"
 }
 
+# --- boot-restore repair -----------------------------------------------------
+# Единый источник юнитов для repair — встроенные heredoc-копии. Причина: repair
+# должен чинить хост без сети и без остальных файлов репозитория (панель может
+# вызвать старую копию скрипта). Содержимое совпадает с
+# scripts/rknblock/rkn-extra-block.{service,timer}; менять их нужно вместе.
+write_units() {
+    mkdir -p /etc/systemd/system
+    cat > "$UNIT_SERVICE.tmp" <<'EOF'
+[Unit]
+Description=RKN extra block (C24Be lists): boot restore + daily list update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/rkn-extra-block boot
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    mv -f "$UNIT_SERVICE.tmp" "$UNIT_SERVICE"
+    chmod 0644 "$UNIT_SERVICE"
+
+    cat > "$UNIT_TIMER.tmp" <<'EOF'
+[Unit]
+Description=Daily RKN extra block list update (C24Be/AS_Network_List)
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=2h
+Persistent=true
+Unit=rkn-extra-block.service
+
+[Install]
+WantedBy=timers.target
+EOF
+    mv -f "$UNIT_TIMER.tmp" "$UNIT_TIMER"
+    chmod 0644 "$UNIT_TIMER"
+}
+
+# Идемпотентно: юниты -> daemon-reload -> enable timer/service -> живые правила.
+# Работает и от root, и через sudo (systemd всё равно запускает скрипт от root).
+cmd_repair() {
+    [ "$(id -u)" -eq 0 ] || die "repair: нужен root (запустите через sudo)"
+    command -v systemctl >/dev/null 2>&1 || die "repair: systemctl не найден"
+
+    write_units
+    systemctl daemon-reload || die "repair: systemctl daemon-reload failed"
+    systemctl enable rkn-extra-block.timer || die "repair: could not enable rkn-extra-block.timer"
+    systemctl enable --now rkn-extra-block.timer || die "repair: could not start rkn-extra-block.timer"
+    systemctl enable rkn-extra-block.service || die "repair: could not enable rkn-extra-block.service"
+
+    local en
+    en=$(systemctl is-enabled rkn-extra-block.service 2>/dev/null || true)
+    if [ "$en" != "enabled" ]; then
+        die "repair: rkn-extra-block.service is '${en:-unknown}' after enable (expected enabled)"
+    fi
+
+    if [ "$(get_state)" = "on" ]; then
+        # cmd_on переиспользует уже загруженные наборы (update только если пусты)
+        # и заканчивается verify; при провале state сбрасывается в off.
+        cmd_on
+        cmd_status
+    else
+        log "REPAIR: состояние off, только автозапуск и юниты"
+        echo "rkn-extra-block: boot restore repaired (state off, rules stay off)"
+        cmd_status
+    fi
+}
+
 # Полное удаление контура: прыжки, цепочки, наборы, юниты, скрипты, конфиги, логи.
 # Вызывается панелью при удалении приложения; может запускаться из копии в /tmp
 # (сам себя установленный скрипт при этом тоже удалит — inode останется у процесса).
@@ -657,10 +859,11 @@ case "${1:-}" in
     verify)  ensure_deps; cmd_verify ;;
     update)  lock; ensure_deps; cmd_update || exit $?; cmd_status_short ;;
     boot)    lock; cmd_boot ;;
+    repair|ensure-boot) lock; cmd_repair ;;
     log)     lock; ensure_deps; shift; cmd_log "${1:-status}" ;;
     scan)    shift; cmd_scan "$@" ;;
     set)     lock; ensure_deps; shift; cmd_set "$@" ;;
     clearscans) lock; cmd_clearscans ;;
     uninstall) lock; ensure_deps; cmd_uninstall ;;
-    *) echo "Использование: rkn-extra-block {on|off|status|verify|update|boot|set флаг=on|off...|log on|off|status|scan [файлы...]|clearscans|uninstall}" >&2; exit 2 ;;
+    *) echo "Использование: rkn-extra-block {on|off|status|verify|update|boot|repair|set флаг=on|off...|log on|off|status|scan [файлы...]|clearscans|uninstall}" >&2; exit 2 ;;
 esac
