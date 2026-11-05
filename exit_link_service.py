@@ -376,6 +376,12 @@ class ExitLinkService:
                 'linked_at': datetime.now().isoformat(),
                 'stale': None,
             }
+            # Smart Route preferences live inside exit_link. A relink replaces
+            # that record; dropping them silently disables an already split
+            # instance while the host marker keeps applying throw routes.
+            for key in ('smart_route', 'smart_route_lost', 'smart_route_prev_dns'):
+                if key in previous:
+                    record[key] = previous[key]
             try:
                 await self._record_link(entry, exit_srv, protocol, record, source=source)
             except Exception:
