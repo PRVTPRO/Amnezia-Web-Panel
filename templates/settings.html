@@ -17,6 +17,7 @@
     <a href="#settings-captcha">{{ _('captcha_title') }}</a>
     <a href="#settings-telegram">{{ _('telegram_bot_title') }}</a>
     <a href="#settings-mail">{{ _('mail_title') }}</a>
+    <a href="#settings-split-tunnel">{{ _('split_title') }}</a>
     <a href="#settings-tunnels">{{ _('tunnels_title') }}</a>
     <a href="#settings-ssl">{{ _('ssl_title') }}</a>
     <a href="#settings-duckdns">{{ _('duckdns_title') }}</a>
@@ -176,6 +177,48 @@
                 </div>
                 <p class="form-hint">{{ _('mail_hint') }}</p>
             </form>
+        </div>
+
+        <!-- BLOCK: networks routed outside the VPN (client AllowedIPs) -->
+        <div class="card" id="settings-split-tunnel">
+            <h3 class="card-title" style="margin-bottom: var(--space-lg);"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="margin-right: 6px; vertical-align: -2px;"><path d="M16 3h5v5"/><path d="M8 3H3v5"/><path d="M12 22v-8.3a4 4 0 0 0-1.172-2.872L3 3"/><path d="m15 9 6-6"/></svg>{{ _('split_title') }}</h3>
+            <p class="form-hint" style="margin-top: 0;">{{ _('split_intro') }}</p>
+            <div class="form-group">
+                <label style="display: flex; align-items: center; gap: var(--space-sm); cursor: pointer;">
+                    <input type="checkbox" id="split_enabled" onchange="saveSplitTunnel(true)">
+                    {{ _('split_enabled_label') }}
+                </label>
+                <div class="form-hint" id="splitStatus">{{ _('split_status_empty') }}</div>
+            </div>
+            <div style="padding: var(--space-md); border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-primary); margin-bottom: var(--space-md);">
+                <strong>{{ _('split_public_title') }}</strong>
+                <div class="form-hint" style="margin: var(--space-xs) 0 var(--space-sm);">{{ _('split_public_hint') }}</div>
+                <label style="display: flex; align-items: center; gap: var(--space-sm); cursor: pointer;">
+                    <input type="checkbox" id="split_shorten" checked>
+                    {{ _('split_shorten_label') }}
+                </label>
+                <div class="form-hint" style="margin-bottom: var(--space-sm);">{{ _('split_shorten_hint') }}</div>
+                <button type="button" class="btn btn-primary" onclick="fetchSplitPublic()" id="splitFetchBtn">
+                    <span>{{ _('split_fetch_btn') }}</span>
+                    <div class="spinner hidden" id="splitFetchSpinner" style="width:14px;height:14px;"></div>
+                </button>
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="split_networks">{{ _('split_networks_label') }}</label>
+                <textarea class="form-input" id="split_networks" rows="8" spellcheck="false"
+                    placeholder="77.88.0.0/18&#10;87.240.128.0/18" style="font-family: monospace;"></textarea>
+                <div class="form-hint">{{ _('split_networks_hint') }}</div>
+            </div>
+            <p class="form-hint hidden" id="splitLargeWarning" style="color: var(--warning);">{{ _('split_large_warning') }}</p>
+            <div style="display: flex; gap: var(--space-sm); flex-wrap: wrap;">
+                <input type="file" id="split_file" hidden onchange="loadSplitFile(this)"
+                    accept=".txt,.csv,.json,.lst,.list,.zone,.cidr,.ipset,text/plain,application/json">
+                <button type="button" class="btn btn-secondary" onclick="document.getElementById('split_file').click()">{{ _('split_file_btn') }}</button>
+                <button type="button" class="btn btn-primary" onclick="saveSplitTunnel(false)" id="splitSaveBtn">
+                    <span>{{ _('split_save_btn') }}</span>
+                    <div class="spinner hidden" id="splitSaveSpinner" style="width:14px;height:14px;"></div>
+                </button>
+            </div>
         </div>
 
         <!-- BLOCK 4: API Docs -->
@@ -1416,10 +1459,128 @@
         }
     }
 
+    // ---- Networks outside the VPN ----
+    // The stored list as last rendered: a toggle saves this, not edits still in the box.
+    let splitStoredText = '';
+    let splitSource = 'manual';
+
+    function renderSplitTunnel(state) {
+        document.getElementById('split_enabled').checked = !!state.enabled;
+        splitStoredText = (state.networks || []).join('\n');
+        document.getElementById('split_networks').value = splitStoredText;
+        splitSource = 'manual';
+        const status = document.getElementById('splitStatus');
+        if (!state.network_count) {
+            status.textContent = _('split_status_empty');
+        } else {
+            const parts = [_('split_status')
+                .replace('{networks}', state.network_count)
+                .replace('{entries}', state.allowed_ips_entries)];
+            parts.push(state.source_detail || _('split_source_' + (state.source || 'manual')));
+            if (state.shortened) parts.push(_('split_shortened_badge'));
+            if (state.updated_at) parts.push(new Date(state.updated_at).toLocaleString());
+            parts.push(state.active ? _('split_state_on') : _('split_state_off'));
+            status.textContent = parts.join(' · ');
+        }
+        document.getElementById('splitLargeWarning').classList.toggle('hidden', !state.large);
+    }
+
+    async function loadSplitTunnel() {
+        try {
+            const res = await fetch('/api/settings/split-tunnel');
+            if (res.ok) renderSplitTunnel(await res.json());
+        } catch (err) {
+            // The card keeps its placeholder; saving still reports errors.
+        }
+    }
+
+    function splitErrorMessage(body) {
+        const key = 'split_error_' + (body.code || '');
+        let message = _(key) !== key ? _(key) : (body.error || _('error'));
+        if (body.invalid && body.invalid.length) message += ': ' + body.invalid.slice(0, 5).join(', ');
+        return message;
+    }
+
+    function loadSplitFile(input) {
+        const file = input.files && input.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+            document.getElementById('split_networks').value = String(reader.result || '');
+            splitSource = 'file';
+            showToast(_('split_file_loaded'), 'info');
+        };
+        reader.onerror = () => showToast(_('error'), 'error');
+        reader.readAsText(file);
+        input.value = '';
+    }
+
+    async function saveSplitTunnel(fromToggle) {
+        const enabledBox = document.getElementById('split_enabled');
+        const textarea = document.getElementById('split_networks');
+        const spinner = document.getElementById('splitSaveSpinner');
+        const typed = textarea.value;
+        const typedSource = splitSource;
+        spinner.classList.remove('hidden');
+        try {
+            const res = await fetch('/api/settings/split-tunnel', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    enabled: enabledBox.checked,
+                    networks: fromToggle ? splitStoredText : typed,
+                    source: splitSource
+                })
+            });
+            const body = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(splitErrorMessage(body));
+            renderSplitTunnel(body);
+            if (fromToggle) {
+                textarea.value = typed;
+                splitSource = typedSource;
+            }
+            if (body.ipv6_skipped) showToast(_('split_ipv6_skipped').replace('{}', body.ipv6_skipped), 'info');
+            showToast(body.active ? _('split_saved_on') : _('split_saved_off'), 'success');
+        } catch (err) {
+            if (fromToggle) enabledBox.checked = !enabledBox.checked;
+            showToast(err.message, 'error');
+        } finally {
+            spinner.classList.add('hidden');
+        }
+    }
+
+    async function fetchSplitPublic() {
+        if (document.getElementById('split_networks').value.trim() && !confirm(_('split_replace_confirm'))) return;
+        const btn = document.getElementById('splitFetchBtn');
+        const spinner = document.getElementById('splitFetchSpinner');
+        btn.disabled = true;
+        spinner.classList.remove('hidden');
+        try {
+            const res = await fetch('/api/settings/split-tunnel/public', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ country: 'RU', shorten: document.getElementById('split_shorten').checked })
+            });
+            const body = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(splitErrorMessage(body));
+            renderSplitTunnel(body);
+            showToast(_('split_fetched')
+                .replace('{networks}', body.network_count)
+                .replace('{full}', body.full_count)
+                .replace('{entries}', body.allowed_ips_entries), 'success');
+        } catch (err) {
+            showToast(err.message, 'error');
+        } finally {
+            btn.disabled = false;
+            spinner.classList.add('hidden');
+        }
+    }
+
     document.addEventListener('DOMContentLoaded', () => {
         loadTokens();
         loadTunnelStatus();
         loadExitNodes();
+        loadSplitTunnel();
         tunnelStatusTimer = setInterval(loadTunnelStatus, 10000);
     });
 </script>
