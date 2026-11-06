@@ -111,6 +111,11 @@ Configuration panel for system parameters and preferences:
     *   SMTP is configured in `/settings` (host, port, none/STARTTLS/SSL, credentials, sender name and address, Reply-To, timeout) with a one-click test message. The stored password is never echoed back to the page: leaving the field empty on save keeps it.
     *   A mass send runs in the background over a single SMTP session and reports progress per user — sent, skipped (no address, disabled, no connections yet) or failed, with the reason next to each name. One unreachable node costs that one connection, not the message and not the run.
     *   Messages are text plus an HTML alternative dressed in the panel's own appearance (title, logo, colours) — no third-party branding anywhere.
+*   **🧭 Networks Outside the VPN (client-side split tunneling)**:
+    *   A list of IPv4 networks in `/settings` that clients reach through their own ISP instead of the tunnel. Every WireGuard / AmneziaWG config the panel hands out — download, `vpn://` key, share link, self-service page, Telegram bot, email — gets `AllowedIPs = 0.0.0.0/0` minus the list minus local ranges; `::/0` stays as it was. Servers are not touched, so configs issued earlier keep working next to regenerated ones.
+    *   Type the list, load it from a file (plain CIDRs, `a-b` ranges, AmneziaVPN site lists, ipset dumps, JSON), or press **Load Russian networks** to fetch the current list from RIPEstat (fallbacks: ipdeny.com, country-ip-blocks); the fetched list is saved and switched on at once.
+    *   **Shorten the list** is on by default. The full Russian list is ~8.7k networks, ~22k AllowedIPs entries; on Windows every entry becomes a route (plus a broadcast route Windows adds), connecting takes minutes and the Network List Service keeps a CPU core busy. The shortened list keeps /16-and-larger networks plus the networks of popular Russian services (~1.1k entries) and does not load the CPU; anything left out simply stays in the tunnel.
+    *   A hand-edited config keeps following the list as long as its AllowedIPs still contains `0.0.0.0/0`; a deliberately narrowed line is left alone. AmneziaVPN's own site-based split tunneling is disabled for such configs (it needs `0.0.0.0/0, ::/0`).
 
 *   **🔗 Public Sharing**:
     *   Generate password-protected links for users to download their configurations without panel access.
