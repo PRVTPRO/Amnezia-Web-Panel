@@ -6769,8 +6769,9 @@ async def api_set_protocol_public_endpoint(request: Request, server_id: int, req
     Both fields are optional and empty means "as before": the server's own
     address, the instance's listen port. Useful when an instance answers on a
     second IP of the same box, behind a port forward, or under a domain name.
-    A custom public port on this same box is published automatically: REDIRECT
-    rules in iptables/ip6tables send it to the instance's listen port.
+    A custom public port on this same box is published automatically: a DNAT
+    rule in iptables/ip6tables sends it straight to the container, the same
+    path Docker uses (a host-local listener falls back to REDIRECT).
     """
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -6815,8 +6816,18 @@ async def api_set_protocol_public_endpoint(request: Request, server_id: int, req
                 await asyncio.to_thread(
                     manager.set_public_endpoint, pub_host, pub_port or record.get('port', '443'))
             fwd_host, _ = protocol_public_endpoint(server, proto)
+            will_forward = bool(port and str(port) != str(listen_port))
+            will_drop = bool(old_public_port and str(old_public_port) != str(port))
+            if ssh is None and (will_forward or will_drop):
+                ssh = await asyncio.to_thread(get_ssh, server)
+                await asyncio.to_thread(ssh.connect)
+            container_dests = None
+            if ssh is not None and (will_forward or will_drop):
+                container_dests = await asyncio.to_thread(
+                    _docker_dnat_destinations, ssh, listen_port)
             fwd, fwd_warning = public_port_forward_commands(
-                proto, port, listen_port, old_public_port, fwd_host)
+                proto, port, listen_port, old_public_port, fwd_host,
+                container_dests=container_dests)
             if fwd_warning and not warning:
                 warning = fwd_warning
             if fwd is not None:
@@ -6838,14 +6849,16 @@ async def api_set_protocol_public_endpoint(request: Request, server_id: int, req
                             addrs = fam[fkey]
                             if addrs == []:
                                 continue
+                            container_dest = (container_dests or {}).get(fkey)
                             for addr in (addrs if addrs is not None else ['']):
-                                dest = f' -d {addr}' if addr else ''
-                                verify = (f'{ipt} -t nat -C PREROUTING -p {l4}{dest} --dport {port} '
-                                          f'-j REDIRECT --to-ports {listen_port}')
+                                match = _forward_match(l4, addr, port, listen_port, container_dest)
+                                verify = f'{ipt} -t nat -C PREROUTING {match}'
                                 vout, verr, vcode = await asyncio.to_thread(ssh.run_sudo_command, verify)
                                 if vcode != 0 and not warning:
                                     logger.warning(f"Public port forward verification failed on {proto}: {ipt}: {verr}")
-                                    warning = f"forward verification failed: {ipt} REDIRECT to :{listen_port} not present"
+                                    target = (f'DNAT to {container_dest}' if container_dest
+                                              else f'REDIRECT to :{listen_port}')
+                                    warning = f"forward verification failed: {ipt} {target} not present"
         except Exception as e:
             logger.warning(f"Could not apply the public endpoint to {proto}: {e}")
             warning = str(e)
@@ -6890,7 +6903,7 @@ async def restore_public_port_forwards():
     await asyncio.sleep(RESTORE_FORWARD_DELAY)  # let the panel finish booting
     data = load_data()
     for server in data.get('servers', []):
-        commands = []
+        pending = []
         for proto, record in (server.get('protocols') or {}).items():
             if not isinstance(record, dict):
                 continue
@@ -6898,20 +6911,27 @@ async def restore_public_port_forwards():
             listen_port = str(record.get('port') or '').strip()
             if not public_port or not listen_port:
                 continue
-            pub_host, _ = protocol_public_endpoint(server, proto)
-            cmds, fwd_warning = public_port_forward_commands(
-                proto, public_port, listen_port, public_ip=pub_host)
-            if fwd_warning:
-                logger.warning(f"Public port forward on "
-                               f"{server.get('name') or server.get('host')} {proto}: {fwd_warning}")
-            if cmds:
-                commands.extend(cmds)
-        if not commands:
+            pending.append((proto, public_port, listen_port))
+        if not pending:
             continue
         ssh = None
         try:
             ssh = get_ssh(server)
             await asyncio.to_thread(ssh.connect)
+            dests_by_port = {}
+            commands = []
+            for proto, public_port, listen_port in pending:
+                if listen_port not in dests_by_port:
+                    dests_by_port[listen_port] = _docker_dnat_destinations(ssh, listen_port)
+                pub_host, _ = protocol_public_endpoint(server, proto)
+                cmds, fwd_warning = public_port_forward_commands(
+                    proto, public_port, listen_port, public_ip=pub_host,
+                    container_dests=dests_by_port[listen_port])
+                if fwd_warning:
+                    logger.warning(f"Public port forward on "
+                                   f"{server.get('name') or server.get('host')} {proto}: {fwd_warning}")
+                if cmds:
+                    commands.extend(cmds)
             failed = False
             for cmd in commands:
                 out, err, code = await asyncio.to_thread(ssh.run_sudo_command, cmd)
@@ -6931,7 +6951,7 @@ async def restore_public_port_forwards():
 
 async def restore_public_port_forwards_loop():
     """Re-apply the forwards periodically, not only at panel startup: a VPS
-    rebooted independently leaves its REDIRECT rules gone until someone
+    rebooted independently leaves its DNAT rules gone until someone
     restarts the panel. Never raises - the next round retries."""
     while True:
         await asyncio.sleep(RESTORE_FORWARD_INTERVAL)
@@ -6942,7 +6962,7 @@ async def restore_public_port_forwards_loop():
 
 
 def _forward_family_dests(public_ip):
-    """Per-address-family -d scoping for the REDIRECT rules.
+    """Per-address-family -d scoping for the public-port forward rules.
 
     Returns ({4: addrs|None, 6: addrs|None}, warning): None means the family
     stays unrestricted, [] means the family is skipped entirely (a resolved
@@ -6979,22 +6999,80 @@ def _forward_family_dests(public_ip):
     return {4: v4, 6: v6}, ''
 
 
+def _parse_docker_dnat(output, listen_port):
+    """Extract the container destination from the nat/DOCKER DNAT rule.
+
+    `iptables -t nat -S DOCKER` prints one line per published container port,
+    e.g. `... --dport 55424 -j DNAT --to-destination 172.17.0.2:55424`.
+    Returns the `ip:port` token of the first rule for this listen port, or
+    None when Docker does not publish the port (a host-local listener).
+    """
+    want = str(listen_port).strip()
+    if not output or not want:
+        return None
+    for line in str(output).splitlines():
+        tokens = line.split()
+        for i in range(len(tokens) - 1):
+            if tokens[i] != '--dport' or tokens[i + 1] != want:
+                continue
+            for j in range(len(tokens) - 1):
+                if tokens[j] == '--to-destination':
+                    return tokens[j + 1]
+    return None
+
+
+def _docker_dnat_destinations(ssh, listen_port):
+    """Resolve the in-container destination of a Docker-published port.
+
+    Docker owns the real publish rule in nat/DOCKER, so reusing its
+    `--to-destination` is more reliable than guessing the container IP.
+    Returns {4: 'ip:port'|None, 6: 'ip:port'|None}; None means no rule of
+    that family (or the family is unavailable on this host). Never raises.
+    """
+    result = {4: None, 6: None}
+    for ipt, fkey in (('iptables', 4), ('ip6tables', 6)):
+        try:
+            out, _err, code = ssh.run_sudo_command(f'{ipt} -t nat -S DOCKER')
+        except Exception as e:
+            logger.warning(f"Could not read {ipt} DOCKER rules: {e}")
+            continue
+        if code == 0:
+            result[fkey] = _parse_docker_dnat(out, listen_port)
+    return result
+
+
+def _forward_match(l4, addr, port, listen_port, container_dest=None):
+    """One iptables match for a public-port forward, without the action."""
+    scope = f' -d {addr}' if addr else ''
+    if container_dest:
+        return (f'-p {l4}{scope} --dport {port} '
+                f'-j DNAT --to-destination {container_dest}')
+    return (f'-p {l4}{scope} --dport {port} '
+            f'-j REDIRECT --to-ports {listen_port}')
+
+
 def public_port_forward_commands(protocol, public_port, listen_port, old_public_port='',
-                                 public_ip=''):
+                                 public_ip='', container_dests=None):
     """iptables/ip6tables commands publishing a custom public port.
 
     Returns (commands, warning); commands is None when nothing is needed.
     A public port equal to the listen port (or empty) means "no rule"; any
     previous rule for the same instance is removed. Idempotent: additions are
     guarded by -C, removals loop -D until the rule is gone. Rules are scoped
-    to the public address (-d public_ip) so they redirect only the traffic
+    to the public address (-d public_ip) so they forward only the traffic
     actually meant for this instance, not every packet hitting the port.
+
+    A Docker-published listen port is forwarded with DNAT straight to the
+    container (the path Docker itself uses), so ufw's INPUT policy cannot
+    drop the packet. A listen port Docker does not publish keeps the old
+    REDIRECT-to-local behaviour as a fallback.
     """
     base = protocol_base(protocol)
     l4 = next((k for k, v in PUBLIC_FORWARD_L4.items() if base in v), None)
     if l4 is None:
         return None, ''
     fam, warning = _forward_family_dests(public_ip)
+    dests = container_dests or {}
     commands = []
 
     def drop(port):
@@ -7002,11 +7080,15 @@ def public_port_forward_commands(protocol, public_port, listen_port, old_public_
             addrs = fam[fkey]
             if addrs == []:
                 continue  # nothing was ever published in this family
+            container_dest = dests.get(fkey)
             for addr in (addrs if addrs is not None else ['']):
-                dest = f' -d {addr}' if addr else ''
-                rule = (f'-t nat -D PREROUTING -p {l4}{dest} --dport {port} '
-                        f'-j REDIRECT --to-ports {listen_port}')
-                commands.append(f'for i in 1 2 3; do {ipt} {rule} 2>/dev/null || break; done')
+                legacy = _forward_match(l4, addr, port, listen_port)
+                commands.append(f'for i in 1 2 3; do {ipt} -t nat -D PREROUTING '
+                                f'{legacy} 2>/dev/null || break; done')
+                if container_dest:
+                    dnat = _forward_match(l4, addr, port, listen_port, container_dest)
+                    commands.append(f'for i in 1 2 3; do {ipt} -t nat -D PREROUTING '
+                                    f'{dnat} 2>/dev/null || break; done')
 
     for stale in {p for p in (old_public_port,) if p and p != public_port}:
         drop(stale)
@@ -7015,11 +7097,11 @@ def public_port_forward_commands(protocol, public_port, listen_port, old_public_
             addrs = fam[fkey]
             if addrs == []:
                 continue
+            container_dest = dests.get(fkey)
             for addr in (addrs if addrs is not None else ['']):
-                dest = f' -d {addr}' if addr else ''
-                rule = (f'-t nat -A PREROUTING -p {l4}{dest} --dport {public_port} '
-                        f'-j REDIRECT --to-ports {listen_port}')
-                commands.append(f'{ipt} {rule.replace("-A ", "-C ", 1)} 2>/dev/null || {ipt} {rule}')
+                match = _forward_match(l4, addr, public_port, listen_port, container_dest)
+                commands.append(f'{ipt} -t nat -C PREROUTING {match} 2>/dev/null '
+                                f'|| {ipt} -t nat -I PREROUTING 1 {match}')
     return (commands or None), warning
 
 
