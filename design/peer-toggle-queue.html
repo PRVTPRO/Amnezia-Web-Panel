@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Дизайн · Очередь переключения пиров</title>
+<style>
+.theme-dark{
+  --bg-primary:#0a0a0f; --bg-secondary:#12121a; --bg-card:#1a1a26;
+  --bg-card-hover:#22223a; --border-color:rgba(255,255,255,.06);
+  --border-hover:rgba(255,255,255,.12);
+  --text-primary:#f0f0f5; --text-secondary:#8b8ba0; --text-muted:#83839c;
+  --accent:#8b5cf6; --accent-light:#a78bfa;
+  --success:#22c55e; --danger:#ef4444; --warning:#f59e0b;
+  --danger-bg:rgba(239,68,68,.12); --danger-border:rgba(239,68,68,.25);
+  --warning-bg:rgba(245,158,11,.12);
+  --radius-sm:8px; --radius-md:12px; --radius-lg:16px;
+  --shadow-card:0 4px 24px rgba(0,0,0,.3), inset 0 1px 0 rgba(255,255,255,.04);
+  --toast-bg:#15151f; --toast-running-bg:linear-gradient(160deg,#1b1730,#14141f 62%);
+  --toast-shadow:0 8px 32px rgba(0,0,0,.5);
+}
+.theme-light{
+  --bg-primary:#f2f2f7; --bg-secondary:#f7f7fb; --bg-card:#ffffff;
+  --bg-card-hover:#f4f2fb; --border-color:rgba(22,22,40,.08);
+  --border-hover:rgba(22,22,40,.16);
+  --text-primary:#17171f; --text-secondary:#5c5c73; --text-muted:#77778d;
+  --accent:#7c3aed; --accent-light:#8b5cf6;
+  --success:#16a34a; --danger:#dc2626; --warning:#d97706;
+  --danger-bg:rgba(220,38,38,.08); --danger-border:rgba(220,38,38,.22);
+  --warning-bg:rgba(217,119,6,.1);
+  --radius-sm:8px; --radius-md:12px; --radius-lg:16px;
+  --shadow-card:0 4px 24px rgba(30,30,60,.06), inset 0 1px 0 rgba(255,255,255,.8);
+  --toast-bg:#ffffff; --toast-running-bg:linear-gradient(160deg,#fbf8ff,#ffffff 62%);
+  --toast-shadow:0 10px 34px rgba(40,30,90,.14);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:#08080c;font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
+body{padding:34px 28px 70px;color:#f0f0f5}
+.board-head{max-width:1420px;margin:0 auto 26px;display:flex;align-items:flex-end;justify-content:space-between;gap:24px}
+.kicker{font-size:10.5px;letter-spacing:.18em;text-transform:uppercase;color:#a78bfa;font-weight:700;margin-bottom:8px}
+.board-head h1{font-size:23px;letter-spacing:-.02em;font-weight:750}
+.board-head p{font-size:12.5px;color:#8b8ba0;margin-top:6px;line-height:1.5;max-width:720px}
+.board-legend{display:flex;gap:14px;flex-wrap:wrap;justify-content:flex-end;font-size:11px;color:#8b8ba0}
+.board-legend span{display:inline-flex;align-items:center;gap:6px}
+.dot{width:7px;height:7px;border-radius:50%}
+.dot-run{background:#a78bfa;box-shadow:0 0 8px #8b5cf6}
+.dot-q{background:#f59e0b}
+.dot-done{background:#22c55e}
+.screen{
+  position:relative;max-width:1420px;margin:0 auto 30px;min-height:620px;overflow:hidden;
+  border-radius:18px;border:1px solid rgba(255,255,255,.08);
+  background:
+    radial-gradient(900px 460px at 12% -10%, rgba(124,58,237,.12), transparent 60%),
+    radial-gradient(700px 380px at 100% 0%, rgba(59,130,246,.07), transparent 55%),
+    var(--bg-primary);
+  color:var(--text-primary);box-shadow:0 24px 70px rgba(0,0,0,.45);font-size:14px;
+}
+.screen.theme-light{border-color:rgba(20,20,50,.1);box-shadow:0 24px 70px rgba(30,30,60,.18)}
+.screen-label{
+  position:absolute;left:22px;top:18px;z-index:5;display:flex;align-items:center;gap:8px;
+  font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;font-weight:700;color:var(--text-muted);
+}
+.screen-label i{width:8px;height:8px;border-radius:50%;background:var(--accent-light);display:inline-block}
+.mock-nav{
+  height:58px;border-bottom:1px solid var(--border-color);display:flex;align-items:center;
+  justify-content:space-between;padding:0 24px 0 150px;background:color-mix(in srgb,var(--bg-secondary) 70%,transparent);
+}
+.mock-nav .title{font-size:12.5px;font-weight:650;display:flex;align-items:center;gap:10px}
+.mock-nav .sub{font-size:10.5px;color:var(--text-muted);font-weight:450}
+.mock-nav .nav-actions{display:flex;gap:6px}
+.nav-pill{font-size:10px;color:var(--text-secondary);border:1px solid var(--border-color);background:var(--bg-card);padding:5px 9px;border-radius:999px}
+.mock-body{padding:24px;display:grid;grid-template-columns:minmax(0,720px) minmax(0,420px);gap:22px;align-items:start}
+.panel{background:var(--bg-card);border:1px solid var(--border-color);border-radius:var(--radius-lg);box-shadow:var(--shadow-card);overflow:hidden}
+.panel-head{padding:16px 18px 13px;border-bottom:1px solid var(--border-color);display:flex;align-items:center;justify-content:space-between;gap:12px}
+.panel-title{font-size:12.5px;font-weight:650}
+.panel-sub{font-size:10.5px;color:var(--text-muted);margin-top:4px;font-weight:450}
+.pill{font-size:10px;font-weight:650;padding:4px 9px;border-radius:999px;border:1px solid var(--border-hover);color:var(--text-secondary);background:color-mix(in srgb,var(--text-primary) 3%,transparent);white-space:nowrap}
+.pill-accent{color:var(--accent-light);border-color:color-mix(in srgb,var(--accent) 35%,transparent);background:color-mix(in srgb,var(--accent) 10%,transparent)}
+.panel-body{padding:10px}
+.client-item{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 12px;border-radius:var(--radius-md);border:1px solid transparent;transition:background .18s,border-color .18s,opacity .18s}
+.client-item + .client-item{margin-top:2px}
+.client-item:hover{background:var(--bg-card-hover)}
+.client-item.off{opacity:.5}
+.client-item.running{border-color:color-mix(in srgb,var(--accent) 30%,transparent);background:linear-gradient(90deg,color-mix(in srgb,var(--accent) 9%,transparent),transparent)}
+.client-item.queued{border-color:color-mix(in srgb,var(--warning) 22%,transparent);background:color-mix(in srgb,var(--warning) 4%,transparent)}
+.client-name{font-size:12.5px;font-weight:600;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.client-meta{display:flex;align-items:center;gap:9px;margin-top:4px;font-size:10.5px;color:var(--text-muted);flex-wrap:wrap}
+.meta-ok{color:var(--success)}
+.badge{font-size:9.5px;font-weight:700;padding:2px 6px;border-radius:5px}
+.badge-stop{color:var(--danger);background:var(--danger-bg);border:1px solid var(--danger-border);text-transform:uppercase;letter-spacing:.02em}
+.badge-q{color:var(--warning);background:var(--warning-bg);border:1px solid color-mix(in srgb,var(--warning) 25%,transparent);font-weight:600}
+.badge-run{color:var(--accent-light);background:color-mix(in srgb,var(--accent) 12%,transparent);border:1px solid color-mix(in srgb,var(--accent) 25%,transparent);font-weight:600}
+.actions{display:flex;align-items:center;gap:5px;flex:none}
+.icon-btn{width:29px;height:29px;border-radius:var(--radius-sm);border:1px solid var(--border-color);background:color-mix(in srgb,var(--text-primary) 2%,transparent);color:var(--text-secondary);cursor:pointer;display:grid;place-items:center;font-size:12px;line-height:1}
+.icon-btn:hover{background:var(--bg-card-hover);border-color:var(--border-hover);color:var(--text-primary)}
+.icon-btn:disabled{opacity:.55;cursor:default}
+.icon-btn.danger:hover{color:var(--danger);border-color:var(--danger-border);background:var(--danger-bg)}
+.bulb.on{filter:drop-shadow(0 0 7px rgba(250,204,21,.5))}
+.bulb.off{filter:grayscale(1) brightness(.75);opacity:.62}
+/* ============================================================
+   ТОСТ. Только имя пира, название процесса и шкала.
+   Шкала 1:1 из .awg-progress (обновление плагина kernel):
+   4px, рамка, фон --bg-primary, градиент accent -> success,
+   блик 1.6s, проценты над шкалой.
+   ============================================================ */
+.toast-stack{position:absolute;top:20px;right:24px;width:344px;z-index:20;display:flex;flex-direction:column;gap:9px}
+.toast{
+  position:relative;overflow:hidden;padding:13px 14px 12px;border-radius:var(--radius-md);
+  border:1px solid var(--border-color);background:var(--toast-bg);
+  box-shadow:var(--toast-shadow);animation:toast-in .3s cubic-bezier(.2,.8,.2,1) both;
+}
+.toast.running{border-color:color-mix(in srgb,var(--accent) 34%,transparent);background:var(--toast-running-bg)}
+.toast.queued{border-color:color-mix(in srgb,var(--warning) 18%,transparent);opacity:.86}
+.toast.done{border-color:color-mix(in srgb,var(--success) 28%,transparent);opacity:.95;animation:toast-in .3s ease-out both,toast-out .6s ease-in 2.8s forwards}
+@keyframes toast-in{from{transform:translateX(105%);opacity:0}to{transform:translateX(0);opacity:1}}
+@keyframes toast-out{to{transform:translateX(105%);opacity:0}}
+.toast-rail{position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--border-hover)}
+.toast.running .toast-rail{background:linear-gradient(180deg,var(--accent-light),var(--accent))}
+.toast.queued .toast-rail{background:color-mix(in srgb,var(--warning) 60%,transparent)}
+.toast.done .toast-rail{background:var(--success)}
+.toast-peer{font-size:13px;font-weight:650;line-height:1.35;color:var(--text-primary);padding-right:52px}
+.toast-process{font-size:11px;color:var(--text-secondary);margin-top:2px}
+.toast-state{position:absolute;top:13px;right:14px;font-size:10px;font-weight:650;color:var(--text-muted)}
+.toast.running .toast-state{color:var(--accent-light)}
+.toast.queued .toast-state{color:var(--warning)}
+.toast.done .toast-state{color:var(--success)}
+
+/* Точная копия шкалы плагина kernel */
+.awg-progress{margin-top:8px}
+.awg-progress-head{display:flex;justify-content:space-between;align-items:baseline;font-size:.8rem;color:var(--text-muted);margin-bottom:6px}
+.awg-progress-percent{font-weight:700;color:var(--text-primary);font-variant-numeric:tabular-nums}
+.awg-progress-track{height:4px;border-radius:999px;background:var(--bg-primary);border:1px solid var(--border-color);overflow:hidden}
+.awg-progress-fill{height:100%;width:0;border-radius:999px;background:linear-gradient(90deg,var(--accent),var(--success));transition:width .5s ease;position:relative;overflow:hidden}
+.awg-progress-fill::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,.35),transparent);transform:translateX(-100%);animation:awgProgressShimmer 1.6s infinite}
+@keyframes awgProgressShimmer{0%{transform:translateX(-100%)}100%{transform:translateX(100%)}}
+@media (prefers-reduced-motion:reduce){.awg-progress-fill{transition:none}.awg-progress-fill::after{animation:none}.toast{animation:none}}
+
+.user-panel{max-width:100%}
+.user-panel .client-item{padding:10px 11px}
+.board-note{max-width:1420px;margin:0 auto;display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.note-card{background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.07);border-radius:12px;padding:13px 15px}
+.note-card h3{font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:#a78bfa;margin-bottom:6px;font-weight:700}
+.note-card p{font-size:11.5px;line-height:1.55;color:#8b8ba0}
+.note-card code{font-size:10.5px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);padding:1px 5px;border-radius:4px;color:#f0f0f5}
+
+@media(max-width:1180px){
+  body{padding:22px 14px 50px}
+  .mock-body{grid-template-columns:1fr}
+  .toast-stack{right:16px;width:min(344px,calc(100% - 32px))}
+  .board-note{grid-template-columns:1fr}
+  .board-head{flex-direction:column;align-items:flex-start}
+  .board-legend{justify-content:flex-start}
+}
+</style>
+</head>
+<body>
+<div class="board-head">
+  <div>
+    <div class="kicker">Дизайн · два варианта</div>
+    <h1>Очередь переключения пиров</h1>
+    <p>Быстрые клики по «лампочкам» ставят задания в очередь. Внутри тоста только имя пира, название процесса и шкала — та же, что при обновлении плагина kernel. После 100% тост плавно исчезает.</p>
+  </div>
+  <div class="board-legend">
+    <span><i class="dot dot-run"></i> выполняется</span>
+    <span><i class="dot dot-q"></i> в очереди</span>
+    <span><i class="dot dot-done"></i> готово → исчезает</span>
+  </div>
+</div>
+
+<!-- ===================== DARK ===================== -->
+<section class="screen theme-dark">
+  <div class="screen-label"><i></i> Тёмная тема</div>
+
+  <div class="mock-nav">
+    <div class="title">Пиры инстанса <span class="sub">DE-1 · AmneziaWG</span></div>
+    <div class="nav-actions"><span class="nav-pill">5 пиров</span><span class="nav-pill">Очередь: 3</span></div>
+  </div>
+
+  <div class="mock-body" style="grid-template-columns:minmax(0,760px) minmax(360px,1fr)">
+    <div class="panel">
+      <div class="panel-head">
+        <div>
+          <div class="panel-title">Список пиров</div>
+          <div class="panel-sub">Клик по «лампочке» создаёт задание</div>
+        </div>
+        <span class="pill pill-accent">1 выполняется · 2 в очереди</span>
+      </div>
+      <div class="panel-body">
+
+        <div class="client-item running">
+          <div>
+            <div class="client-name">MacBook — Мария <span class="badge badge-run">выполняется</span></div>
+            <div class="client-meta"><span>10.8.0.14</span><span>🤝 12 сек назад</span><span>↓ 1.2 ГБ · ↑ 340 МБ</span></div>
+          </div>
+          <div class="actions">
+            <button class="icon-btn" disabled>✎</button>
+            <button class="icon-btn" disabled>📄</button>
+            <button class="icon-btn" disabled>💡</button>
+            <button class="icon-btn danger" disabled>🗑</button>
+          </div>
+        </div>
+
+        <div class="client-item queued">
+          <div>
+            <div class="client-name">Pixel — Игорь <span class="badge badge-q">в очереди · 2</span></div>
+            <div class="client-meta"><span>10.8.0.22</span><span>🤝 4 мин назад</span><span>↓ 860 МБ · ↑ 120 МБ</span></div>
+          </div>
+          <div class="actions">
+            <button class="icon-btn" disabled>✎</button>
+            <button class="icon-btn" disabled>📄</button>
+            <button class="icon-btn bulb off" disabled>💡</button>
+            <button class="icon-btn danger" disabled>🗑</button>
+          </div>
+        </div>
+
+        <div class="client-item queued">
+          <div>
+            <div class="client-name">iPhone — Алексей <span class="badge badge-q">в очереди · 3</span></div>
+            <div class="client-meta"><span>10.8.0.31</span><span>🤝 1 мин назад</span><span>↓ 2.4 ГБ · ↑ 610 МБ</span></div>
+          </div>
+          <div class="actions">
+            <button class="icon-btn" disabled>✎</button>
+            <button class="icon-btn" disabled>📄</button>
+            <button class="icon-btn bulb on" disabled>💡</button>
+            <button class="icon-btn danger" disabled>🗑</button>
+          </div>
+        </div>
+
+        <div class="client-item off">
+          <div>
+            <div class="client-name">Galaxy — Олег <span class="badge badge-stop">отключён</span></div>
+            <div class="client-meta"><span>10.8.0.9</span><span>🤝 2 дня назад</span><span>↓ 4.1 ГБ · ↑ 980 МБ</span></div>
+          </div>
+          <div class="actions">
+            <button class="icon-btn">✎</button>
+            <button class="icon-btn">📄</button>
+            <button class="icon-btn bulb off">💡</button>
+            <button class="icon-btn danger">🗑</button>
+          </div>
+        </div>
+
+        <div class="client-item">
+          <div>
+            <div class="client-name">ThinkPad — Сергей</div>
+            <div class="client-meta"><span>10.8.0.44</span><span class="meta-ok">🤝 38 сек назад</span><span>↓ 320 МБ · ↑ 90 МБ</span></div>
+          </div>
+          <div class="actions">
+            <button class="icon-btn">✎</button>
+            <button class="icon-btn">📄</button>
+            <button class="icon-btn bulb on">💡</button>
+            <button class="icon-btn danger">🗑</button>
+          </div>
+        </div>
+
+      </div>
+    </div>
+    <div></div>
+  </div>
+
+  <div class="toast-stack">
+    <div class="toast running">
+      <span class="toast-rail"></span>
+      <div class="toast-peer">MacBook — Мария</div>
+      <div class="toast-process">Отключение пира</div>
+      <div class="awg-progress">
+        <div class="awg-progress-head"><span></span><span class="awg-progress-percent">68%</span></div>
+        <div class="awg-progress-track"><div class="awg-progress-fill" style="width:68%"></div></div>
+      </div>
+    </div>
+
+    <div class="toast queued">
+      <span class="toast-rail"></span>
+      <div class="toast-state">В очереди</div>
+      <div class="toast-peer">Pixel — Игорь</div>
+      <div class="toast-process">Включение пира</div>
+      <div class="awg-progress">
+        <div class="awg-progress-head"><span></span><span class="awg-progress-percent">0%</span></div>
+        <div class="awg-progress-track"><div class="awg-progress-fill" style="width:0%"></div></div>
+      </div>
+    </div>
+
+    <div class="toast queued">
+      <span class="toast-rail"></span>
+      <div class="toast-state">В очереди</div>
+      <div class="toast-peer">iPhone — Алексей</div>
+      <div class="toast-process">Отключение пира</div>
+      <div class="awg-progress">
+        <div class="awg-progress-head"><span></span><span class="awg-progress-percent">0%</span></div>
+        <div class="awg-progress-track"><div class="awg-progress-fill" style="width:0%"></div></div>
+      </div>
+    </div>
+
+    <div class="toast done">
+      <span class="toast-rail"></span>
+      <div class="toast-state">Готово</div>
+      <div class="toast-peer">Galaxy — Олег</div>
+      <div class="toast-process">Отключение пира</div>
+      <div class="awg-progress">
+        <div class="awg-progress-head"><span></span><span class="awg-progress-percent">100%</span></div>
+        <div class="awg-progress-track"><div class="awg-progress-fill" style="width:100%"></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== LIGHT ===================== -->
+<section class="screen theme-light">
+  <div class="screen-label"><i></i> Светлая тема</div>
+
+  <div class="mock-nav">
+    <div class="title">Пиры инстанса <span class="sub">DE-1 · AmneziaWG</span></div>
+    <div class="nav-actions"><span class="nav-pill">5 пиров</span><span class="nav-pill">Очередь: 3</span></div>
+  </div>
+
+  <div class="mock-body" style="grid-template-columns:minmax(0,760px) minmax(360px,1fr)">
+    <div class="panel">
+      <div class="panel-head">
+        <div>
+          <div class="panel-title">Список пиров</div>
+          <div class="panel-sub">Клик по «лампочке» создаёт задание</div>
+        </div>
+        <span class="pill pill-accent">1 выполняется · 2 в очереди</span>
+      </div>
+      <div class="panel-body">
+
+        <div class="client-item running">
+          <div>
+            <div class="client-name">MacBook — Мария <span class="badge badge-run">выполняется</span></div>
+            <div class="client-meta"><span>10.8.0.14</span><span>🤝 12 сек назад</span><span>↓ 1.2 ГБ · ↑ 340 МБ</span></div>
+          </div>
+          <div class="actions">
+            <button class="icon-btn" disabled>✎</button>
+            <button class="icon-btn" disabled>📄</button>
+            <button class="icon-btn" disabled>💡</button>
+            <button class="icon-btn danger" disabled>🗑</button>
+          </div>
+        </div>
+
+        <div class="client-item queued">
+          <div>
+            <div class="client-name">Pixel — Игорь <span class="badge badge-q">в очереди · 2</span></div>
+            <div class="client-meta"><span>10.8.0.22</span><span>🤝 4 мин назад</span><span>↓ 860 МБ · ↑ 120 МБ</span></div>
+          </div>
+          <div class="actions">
+            <button class="icon-btn" disabled>✎</button>
+            <button class="icon-btn" disabled>📄</button>
+            <button class="icon-btn bulb off" disabled>💡</button>
+            <button class="icon-btn danger" disabled>🗑</button>
+          </div>
+        </div>
+
+        <div class="client-item queued">
+          <div>
+            <div class="client-name">iPhone — Алексей <span class="badge badge-q">в очереди · 3</span></div>
+            <div class="client-meta"><span>10.8.0.31</span><span>🤝 1 мин назад</span><span>↓ 2.4 ГБ · ↑ 610 МБ</span></div>
+          </div>
+          <div class="actions">
+            <button class="icon-btn" disabled>✎</button>
+            <button class="icon-btn" disabled>📄</button>
+            <button class="icon-btn bulb on" disabled>💡</button>
+            <button class="icon-btn danger" disabled>🗑</button>
+          </div>
+        </div>
+
+        <div class="client-item off">
+          <div>
+            <div class="client-name">Galaxy — Олег <span class="badge badge-stop">отключён</span></div>
+            <div class="client-meta"><span>10.8.0.9</span><span>🤝 2 дня назад</span><span>↓ 4.1 ГБ · ↑ 980 МБ</span></div>
+          </div>
+          <div class="actions">
+            <button class="icon-btn">✎</button>
+            <button class="icon-btn">📄</button>
+            <button class="icon-btn bulb off">💡</button>
+            <button class="icon-btn danger">🗑</button>
+          </div>
+        </div>
+
+        <div class="client-item">
+          <div>
+            <div class="client-name">ThinkPad — Сергей</div>
+            <div class="client-meta"><span>10.8.0.44</span><span class="meta-ok">🤝 38 сек назад</span><span>↓ 320 МБ · ↑ 90 МБ</span></div>
+          </div>
+          <div class="actions">
+            <button class="icon-btn">✎</button>
+            <button class="icon-btn">📄</button>
+            <button class="icon-btn bulb on">💡</button>
+            <button class="icon-btn danger">🗑</button>
+          </div>
+        </div>
+
+      </div>
+    </div>
+    <div></div>
+  </div>
+
+  <div class="toast-stack">
+    <div class="toast running">
+      <span class="toast-rail"></span>
+      <div class="toast-peer">MacBook — Мария</div>
+      <div class="toast-process">Отключение пира</div>
+      <div class="awg-progress">
+        <div class="awg-progress-head"><span></span><span class="awg-progress-percent">68%</span></div>
+        <div class="awg-progress-track"><div class="awg-progress-fill" style="width:68%"></div></div>
+      </div>
+    </div>
+
+    <div class="toast queued">
+      <span class="toast-rail"></span>
+      <div class="toast-state">В очереди</div>
+      <div class="toast-peer">Pixel — Игорь</div>
+      <div class="toast-process">Включение пира</div>
+      <div class="awg-progress">
+        <div class="awg-progress-head"><span></span><span class="awg-progress-percent">0%</span></div>
+        <div class="awg-progress-track"><div class="awg-progress-fill" style="width:0%"></div></div>
+      </div>
+    </div>
+
+    <div class="toast queued">
+      <span class="toast-rail"></span>
+      <div class="toast-state">В очереди</div>
+      <div class="toast-peer">iPhone — Алексей</div>
+      <div class="toast-process">Отключение пира</div>
+      <div class="awg-progress">
+        <div class="awg-progress-head"><span></span><span class="awg-progress-percent">0%</span></div>
+        <div class="awg-progress-track"><div class="awg-progress-fill" style="width:0%"></div></div>
+      </div>
+    </div>
+
+    <div class="toast done">
+      <span class="toast-rail"></span>
+      <div class="toast-state">Готово</div>
+      <div class="toast-peer">Galaxy — Олег</div>
+      <div class="toast-process">Отключение пира</div>
+      <div class="awg-progress">
+        <div class="awg-progress-head"><span></span><span class="awg-progress-percent">100%</span></div>
+        <div class="awg-progress-track"><div class="awg-progress-fill" style="width:100%"></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="board-note">
+  <div class="note-card">
+    <h3>Шкала</h3>
+    <p>1:1 как в обновлении плагина kernel: трек <code>4px</code> с рамкой и фоном <code>--bg-primary</code>, заливка <code>linear-gradient(90deg, accent, success)</code>, блик <code>1.6s</code>, переход ширины <code>.5s</code>, проценты над шкалой.</p>
+  </div>
+  <div class="note-card">
+    <h3>Тост</h3>
+    <p>Справа вверху, как обычные тосты панели. Внутри — только имя пира, название процесса и шкала. Без аватарок, шагов, сервера, инстанса и IP.</p>
+  </div>
+  <div class="note-card">
+    <h3>Завершение</h3>
+    <p>На 100% тост становится зелёным и через короткую паузу плавно уезжает вправо и удаляется из DOM. В очереди остаются только реально ожидающие задания.</p>
+  </div>
+</div>
+</body>
+</html>

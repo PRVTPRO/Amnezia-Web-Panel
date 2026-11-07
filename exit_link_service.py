@@ -278,6 +278,13 @@ class ExitLinkService:
             except (TypeError, ValueError):
                 mtu = 0
             ipv6 = bool(await asyncio.to_thread(awg._get_subnet_ipv6_ip, protocol))
+            if ipv6:
+                # The exit node publishes only IPv4: a dual-stack tunnel would
+                # send IPv6 into a black hole. Refuse at any peer count.
+                raise ExitLinkError(
+                    'exit_link_ipv6',
+                    'Instance has IPv6 enabled; disable IPv6 before linking '
+                    'to an exit node')
             if mtu > EXIT_MTU_LIMIT and not force:
                 raise ExitLinkError('exit_mtu_too_big',
                                     f'Client MTU {mtu} exceeds the link MTU {EXIT_MTU_LIMIT}; '

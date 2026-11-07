@@ -4,6 +4,11 @@ Run with pytest against a panel already serving on BASE_URL. `unittest
 discover` imports every tests/ module, and pytest is not in requirements.txt,
 so the import is guarded: without it the module skips instead of failing the
 whole suite.
+
+Run this file last when it shares one pytest process with the other browser
+tests. Its `page` fixture starts the pytest-playwright event loop, and the
+files that call `sync_playwright()` themselves then fail inside that loop with
+"Playwright Sync API cannot be used inside the asyncio loop".
 """
 import unittest
 

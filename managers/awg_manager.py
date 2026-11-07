@@ -16,6 +16,7 @@ import hashlib
 import ipaddress
 import logging
 import re
+import shlex
 import time
 import uuid
 import functools
@@ -94,10 +95,14 @@ def parse_subnet_indexes(address_lines):
             if not addr:
                 continue
             m = re.match(r'^10\.8\.(\d+)\.\d+$', addr)
-            if not m:
-                m = re.match(r'^fd42:8:([0-9a-f]+)::', addr)
             if m:
-                used.add(int(m.group(1), 16))
+                used.add(int(m.group(1)))
+                continue
+            m = re.match(r'^fd42:8:([0-9a-fA-F]+)::', addr)
+            if m:
+                # New configs write decimal (matching IPv4); old ones used hex.
+                raw = m.group(1)
+                used.add(int(raw) if raw.isdigit() else int(raw, 16))
     return used
 
 
@@ -628,13 +633,19 @@ class AWGManager:
         """Path to the clients table file inside container."""
         return '/opt/amnezia/awg/clientsTable'
 
-    def _used_subnet_indexes(self):
-        """Subnet indexes (N of 10.8.N.0/24) taken by the other awg/wireguard
-        containers on this host. Best effort: on any SSH failure returns an
-        empty set, which falls back to the default subnet (index 1)."""
+    def _used_subnet_indexes(self, exclude=None):
+        """Subnet indexes (N of 10.8.N.0/24) taken by the awg/wireguard
+        containers on this host. `exclude` skips one container name, so a
+        switch can compare an instance with its neighbours only. Best effort:
+        on any SSH failure returns an empty set."""
+        skip = ''
+        if exclude:
+            safe = re.sub(r'[^A-Za-z0-9_.-]', '', exclude)
+            skip = f"[ \"$c\" = \"{safe}\" ] && continue; "
         cmd = (
             "for c in $(docker ps -a --format '{{.Names}}' "
             "| grep -E '^amnezia-(awg|wireguard)'); do "
+            f"{skip}"
             "docker exec \"$c\" sh -c "
             "'grep -h -m1 \"^Address\" "
             "/opt/amnezia/awg/awg0.conf /opt/amnezia/awg/wg0.conf "
@@ -721,14 +732,16 @@ class AWGManager:
         try:
             octet = int(client_ip.split('.')[3])
         except (ValueError, IndexError, AttributeError):
+            logger.warning("Cannot derive IPv6 for client %r on %s", client_ip, protocol_type)
             return ''
         prefix = gateway.rsplit(':', 1)[0] + ':'
         return f"{prefix}{octet:x}"
 
-    def _detect_server_ipv6(self, protocol_type=None):
+    def _detect_server_ipv6(self, protocol_type=None, preference=None):
         """Decide whether the tunnel should be dual-stack.
 
-        The AWG_IPV6 environment variable forces the answer ("off" / "on");
+        An explicit server preference (True/False) wins; otherwise the
+        AWG_IPV6 environment variable forces the answer ("off" / "on"), and
         in the default "auto" mode the server is probed.
 
         Auto-detection requires IPv6 to work end-to-end: a global address on
@@ -740,7 +753,16 @@ class AWGManager:
         out, which blackholes traffic on IPv6-preferring clients (notably
         macOS) even though the host's own IPv6 is fine.
         """
+        # The environment override is an operator decision: it wins over the
+        # panel preference, because the host may forbid IPv6 outright.
         mode = os.environ.get(AWG_IPV6_ENV, 'auto').strip().lower()
+        if mode not in IPV6_FORCE_OFF and mode not in IPV6_FORCE_ON:
+            if preference is True:
+                logger.info("Server preference forces a dual-stack tunnel")
+                return True
+            if preference is False:
+                logger.info("Server preference keeps the tunnel IPv4-only")
+                return False
         if mode in IPV6_FORCE_OFF:
             logger.info("%s=%s, keeping the tunnel IPv4-only", AWG_IPV6_ENV, mode)
             return False
@@ -770,6 +792,638 @@ class AWGManager:
             container_name,
         )
         return False
+
+    # --- IPv6 status and control -----------------------------------------
+
+    def _host_ipv6_info(self):
+        """Global addresses, default route and the system IPv6 switch."""
+        out, _, _ = self.ssh.run_sudo_command(
+            "ip -6 route get 2606:4700::1111 2>/dev/null")
+        match = re.search(r'src\s+([0-9a-fA-F:]+)', out or '')
+        address = match.group(1) if match else ''
+        if address.lower().startswith(('fc', 'fd', 'fe80')):
+            address = ''
+        dev = re.search(r'dev\s+(\S+)', out or '')
+        if dev and re.match(r'^(docker|br-|veth|tun|awg|amn0)', dev.group(1)):
+            # A container bridge address is not the host's own IPv6.
+            address = ''
+        route, _, _ = self.ssh.run_sudo_command(
+            "ip -6 route show default 2>/dev/null")
+        ipv4, _, _ = self.ssh.run_sudo_command(
+            "ip route get 1.1.1.1 2>/dev/null | head -1")
+        m4 = re.search(r'src\s+(\d+\.\d+\.\d+\.\d+)', ipv4 or '')
+        sysctl, _, _ = self.ssh.run_sudo_command(
+            "cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null")
+        cmdline, _, _ = self.ssh.run_sudo_command(
+            "grep -q 'ipv6.disable=1' /proc/cmdline 2>/dev/null && echo yes")
+        disabled = ((sysctl or '').strip() == '1'
+                    or (cmdline or '').strip() == 'yes')
+        return {'address': address, 'ipv4': m4.group(1) if m4 else '',
+                'default_route': bool((route or '').strip()),
+                'disabled_by_sysctl': disabled}
+
+    def _docker_ipv6_info(self):
+        """IPv6 state of the Docker daemon and the default bridge."""
+        info = {'installed': False, 'ipv6_enabled': False,
+                'bridge_ipv6': False, 'daemon_json_present': False,
+                'restart_required': False, 'ip6tables_ok': True,
+                'flags_conflict': False, 'version_ok': False}
+        out, _, _ = self.ssh.run_sudo_command(
+            "command -v docker >/dev/null 2>&1 && echo yes")
+        info['installed'] = (out or '').strip() == 'yes'
+        if not info['installed']:
+            return info
+        out, _, _ = self.ssh.run_sudo_command(
+            "test -f /etc/docker/daemon.json && echo yes")
+        info['daemon_json_present'] = (out or '').strip() == 'yes'
+        out, _, _ = self.ssh.run_sudo_command(
+            "docker network inspect bridge -f '{{.EnableIPv6}}' 2>/dev/null")
+        info['bridge_ipv6'] = (out or '').strip().lower() == 'true'
+        info['ipv6_enabled'] = info['bridge_ipv6']
+        out, _, _ = self.ssh.run_sudo_command(
+            "grep -q '\"ipv6\"' /etc/docker/daemon.json 2>/dev/null && echo yes")
+        info['restart_required'] = ((out or '').strip() == 'yes'
+                                    and not info['bridge_ipv6'])
+        out, _, _ = self.ssh.run_sudo_command(
+            "ip6tables -t nat -L -n >/dev/null 2>&1 && echo yes")
+        info['ip6tables_ok'] = (out or '').strip() == 'yes'
+        _out, _err, code = self.ssh.run_sudo_command(
+            "docker version >/dev/null 2>&1")
+        info['version_ok'] = code == 0
+        out, _, _ = self.ssh.run_sudo_command(
+            "systemctl cat docker 2>/dev/null | grep -E -- '--ipv6|--ip6tables' || true")
+        info['flags_conflict'] = bool((out or '').strip())
+        return info
+
+    def _peers_state(self, protocol_type):
+        """Peer counters. readable=False when a read failed.
+
+        Counts the union of clientsTable rows and config [Peer] sections, the
+        same rule as `clients_count` (:4313-4316). A failed or empty config
+        read is not treated as "zero peers".
+        """
+        total, v6 = 0, 0
+        try:
+            table = self._get_clients_table(protocol_type) or []
+            config = self._get_server_config(protocol_type)
+        except Exception:
+            return 0, 0, False
+        if not isinstance(config, str) or not config.strip():
+            return 0, 0, False
+        try:
+            config_peers = self._parse_peers_from_config(protocol_type) or {}
+        except Exception:
+            return 0, 0, False
+        known = {(row or {}).get('clientId') for row in table
+                 if (row or {}).get('clientId')}
+        total = len(known | set(config_peers))
+        for row in table:
+            if (row or {}).get('enabled', True) and (row or {}).get('clientIpv6'):
+                v6 += 1
+        return total, v6, True
+
+    def _container_state(self, protocol_type):
+        container = self._container_name(protocol_type)
+        state_fn = getattr(self.ssh, 'docker_container_state', None)
+        st = None
+        try:
+            st = state_fn(container) if state_fn else None
+        except Exception:
+            st = None
+        if isinstance(st, tuple) and len(st) == 2:
+            return bool(st[0] and st[1]), container
+        # Snapshot unavailable: ask Docker directly for this container.
+        out, _, _ = self.ssh.run_sudo_command(
+            "docker inspect -f '{{.State.Running}}' "
+            f"{container} 2>/dev/null")
+        return (out or '').strip().lower() == 'true', container
+
+    def get_instance_ipv6_state(self, protocol_type, docker_info=None,
+                                host_info=None):
+        """IPv6 state of one instance, as shown in the panel."""
+        docker_info = docker_info or self._docker_ipv6_info()
+        gateway = self._get_subnet_ipv6_ip(protocol_type)
+        peers, peers_v6, readable = self._peers_state(protocol_type)
+        running, container = self._container_state(protocol_type)
+        capable = False
+        if running:
+            out, _, _ = self.ssh.run_sudo_command(
+                f"docker exec {container} cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null")
+            capable = (out or '').strip() == '0'
+        exit_linked = bool(self.exit_link_info(protocol_type))
+        if not running:
+            reason = 'server_off'
+        elif not readable:
+            reason = 'state_unreadable'
+        elif peers > 0:
+            reason = 'peers'
+        elif gateway:
+            reason = 'none'
+        elif exit_linked:
+            reason = 'exit_link'
+        elif not docker_info.get('ipv6_enabled'):
+            reason = 'docker_off'
+        elif not capable:
+            reason = 'needs_recreate'
+        else:
+            reason = 'none'
+        return {
+            'proto': protocol_type,
+            'container': container,
+            'subnet_v4': self._get_subnet_ip(protocol_type),
+            'subnet_v6': gateway or None,
+            'peers': peers if readable else None,
+            'peers_v6': peers_v6,
+            'ipv6_enabled': bool(gateway),
+            'container_running': running,
+            'container_ipv6_capable': capable,
+            'needs_recreate': bool(running and not capable and not gateway),
+            'can_enable': readable and peers == 0 and not exit_linked,
+            # A broken exit link may be repaired by dropping IPv6, even with
+            # peers: IPv4 keeps working.
+            # A stopped container cannot be (re)configured at all.
+            'can_disable': running and readable and (peers == 0 or exit_linked),
+            'blocked_reason': reason,
+            'exit_linked': exit_linked,
+        }
+
+    def get_ip_status(self, protocols):
+        """Full IPv4/IPv6 status of a server and its AWG instances."""
+        host = self._host_ipv6_info()
+        docker = self._docker_ipv6_info()
+        instances = []
+        for proto in protocols:
+            try:
+                instances.append(self.get_instance_ipv6_state(
+                    proto, docker_info=docker, host_info=host))
+            except Exception as exc:
+                logger.warning("IPv6 status failed for %s: %s", proto, exc)
+                instances.append({'proto': proto, 'blocked_reason': 'state_unreadable',
+                                  'peers': None, 'ipv6_enabled': False,
+                                  'can_enable': False, 'can_disable': False})
+        used = any(i.get('ipv6_enabled') for i in instances)
+        peers_v6 = sum(i.get('peers_v6') or 0 for i in instances)
+        if host.get('disabled_by_sysctl'):
+            v6_state = 'disabled'
+        elif not host['address'] and not host['default_route']:
+            v6_state = 'absent'
+        elif not host['default_route']:
+            v6_state = 'no_route'
+        elif peers_v6 > 0:
+            v6_state = 'in_use'
+        elif used:
+            v6_state = 'enabled_no_peers'
+        else:
+            v6_state = 'host_only'
+        v4_used = any(i.get('subnet_v4') for i in instances)
+        unreadable = any(i.get('peers') is None for i in instances)
+        return {
+            'state': 'degraded' if unreadable else 'ok',
+            'error': 'container_unreadable' if unreadable else None,
+            'host': {'ipv4': host.get('ipv4', ''), 'ipv6': host['address'],
+                     'ipv4_state': 'in_use' if v4_used else 'host_only',
+                     'ipv6_state': v6_state,
+                     'ipv6_default_route': host['default_route'],
+                     'ipv6_disabled_by_sysctl': bool(host.get('disabled_by_sysctl'))},
+            'docker': docker,
+            'instances': instances,
+        }
+
+    def enable_docker_ipv6(self, restart=False):
+        """Merge Docker IPv6 settings into daemon.json. Restart on request."""
+        info = self._docker_ipv6_info()
+        if info.get('flags_conflict'):
+            # The unit already passes --ipv6/--ip6tables: daemon.json alone
+            # cannot win, and the flags would fight the file.
+            raise RuntimeError('docker_flags_conflict')
+        if self._host_ipv6_info().get('disabled_by_sysctl'):
+            raise RuntimeError('ipv6_disabled_by_sysctl')
+        out, _, _ = self.ssh.run_sudo_command(
+            "cat /etc/docker/daemon.json 2>/dev/null")
+        config = {}
+        if (out or '').strip():
+            try:
+                config = json.loads(out)
+            except ValueError:
+                raise RuntimeError('daemon_json_invalid')
+        config.update({'ipv6': True, 'experimental': True})
+        if not config.get('fixed-cidr-v6'):
+            config['fixed-cidr-v6'] = 'fd00:42::/64'
+        if not self._docker_ipv6_info().get('ip6tables_ok'):
+            config.pop('ip6tables', None)
+        else:
+            config['ip6tables'] = True
+        payload = json.dumps(config, indent=2)
+        # base64 keeps quotes and newlines out of the shell. The whole script
+        # runs as root; a plain `run_sudo_command("a; b")` would sudo only `a`.
+        encoded = b64encode(payload.encode('utf-8')).decode('ascii')
+        script = (
+            "set -e\n"
+            "# Unconditional backup: cp -n would skip refreshing a stale .bak on\n"
+            "# repeated calls; skip the backup entirely when daemon.json is absent.\n"
+            "if [ -f /etc/docker/daemon.json ]; then\n"
+            "  cp -f /etc/docker/daemon.json /etc/docker/daemon.json.bak\n"
+            "fi\n"
+            f"printf '%s' '{encoded}' | base64 -d > /etc/docker/daemon.json.tmp\n"
+            "mv /etc/docker/daemon.json.tmp /etc/docker/daemon.json\n"
+        )
+        _out, err, code = self.ssh.run_sudo_script(script)
+        if code != 0:
+            logger.warning("daemon.json write failed: %s", err)
+            raise RuntimeError('daemon_json_invalid')
+        if not restart:
+            return {'pending': True}
+
+        def recover():
+            self.ssh.run_sudo_command(
+                "cp -f /etc/docker/daemon.json.bak /etc/docker/daemon.json 2>/dev/null || true")
+            self.ssh.run_sudo_command("systemctl restart docker")
+
+        _out, err, code = self.ssh.run_sudo_command("systemctl restart docker")
+        if code != 0:
+            logger.warning("Docker restart failed: %s", err)
+            recover()
+            raise RuntimeError('docker_recovery_failed')
+        # The daemon needs a moment before it answers on the socket.
+        for _attempt in range(10):
+            out, _, code = self.ssh.run_sudo_command(
+                "docker version --format '{{.Server.Version}}' 2>/dev/null")
+            if code == 0 and (out or '').strip():
+                break
+            time.sleep(2)
+        else:
+            recover()
+            raise RuntimeError('docker_recovery_failed')
+        out, _, _ = self.ssh.run_sudo_command(
+            "docker network inspect bridge -f '{{.EnableIPv6}}' 2>/dev/null")
+        if (out or '').strip().lower() != 'true':
+            raise RuntimeError('docker_bridge_ipv6_missing')
+        return {'pending': False}
+
+    def _config_sha(self, container, path):
+        out, _, _ = self.ssh.run_sudo_command(
+            f"docker exec {container} sha256sum {path} 2>/dev/null")
+        parts = (out or '').split()
+        return parts[0] if parts else ''
+
+    def _set_config_address_ipv6(self, protocol_type, prefix=None):
+        """Add or remove the IPv6 gateway in the server `Address` line.
+
+        The edit is guarded three ways: a verified copy at `<path>.ipv6bak`,
+        an in-container probe that the netns can take an IPv6 address, and a
+        read-back of the Address line. Any failure restores the copy.
+        """
+        container = self._container_name(protocol_type)
+        path = self._resolve_config_path(protocol_type)
+        backup = f'{path}.ipv6bak'
+        _out, err, code = self.ssh.run_sudo_command(
+            f"docker exec {container} cp -f {path} {backup}")
+        before = self._config_sha(container, path) if code == 0 else ''
+        if not before or before != self._config_sha(container, backup):
+            logger.warning("Config backup check failed for %s: %s", path, err)
+            raise RuntimeError('state_unreadable')
+
+        def restore():
+            self.ssh.run_sudo_command(
+                f"docker exec {container} cp -f {backup} {path}")
+
+        if prefix:
+            probe = (
+                "sh -c 'ip link add awp6probe type dummy 2>/dev/null; "
+                f"ip -6 addr add {prefix} dev awp6probe 2>/dev/null; "
+                "rc=$?; ip link del awp6probe 2>/dev/null; exit $rc'")
+            _out, err, code = self.ssh.run_sudo_command(
+                f"docker exec {container} {probe}")
+            if code != 0:
+                logger.warning("Container cannot take IPv6: %s", err)
+                raise RuntimeError('env_off')
+            expr = f"s|^(Address = [^,]+) *$|\\1, {prefix}|"
+        else:
+            expr = r"s|^(Address = [^,]+)(, *[0-9a-fA-F:]+/[0-9]+)+|\1|"
+
+        out, err, code = self.ssh.run_sudo_command(
+            f"docker exec {container} sed -i -E '{expr}' {path}")
+        if code != 0:
+            logger.warning("Address rewrite failed: %s", err or out)
+            restore()
+            raise RuntimeError('state_unreadable')
+        # sed exits 0 even when no line matches: read the line back.
+        line_out, _, line_code = self.ssh.run_sudo_command(
+            f"docker exec {container} grep -m1 '^Address' {path} 2>/dev/null")
+        line = (line_out or '').strip()
+        address = line.split('=', 1)[1] if '=' in line else ''
+        done = prefix in address if prefix else (bool(address) and ':' not in address)
+        if line_code != 0 or not done:
+            logger.warning("Address not applied: %s", line or err)
+            restore()
+            raise RuntimeError('state_unreadable')
+
+        # Keep the DNS6 comment in step with the gateway.
+        if prefix:
+            dns6 = self._read_config_key(protocol_type, 'DNS6') or AWG_DEFAULTS['dns6']
+            self.ssh.run_sudo_command(
+                f"docker exec {container} sh -c \"grep -q '^# DNS6' {path} "
+                f"|| echo '# DNS6 = {shlex.quote(str(dns6))}' >> {path}\"")
+        else:
+            self.ssh.run_sudo_command(
+                f"docker exec {container} sed -i '/^# DNS6/d' {path}")
+        self.ssh.run_sudo_command(
+            f"docker exec {container} rm -f {backup}")
+
+    def _container_run_image(self, container):
+        """Image the container was created from (falls back to its own name)."""
+        out, _, _ = self.ssh.run_sudo_command(
+            f"docker inspect -f '{{{{.Config.Image}}}}' {container} 2>/dev/null")
+        return out.strip() or container
+
+    def _inspect_container(self, container):
+        """Parsed `docker inspect`, or None when the call failed."""
+        out, _, code = self.ssh.run_sudo_command(
+            f"docker inspect {container} 2>/dev/null")
+        if code != 0 or not (out or '').strip():
+            return None
+        try:
+            parsed = json.loads(out)
+        except ValueError:
+            return None
+        return parsed[0] if isinstance(parsed, list) and parsed else None
+
+    @staticmethod
+    def _run_cmd_from_inspect(info, name, image):
+        """Rebuild the run command from the container's own inspect data.
+
+        Keeps binds, caps, ulimits, ports, restart policy and sysctls, then
+        forces the two IPv6 sysctls the old container was missing.
+        """
+        if not isinstance(info, dict):
+            return None
+        host = info.get('HostConfig') or {}
+        parts = ['docker run -d']
+        policy = (host.get('RestartPolicy') or {}).get('Name')
+        if policy:
+            parts.append(f'--restart {shlex.quote(str(policy))}')
+        if host.get('Privileged'):
+            parts.append('--privileged')
+        for cap in host.get('CapAdd') or []:
+            parts.append(f'--cap-add={shlex.quote(str(cap))}')
+        for cap in host.get('CapDrop') or []:
+            parts.append(f'--cap-drop={shlex.quote(str(cap))}')
+        for bind in host.get('Binds') or []:
+            parts.append(f'-v {shlex.quote(str(bind))}')
+        for extra in host.get('ExtraHosts') or []:
+            parts.append(f'--add-host {shlex.quote(str(extra))}')
+        for limit in host.get('Ulimits') or []:
+            limit_name = limit.get('Name')
+            if limit_name and limit.get('Soft') is not None:
+                parts.append(
+                    f'--ulimit {shlex.quote(str(limit_name))}='
+                    f'{limit["Soft"]}:{limit.get("Hard")}')
+        mode = host.get('NetworkMode')
+        if mode and mode not in ('default', 'bridge'):
+            parts.append(f'--network {shlex.quote(str(mode))}')
+        sysctls = dict(host.get('Sysctls') or {})
+        sysctls['net.ipv6.conf.all.disable_ipv6'] = '0'
+        sysctls['net.ipv6.conf.default.disable_ipv6'] = '0'
+        for key, value in sysctls.items():
+            parts.append(f'--sysctl {shlex.quote(str(key))}={shlex.quote(str(value))}')
+        # Carry the container's own runtime config: environment, entrypoint,
+        # labels and the command to run inside the container.
+        config = info.get('Config') or {}
+        env_keys = set()
+        for entry in config.get('Env') or []:
+            if not entry:
+                continue
+            key, _, value = entry.partition('=')
+            if not key or key in env_keys:
+                continue
+            env_keys.add(key)
+            parts.append(f'-e {shlex.quote(key)}={shlex.quote(value)}')
+        entrypoint = config.get('Entrypoint')
+        if entrypoint:
+            if isinstance(entrypoint, list):
+                entrypoint = entrypoint[0] if entrypoint else ''
+            if entrypoint:
+                parts.append(f'--entrypoint {shlex.quote(str(entrypoint))}')
+        for key, value in (config.get('Labels') or {}).items():
+            if key:
+                parts.append(
+                    f'--label {shlex.quote(str(key))}={shlex.quote(str(value))}')
+        # -p bindings are invalid for host/container networking: skip them,
+        # but keep the rest of the command.
+        skip_ports = bool(mode) and (mode == 'host' or str(mode).startswith('container:'))
+        for port, bindings in (host.get('PortBindings') or {}).items():
+            if skip_ports:
+                break
+            for binding in bindings or []:
+                host_ip = binding.get('HostIp') or ''
+                host_port = binding.get('HostPort') or ''
+                mapping = f'{host_ip}:{host_port}:{port}' if host_ip else f'{host_port}:{port}'
+                parts.append(f'-p {shlex.quote(mapping)}')
+        parts.append(f'--name {shlex.quote(name)}')
+        parts.append(shlex.quote(image))
+        # Cmd runs as the container's own arguments, after the image.
+        for arg in config.get('Cmd') or []:
+            parts.append(shlex.quote(str(arg)))
+        return ' '.join(parts)
+
+    @staticmethod
+    def _container_udp_port(config_text):
+        """Published UDP port, taken from the server config."""
+        match = re.search(r'^ListenPort\s*=\s*(\d+)', config_text or '', re.M)
+        return match.group(1) if match else str(AWG_DEFAULTS['port'])
+
+    # Known failure codes raised by this path (and handled by callers):
+    # server_off, env_off, state_unreadable, recreate_rollback_failed.
+    def _recreate_container_ipv6(self, protocol_type):
+        """Recreate an IPv4-only container as dual-stack.
+
+        The old container is renamed to `<name>-ipv6bak` and kept until the new
+        one answers on IPv6. On any failure the old container is renamed back
+        and started again. The image is never removed, so a retry stays cheap.
+        """
+        container = self._container_name(protocol_type)
+        path = self._resolve_config_path(protocol_type)
+        config_text = self._get_server_config(protocol_type)
+        if not (config_text or '').strip():
+            raise RuntimeError('state_unreadable')
+        image = self._container_run_image(container)
+        port = self._container_udp_port(config_text)
+        source_sha = hashlib.sha256(config_text.encode('utf-8')).hexdigest()
+        backup = f'{container}-ipv6bak'
+        self.ssh.run_sudo_command(f"docker rm -f {backup} >/dev/null 2>&1; true")
+        _out, _err, code = self.ssh.run_sudo_command(f"docker stop {container}")
+        if code != 0:
+            raise RuntimeError('server_off')
+        _out, _err, code = self.ssh.run_sudo_command(
+            f"docker rename {container} {backup}")
+        if code != 0:
+            self.ssh.run_sudo_command(f"docker start {container}")
+            raise RuntimeError('server_off')
+
+        def restore():
+            # Best effort: drop a half-created replacement under the original name.
+            self.ssh.run_sudo_command(f"docker rm -f {container} >/dev/null 2>&1; true")
+            _out, err, code = self.ssh.run_sudo_command(f"docker rename {backup} {container}")
+            if code != 0:
+                logger.warning("rollback: cannot rename %s back to %s: %s", backup, container, err)
+                self.ssh.run_sudo_command(f"docker start {backup} >/dev/null 2>&1; true")
+                return False
+            _out, err, code = self.ssh.run_sudo_command(f"docker start {container}")
+            if code != 0:
+                logger.warning("rollback: cannot start %s: %s", container, err)
+                return False
+            return True
+
+        # Rebuild from the container's own runtime config, not from a guess.
+        run_cmd = (self._run_cmd_from_inspect(
+            self._inspect_container(backup), container, image)
+            or self._docker_run_cmd(container, image, port, True))
+        _out, _err, code = self.ssh.run_sudo_command(run_cmd)
+        if code != 0:
+            if not restore():
+                raise RuntimeError('recreate_rollback_failed')
+            raise RuntimeError('env_off')
+        _out, _err, code = self.ssh.run_sudo_command(
+            f"docker network connect amnezia-dns-net {container}")
+        if code != 0:
+            if not restore():
+                raise RuntimeError('recreate_rollback_failed')
+            raise RuntimeError('env_off')
+        _out, _err, code = self.ssh.run_sudo_command(
+            f"docker cp {backup}:{path} {container}:{path}")
+        if code != 0:
+            if not restore():
+                raise RuntimeError('recreate_rollback_failed')
+            raise RuntimeError('state_unreadable')
+        _out, _err, code = self.ssh.run_sudo_command(
+            f"docker cp {backup}:/opt/amnezia/start.sh {container}:/opt/amnezia/start.sh")
+        if code != 0:
+            if not restore():
+                raise RuntimeError('recreate_rollback_failed')
+            raise RuntimeError('state_unreadable')
+        # The config must be byte-identical to the source before start.
+        copied_sha = self._config_sha(container, path)
+        if copied_sha and copied_sha != source_sha:
+            logger.warning("Config copy mismatch: %s != %s", copied_sha, source_sha)
+            if not restore():
+                raise RuntimeError('recreate_rollback_failed')
+            raise RuntimeError('state_unreadable')
+        self.ssh.run_sudo_command(f"docker start {container}")
+        try:
+            self._wait_container_running(container)
+        except RuntimeError:
+            if not restore():
+                raise RuntimeError('recreate_rollback_failed')
+            raise RuntimeError('env_off')
+        out, _, _ = self.ssh.run_sudo_command(
+            f"docker exec {container} ip -6 route show default 2>/dev/null")
+        if not (out or '').strip():
+            if not restore():
+                raise RuntimeError('recreate_rollback_failed')
+            raise RuntimeError('env_off')
+        _out, err, code = self.ssh.run_sudo_command(
+            f"docker rm -f {backup} >/dev/null 2>&1")
+        if code != 0:
+            # A leftover copy must not look like a second instance.
+            logger.warning("Could not remove the IPv6 backup container %s: %s",
+                           backup, err)
+        if hasattr(self.ssh, 'docker_ps_invalidate'):
+            self.ssh.docker_ps_invalidate()
+        self._invalidate_config_cache(protocol_type)
+        return container
+
+    def set_instance_ipv6(self, protocol_type, enabled, allow_repair=False):
+        """Enable or disable IPv6 on an instance.
+
+        Enabling needs zero peers. Disabling also needs zero peers, except for
+        the repair path: an instance linked to an exit node whose link is
+        already broken may drop IPv6 with `allow_repair=True`.
+        """
+        state = self.get_instance_ipv6_state(protocol_type)
+        repair = (enabled is False and allow_repair
+                  and bool(state.get('exit_linked')))
+        if state['peers'] is None:
+            raise RuntimeError(state['blocked_reason'] or 'state_unreadable')
+        if state['peers'] != 0 and not repair:
+            raise RuntimeError(state['blocked_reason'] or 'peers')
+        if enabled and state['exit_linked']:
+            raise RuntimeError('exit_link')
+        if enabled and state.get('needs_recreate'):
+            self._recreate_container_ipv6(protocol_type)
+            state = self.get_instance_ipv6_state(protocol_type)
+            if state.get('blocked_reason') != 'none':
+                raise RuntimeError(state.get('blocked_reason') or 'env_off')
+            if state.get('peers'):
+                # A client appeared while the container was rebuilt.
+                raise RuntimeError('peers_appeared')
+        index = self._subnet_ip(protocol_type)
+        prefix = f'fd42:8:{index}::1/64'
+        if enabled:
+            try:
+                taken = int(index) in self._used_subnet_indexes(
+                    exclude=state['container'])
+            except (TypeError, ValueError):
+                taken = False
+            if taken:
+                raise RuntimeError('ipv6_pool_exhausted')
+        # Second peer check right before the write: a peer can appear while
+        # the container is being rebuilt or the netns is probed.
+        peers, _v6, readable = self._peers_state(protocol_type)
+        if not readable:
+            raise RuntimeError('state_unreadable')
+        if peers != 0 and not repair:
+            raise RuntimeError('peers')
+        if enabled:
+            self._set_config_address_ipv6(protocol_type, prefix)
+        else:
+            self._set_config_address_ipv6(protocol_type, None)
+        self._write_start_script(protocol_type)
+        out, err, code = self.ssh.run_sudo_command(
+            f"docker restart {state['container']}")
+        if code != 0:
+            logger.warning("docker restart failed: %s", err or out)
+            # Do not leave an IPv6 Address in a config whose container will
+            # not come up: restore the previous Address and retry the restart.
+            try:
+                self._set_config_address_ipv6(protocol_type, None)
+            except Exception as exc:  # restore failure is secondary
+                logger.warning("address rollback failed: %s", exc)
+            self.ssh.run_sudo_command(
+                f"docker restart {state['container']}")
+            raise RuntimeError('server_off')
+        self._invalidate_config_cache(protocol_type)
+        # Both directions must prove the container is back: on disable there
+        # is no IPv6 route to check, and a silent restart failure would look
+        # like success.
+        running, _container = self._container_state(protocol_type)
+        if not running:
+            raise RuntimeError('server_off')
+        try:
+            self._verify_interface_up(protocol_type)
+        except RuntimeError as exc:
+            logger.warning("Tunnel interface check failed: %s", exc)
+            if enabled:
+                self._set_config_address_ipv6(protocol_type, None)
+                self._write_start_script(protocol_type)
+                self.ssh.run_sudo_command(f"docker restart {state['container']}")
+            raise RuntimeError('env_off')
+        if enabled:
+            out, _, _ = self.ssh.run_sudo_command(
+                f"docker exec {state['container']} ip -6 route show default 2>/dev/null")
+            if not (out or '').strip():
+                self._set_config_address_ipv6(protocol_type, None)
+                self._write_start_script(protocol_type)
+                self.ssh.run_sudo_command(f"docker restart {state['container']}")
+                raise RuntimeError('env_off')
+        elif self._get_subnet_ipv6_ip(protocol_type):
+            raise RuntimeError('env_off')
+        return self.get_instance_ipv6_state(protocol_type)
+
+    def _subnet_ip(self, protocol_type):
+        """IPv4 subnet index of an instance (10.8.N.1/24 -> N)."""
+        gateway = self._get_subnet_ip(protocol_type) or ''
+        parts = gateway.split('.')
+        return parts[2] if len(parts) == 4 else '1'
 
     def _userspace_guard(self, protocol_type):
         """Shell snippet forcing userspace for awg3 on a pre-3.1 kernel module."""
@@ -990,12 +1644,16 @@ fi
 # as AWP_DOCKER_IPV6=pending so the install log can warn the admin.
 if ip -6 -o addr show scope global 2>/dev/null | grep -q inet6; then
   cp /etc/docker/daemon.json /etc/docker/daemon.json.bak.awp 2>/dev/null
-  IPV6_CHANGED=$(python3 - <<'PYEOF' 2>/dev/null
+  IPV6_STATE=$(python3 - <<'PYEOF' 2>/dev/null
 import json, os
 p = '/etc/docker/daemon.json'
 d = {{}}
 if os.path.exists(p):
-    d = json.load(open(p))
+    try:
+        d = json.load(open(p))
+    except Exception:
+        print('invalid')
+        raise SystemExit(0)
 need = {{'ipv6': True, 'experimental': True, 'ip6tables': True}}
 changed = False
 for k, v in need.items():
@@ -1005,22 +1663,26 @@ if 'fixed-cidr-v6' not in d:
     d['fixed-cidr-v6'] = 'fd00:42::/64'; changed = True
 if changed:
     json.dump(d, open(p, 'w'), indent=2)
-    print('yes')
+print('changed' if changed else 'ok')
 PYEOF
 )
-  if [ -z "$IPV6_CHANGED" ] && ! grep -q '"ipv6"' /etc/docker/daemon.json 2>/dev/null; then
-    echo '{{"ipv6": true, "fixed-cidr-v6": "fd00:42::/64", "experimental": true, "ip6tables": true}}' > /etc/docker/daemon.json
-    IPV6_CHANGED=yes
-  fi
-  if [ "$IPV6_CHANGED" = "yes" ]; then
+  if [ "$IPV6_STATE" = "invalid" ]; then
+    # Never overwrite a file we cannot parse: it may hold foreign keys.
+    echo "AWP_DOCKER_IPV6=invalid"
+  elif [ "$IPV6_STATE" = "changed" ]; then
     if docker ps --format '{{{{.Names}}}}' 2>/dev/null | grep -qiE '^amnezia-|panel'; then
       echo "AWP_DOCKER_IPV6=pending"
     else
       systemctl restart docker
       echo "AWP_DOCKER_IPV6=restarted"
     fi
-  else
+  elif [ "$IPV6_STATE" = "ok" ]; then
     echo "AWP_DOCKER_IPV6=ok"
+  elif grep -q '"ipv6"' /etc/docker/daemon.json 2>/dev/null; then
+    echo "AWP_DOCKER_IPV6=ok"
+  else
+    echo '{{"ipv6": true, "fixed-cidr-v6": "fd00:42::/64", "experimental": true, "ip6tables": true}}' > /etc/docker/daemon.json
+    echo "AWP_DOCKER_IPV6=pending"
   fi
 fi
 """
@@ -1241,7 +1903,8 @@ done
         return info
 
     def install_protocol(self, protocol_type, port=None, awg_params=None,
-                         mtu=None, dns=None, special_junk=None, dns6=None):
+                         mtu=None, dns=None, special_junk=None, dns6=None,
+                         progress=None, ipv6_preference=None):
         """
         Full installation of AWG or AWG-Legacy protocol.
         Steps: install docker -> prepare host -> build container ->
@@ -1285,6 +1948,15 @@ done
         iface = self._interface_name(protocol_type)
 
         results = []
+        streamed = 0
+
+        def flush(stage, percent=None):
+            """Stream every log line produced since the previous checkpoint."""
+            nonlocal streamed
+            if progress:
+                for message in results[streamed:]:
+                    progress(stage, message, percent)
+            streamed = len(results)
 
         # Step 1: Install Docker
         if not self.check_docker_installed():
@@ -1293,6 +1965,7 @@ done
             results.append("Docker installed successfully")
         else:
             results.append("Docker already installed")
+        flush('docker', 12)
 
         # Step 2: Prepare host
         results.append("Preparing host...")
@@ -1306,6 +1979,13 @@ done
             )
         elif docker_ipv6 == 'restarted':
             results.append("Docker restarted to apply IPv6 config")
+        elif docker_ipv6 == 'invalid':
+            results.append(
+                "! /etc/docker/daemon.json is not valid JSON, so Docker IPv6 was "
+                "not enabled and the file was left untouched. Fix the file, then "
+                "apply the Docker IPv6 settings from the server page."
+            )
+        flush('host', 22)
 
         # Step 2.5: Kernel module (best effort, userspace fallback)
         results.append("Checking amneziawg kernel module...")
@@ -1317,6 +1997,7 @@ done
             results.append(f"Kernel module skipped, userspace mode (amneziawg-go): {km.split(':', 1)[-1].strip()}")
         else:
             results.append(f"Kernel module failed, userspace mode (amneziawg-go): {km.split(':', 1)[-1].strip()}")
+        flush('host', 28)
 
         # Step 2.6: warn about sibling AWG containers whose image still carries
         # awg-tools of another version than the host kernel module - such a
@@ -1341,6 +2022,7 @@ done
                         f"the tunnel self-heals in userspace mode on restart, but reinstall "
                         f"this instance to rebuild its image and keep the fast kernel datapath."
                     )
+        flush('host', 30)
 
         # Step 3: Remove old container if exists
         if self.check_protocol_installed(protocol_type):
@@ -1351,6 +2033,7 @@ done
             self._backup_container_state(container_name, results)
             self.remove_container(protocol_type)
             results.append("Old container removed")
+        flush('host', 35)
 
         # Step 4: Build/Pull container
         if base_proto == self.AWG3:
@@ -1363,6 +2046,7 @@ done
                     f"datapath."
                 )
         results.append("Pulling Docker image...")
+        flush('build', 40)
         dockerfile_folder = f"/opt/amnezia/{container_name}"
 
         dockerfile_content = self._dockerfile_content(
@@ -1386,8 +2070,12 @@ done
             f">/dev/null 2>&1 &",
             timeout=30
         )
+        if progress:
+            progress('build', 'docker build --no-cache --pull started', 42)
+        build_started = time.time()
+        next_tail = build_started + 10
         build_code = None
-        deadline = time.time() + 900
+        deadline = build_started + 900
         while time.time() < deadline:
             time.sleep(5)
             out, err, code = self.ssh.run_sudo_command(
@@ -1395,6 +2083,14 @@ done
             if code == 0 and (out or '').strip().isdigit():
                 build_code = int(out.strip())
                 break
+            if progress and time.time() >= next_tail:
+                next_tail = time.time() + 10
+                tail, _, _ = self.ssh.run_sudo_command(
+                    f"tail -n 1 {build_log} 2>/dev/null", timeout=15)
+                line = (tail or '').strip()
+                if line:
+                    percent = 45 + min(30, int((time.time() - build_started) / 4))
+                    progress('build', line[-500:], percent)
         if build_code is None:
             raise RuntimeError(
                 f"Build did not finish within 900s; "
@@ -1406,13 +2102,14 @@ done
                 f"no output; full log on the server: {build_log}")
             raise RuntimeError(f"Failed to build container: {detail}")
         results.append("Docker image built successfully")
+        flush('build', 75)
 
         # Step 5: Run container
         results.append("Starting container...")
         # Detect host IPv6 BEFORE creating the container: the netns
         # disable_ipv6 flags are fixed at container creation time, see
         # _docker_run_cmd.
-        ipv6_enabled = self._detect_server_ipv6()
+        ipv6_enabled = self._detect_server_ipv6(preference=ipv6_preference)
         run_cmd = self._docker_run_cmd(container_name, container_name, port, ipv6_enabled)
 
         out, err, code = self.ssh.run_sudo_command(run_cmd)
@@ -1428,10 +2125,12 @@ done
         results.append("Waiting for container to start...")
         self._wait_container_running(container_name)
         results.append("Container started")
+        flush('run', 80)
 
         # Step 6: Configure container (generate server keys and config)
         results.append("Configuring AWG...")
-        ipv6_enabled = self._detect_server_ipv6(protocol_type)
+        ipv6_enabled = self._detect_server_ipv6(protocol_type,
+                                                preference=ipv6_preference)
         results.append(
             "IPv6 works end-to-end, enabling dual-stack tunnel"
             if ipv6_enabled else
@@ -1440,22 +2139,26 @@ done
         self._configure_container(protocol_type, port, awg_params, ipv6=ipv6_enabled,
                                   mtu=mtu, dns=dns, dns6=dns6)
         results.append("AWG configured")
+        flush('config', 88)
 
         # Step 7: Upload and run start script
         results.append("Starting AWG service...")
         self._upload_start_script(protocol_type)
         self._verify_interface_up(protocol_type)
         results.append("AWG service started")
+        flush('config', 90)
 
         # Step 8: Setup firewall
         results.append("Setting up firewall...")
         self.setup_firewall()
         results.append("Firewall configured")
+        flush('firewall', 94)
 
         # Step 9: Host network tuning (BBR)
         results.append("Applying host network tuning (BBR)...")
         self.setup_host_tuning()
         results.append("Host network tuning applied")
+        flush('firewall', 97)
 
         return {
             'status': 'success',
@@ -1541,7 +2244,7 @@ done
         # IPv6 DNS for dual-stack tunnels, stored the same comment way;
         # _get_dns6 reads it back when building client configs.
         if ipv6:
-            client_defaults_lines += f"# DNS6 = {AWG_DEFAULTS['dns6']}\n"
+            client_defaults_lines += f"# DNS6 = {dns6 or AWG_DEFAULTS['dns6']}\n"
 
         address_line = f"{subnet_ip}/{subnet_cidr}"
         if ipv6:
@@ -3812,11 +4515,16 @@ PersistentKeepalive = 25
         """IPv6 DNS appended to client configs on dual-stack tunnels.
 
         Priority: per-client override (userData.dns6) > `# DNS6 = ...` line in
-        the server config (written at install when IPv6 is enabled) > built-in
-        default (Cloudflare v6)."""
+        the server config > built-in default. An IPv4-only instance has no
+        IPv6 gateway, so it returns '' instead of a default nobody can use."""
         if user_data and user_data.get('dns6'):
             return user_data['dns6']
-        return self._read_config_key(protocol_type, 'DNS6') or AWG_DEFAULTS['dns6']
+        value = self._read_config_key(protocol_type, 'DNS6')
+        if value:
+            return value
+        if not self._get_subnet_ipv6_ip(protocol_type):
+            return ''
+        return AWG_DEFAULTS['dns6']
 
     def get_awg_settings(self, protocol_type):
         """Client-facing AWG settings currently stored in the server config."""
@@ -3826,6 +4534,7 @@ PersistentKeepalive = 25
             'mtu': self._get_mtu(protocol_type),
             'dns': self._get_dns(protocol_type),
             'dns6': self._get_dns6(protocol_type),
+            'ipv6_enabled': bool(self._get_subnet_ipv6_ip(protocol_type)),
             'default_i1': AWG_DEFAULT_I1,
             'supports_special_junk': self._base_protocol(protocol_type) != self.AWG_LEGACY,
             # an instance behind an exit link cannot carry more than the link
@@ -3840,6 +4549,28 @@ PersistentKeepalive = 25
             settings[key] = params.get(key, '')
         return settings
 
+    def _validate_dns_value(self, value):
+        """Validate a DNS/DNS6 value.
+
+        None -> unchanged (caller should skip validation).
+        Empty string -> valid (means clear the setting).
+        Comma/whitespace separated tokens, each must be a valid IPv4 or IPv6 address.
+        Raises RuntimeError('bad_request') on invalid input.
+        """
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return text  # empty string means clear
+        # Split on comma and/or whitespace
+        tokens = [t.strip() for t in re.split(r'[,\s]+', text) if t.strip()]
+        for token in tokens:
+            try:
+                ipaddress.ip_address(token)
+            except ValueError:
+                raise RuntimeError('bad_request')
+        return text
+
     def update_awg_settings(self, protocol_type, mtu=None, dns=None, special_junk=None, dns6=None):
         """Rewrite MTU/DNS/I1-I5 in the server config and apply them live.
 
@@ -3847,10 +4578,17 @@ PersistentKeepalive = 25
         and DNS only matter when a client config is generated. Existing
         clients pick the new values up on their next config export -- the
         config they already imported keeps the old ones.
+        DNS and DNS6 values are validated as IP addresses.
         """
         if self._base_protocol(protocol_type) == self.AWG_LEGACY:
             special_junk = None
         junk = normalize_special_junk(special_junk) if special_junk is not None else None
+
+        # Validate DNS and DNS6 before writing
+        if dns is not None:
+            self._validate_dns_value(dns)
+        if dns6 is not None:
+            self._validate_dns_value(dns6)
 
         current_junk = self._get_awg_params_from_config(protocol_type)
         config = self._get_server_config(protocol_type)
