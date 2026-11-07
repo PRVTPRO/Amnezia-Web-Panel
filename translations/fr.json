@@ -1101,5 +1101,14 @@
   "server_ipv6_badge_operation_busy": "une autre opération est en cours",
   "server_ipv6_err_not_awg": "pas AmneziaWG",
   "exit_link_ipv6": "Cette instance a IPv6 activé. Désactivez IPv6 avant de la lier à un nœud de sortie.",
-  "server_ipv6_chip_restart": "redémarrage requis"
+  "server_ipv6_chip_restart": "redémarrage requis",
+  "server_ipv6_state_env_off": "IPv6 est désactivé par le réglage du serveur",
+  "server_ipv6_state_env_on": "IPv6 est imposé par le réglage du serveur",
+  "server_ipv6_badge_peer_lifecycle_busy": "Une opération client est déjà en cours",
+  "server_ipv6_badge_ip6tables_unsupported": "ip6tables n'est pas pris en charge",
+  "server_ipv6_save_preference": "Enregistrer",
+  "server_ipv6_cancel": "Annuler",
+  "server_ipv6_discard_confirm": "Des modifications ne sont pas enregistrées. Fermer sans enregistrer ?",
+  "server_ipv6_enable_docker_first": "Activez d'abord IPv6 pour Docker",
+  "server_ipv6_apply_or_revert_hint": "Appliquez ou annulez d'abord le changement IPv6."
 }

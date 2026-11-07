@@ -170,13 +170,14 @@ class Ipv6UiBrowserTests(unittest.TestCase):
             page.evaluate("() => { renderIpChips({host: {ipv4: '1.2.3.4', "
                           "ipv6_state: 'absent'}, docker: "
                           "{installed: true, ipv6_enabled: true}}); }")
-            self.assertEqual(self._states(page), ['on', 'off'])
+            self.assertEqual(self._states(page), ['on', 'bad'])
             self.assertEqual(self._glyphs(page)[1], '✕')
 
             page.evaluate("() => { renderIpChips({host: {ipv4: '1.2.3.4', "
                           "ipv6_state: 'unknown'}, docker: "
                           "{installed: true, ipv6_enabled: true}}); }")
-            self.assertEqual(self._states(page), ['on', 'off'])
+            self.assertEqual(self._states(page), ['on', 'neutral'])
+            self.assertEqual(self._glyphs(page)[1], '?')
             self.assertIn(EN['server_ipv6_state_unknown'],
                           page.locator('.ip-chip').nth(1).inner_text())
 
@@ -400,8 +401,8 @@ class Ipv6UiBrowserTests(unittest.TestCase):
             self.assertFalse(result['dns6Shown'])
 
             result = note(True, False)
-            self.assertEqual(result['text'], EN['server_ipv6_install_ipv6_auto'])
-            self.assertEqual(result['kind'], 'warn')
+            self.assertEqual(result['text'], EN['server_ipv6_after_docker_restart'])
+            self.assertEqual(result['kind'], 'pending')
             self.assertTrue(result['dns6Shown'])
 
             result = note(True, True)

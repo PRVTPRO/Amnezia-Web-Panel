@@ -49,7 +49,7 @@ class DnsSixTests(unittest.TestCase):
     def test_config_line_wins_over_the_default(self):
         manager = make_manager()
         manager._read_config_key = Mock(return_value='2001:db8::53')
-        manager._get_subnet_ipv6_ip = Mock(return_value='')
+        manager._get_subnet_ipv6_ip = Mock(return_value='fd42:8:1::1')
         self.assertEqual(manager._get_dns6('awg3'), '2001:db8::53')
 
     def test_per_client_override_wins(self):
@@ -71,7 +71,8 @@ class PeerStateTests(unittest.TestCase):
         manager._parse_peers_from_config = Mock(return_value={'KEY_A': {}, 'KEY_D': {}})
         peers, v6, readable = manager._peers_state('awg3')
         self.assertTrue(readable)
-        self.assertEqual(peers, 4)
+        # KEY_C is disabled, so its clientsTable row is not a live peer.
+        self.assertEqual(peers, 3)
         self.assertEqual(v6, 1)
 
     def test_disabled_peer_does_not_make_ipv6_in_use(self):
@@ -108,10 +109,15 @@ class InstanceStateTests(unittest.TestCase):
         manager = make_manager()
         manager._docker_ipv6_info = Mock(return_value={'ipv6_enabled': docker_on,
                                                       'installed': True})
-        manager._get_subnet_ipv6_ip = Mock(return_value=gateway)
+        address = 'Address = 10.8.1.1/24'
+        if gateway:
+            address += f', {gateway}/64'
+        manager._get_server_config = Mock(
+            return_value=f'[Interface]\n{address}\nListenPort = 55424\n')
+        manager._host_ipv6_info = Mock(
+            return_value={'disabled_by_sysctl': False})
         manager._peers_state = Mock(return_value=(peers, v6count, readable))
         manager._container_state = Mock(return_value=(running, 'c'))
-        manager._get_subnet_ip = Mock(return_value='10.8.1.1')
         manager.exit_link_info = Mock(return_value={'exit_uid': 'e'} if exit_linked else None)
         manager.ssh.run_sudo_command.return_value = ('0', '', 0) if capable else ('1', '', 0)
         return manager.get_instance_ipv6_state('awg3')

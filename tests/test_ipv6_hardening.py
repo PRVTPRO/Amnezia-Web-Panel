@@ -57,8 +57,11 @@ class RunCmdFromInspectHardeningTests(unittest.TestCase):
         self.assertEqual(cmd.count('PATH='), 1)
         self.assertIn('--entrypoint /entry.sh', cmd)
         self.assertIn('--label panel.role=', cmd)
-        # Cmd is appended after the image, quoted as one argument.
-        self.assertTrue(cmd.endswith("img serve --flag 'two words'"), cmd)
+        # Docker replaces the whole Entrypoint with --entrypoint, so the rest
+        # of an exec-form Entrypoint list is prepended to Cmd. Both come after
+        # the image, quoted as separate arguments.
+        self.assertTrue(
+            cmd.endswith("img ignored-arg serve --flag 'two words'"), cmd)
 
     def test_ports_are_skipped_for_host_and_container_networks(self):
         info = {
