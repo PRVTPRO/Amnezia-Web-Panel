@@ -2746,6 +2746,7 @@ def _normalize_telegram_id(value):
 
 class AddUserConnectionRequest(BaseModel):
     server_id: int
+    server_uid: Optional[constr(min_length=1, max_length=128)] = None
     protocol: str = 'awg'
     name: str = 'VPN Connection'
     client_id: Optional[str] = None
@@ -8086,15 +8087,72 @@ async def api_reset_user_traffic(request: Request, user_id: str):
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
+_CREATE_CAPABILITIES_CACHE = {}
+
+
+@app.get('/api/connections/create-capabilities', tags=["Connections"])
+@serialize_peer_lifecycle
+async def api_create_connection_capabilities(request: Request):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    data = load_data()
+    servers = {}
+    for server in data.get('servers', []):
+        if not server.get('uid'):
+            continue
+        protocols = {}
+        for protocol, info in server.get('protocols', {}).items():
+            if protocol_base(protocol) != 'telemt' or not info.get('installed'):
+                continue
+            identity = (server['uid'], server.get('host'), server.get('ssh_port', 22), server.get('username'), protocol)
+            cached = _CREATE_CAPABILITIES_CACHE.get(identity)
+            if cached and time.monotonic() - cached[0] < 30:
+                protocols[protocol] = cached[1]
+                continue
+            ssh = None
+            supported = False
+            try:
+                ssh = await asyncio.to_thread(get_ssh, server)
+                await asyncio.to_thread(ssh.connect)
+                manager = get_protocol_manager(ssh, protocol)
+                supported = await asyncio.to_thread(manager.supports_inactive_create)
+                latest = next((s for s in load_data().get('servers', []) if s.get('uid') == server['uid']), None)
+                supported = supported and latest == server
+            except Exception:
+                pass  # Only a capability boolean, never remote output or secrets.
+            finally:
+                if ssh:
+                    await asyncio.to_thread(ssh.disconnect)
+            _CREATE_CAPABILITIES_CACHE[identity] = (time.monotonic(), bool(supported))
+            protocols[protocol] = bool(supported)
+        servers[server['uid']] = protocols
+    # Bound topology cache; old endpoint/instance proofs are never reused by UID alone.
+    if len(_CREATE_CAPABILITIES_CACHE) > 256:
+        _CREATE_CAPABILITIES_CACHE.clear()
+    return {'contract': 'peer-create-v2', 'expected_server_uid': True, 'servers': servers}
+
+
 @app.post('/api/users/{user_id}/connections/add', tags=["Users"])
 @serialize_peer_lifecycle
 async def api_add_user_connection(request: Request, user_id: str, req: AddUserConnectionRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
-        if not req.client_id and protocol_base(req.protocol) in ('awg', 'awg2', 'awg3', 'awg_legacy'):
+        if not req.client_id and protocol_base(req.protocol) in ('awg', 'awg2', 'awg3', 'awg_legacy', 'telemt'):
+            extra = {}
+            if getattr(req, 'server_uid', None) is not None:
+                extra['expected_server_uid'] = req.server_uid
+            if protocol_base(req.protocol) == 'telemt':
+                options = {}
+                for source, target in (('telemt_quota', 'data_quota_bytes'), ('telemt_max_ips', 'max_unique_ips'),
+                                       ('telemt_expiry', 'expiration_rfc3339'), ('telemt_ad_tag', 'user_ad_tag'),
+                                       ('telemt_max_conns', 'max_tcp_conns'), ('telemt_secret', 'secret')):
+                    value = getattr(req, source, None)
+                    if value is not None and value != '':
+                        options[target] = int(value) if target in ('data_quota_bytes', 'max_unique_ips', 'max_tcp_conns') else value
+                extra['options'] = options
             result = await peer_creates.create(user_id, req.server_id, req.protocol,
-                                               req.name, req.operation_id)
+                                               req.name, req.operation_id, **extra)
             data = load_data()
             operation = peer_creates.journal.read()[result['operation_id']]
             server = next(server for server in data['servers']
@@ -8351,7 +8409,7 @@ def api_get_user_connections(request: Request, user_id: str):
             ud = cl.get('userData', {}) or {}
             # Peer names live in userData.clientName (same place the server
             # page reads them); fall back to a top-level key just in case.
-            c['peer_name'] = ud.get('clientName') or cl.get('name', '')
+            c['peer_name'] = c.get('name', '') if protocol_base(c['protocol']) == 'telemt' and c.get('create_operation_id') else ud.get('clientName') or cl.get('name', '')
             # Managers store the flag in userData.enabled; fall back to the
             # top-level key just in case another manager sets it there.
             enabled = cl.get('enabled', ud.get('enabled', True))

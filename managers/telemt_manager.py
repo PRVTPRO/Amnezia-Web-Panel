@@ -5,6 +5,10 @@ import re
 import os
 import secrets
 import shlex
+import base64
+import hmac
+import time
+import tomllib
 from datetime import datetime
 from .ssh_manager import SSHManager
 
@@ -67,6 +71,130 @@ class TelemtManager:
             return json.loads(out)
         except json.JSONDecodeError:
             return None
+
+    def _lifecycle_api(self, method, path, data=None):
+        """Checked native API. Payloads are private files/stdin, never SSH argv/logs.
+
+        Native enabled=false is required; older Telemt builds fail closed before
+        preparation. The API atomically persists access.users/user_enabled and
+        fences credentials, unlike the legacy comment/DELETE/re-add sequence.
+        """
+        payload = base64.b64encode(json.dumps(data).encode()).decode() if data is not None else ''
+        script = '''import base64,json,subprocess,sys
+try:
+    args=['docker','exec','-i',CONTAINER,'curl','--silent','--show-error','--max-time','10',
+          '--write-out','\\n%{http_code}','--request',METHOD]
+    raw=None
+    if PAYLOAD:
+        raw=base64.b64decode(PAYLOAD)
+        args+=['--header','Content-Type: application/json','--data-binary','@-']
+    args+=['--',URL]
+    p=subprocess.run(args,input=raw,capture_output=True,timeout=15)
+    if p.returncode: raise RuntimeError()
+    body,status=p.stdout.rsplit(b'\\n',1)
+    print(json.dumps({'status':int(status),'body':json.loads(body)}))
+except Exception:
+    print('{"status":0,"body":{}}')
+    sys.exit(1)
+'''
+        # repr, not shell interpolation; the staged script is not a command argument.
+        script = ''.join(key + '=' + repr(value) + '\n' for key, value in
+                         [('CONTAINER', self.container_name), ('METHOD', method),
+                          ('PAYLOAD', payload), ('URL', self.API_URL + path)]) + script
+        private = self.ssh._make_private_temp_dir()
+        try:
+            file = private + '/telemt-api.py'
+            self.ssh.upload_file(script, file)
+            out, _, code = self.ssh.run_sudo_command('python3 ' + shlex.quote(file), timeout=25)
+            if code:
+                raise RuntimeError('Telemt API result unknown; recovery pending')
+            result = json.loads(out)
+            if (not isinstance(result, dict) or not 200 <= result.get('status', 0) < 300
+                    or not isinstance(result.get('body'), dict) or result['body'].get('ok') is not True):
+                raise RuntimeError('Telemt API rejected operation; recovery pending')
+            return result['body']['data']
+        finally:
+            self.ssh.run_command('rm -rf -- ' + shlex.quote(private))
+
+    def _native_users(self):
+        users = self._lifecycle_api('GET', '/v1/users')
+        if (not isinstance(users, list) or not users or
+                any(not isinstance(u, dict) or not isinstance(u.get('username'), str)
+                    or not isinstance(u.get('enabled'), bool) or not isinstance(u.get('in_runtime'), bool)
+                    for u in users) or len({u['username'] for u in users}) != len(users)):
+            raise RuntimeError('Telemt native disabled-user API is required')
+        return {u['username']: u for u in users}
+
+    def supports_inactive_create(self):
+        self._native_users()
+        health = self._lifecycle_api('GET', '/v1/health')
+        return isinstance(health, dict) and health.get('read_only') is False
+
+    def _credential(self, client_id, expected_secret=None):
+        text = self._get_server_config()
+        try:
+            access = tomllib.loads(text)['access']
+            users, flags = access['users'], access.get('user_enabled', {})
+            secret = users.get(client_id)
+            enabled = flags.get(client_id, True)
+            if (not isinstance(secret, str) or re.fullmatch(r'[a-fA-F0-9]{32}', secret) is None
+                    or not isinstance(enabled, bool) or expected_secret is not None
+                    and not hmac.compare_digest(secret, expected_secret)):
+                raise ValueError()
+        except (KeyError, TypeError, ValueError):
+            raise RuntimeError('Telemt credential identity is unverified') from None
+        return text, secret, enabled
+
+    def prepare_client(self, protocol_type, operation_id, client_name, secret, client_id,
+                       host='', port='', public_port=None, options=None):
+        if protocol_type != self.protocol or re.fullmatch(r'telemt(?:__[1-9][0-9]*)?', protocol_type) is None:
+            raise RuntimeError('Telemt instance identity mismatch')
+        if not host or not str(public_port or port).isdigit() or not 1 <= int(public_port or port) <= 65535:
+            raise RuntimeError('Telemt public endpoint is unverified')
+        if client_id != 'pc_' + uuid.UUID(operation_id).hex:
+            raise RuntimeError('Telemt operation identity mismatch')
+        runtime = self._native_users()  # Prove native fields before any write.
+        text = self._get_server_config()
+        try:
+            users = tomllib.loads(text)['access']['users']
+        except (KeyError, TypeError, ValueError):
+            raise RuntimeError('Telemt configuration unverified') from None
+        # Never rotate or adopt a different credential, including commented legacy users.
+        entries = self._parse_users_from_config(text)
+        if any(k.lstrip('#').strip() != client_id and hmac.compare_digest(v, secret)
+               or k.lstrip('#').strip() == client_id and not hmac.compare_digest(v, secret)
+               for k, v in entries.items()):
+            raise RuntimeError('Telemt credential conflict')
+        created = client_id not in users
+        if created:
+            if client_id in runtime:
+                raise RuntimeError('Telemt runtime ownership conflict')
+            self._lifecycle_api('POST', '/v1/users',
+                                dict(options or {}, username=client_id, secret=secret, enabled=False))
+        _, _, enabled = self._credential(client_id, secret)
+        observed = self._native_users().get(client_id)
+        if observed is None or created and (enabled or observed['enabled']):
+            raise RuntimeError('Prepared Telemt credential not confirmed')
+        text, _, _ = self._credential(client_id, secret)
+        return {'client_id': client_id,
+                'config': self._build_client_link(secret, host, public_port or port, text)}
+
+    def peer_is_active(self, protocol_type, client_id):
+        _, _, persistent = self._credential(client_id)
+        user = self._native_users().get(client_id)
+        if user is None or user['enabled'] != persistent:
+            raise RuntimeError('Telemt runtime state unconfirmed')
+        return persistent and user['in_runtime']
+
+    def set_prepared_active(self, protocol_type, client_id, secret, enable):
+        self._credential(client_id, secret)
+        self._lifecycle_api('PATCH', '/v1/users/' + client_id, {'enabled': bool(enable)})
+        for _ in range(20):
+            self._credential(client_id, secret)
+            if self.peer_is_active(protocol_type, client_id) == enable:
+                return
+            time.sleep(.1)
+        raise RuntimeError('Telemt activation state unconfirmed')
 
     def check_docker_installed(self):
         out, _, _ = self.ssh.run_command("docker --version 2>/dev/null")
@@ -325,6 +453,12 @@ docker compose version
             
             enabled = not username.startswith('#')
             clean_name = username.lstrip('#').strip()
+            if re.fullmatch(r'pc_[a-f0-9]{32}', clean_name):
+                # Native journaled credentials remain in access.users while disabled.
+                # Missing runtime data is unknown, never an inferred success.
+                enabled = (user_stats['enabled'] and user_stats['in_runtime']
+                           if isinstance(user_stats.get('enabled'), bool)
+                           and isinstance(user_stats.get('in_runtime'), bool) else None)
             
             total_octets = user_stats.get('total_octets', 0)
             quota = user_stats.get('data_quota_bytes')
@@ -545,6 +679,13 @@ docker compose version
         return '\n'.join(lines)
 
     def remove_client(self, protocol_type, client_id):
+        if re.fullmatch(r'pc_[a-f0-9]{32}', client_id):
+            self._credential(client_id)
+            self._lifecycle_api('DELETE', '/v1/users/' + client_id)
+            users = tomllib.loads(self._get_server_config())['access']['users']
+            if client_id in users or client_id in self._native_users():
+                raise RuntimeError('Telemt removal unconfirmed; recovery pending')
+            return
         # 1. API
         self._api_request("DELETE", f"/v1/users/{client_id}")
         
@@ -560,6 +701,9 @@ docker compose version
         self.ssh.upload_file_sudo('\n'.join(new_lines).replace('\r\n', '\n'), f"{self._config_path()}")
 
     def toggle_client(self, protocol_type, client_id, enable, restart=True):
+        if re.fullmatch(r'pc_[a-f0-9]{32}', client_id):
+            _, secret, _ = self._credential(client_id)
+            return self.set_prepared_active(protocol_type, client_id, secret, enable)
         # API doesn't have a direct "toggle", so we either set a huge quota or remove/re-add
         # But for Telemt, commenting out in config is the persistent way.
         # We'll use HUP after toggling in config.
@@ -601,6 +745,8 @@ docker compose version
         (preserving the `#` disabled marker) and the runtime API user is
         re-created under the new name with the same secret. Proxy links are
         secret-based, so existing links keep working."""
+        if re.fullmatch(r'pc_[a-f0-9]{32}', client_id):
+            raise RuntimeError('Journaled credential identity cannot be renamed')
         new_username = re.sub(r'[^a-zA-Z0-9_.-]', '', (new_name or '').replace(' ', '_'))
         if not new_username:
             raise RuntimeError('Invalid name')
@@ -652,7 +798,11 @@ docker compose version
             secret = 'ee' + secret + domain.encode('utf-8').hex()
         return f"tg://proxy?server={host}&port={port}&secret={secret}"
 
-    def get_client_config(self, protocol_type, client_id, host='', port='', public_port=None):
+    def get_client_config(self, protocol_type, client_id, host='', port='', public_port=None,
+                          expected_secret=None):
+        if re.fullmatch(r'pc_[a-f0-9]{32}', client_id):
+            text, secret, _ = self._credential(client_id, expected_secret)
+            return self._build_client_link(secret, host, public_port or port, text)
         resp = self._api_request("GET", f"/v1/users/{client_id}")
         if resp and resp.get('ok'):
             user = resp.get('data', {})

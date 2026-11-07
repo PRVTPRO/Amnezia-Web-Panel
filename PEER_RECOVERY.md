@@ -162,6 +162,32 @@ still owned by that journal. Reconcile the journal first; never delete it to
 make a restore pass. This is a deliberate fail-closed limitation, not automatic
 recovery of unknown remote outcomes.
 
+## Journaled Telemt creation
+
+`POST /api/users/{user_id}/connections/add` also uses the peer-create journal
+for new Telemt credentials. Supply a UUID `operation_id` and, when available,
+`server_uid`; retries must retain owner, UID, full instance, name and options.
+The admin-only `GET /api/connections/create-capabilities` reports exact instances
+whose native API exposes persistent `enabled` and runtime `in_runtime` state.
+Older runtimes are refused before mutation. Legacy credentials remain supported.
+
+The intent durably stores one random secret and deterministic credential name.
+Native creation uses `enabled=false`, with persistent/native readback, before
+ownership is saved; activation follows a fresh user access check. Commenting a
+TOML line and DELETE/re-add are not used for this flow. Native disable/re-enable
+preserves the secret across restarts. Credential identities cannot be renamed;
+the connection's display name is separate. Removal requires native confirmation.
+This does not add a Telemt traffic-accounting adapter; common user access and
+expiration policy still apply.
+
+An uncertain API reply retains the same intent for retry/background recovery.
+Never delete the journal, rotate the secret or blindly remove a remote user.
+A `blocked` intent stays linked and inactive; explicitly restore user access
+through the normal user toggle before retrying. Identity/endpoint conflicts
+require administrator reconciliation. A transport uncertainty fence still
+requires the offline procedure below; this adapter does not bypass it.
+Back up the journal with panel data: it contains private credentials, not logs.
+
 ## Cancellation and uncertain SSH
 
 Lifecycle queue admission waits at most 10 seconds. HTTP response waiting is

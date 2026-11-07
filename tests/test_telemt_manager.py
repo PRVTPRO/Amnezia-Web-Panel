@@ -1,5 +1,6 @@
 import unittest
-from unittest.mock import patch
+import json
+from unittest.mock import Mock, patch
 
 from managers.telemt_manager import TelemtManager
 
@@ -62,6 +63,43 @@ class FakeSSH:
 
 
 class TelemtManagerClientTest(unittest.TestCase):
+    def test_checked_api_rejects_http_errors_and_cleans_private_staging(self):
+        ssh = Mock()
+        ssh._make_private_temp_dir.return_value = '/tmp/amnezia-private.fixture'
+        manager = TelemtManager(ssh)
+        for status, ok, code in [(500, True, 0), (200, False, 0), (0, False, 1)]:
+            ssh.run_sudo_command.return_value = (json.dumps({'status': status, 'body': {'ok': ok}}), '', code)
+            with self.assertRaises(RuntimeError):
+                manager._lifecycle_api('POST', '/v1/users', {'secret': '12' * 16})
+            command = ssh.run_sudo_command.call_args.args[0]
+            self.assertNotIn('12' * 16, command)
+            self.assertEqual(command, 'python3 /tmp/amnezia-private.fixture/telemt-api.py')
+            ssh.run_command.assert_called_with('rm -rf -- /tmp/amnezia-private.fixture')
+        ssh.upload_file.side_effect = OSError('synthetic upload failure')
+        with self.assertRaises(OSError):
+            manager._lifecycle_api('GET', '/v1/users')
+        ssh.run_command.assert_called_with('rm -rf -- /tmp/amnezia-private.fixture')
+
+    def test_native_disabled_and_unknown_states_do_not_use_legacy_enabled_fallback(self):
+        key = 'pc_' + 'a' * 32
+        ssh, manager = self.make_manager(BASE_CONFIG + key + ' = "' + '12' * 16 + '"\n')
+        for row, expected in [({'enabled': False, 'in_runtime': True}, False), ({}, None),
+                              ({'enabled': True, 'in_runtime': True}, True)]:
+            manager._api_request = lambda *a, **k: {'ok': True, 'data': [dict(username=key, **row)]}
+            clients = {c['clientId']: c for c in manager.get_clients('telemt')}
+            self.assertIs(clients[key]['enabled'], expected)
+            self.assertTrue(clients['hello']['enabled'])
+
+    def test_native_identity_cannot_be_renamed_or_removed_after_rejected_api(self):
+        key = 'pc_' + 'a' * 32
+        ssh, manager = self.make_manager(BASE_CONFIG + key + ' = "' + '12' * 16 + '"\n')
+        with self.assertRaisesRegex(RuntimeError, 'identity'):
+            manager.rename_client('telemt', key, 'other')
+        manager._lifecycle_api = Mock(side_effect=RuntimeError('synthetic rejection'))
+        with self.assertRaises(RuntimeError):
+            manager.remove_client('telemt', key)
+        self.assertEqual(ssh.uploads, [])
+
     def make_manager(self, config=BASE_CONFIG):
         ssh = FakeSSH(config)
         manager = TelemtManager(ssh)

@@ -1,4 +1,4 @@
-"""Disabled-first AWG creation. The journal owns uncertain remote outcomes.
+"""Disabled-first peer creation. The journal owns uncertain remote outcomes.
 
 Ordering: durable intent -> inactive remote reservation -> durable panel link
 -> current access check -> activation/readback. Never compensate with removal.
@@ -9,6 +9,7 @@ import copy
 import json
 import logging
 import os
+import secrets
 import tempfile
 import threading
 import uuid
@@ -112,8 +113,10 @@ class PeerCreateService:
         return self.recovery_task
 
     @serialize_peer_lifecycle
-    async def create(self, user_id, server_id, protocol, name, operation_id=None):
-        if str(protocol).split('__', 1)[0] not in ('awg', 'awg2', 'awg3', 'awg_legacy'):
+    async def create(self, user_id, server_id, protocol, name, operation_id=None,
+                     expected_server_uid=None, options=None):
+        base = str(protocol).split('__', 1)[0]
+        if base not in ('awg', 'awg2', 'awg3', 'awg_legacy', 'telemt'):
             raise PeerCreateError('Protocol has no inactive-create adapter', 409)
         # Read and persist the intent before even obtaining a pooled SSH client.
         async with self.data_lock:
@@ -126,6 +129,12 @@ class PeerCreateService:
             server = data['servers'][server_id]
             if not server.get('uid'):
                 raise PeerCreateError('Server identity is not initialized', 409)
+            if expected_server_uid is not None and server['uid'] != expected_server_uid:
+                raise PeerCreateError('Server identity changed', 409)
+            options = dict(options or {})
+            supplied_secret = options.pop('secret', None) or None
+            if isinstance(supplied_secret, str):
+                supplied_secret = supplied_secret.lower()
             identity = [user_id, server['uid'], protocol, name]
             try:
                 op_id = str(uuid.UUID(operation_id)) if operation_id else str(
@@ -135,13 +144,26 @@ class PeerCreateService:
             operation = self.journal.read().get(op_id)
             if operation and operation['identity'] != identity:
                 raise PeerCreateError('Operation ID belongs to another request', 409)
+            if operation and (operation.get('options', {}) != options or
+                              supplied_secret is not None and operation['private'] != supplied_secret):
+                raise PeerCreateError('Operation parameters changed', 409)
             if not operation:
                 if not eligible(user):
                     raise PeerCreateError('User access is blocked', 409)
-                private, public = generate_wg_keypair()
+                if base == 'telemt':
+                    private, public = supplied_secret or secrets.token_hex(16), 'pc_' + uuid.UUID(op_id).hex
+                    if not isinstance(private, str) or len(private) != 32 or any(c not in '0123456789abcdef' for c in private):
+                        raise PeerCreateError('Invalid Telemt secret', 400)
+                else:
+                    private, public = generate_wg_keypair()
                 operation = dict(id=op_id, identity=identity, private=private, public=public,
                                  access=access_signature(user), phase='intent',
                                  endpoint=[server.get('host'), server.get('ssh_port', 22), server.get('username')])
+                if options:
+                    operation['options'] = options
+                if base == 'telemt':
+                    operation['protocol_endpoint'] = [server.get('protocols', {}).get(protocol, {}).get('port'),
+                                                      *self.public_endpoint(server, protocol)]
                 self.journal.put(operation)
         return await self.resume(op_id)
 
@@ -184,8 +206,12 @@ class PeerCreateService:
             raise PeerCreateError('Server identity changed; recovery required', 409, operation['id'])
         sid, server = matches[0]
         if ([server.get('host'), server.get('ssh_port', 22), server.get('username')] != operation['endpoint']
-                or protocol not in server.get('protocols', {})):
+                or protocol not in server.get('protocols', {})
+                or server['protocols'][protocol].get('installed', True) is not True):
             raise PeerCreateError('Server endpoint changed; recovery required', 409, operation['id'])
+        if ('protocol_endpoint' in operation and operation['protocol_endpoint'] !=
+                [server['protocols'][protocol].get('port'), *self.public_endpoint(server, protocol)]):
+            raise PeerCreateError('Protocol endpoint changed; recovery required', 409, operation['id'])
         user = next((u for u in data.get('users', []) if u['id'] == user_id), None)
         return data, user, sid, server
 
@@ -202,27 +228,42 @@ class PeerCreateService:
             await asyncio.to_thread(ssh.connect)
             manager = self.get_manager(ssh, protocol)
             host, public_port = self.public_endpoint(server, protocol)
-            port = server['protocols'][protocol].get('port', '55424')
+            port = server['protocols'][protocol].get('port', '' if protocol.split('__', 1)[0] == 'telemt' else '55424')
             if operation['phase'] in ('complete', 'blocked'):
+                was_blocked = operation['phase'] == 'blocked'
                 # Replaying success must not re-create or re-enable a peer
                 # subsequently disabled/deleted by an administrator.
                 async with self.data_lock:
-                    data, _, sid, _ = self._context(operation)
+                    data, latest, sid, _ = self._context(operation)
                     retained = any(c.get('create_operation_id') == op_id
                                    and c.get('user_id') == user_id and c.get('server_id') == sid
                                    and c.get('protocol') == protocol
                                    and c.get('client_id') == operation['public']
                                    for c in data.get('user_connections', []))
+                if operation['phase'] == 'blocked' and retained and protocol.split('__', 1)[0] == 'telemt':
+                    # Only acknowledge a subsequent explicit user enable. Never
+                    # activate a blocked creation as a side effect of replay.
+                    if not eligible(latest) or not await asyncio.to_thread(manager.peer_is_active, protocol, operation['public']):
+                        raise PeerCreateError('Operation remains blocked', 409, op_id)
+                    async with self.data_lock:
+                        _, latest, _, _ = self._context(operation)
+                        if not eligible(latest):
+                            raise PeerCreateError('User access is blocked', 409, op_id)
+                    operation['phase'] = 'complete'
                 if operation['phase'] == 'blocked' or not retained:
                     raise PeerCreateError('Operation is blocked; no automatic activation', 409, op_id)
+                verify_secret = {'expected_secret': operation['private']} if protocol.split('__', 1)[0] == 'telemt' else {}
                 config = await asyncio.to_thread(manager.get_client_config, protocol,
-                    operation['public'], host, port, public_port=public_port)
+                    operation['public'], host, port, public_port=public_port, **verify_secret)
+                if was_blocked:
+                    self.journal.put(operation)
                 return {'status': 'success', 'operation_id': op_id,
                         'client_id': operation['public'], 'config': config}
             # Safe even if a previous call timed out after the remote rename:
             # same operation/keypair, and preparation never activates a peer.
+            prepare_options = {'options': operation.get('options', {})} if protocol.split('__', 1)[0] == 'telemt' else {}
             result = await asyncio.to_thread(manager.prepare_client, protocol, op_id, name,
-                operation['private'], operation['public'], host, port, public_port=public_port)
+                operation['private'], operation['public'], host, port, public_port=public_port, **prepare_options)
             if result.get('client_id') != operation['public']:
                 raise PeerCreateError('Prepared peer identity mismatch', 409, op_id)
             operation['phase'] = 'prepared'
@@ -257,7 +298,11 @@ class PeerCreateService:
                     allowed = eligible(user) and access_signature(user) == operation['access']
                 active = await asyncio.to_thread(manager.peer_is_active, protocol, operation['public'])
                 if active != allowed:
-                    await asyncio.to_thread(manager.toggle_client, protocol, operation['public'], allowed)
+                    if protocol.split('__', 1)[0] == 'telemt':
+                        await asyncio.to_thread(manager.set_prepared_active, protocol, operation['public'],
+                                                operation['private'], allowed)
+                    else:
+                        await asyncio.to_thread(manager.toggle_client, protocol, operation['public'], allowed)
                     if await asyncio.to_thread(manager.peer_is_active, protocol, operation['public']) != allowed:
                         raise PeerCreateError('Live peer state unconfirmed; recovery pending', 503, op_id)
                 async with self.data_lock:
@@ -274,7 +319,10 @@ class PeerCreateService:
             # SSH is unavailable, keep the linked obligation pending instead
             # of reporting success or deleting its accounting ownership.
             if await asyncio.to_thread(manager.peer_is_active, protocol, operation['public']):
-                await asyncio.to_thread(manager.toggle_client, protocol, operation['public'], False)
+                if protocol.split('__', 1)[0] == 'telemt':
+                    await asyncio.to_thread(manager.set_prepared_active, protocol, operation['public'], operation['private'], False)
+                else:
+                    await asyncio.to_thread(manager.toggle_client, protocol, operation['public'], False)
                 if await asyncio.to_thread(manager.peer_is_active, protocol, operation['public']):
                     raise PeerCreateError('Disable unconfirmed; recovery pending', 503, op_id)
             raise PeerCreateError('Access is changing; recovery pending', 503, op_id)
