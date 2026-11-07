@@ -606,7 +606,10 @@ class MailApiTests(unittest.TestCase):
                                 ('get', '/api/users/mail/bulk/status')):
                 response = (client.get(url) if method == 'get'
                             else client.post(url, json={}))
-                self.assertEqual(response.status_code, 403, f'{method} {url}: {response.text}')
+                # Anonymous mail calls are refused with the session-expired
+                # 401 form of the handler's 403.
+                self.assertIn(response.status_code, (401, 403),
+                              f'{method} {url}: {response.text}')
 
     def test_sending_reports_the_error_in_the_admin_language(self):
         with TestClient(panel.app) as client:

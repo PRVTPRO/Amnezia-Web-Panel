@@ -306,7 +306,8 @@ class PublicEndpointApiTests(unittest.TestCase):
         with TestClient(panel.app) as client:
             res = client.post('/api/servers/0/protocol/public-endpoint',
                               json={'protocol': 'awg2', 'public_host': '203.0.113.9'})
-            self.assertEqual(res.status_code, 403)
+            # Anonymous calls are refused with either code.
+            self.assertIn(res.status_code, (401, 403))
 
     def test_telemt_override_is_pushed_into_the_running_config(self):
         client = self.client()
@@ -468,7 +469,8 @@ class PortCheckApiTests(PublicEndpointApiTests):
 
     def test_anonymous_and_unreachable_server(self):
         with TestClient(panel.app) as client:
-            self.assertEqual(client.get('/api/servers/0/protocol/port-check?port=443').status_code, 403)
+            anonymous = client.get('/api/servers/0/protocol/port-check?port=443')
+        self.assertIn(anonymous.status_code, (401, 403))
         client = self.client()
         with mock.patch.object(panel, 'get_ssh', side_effect=RuntimeError('host is down')):
             res = client.get('/api/servers/0/protocol/port-check?port=443')

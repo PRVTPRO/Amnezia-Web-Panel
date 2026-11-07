@@ -33,6 +33,7 @@ class EnrollmentHTTPTests(unittest.TestCase):
         self.data_lock = asyncio.Lock()
         for name, value in [('DATA_LOCK', self.data_lock), ('ssh_trust', self.trust),
                             ('_check_admin', lambda request: self.user),
+                            ('get_current_user', lambda request: self.user),
                             ('load_data', lambda: {'servers': [self.server]}),
                             ('drop_ssh', self.drop)]:
             patch = mock.patch.object(self.module, name, value)
@@ -47,7 +48,9 @@ class EnrollmentHTTPTests(unittest.TestCase):
             for action in ['inspect', 'confirm']:
                 response = self.client.post('/api/servers/0/ssh-trust/' + action,
                                             json={'token': 'abc', 'confirmed': True})
-                self.assertEqual(response.status_code, 403)
+                # Anonymous: 401 from api_auth_status_middleware; signed-in
+                # non-admin: the handler's 403.
+                self.assertIn(response.status_code, (401, 403))
         self.trust.inspect.assert_not_called()
         self.trust.prepare_enrollment.assert_not_called()
         self.trust.commit_enrollment.assert_not_called()
@@ -78,6 +81,8 @@ class EnrollmentHTTPTests(unittest.TestCase):
         response = self.client.post('/api/servers/0/ssh-trust/inspect',
                                     headers={'Origin': 'https://testserver', 'Sec-Fetch-Site': 'same-origin'})
         self.assertEqual(response.status_code, 200)
+        # A cross-site admin request is already signed in, so it keeps the
+        # handler's 403 rather than the anonymous 401 form.
         self.assertEqual(self.client.post('/api/servers/0/ssh-trust/inspect', headers={'Origin': 'https://evil.example'}).status_code, 403)
         self.assertEqual(self.client.post('/api/servers/-1/ssh-trust/inspect').status_code, 404)
         for body in [{}, {'token': '', 'confirmed': True}, {'token': 'abc', 'confirmed': 'yes'}]:

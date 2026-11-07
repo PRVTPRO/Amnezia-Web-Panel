@@ -214,7 +214,15 @@ async def api_auth_status_middleware(request, call_next):
             and not path.startswith(('/api/auth/', '/api/share/'))
             and not request.headers.get('authorization', '').lower().startswith('bearer ')
             and get_current_user(request) is None):
-        return JSONResponse({'error': 'Session expired'}, status_code=401)
+        normalized = JSONResponse({'error': 'Session expired'}, status_code=401)
+        # Carry the denied response's headers over. The panel marks sensitive
+        # denials 'Cache-Control: no-store'; a bare 401 drops that and lets a
+        # shared cache keep the denial body. content-length/content-type are
+        # skipped because the body itself is replaced.
+        for key, value in response.headers.items():
+            if key.lower() not in ('content-length', 'content-type'):
+                normalized.headers[key] = value
+        return normalized
     return response
 
 
