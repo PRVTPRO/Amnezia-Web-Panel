@@ -321,10 +321,16 @@ class LinkTests(unittest.TestCase):
         result = run(h.service.link(0, 'awg2', 'exit-a', force=True))
         self.assertEqual(result['status'], 'success')
 
-    def test_ipv6_instances_are_flagged(self):
+    def test_ipv6_instance_is_refused_before_touching_the_exit(self):
+        # The exit node publishes only IPv4, so a dual-stack entry would send
+        # IPv6 into a black hole. Refuse at any peer count, with no side effect.
         h = Harness()
         h.awg().ipv6 = 'fd42:8:1::1'
-        self.assertTrue(run(h.service.link(0, 'awg2', 'exit-a'))['ipv6_refused'])
+        with self.assertRaises(ExitLinkError) as ctx:
+            run(h.service.link(0, 'awg2', 'exit-a'))
+        self.assertEqual(ctx.exception.code, 'exit_link_ipv6')
+        self.assertEqual(h.exit().calls, [])
+        self.assertFalse((h.record().get('exit_link') or {}).get('exit_uid'))
 
     def test_switching_exits_drops_the_old_peer_only_after_the_new_link_is_confirmed(self):
         h = Harness()
