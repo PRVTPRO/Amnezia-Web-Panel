@@ -1852,12 +1852,20 @@ docker --version
                 return None
             return entry
 
-    def prepare_host(self, protocol_type):
-        """Prepare host for container (mirrors prepare_host.sh)."""
+    def prepare_host(self, protocol_type, allow_ipv6=True):
+        """Prepare host for container (mirrors prepare_host.sh).
+
+        `allow_ipv6` is False when the admin explicitly disabled IPv6 or the
+        AWG_IPV6 environment variable forces IPv4-only. The host-level Docker
+        setting must then stay untouched: enabling it anyway would contradict
+        the preference and restart Docker for nothing.
+        """
         container_name = self._container_name(protocol_type)
         dockerfile_folder = f"/opt/amnezia/{container_name}"
+        allow_ipv6_flag = 1 if allow_ipv6 else 0
         script = f"""
 mkdir -p {dockerfile_folder}
+ALLOW_IPV6={allow_ipv6_flag}
 if ! docker network ls | grep -q amnezia-dns-net; then
   docker network create --driver bridge --subnet=172.29.172.0/24 --opt com.docker.network.bridge.name=amn0 amnezia-dns-net
 fi
@@ -1871,7 +1879,7 @@ fi
 # container on the host (tunnels drop, a dockerized panel dies with its
 # own install request). Otherwise the restart is deferred and reported
 # as AWP_DOCKER_IPV6=pending so the install log can warn the admin.
-if ip -6 -o addr show scope global 2>/dev/null | grep -q inet6; then
+if [ "$ALLOW_IPV6" = "1" ] && ip -6 -o addr show scope global 2>/dev/null | grep -q inet6; then
   cp /etc/docker/daemon.json /etc/docker/daemon.json.bak.awp 2>/dev/null
   IPV6_STATE=$(python3 - <<'PYEOF' 2>/dev/null
 import json, os
@@ -2196,9 +2204,15 @@ done
             results.append("Docker already installed")
         flush('docker', 12)
 
-        # Step 2: Prepare host
+        # Step 2: Prepare host. Docker IPv6 is host-level, but an explicit
+        # IPv4-only preference (or AWG_IPV6=off) must not enable it: the
+        # install gate and the admin's choice say IPv4-only is intended.
         results.append("Preparing host...")
-        docker_ipv6 = self.prepare_host(protocol_type)
+        env_mode = os.environ.get(AWG_IPV6_ENV, 'auto').strip().lower()
+        docker_ipv6 = self.prepare_host(
+            protocol_type,
+            allow_ipv6=(env_mode not in IPV6_FORCE_OFF
+                        and ipv6_preference is not False))
         results.append("Host prepared")
         if docker_ipv6 == 'pending':
             results.append(

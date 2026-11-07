@@ -399,5 +399,28 @@ class R4ModalGuardTests(unittest.TestCase):
         self.assertIn('if (!window.ipSettingsCanClose()) return;', server)
 
 
+class R5PrepareHostHonoursPreferenceTests(unittest.TestCase):
+    """An explicit IPv4-only choice must not enable host-level Docker IPv6."""
+
+    class _SSH:
+        def __init__(self):
+            self.script = ''
+
+        def run_sudo_script(self, script):
+            self.script = script
+            return '', '', 0
+
+    def test_prepare_host_skips_docker_ipv6_when_disallowed(self):
+        ssh = self._SSH()
+        AWGManager(ssh).prepare_host('awg3', allow_ipv6=False)
+        self.assertIn('ALLOW_IPV6=0', ssh.script)
+        self.assertIn('[ "$ALLOW_IPV6" = "1" ]', ssh.script)
+
+    def test_prepare_host_keeps_docker_ipv6_when_allowed(self):
+        ssh = self._SSH()
+        AWGManager(ssh).prepare_host('awg3', allow_ipv6=True)
+        self.assertIn('ALLOW_IPV6=1', ssh.script)
+
+
 if __name__ == '__main__':
     unittest.main()

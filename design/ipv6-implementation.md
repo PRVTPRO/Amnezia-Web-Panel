@@ -166,13 +166,38 @@ therefore safe in HTML text and in quoted attributes.
   process per data file is required.
 - A Docker restart interrupted by a panel restart is not resumed: the record
   is marked `interrupted` and the next status read shows the real state.
-- The `AWG_IPV6` override is reported and enforced for new instances and it
-  locks the preference radios. The instance switch is not gated by it: spec
-  v3 wants `env_off`/`env_on` blocked reasons on that path, but these codes
-  appear only when the switch itself fails.
+- The `AWG_IPV6` override is enforced on the instance switch too:
+  `set_instance_ipv6` raises `env_off` for an enable and `env_on` for a
+  disable before any write.
 - Spec v3 asks for one composite Save that writes settings and the IPv6
-  switch together. The panel still has a separate preference writer and a
-  separate instance switch.
-- `/ip-status` emits only `ssh_failed` in `error`. `container_unreadable` and
-  `docker_unavailable` from spec v3 are not produced: a failed Docker probe
-  is reported as `docker.installed = false`.
+  switch together. The panel keeps two controls, but they cannot race: while
+  the instance IPv6 selection differs from the loaded value, the general AWG
+  Save is disabled and a hint asks to apply or revert IPv6 first.
+- `/ip-status` reports `ssh_failed` when both host route probes fail and sets
+  `state = unknown` with grey `ipv4_state`/`ipv6_state`. A failed Docker
+  probe is still reported as `docker.installed = false`.
+
+## Review hardening (commit `a599fc4`)
+
+- Recreate rebuilds the full entrypoint: `--entrypoint` takes the first
+  element and the remaining elements are prepended to `Config.Cmd`. The old
+  code kept only `dumb-init`, so the new container exited.
+- Recreate copies the whole `/opt/amnezia/awg` directory, not one config
+  file, and verifies the config sha, all key files, `clientsTable` JSON and
+  the `[Peer]` count before `docker start`. The backup container is removed
+  only after those checks pass.
+- `amnezia-dns-net` is connected only when the new container is not already
+  on that network.
+- `set_instance_ipv6` captures the previous gateway and restores it on any
+  write, start-script, restart or verification failure. A repeat enable or
+  disable is a no-op with no restart.
+- `prepare_host(allow_ipv6=False)` skips the Docker IPv6 block when the
+  admin chose IPv4-only or `AWG_IPV6=off`.
+- `enable_docker_ipv6` writes mode 0644 and returns
+  `ip6tables_unsupported` on an apply when NAT66 is not available.
+- `/ip-status` caches healthy payloads for 20 s and degraded or failed ones
+  for 3 s.
+- A malformed body on the IPv6 mutation endpoints returns 400
+  `bad_request`, not the FastAPI 422 detail array.
+- `api_instance_ipv6` takes `@serialize_peer_lifecycle`, so a peer add cannot
+  interleave with the Address rewrite.
