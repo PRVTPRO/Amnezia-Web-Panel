@@ -7471,13 +7471,15 @@ async def api_set_protocol_public_endpoint(request: Request, server_id: int, req
 
         # The override reaches the server in two ways: telemt composes its own
         # tg:// links from config.toml, and a custom public port on this same
-        # box needs an iptables REDIRECT to the listen port. The record is
+        # box is published with an iptables DNAT straight to the container (a
+        # host-local listener keeps REDIRECT). The record is
         # saved either way: a box that is down right now must not lose the
         # setting, and the next save re-applies it.
         warning = ''
         ssh = None
         try:
             base = protocol_base(proto)
+            l4 = next((k for k, v in PUBLIC_FORWARD_L4.items() if base in v), None)
             if base == 'telemt':
                 pub_host, pub_port = protocol_public_endpoint(server, proto)
                 ssh = await asyncio.to_thread(get_ssh, server)
@@ -7501,9 +7503,8 @@ async def api_set_protocol_public_endpoint(request: Request, server_id: int, req
             if fwd_warning and not warning:
                 warning = fwd_warning
             if fwd is not None:
-                if ssh is None:
-                    ssh = await asyncio.to_thread(get_ssh, server)
-                    await asyncio.to_thread(ssh.connect)
+                # will_forward/will_drop already opened the connection above:
+                # a non-empty command list is impossible without one of them.
                 for cmd in fwd:
                     out, err, code = await asyncio.to_thread(ssh.run_sudo_command, cmd)
                     if code != 0 and not warning:
@@ -7511,8 +7512,7 @@ async def api_set_protocol_public_endpoint(request: Request, server_id: int, req
                         warning = f"forward command failed: {cmd}: {err}"
                 # Verify the rule exists for each address family when adding,
                 # scoped exactly like the rule that was installed.
-                if not warning and port and str(port) != str(listen_port):
-                    l4 = next((k for k, v in PUBLIC_FORWARD_L4.items() if base in v), None)
+                if not warning and will_forward:
                     if l4:
                         fam, _ = _forward_family_dests(fwd_host)
                         for ipt, fkey in (('iptables', 4), ('ip6tables', 6)):
@@ -7708,15 +7708,25 @@ def _docker_dnat_destinations(ssh, listen_port):
             continue
         if code == 0:
             result[fkey] = _parse_docker_dnat(out, listen_port)
+        else:
+            logger.warning(f"{ipt} DOCKER rules unavailable (exit {code}); "
+                           f"the {fkey} family falls back to REDIRECT")
     return result
 
 
 def _forward_match(l4, addr, port, listen_port, container_dest=None):
-    """One iptables match for a public-port forward, without the action."""
+    """One iptables match for a public-port forward, without the action.
+
+    The destination is quoted on purpose. Real ip6tables prints an IPv6
+    destination as `[addr]:port`, the command runs through a remote shell,
+    and an unquoted bracket expression is a glob pattern there: a file named
+    e.g. `d:55425` in the working directory would silently replace the
+    container address with garbage.
+    """
     scope = f' -d {addr}' if addr else ''
     if container_dest:
-        return (f'-p {l4}{scope} --dport {port} '
-                f'-j DNAT --to-destination {container_dest}')
+        return (f"-p {l4}{scope} --dport {port} "
+                f"-j DNAT --to-destination '{container_dest}'")
     return (f'-p {l4}{scope} --dport {port} '
             f'-j REDIRECT --to-ports {listen_port}')
 
@@ -7736,12 +7746,20 @@ def public_port_forward_commands(protocol, public_port, listen_port, old_public_
     container (the path Docker itself uses), so ufw's INPUT policy cannot
     drop the packet. A listen port Docker does not publish keeps the old
     REDIRECT-to-local behaviour as a fallback.
+
+    Removal drops both forms, but it can only name the DNAT rule when the
+    container destination is known: if discovery failed, the DNAT rule of an
+    earlier apply stays behind and the REDIRECT fallback is used for the add.
     """
     base = protocol_base(protocol)
     l4 = next((k for k, v in PUBLIC_FORWARD_L4.items() if base in v), None)
     if l4 is None:
         return None, ''
     fam, warning = _forward_family_dests(public_ip)
+    # Both ports are pasted into a remote shell command. Digits only: a stored
+    # value with a metacharacter must not reach the shell.
+    listen_port = ''.join(c for c in str(listen_port).strip() if c.isdigit())
+    public_port = ''.join(c for c in str(public_port).strip() if c.isdigit())
     dests = container_dests or {}
     commands = []
 
@@ -7826,8 +7844,8 @@ async def api_check_protocol_port(request: Request, server_id: int, port: str = 
             foreign = [l for l in listeners
                        if not re.match(r'^(docker-proxy|dockerd)$', l.get('process', ''))]
             if not foreign:
-                resp['warning'] = (f'Port {port} is held by Docker; the REDIRECT rule may '
-                                   f'conflict unless the container publish is removed.')
+                resp['warning'] = (f'Port {port} is held by Docker; a forward on this port '
+                                   f'conflicts with the container publish unless it is removed.')
         return resp
     except Exception as e:
         logger.warning(f"Port check on server {server_id} failed: {e}")

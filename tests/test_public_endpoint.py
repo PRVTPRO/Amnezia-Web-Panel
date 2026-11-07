@@ -581,10 +581,10 @@ class PublicPortForwardTests(PublicEndpointApiTests):
         self.assertEqual(len(v4), 1)
         self.assertEqual(
             v4[0],
-            'iptables -t nat -C PREROUTING -p udp --dport 8443 '
-            '-j DNAT --to-destination 172.17.0.2:55424 2>/dev/null '
-            '|| iptables -t nat -I PREROUTING 1 -p udp --dport 8443 '
-            '-j DNAT --to-destination 172.17.0.2:55424')
+            "iptables -t nat -C PREROUTING -p udp --dport 8443 "
+            "-j DNAT --to-destination '172.17.0.2:55424' 2>/dev/null "
+            "|| iptables -t nat -I PREROUTING 1 -p udp --dport 8443 "
+            "-j DNAT --to-destination '172.17.0.2:55424'")
         v6 = [c for c in cmds if c.startswith('ip6tables ')]
         self.assertIn('-j REDIRECT --to-ports 55424', v6[0])
 
@@ -593,9 +593,9 @@ class PublicPortForwardTests(PublicEndpointApiTests):
             'awg3', '8443', '55424',
             container_dests={4: '172.17.0.2:55424', 6: 'fd00::2:55424'})
         self.assertEqual(len(cmds), 2)
-        self.assertTrue(any('-j DNAT --to-destination 172.17.0.2:55424' in c
+        self.assertTrue(any("-j DNAT --to-destination '172.17.0.2:55424'" in c
                             and c.startswith('iptables ') for c in cmds), cmds)
-        self.assertTrue(any('-j DNAT --to-destination fd00::2:55424' in c
+        self.assertTrue(any("-j DNAT --to-destination 'fd00::2:55424'" in c
                             and c.startswith('ip6tables ') for c in cmds), cmds)
 
     def test_builder_keeps_redirect_when_docker_does_not_publish_the_port(self):
@@ -619,7 +619,7 @@ class PublicPortForwardTests(PublicEndpointApiTests):
         v4 = [c for c in cmds if 'iptables -t nat -D' in c]
         self.assertEqual(len(v4), 2, cmds)  # REDIRECT first, then DNAT
         self.assertIn('-j REDIRECT --to-ports 55424', v4[0])
-        self.assertIn('--to-destination 172.17.0.2:55424', v4[1])
+        self.assertIn("--to-destination '172.17.0.2:55424'", v4[1])
         v6 = [c for c in cmds if 'ip6tables -t nat -D' in c]
         self.assertEqual(len(v6), 1, cmds)  # no destination: only REDIRECT
         self.assertIn('-j REDIRECT --to-ports 55424', v6[0])
@@ -633,7 +633,7 @@ class PublicPortForwardTests(PublicEndpointApiTests):
         self.assertEqual(res.status_code, 200, res.text)
         self.assertEqual(res.json()['warning'], '')
         self.assertIn('iptables -t nat -S DOCKER', ssh.docker_queries)
-        self.assertTrue(any('-j DNAT --to-destination 172.17.0.2:55424' in c
+        self.assertTrue(any("-j DNAT --to-destination '172.17.0.2:55424'" in c
                             for c in ssh.commands), ssh.commands)
         self.assertFalse(any('--to-ports 55424' in c for c in ssh.commands), ssh.commands)
 
@@ -646,7 +646,7 @@ class PublicPortForwardTests(PublicEndpointApiTests):
         verify = [c for c in ssh.commands if c.startswith('iptables -t nat -C PREROUTING')
                   and ' -d 203.0.113.9 ' in c]
         self.assertTrue(verify, ssh.commands)
-        self.assertIn('-j DNAT --to-destination 172.17.0.2:55424', verify[0])
+        self.assertIn("-j DNAT --to-destination '172.17.0.2:55424'", verify[0])
 
     def test_saving_falls_back_to_redirect_without_a_docker_rule(self):
         client = self.client()
@@ -825,10 +825,10 @@ class RestoreForwardTests(unittest.TestCase):
         # one discovery per distinct listen port (55424 awg2, 443 xray) x 2 families
         self.assertEqual(len(ssh.docker_queries), 4, ssh.docker_queries)
         self.assertTrue(any('-p udp -d 203.0.113.9 --dport 8443 '
-                            '-j DNAT --to-destination 172.17.0.2:55424' in c
+                            "-j DNAT --to-destination '172.17.0.2:55424'" in c
                             for c in ssh.commands), ssh.commands)
         self.assertTrue(any('-p tcp -d 198.51.100.1 --dport 8443 '
-                            '-j DNAT --to-destination 172.17.0.3:443' in c
+                            "-j DNAT --to-destination '172.17.0.3:443'" in c
                             for c in ssh.commands), ssh.commands)
 
     def test_restore_without_docker_rules_keeps_redirect(self):
