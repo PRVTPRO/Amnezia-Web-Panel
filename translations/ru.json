@@ -1132,5 +1132,14 @@
   "server_ipv6_badge_operation_busy": "другая операция уже идёт",
   "server_ipv6_err_not_awg": "не AmneziaWG",
   "exit_link_ipv6": "У инстанса включён IPv6. Сначала выключите IPv6, потом связывайте с exit-нодой.",
-  "server_ipv6_chip_restart": "нужен перезапуск"
+  "server_ipv6_chip_restart": "нужен перезапуск",
+  "server_ipv6_state_env_off": "IPv6 выключен настройкой сервера",
+  "server_ipv6_state_env_on": "IPv6 включён настройкой сервера",
+  "server_ipv6_badge_peer_lifecycle_busy": "Операция с клиентами уже выполняется",
+  "server_ipv6_badge_ip6tables_unsupported": "ip6tables не поддерживается",
+  "server_ipv6_save_preference": "Сохранить",
+  "server_ipv6_cancel": "Отмена",
+  "server_ipv6_discard_confirm": "Есть несохранённые изменения. Закрыть без сохранения?",
+  "server_ipv6_enable_docker_first": "Сначала включите Docker IPv6",
+  "server_ipv6_apply_or_revert_hint": "Сначала примените или отмените изменение IPv6."
 }

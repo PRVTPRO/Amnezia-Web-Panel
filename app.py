@@ -33,6 +33,8 @@ from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi import FastAPI, Request, Query, UploadFile, File, Form
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
 from starlette.middleware.sessions import SessionMiddleware
 from pydantic import BaseModel, Field, StrictBool, constr, conint
 from typing import Optional, List, Dict
@@ -128,6 +130,21 @@ async def api_json_error_handler(request: Request, exc: Exception):
     if request.url.path.startswith('/api/'):
         return JSONResponse({'error': 'Internal server error'}, status_code=500)
     return PlainTextResponse('Internal Server Error', status_code=500)
+
+
+# IPv6 mutation endpoints document a 400 bad_request for a malformed body,
+# while every other endpoint keeps FastAPI's stock 422 detail array. Only
+# these paths are remapped; the body model lives in the handlers below.
+_IPV6_BAD_BODY_PATH = re.compile(
+    r'^/api/servers/[^/]+/(?:ipv6|docker/ipv6/apply|protocol/[^/]+/ipv6)$')
+
+
+@app.exception_handler(RequestValidationError)
+async def ipv6_validation_error_handler(request: Request, exc: RequestValidationError):
+    if _IPV6_BAD_BODY_PATH.match(request.url.path):
+        return JSONResponse({'error': 'bad_request', 'code': 'bad_request'},
+                            status_code=400)
+    return await request_validation_exception_handler(request, exc)
 
 
 @app.get("/redoc", include_in_schema=False)
@@ -3464,8 +3481,14 @@ def _require_admin_strict(request):
         host_header = request.headers.get('host')
         if not host_header:
             return None
-        # Extract hostname, ignore port
-        host_hostname = host_header.split(':')[0].lower()
+        # Extract hostname, ignore port. An IPv6 literal arrives bracketed,
+        # e.g. [2001:db8::1]:5000, so a plain split(':')[0] would read '['.
+        if host_header.startswith('['):
+            close = host_header.find(']')
+            host_hostname = (host_header[1:close] if close != -1
+                             else host_header[1:]).lower()
+        else:
+            host_hostname = host_header.split(':')[0].lower()
         allowlist = _panel_host_allowlist(request)
         if host_hostname not in allowlist:
             return None
@@ -5336,6 +5359,21 @@ def _install_finish(op, state, result=None, error=None):
         op['stage'] = 'error'
 
 
+def _install_running(server_id):
+    """True while an install or an AWG plugin update holds this server.
+
+    Registries are process-local: this guard stops the common case, not a
+    host whose install was started by another panel process.
+    """
+    for (op_server, _protocol), op in list(_INSTALL_OPS.items()):
+        if op_server == server_id and op.get('state') in ('running', 'starting'):
+            return True
+    for key in list(_awg_plugin_active):
+        if key[0] == server_id:
+            return True
+    return False
+
+
 @app.get('/api/servers/{server_id}/install/progress', tags=["Protocols"])
 def api_install_progress(request: Request, server_id: int, protocol: str, offset: int = 0):
     if not _check_admin(request):
@@ -5444,9 +5482,14 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
             ipv6_pref = False
         elif env_pref == 'on':
             ipv6_pref = True
-        # The env override already forces IPv4, so the exit link agrees.
-        if will_link_default and ipv6_pref is not False:
+        # An exit link cannot carry IPv6: exit0.conf allows only 0.0.0.0/0 and
+        # its kill-switch blackholes ::/0. A reinstall that inherits a link
+        # must therefore inherit IPv4-only too, even with AWG_IPV6=on.
+        carries_exit_link = bool(previous_link) and install_base in AWG_PROTOCOLS
+        forced_ipv6_off = False
+        if (will_link_default or carries_exit_link) and ipv6_pref is not False:
             ipv6_pref = False
+            forced_ipv6_off = True
         if ipv6_pref is True and env_pref != 'off':
             docker_info = await asyncio.to_thread(manager._docker_ipv6_info)
             if not docker_info.get('ipv6_enabled'):
@@ -5536,7 +5579,7 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
 
         if not isinstance(result, dict):
             result = {'status': 'success', 'message': str(result)}
-        if will_link_default and server.get('ipv6_new_instances') is not False:
+        if forced_ipv6_off and server.get('ipv6_new_instances') is not False:
             result.setdefault('log', []).append(
                 "! IPv6 is off for this instance: it will be linked to the default exit node.")
         if docker_install_log:
@@ -5808,7 +5851,9 @@ async def api_exit_link(request: Request, server_id: int, req: ExitLinkRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
-        return await exit_link_svc.link(server_id, req.protocol, req.exit_uid.strip(), force=bool(req.force))
+        result = await exit_link_svc.link(server_id, req.protocol, req.exit_uid.strip(), force=bool(req.force))
+        _invalidate_ip_status_for_server(server_id)
+        return result
     except ExitLinkError as e:
         return _exit_link_error(e)
     except Exception as e:
@@ -5823,7 +5868,9 @@ async def api_exit_unlink(request: Request, server_id: int, req: ProtocolRequest
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
-        return await exit_link_svc.unlink(server_id, req.protocol)
+        result = await exit_link_svc.unlink(server_id, req.protocol)
+        _invalidate_ip_status_for_server(server_id)
+        return result
     except ExitLinkError as e:
         return _exit_link_error(e)
     except Exception as e:
@@ -5838,7 +5885,9 @@ async def api_exit_relink(request: Request, server_id: int, req: ProtocolRequest
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
-        return await exit_link_svc.relink_entry(server_id, req.protocol)
+        result = await exit_link_svc.relink_entry(server_id, req.protocol)
+        _invalidate_ip_status_for_server(server_id)
+        return result
     except ExitLinkError as e:
         return _exit_link_error(e)
     except Exception as e:
@@ -5911,7 +5960,9 @@ async def api_exit_link_failover(request: Request, server_id: int, req: ExitFail
         protocol = payload.pop('protocol')
         fields = {key: value for key, value in payload.items()
                   if value is not None or key == 'enabled'}
-        return await exit_link_svc.configure_failover(server_id, protocol, **fields)
+        result = await exit_link_svc.configure_failover(server_id, protocol, **fields)
+        _invalidate_ip_status_for_server(server_id)
+        return result
     except ExitLinkError as e:
         return _exit_link_error(e)
     except Exception as e:
@@ -6448,6 +6499,9 @@ IPV6_RETRY_CODES = frozenset({'peer_lifecycle_uncertain'})
 IPV6_BAD_REQUEST_CODES = frozenset({'not_awg', 'bad_request'})
 
 _IP_STATUS_TTL = 20.0
+# A degraded or unknown payload is re-probed sooner: the next poll should not
+# keep showing a stale error for the full healthy TTL.
+_IP_STATUS_TTL_DEGRADED = 3.0
 _IP_STATUS_CACHE = {}
 _OP_STORES = {}
 _OP_LOCKS = {}
@@ -6459,19 +6513,28 @@ def _awg_protocols(server):
             if protocol_base(proto) in AWG_PROTOCOLS]
 
 
+def _ip_status_cache_ttl(payload):
+    """20 s for a healthy payload, 3 s for a degraded or failed one."""
+    if isinstance(payload, dict) and payload.get('state') == 'ok' \
+            and not payload.get('error'):
+        return _IP_STATUS_TTL
+    return _IP_STATUS_TTL_DEGRADED
+
+
 def _ip_status_cache_get(server_uid):
     entry = _IP_STATUS_CACHE.get(server_uid)
     if not entry:
         return None
-    stamp, payload = entry
-    if time.time() - stamp > _IP_STATUS_TTL:
+    stamp, payload, ttl = entry
+    if time.time() - stamp > ttl:
         _IP_STATUS_CACHE.pop(server_uid, None)
         return None
     return payload
 
 
 def _ip_status_cache_put(server_uid, payload):
-    _IP_STATUS_CACHE[server_uid] = (time.time(), payload)
+    _IP_STATUS_CACHE[server_uid] = (time.time(), payload,
+                                    _ip_status_cache_ttl(payload))
 
 
 def _invalidate_ip_status(server_uid=None):
@@ -6480,6 +6543,19 @@ def _invalidate_ip_status(server_uid=None):
         _IP_STATUS_CACHE.clear()
     else:
         _IP_STATUS_CACHE.pop(server_uid, None)
+
+
+def _invalidate_ip_status_for_server(server_id):
+    """Drop the cache entry of an endpoint that only knows the server index."""
+    try:
+        data = load_data()
+        servers = data.get('servers') or []
+        if 0 <= server_id < len(servers):
+            server = servers[server_id]
+            _invalidate_ip_status(server.get('uid') or f'#{server_id}')
+    except Exception:
+        logger.debug("Cannot resolve server %s for IP status invalidation",
+                     server_id, exc_info=True)
 
 
 def _op_store():
@@ -6594,9 +6670,10 @@ def api_server_ipv6_preference(request: Request, server_id: int,
                     'new_instances': server.get('ipv6_new_instances'),
                     'env_override': (os.environ.get('AWG_IPV6') or 'auto').strip().lower(),
                 }}
-    except Exception as e:
+    except Exception:
         logger.exception("Error saving IPv6 preference")
-        return JSONResponse({'error': str(e)}, status_code=500)
+        return JSONResponse({'error': 'internal_error', 'code': 'internal_error'},
+                            status_code=500)
 
 
 @app.post('/api/servers/{server_id}/docker/ipv6/apply', tags=["Protocols"])
@@ -6619,12 +6696,23 @@ def api_docker_ipv6_apply(request: Request, server_id: int,
         return JSONResponse({'error': 'Server not found'}, status_code=404)
     server = data['servers'][server_id]
     uid = server.get('uid') or f'#{server_id}'
+    if _install_running(server_id):
+        return JSONResponse({'error': 'operation_busy',
+                             'code': 'operation_busy'}, status_code=409)
     lock = _op_lock(uid)
     if not lock.acquire(blocking=False):
         return JSONResponse({'error': 'operation_busy',
                              'code': 'operation_busy'}, status_code=409)
     store = _op_store()
-    operation = store.create(uid, 'docker_ipv6')
+    try:
+        operation = store.create(uid, 'docker_ipv6')
+    except Exception:
+        # Without this the lock stays taken and every later IPv6 mutation
+        # answers operation_busy until the panel restarts.
+        logger.exception("Failed to create Docker IPv6 operation")
+        lock.release()
+        return JSONResponse({'error': 'internal_error', 'code': 'internal_error'},
+                            status_code=500)
 
     def work():
         try:
@@ -6662,10 +6750,15 @@ def api_docker_ipv6_apply(request: Request, server_id: int,
                         status_code=202)
 
 
-AWG_SWITCHABLE = re.compile(r'^(awg|awg2|awg3)(__(2|3|4|5))?$')
+AWG_SWITCHABLE_BASES = frozenset({'awg', 'awg2', 'awg3'})
+
+
+def _is_switchable_awg(proto):
+    return is_valid_protocol(proto) and protocol_base(proto) in AWG_SWITCHABLE_BASES
 
 
 @app.post('/api/servers/{server_id}/protocol/{proto}/ipv6', tags=["Protocols"])
+@serialize_peer_lifecycle
 def api_instance_ipv6(request: Request, server_id: int, proto: str,
                       req: InstanceIpv6Request):
     """Enable or disable IPv6 on one instance.
@@ -6675,7 +6768,7 @@ def api_instance_ipv6(request: Request, server_id: int, proto: str,
     """
     if not _require_admin_strict(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
-    if not AWG_SWITCHABLE.match(proto):
+    if not _is_switchable_awg(proto):
         return JSONResponse({'error': 'Not an AmneziaWG protocol',
                              'code': 'not_awg'}, status_code=400)
     data = load_data()
@@ -6699,7 +6792,13 @@ def api_instance_ipv6(request: Request, server_id: int, proto: str,
             before = manager.get_instance_ipv6_state(proto)
         finally:
             ssh.disconnect()
-        if req.enabled and before.get('needs_recreate'):
+        blocked = before.get('blocked_reason') or 'none'
+        # Preconditions are checked before any operation exists. The rebuild
+        # path is the only 202; a peer block, an exit link or a dead Docker
+        # must answer 409 now, not fail later inside the operation.
+        if req.enabled and blocked not in ('needs_recreate', 'none'):
+            return _ipv6_error(RuntimeError(blocked))
+        if req.enabled and blocked == 'needs_recreate':
             store = _op_store()
             operation = store.create(uid, 'instance_ipv6', proto)
             handed_off = True
@@ -6744,9 +6843,10 @@ def api_instance_ipv6(request: Request, server_id: int, proto: str,
         return {'status': 'success', 'instance': state}
     except RuntimeError as e:
         return _ipv6_error(e)
-    except Exception as e:
+    except Exception:
         logger.exception("Error switching instance IPv6")
-        return JSONResponse({'error': str(e)}, status_code=500)
+        return JSONResponse({'error': 'internal_error', 'code': 'internal_error'},
+                            status_code=500)
     finally:
         if not handed_off:
             lock.release()
@@ -7128,6 +7228,7 @@ def api_container_toggle(request: Request, server_id: int, req: ContainerToggleR
         if hasattr(ssh, 'docker_ps_invalidate'):
             ssh.docker_ps_invalidate()
         ssh.disconnect()
+        _invalidate_ip_status(server.get('uid') or f'#{server_id}')
         return {'status': 'success', 'action': action, 'container': container}
     except Exception as e:
         logger.exception("Error toggling container")
@@ -8446,6 +8547,7 @@ def api_toggle_connection(request: Request, server_id: int, req: ToggleConnectio
         manager = get_protocol_manager(ssh, req.protocol)
         _manager_call(manager, 'toggle_client', req.protocol, req.client_id, req.enable)
         ssh.disconnect()
+        _invalidate_ip_status(server.get('uid') or f'#{server_id}')
         status = 'enabled' if req.enable else 'disabled'
         return {'status': 'success', 'enabled': req.enable, 'message': f'Connection {status}'}
     except Exception as e:

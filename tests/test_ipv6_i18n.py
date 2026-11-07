@@ -20,6 +20,9 @@ NON_RU = ("en", "fr", "zh", "fa")
 
 PLACEHOLDER_RE = re.compile(r"\{[A-Za-z0-9_]+\}")
 KEY_USE_RE = re.compile(r"_\(\s*['\"](server_ipv6_[A-Za-z0-9_]+)['\"]\s*\)")
+# Map literals such as IP_STATE_KEYS are never passed to _() at the call
+# site, so they need their own scan.
+KEY_LITERAL_RE = re.compile(r"(server_ipv6_[A-Za-z0-9_]+)")
 
 CSS_TOKENS = ("--warning-border", "--info-border")
 CSS_SELECTORS = (".ip-chip", ".seg-group", ".ip-note", ".ip-modal-table")
@@ -107,15 +110,22 @@ class TestNoCyrillicLeakage(unittest.TestCase):
                 assert not bad, "%s has Cyrillic in %s: %r" % (key, locale, bad)
 
 
+def template_keys():
+    template = read_text(TEMPLATE_FILE)
+    keys = set(KEY_USE_RE.findall(template))
+    keys.update(KEY_LITERAL_RE.findall(template))
+    keys.update(re.findall(r"_\(\s*['\"](exit_link_ipv6)['\"]\s*\)", template))
+    return keys
+
+
 class TestTemplateKeys(unittest.TestCase):
     def test_template_uses_server_ipv6_keys(self):
-        uses = KEY_USE_RE.findall(read_text(TEMPLATE_FILE))
-        assert uses, "template has no server_ipv6_* translation calls"
+        uses = KEY_LITERAL_RE.findall(read_text(TEMPLATE_FILE))
+        assert uses, "template has no server_ipv6_* keys"
 
     def test_every_server_ipv6_key_used_by_template_exists_in_ru(self):
-        template = read_text(TEMPLATE_FILE)
         ru = translation("ru")
-        for key in set(KEY_USE_RE.findall(template)):
+        for key in template_keys():
             assert key in ru, "template uses unknown key %s" % key
             assert isinstance(ru[key], str), "ru value for %s is not a string" % key
             assert ru[key].strip(), "ru value for %s is empty" % key
@@ -125,10 +135,7 @@ class TestTemplateKeysAllLocales(unittest.TestCase):
     """Keys added after the design file shipped are checked here too."""
 
     def template_keys(self):
-        template = read_text(TEMPLATE_FILE)
-        keys = set(KEY_USE_RE.findall(template))
-        keys.update(re.findall(r"_\(\s*['\"](exit_link_ipv6)['\"]\s*\)", template))
-        return keys
+        return template_keys()
 
     def test_every_template_key_exists_in_all_locales(self):
         keys = self.template_keys()

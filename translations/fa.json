@@ -1132,5 +1132,14 @@
   "server_ipv6_badge_operation_busy": "عملیات دیگری در حال اجراست",
   "server_ipv6_err_not_awg": "AmneziaWG نیست",
   "exit_link_ipv6": "IPv6 در این نمونه فعال است. پیش از اتصال به گره خروجی، IPv6 را غیرفعال کنید.",
-  "server_ipv6_chip_restart": "نیاز به راه‌اندازی دوباره"
+  "server_ipv6_chip_restart": "نیاز به راه‌اندازی دوباره",
+  "server_ipv6_state_env_off": "IPv6 توسط تنظیم سرور غیرفعال است",
+  "server_ipv6_state_env_on": "IPv6 توسط تنظیم سرور اجباری فعال است",
+  "server_ipv6_badge_peer_lifecycle_busy": "یک عملیات کاربر در حال اجراست",
+  "server_ipv6_badge_ip6tables_unsupported": "ip6tables پشتیبانی نمی‌شود",
+  "server_ipv6_save_preference": "ذخیره",
+  "server_ipv6_cancel": "لغو",
+  "server_ipv6_discard_confirm": "تغییرات ذخیره‌نشده وجود دارد. بدون ذخیره بسته شود؟",
+  "server_ipv6_enable_docker_first": "ابتدا IPv6 داکر را فعال کنید",
+  "server_ipv6_apply_or_revert_hint": "ابتدا تغییر IPv6 را اعمال یا لغو کنید."
 }

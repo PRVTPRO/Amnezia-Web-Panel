@@ -1132,5 +1132,14 @@
   "server_ipv6_badge_operation_busy": "另一个操作正在进行",
   "server_ipv6_err_not_awg": "不是 AmneziaWG",
   "exit_link_ipv6": "该实例已启用 IPv6。请先禁用 IPv6,再连接到出口节点。",
-  "server_ipv6_chip_restart": "需要重启"
+  "server_ipv6_chip_restart": "需要重启",
+  "server_ipv6_state_env_off": "IPv6 已被服务器设置禁用",
+  "server_ipv6_state_env_on": "IPv6 已被服务器设置强制启用",
+  "server_ipv6_badge_peer_lifecycle_busy": "客户端操作正在进行",
+  "server_ipv6_badge_ip6tables_unsupported": "不支持 ip6tables",
+  "server_ipv6_save_preference": "保存",
+  "server_ipv6_cancel": "取消",
+  "server_ipv6_discard_confirm": "有未保存的更改。关闭而不保存？",
+  "server_ipv6_enable_docker_first": "请先启用 Docker IPv6",
+  "server_ipv6_apply_or_revert_hint": "请先应用或撤销 IPv6 更改。"
 }

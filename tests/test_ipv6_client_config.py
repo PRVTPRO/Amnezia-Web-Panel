@@ -126,6 +126,8 @@ class ClientConfigTests(unittest.TestCase):
         manager._get_dns = Mock(return_value='1.1.1.1, 1.0.0.1')
         manager._get_dns6 = Mock(return_value=dns6)
         manager._get_client_ipv6 = Mock(return_value=client_ipv6)
+        manager._get_subnet_ipv6_ip = Mock(
+            return_value='fd42:8:1::1' if client_ipv6 else '')
         return manager
 
     def _config(self, manager):

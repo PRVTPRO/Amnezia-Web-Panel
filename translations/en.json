@@ -1132,5 +1132,14 @@
   "server_ipv6_badge_operation_busy": "another operation is running",
   "server_ipv6_err_not_awg": "not AmneziaWG",
   "exit_link_ipv6": "This instance has IPv6 enabled. Disable IPv6 before linking it to an exit node.",
-  "server_ipv6_chip_restart": "restart needed"
+  "server_ipv6_chip_restart": "restart needed",
+  "server_ipv6_state_env_off": "IPv6 is disabled by the server setting",
+  "server_ipv6_state_env_on": "IPv6 is forced on by the server setting",
+  "server_ipv6_badge_peer_lifecycle_busy": "A client operation is already running",
+  "server_ipv6_badge_ip6tables_unsupported": "ip6tables is not supported",
+  "server_ipv6_save_preference": "Save",
+  "server_ipv6_cancel": "Cancel",
+  "server_ipv6_discard_confirm": "There are unsaved changes. Close without saving?",
+  "server_ipv6_enable_docker_first": "Enable Docker IPv6 first",
+  "server_ipv6_apply_or_revert_hint": "Apply or revert the IPv6 change first."
 }
