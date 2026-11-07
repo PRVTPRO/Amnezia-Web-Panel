@@ -828,7 +828,7 @@ class AWGManager:
                 'restart_required': False, 'ip6tables_ok': True,
                 'flags_conflict': False, 'version_ok': False}
         out, _, _ = self.ssh.run_sudo_command(
-            "command -v docker >/dev/null 2>&1 && echo yes")
+            "sh -c 'command -v docker' >/dev/null 2>&1 && echo yes")
         info['installed'] = (out or '').strip() == 'yes'
         if not info['installed']:
             return info

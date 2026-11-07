@@ -65,11 +65,17 @@ The tests use `http://127.0.0.1:8000`. They do not start the panel.
 | `tests/test_ipv6_install_gate.py` | new instances follow the server preference and `AWG_IPV6` |
 | `tests/test_ipv6_docker.py` | daemon.json merge, base64 write, recovery, refusal order |
 | `tests/test_ipv6_recreate.py` | inspect-based run command, config sha check, rollback order |
+| `tests/test_ipv6_hardening.py` | `Config.Env`/`Entrypoint`/`Cmd`/`Labels` and `-p` skip in the recreate command, DNS/DNS6 validation, stopped-container `can_disable`, `recreate_rollback_failed`, guarded Docker worker start, install `AWG_IPV6` override, quote escaping in `escapeHtml` |
+| `tests/test_ipv6_docker_detect.py` | Docker presence probe runs as `sh -c 'command -v docker'`, so `sudo` on a non-root host does not reject the `command` builtin; the old unwrapped shape is pinned as failing |
 | `tests/test_ipv6_client_config.py` | client IPv6/DNS6 derivation and generated config |
 | `tests/test_ipv6_i18n.py` | 5 locales, placeholders, Cyrillic leakage, CSS tokens |
 | `tests/test_ipv6_ui_browser.py` | chips, modal, repair, install note, phone, light theme, RTL |
 | `tests/test_server_ipv6_header.py` | header chips come from `/ip-status` |
 | `tests/test_exit_link_service.py` | `link()` refuses an IPv6 instance |
+
+`tests/test_ipv6_hardening.py` and `tests/test_ipv6_docker_detect.py` are new
+on the `feat/ipv6-ovh-test` branch and are not committed yet. They are
+collected by the Group A command automatically.
 
 ## Screenshots
 

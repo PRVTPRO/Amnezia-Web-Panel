@@ -16,6 +16,9 @@
   `daemon_json_present`, `restart_required`, `ip6tables_ok`,
   `flags_conflict`, `version_ok`.
 
+The server page polls `/ip-status` every 60 s while the tab is visible and
+again on `visibilitychange` when the tab regains focus.
+
 ## Preference
 
 `POST /api/servers/{id}/ipv6` with `{enabled: true|false|null}`.
@@ -24,7 +27,19 @@
   `changed: false` and does not write data.json.
 - A wrong type returns 400 `bad_request`.
 - `AWG_IPV6=off|on` wins over the stored preference. `/ip-status` reports it
-  as `env_override` and the UI locks the control.
+  as `env_override` (`off`, `on` or `auto`). The UI locks the control.
+- The settings block disables all three preference radios when
+  `env_override` is `off` or `on`, and prints the override beside the host
+  line.
+- The install gate in `api_install_protocol` applies the same rule: `off`
+  forces the new instance to IPv4-only, `on` forces IPv6. `auto` and an unset
+  variable keep the preference and the auto-detection.
+- The Docker IPv6 probe runs only when the effective preference is `True`
+  and `env_override` is not `off`. With `AWG_IPV6=off` the install never
+  returns 409 `docker_pending`.
+- The install modal note reads `preference.env_override`: `off` shows the
+  "disabled on the server" warning and hides the DNS6 field, `on` always
+  shows the automatic-IPv6 note, whatever the stored preference is.
 
 ## Instance switch
 
@@ -38,6 +53,12 @@
   container in the background.
 - `repair: true` allows a disable on an exit-linked instance with peers.
   `peers_appeared` during a rebuild is reported as a failed operation.
+- A failed `docker restart` after the `Address` write restores the IPv4-only
+  `Address` and retries the restart once. If the restore itself fails it is
+  logged, and the call still raises `server_off`.
+- `can_disable` requires a running container: a stopped container cannot be
+  reconfigured. `can_enable` needs readable state, zero peers and no exit
+  link.
 
 The manager refuses a switch when the config is unreadable, when peers
 appear, when the IPv6 subnet is taken by a neighbour, when the container
@@ -54,20 +75,33 @@ does not come back.
 4. adds or removes the `# DNS6` comment;
 5. on any mismatch restores the copy and raises `state_unreadable`.
 
+`update_awg_settings` validates `DNS` and `DNS6` before any write.
+`_validate_dns_value` splits the value on commas and whitespace and requires
+every token to parse as an IPv4 or IPv6 address; a bad token raises
+`bad_request`. An empty value is valid and clears the setting. The config
+writer passes `dns6` through `shlex.quote`, so a value cannot break out of
+the `# DNS6` line.
+
 ## Container rebuild
 
 `_recreate_container_ipv6`:
 
 1. `docker inspect` of the old container builds the new run command:
    restart policy, privileged, caps, binds, extra hosts, ulimits, network,
-   sysctls, port bindings; the two IPv6 sysctls are forced;
-2. old container is renamed to `<name>-ipv6bak`, a new one is created;
-3. the DNS network is joined and the config plus `start.sh` are copied;
-4. the copied config sha256 must equal the source;
-5. the container must run and answer `ip -6 route show default`;
-6. on any failure the new container is removed, the backup is renamed back
-   and started;
-7. on success the backup is removed and a failure to remove it is logged.
+   sysctls, port bindings; `Config.Env` (deduplicated by key),
+   `Config.Entrypoint`, `Config.Cmd` and `Config.Labels` are copied too; the
+   two IPv6 sysctls are forced;
+2. `-p` bindings are skipped for `host` and `container:*` network modes,
+   because Docker rejects them there; the rest of the command is kept;
+3. old container is renamed to `<name>-ipv6bak`, a new one is created;
+4. the DNS network is joined and the config plus `start.sh` are copied;
+5. the copied config sha256 must equal the source;
+6. the container must run and answer `ip -6 route show default`;
+7. on any failure the new container is removed and the backup is renamed back
+   and started; the rename and the start are checked by return code, and a
+   failed rollback raises `recreate_rollback_failed` (the backup is then
+   started under its own name as a best effort);
+8. on success the backup is removed and a failure to remove it is logged.
 
 ## Docker IPv6
 
@@ -81,12 +115,24 @@ does not come back.
   translated reason.
 - `daemon.json` is merged, never overwritten; a broken file is refused with
   `daemon_json_invalid`.
+- The backup is unconditional: every apply runs `cp -f` over
+  `/etc/docker/daemon.json.bak` before the write, so the backup is always the
+  state before the latest apply, not the state before the first one. If
+  `daemon.json` is absent, no backup is made.
 - The write runs as root through a script, with the payload in base64.
 - After `systemctl restart docker` the daemon must answer `docker version`
   within 20 s, else the backup is restored and `docker_recovery_failed` is
   reported.
 - The bridge must then report `EnableIPv6=true`, else
   `docker_bridge_ipv6_missing`.
+- The background worker is started in a guarded block. If the thread cannot
+  start, the operation is marked `failed` with reason `internal_error` and
+  the operation lock is released, so the server is not left busy.
+- Docker presence is probed with `sh -c 'command -v docker'`. `command` is a
+  shell builtin, and a plain `sudo command -v docker` fails on a non-root SSH
+  host because sudo cannot execute a builtin. The `sh -c` wrapper runs the
+  probe in a shell, so `docker.installed` is correct on both root and
+  password-sudo hosts.
 
 ## Operations
 
@@ -104,6 +150,12 @@ operation answers 409 `operation_busy`.
 `link()` refuses an instance whose `Address` has an IPv6 gateway with
 `exit_link_ipv6`, at any peer count. The error text is localized.
 
+## Server page rendering
+
+`escapeHtml` in `templates/server.html` escapes `&`, `<`, `>`, `"` and `'`.
+Proto names, block reasons, IPv6 subnets and other `/ip-status` values are
+therefore safe in HTML text and in quoted attributes.
+
 ## Deviations from spec v3
 
 - The status read uses separate SSH calls, not one batch script. The 20 s
@@ -114,9 +166,13 @@ operation answers 409 `operation_busy`.
   process per data file is required.
 - A Docker restart interrupted by a panel restart is not resumed: the record
   is marked `interrupted` and the next status read shows the real state.
-- The `AWG_IPV6` override is reported and enforced for new instances, but
-  there is no separate `env_off`/`env_on` blocked reason on an existing
-  instance.
+- The `AWG_IPV6` override is reported and enforced for new instances and it
+  locks the preference radios. The instance switch is not gated by it: spec
+  v3 wants `env_off`/`env_on` blocked reasons on that path, but these codes
+  appear only when the switch itself fails.
+- Spec v3 asks for one composite Save that writes settings and the IPv6
+  switch together. The panel still has a separate preference writer and a
+  separate instance switch.
 - `/ip-status` emits only `ssh_failed` in `error`. `container_unreadable` and
   `docker_unavailable` from spec v3 are not produced: a failed Docker probe
   is reported as `docker.installed = false`.
