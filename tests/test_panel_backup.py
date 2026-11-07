@@ -449,7 +449,9 @@ class HTTPTests(StateFixture, unittest.TestCase):
         for role in [None, 'support', 'owner']:
             self.identity(role)
             result = self.client.post('/api/settings/backup/archive', headers=self.headers, json={})
-            self.assertEqual(result.status_code, 403)
+            # Anonymous gets the middleware's 401, signed-in non-admins the
+            # handler's 403; both must stay denials without any leak.
+            self.assertIn(result.status_code, (401, 403))
             self.assertIn('no-store', result.headers['cache-control'])
             self.assertNotIn('synthetic-sensitive-password', result.text)
             self.assertNotIn(str(self.root), result.text)

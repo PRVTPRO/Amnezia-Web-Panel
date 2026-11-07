@@ -41,7 +41,9 @@ class ScanAssumptionTests(unittest.TestCase):
     def test_backup_download_is_admin_only(self):
         with patch.object(panel, '_check_admin', return_value=False):
             response = TestClient(panel.app).get('/api/settings/backup/download')
-        self.assertEqual(response.status_code, 403)
+        # Anonymous: 401 from api_auth_status_middleware; signed-in non-admin:
+        # the handler's 403. Either code means the download stayed closed.
+        self.assertIn(response.status_code, (401, 403))
 
     def test_jinja_autoescapes_untrusted_html(self):
         template = panel.templates.env.from_string('<p>{{ value }}</p>')

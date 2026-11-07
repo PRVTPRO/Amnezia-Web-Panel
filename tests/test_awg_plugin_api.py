@@ -85,7 +85,9 @@ class AwgPluginApiTests(unittest.TestCase):
     def test_status_requires_admin(self):
         client = TestClient(panel.app)
         response = client.get('/api/servers/0/awg-plugin/status')
-        self.assertEqual(response.status_code, 403)
+        # Refused either way: api_auth_status_middleware reports a missing
+        # browser session as 401 instead of the handler's 403.
+        self.assertIn(response.status_code, (401, 403))
 
     def test_status_returns_components(self):
         response = self.client.get('/api/servers/0/awg-plugin/status')
