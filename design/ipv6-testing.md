@@ -73,9 +73,11 @@ The tests use `http://127.0.0.1:8000`. They do not start the panel.
 | `tests/test_server_ipv6_header.py` | header chips come from `/ip-status` |
 | `tests/test_exit_link_service.py` | `link()` refuses an IPv6 instance |
 
-`tests/test_ipv6_hardening.py` and `tests/test_ipv6_docker_detect.py` are new
-on the `feat/ipv6-ovh-test` branch and are not committed yet. They are
-collected by the Group A command automatically.
+`tests/test_ipv6_hardening.py`, `tests/test_ipv6_docker_detect.py`,
+`tests/test_ipv6_core_fixes.py`, `tests/test_ipv6_api_fixes.py` and
+`tests/test_ipv6_ui_fixes.py` are committed on the `feat/ipv6-ovh-test`
+branch. They are collected by the Group A command automatically. The three
+`*_fixes.py` files pin the defects found by the independent review.
 
 ## Screenshots
 
