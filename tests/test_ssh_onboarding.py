@@ -1,5 +1,6 @@
 """Synthetic HTTP onboarding and deterministic inventory races; never real nodes."""
 import asyncio
+import base64
 import contextlib
 import importlib
 import json
@@ -13,6 +14,8 @@ from unittest import mock
 
 import paramiko
 from fastapi.testclient import TestClient
+from itsdangerous import TimestampSigner
+from starlette.middleware.sessions import SessionMiddleware
 from starlette.requests import Request
 from managers import ssh_trust
 
@@ -89,6 +92,7 @@ class OnboardingTests(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         self.app = importlib.import_module('app')
+        self.real_check_admin = self.app._check_admin
         self.user = {'role': 'admin'}
         self.endpoint = {'host': 'node.example.test', 'ssh_port': 2222}
         self.server = dict(self.endpoint, uid='a', username='synthetic', password='fixture',
@@ -111,6 +115,18 @@ class OnboardingTests(unittest.TestCase):
 
     def read(self):
         return json.loads(self.path.read_text())
+
+    def identity(self, role):
+        self.client.cookies.clear()
+        data = self.read()
+        data['users'] = [{'id': 'fixture-actor', 'role': role, 'enabled': True}] if role else []
+        self.path.write_text(json.dumps(data))
+        if role:
+            secret = next(m.kwargs['secret_key'] for m in self.app.app.user_middleware
+                          if m.cls is SessionMiddleware)
+            value = TimestampSigner(secret).sign(base64.b64encode(
+                json.dumps({'user_id': 'fixture-actor'}).encode())).decode()
+            self.client.cookies.set('session', value, domain='testserver.local', path='/')
 
     def inspect(self, endpoint=None):
         return self.client.post('/api/ssh-trust/onboarding/inspect', json=endpoint or self.endpoint)
@@ -179,12 +195,18 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(self.candidate()['status'], 'trusted')
 
     def test_admin_origin_and_explicit_confirmation(self):
+        checker = mock.patch.object(self.app, '_check_admin', self.real_check_admin)
+        checker.start()
+        self.addCleanup(checker.stop)
+        self.identity('admin')
         candidate = self.candidate()
-        for user in [None, {'role': 'support'}, {'role': 'user'}]:
-            self.user = user
-            self.assertEqual(self.inspect().status_code, 403)
-            self.assertEqual(self.confirm(candidate).status_code, 403)
-        self.user = {'role': 'admin'}
+        probe = self.app.ssh_trust.probe
+        calls = probe.call_count
+        for role, expected in [(None, 401), ('support', 403), ('user', 403)]:
+            self.identity(role)
+            self.assertEqual(self.inspect().status_code, expected)
+            self.assertEqual(self.confirm(candidate).status_code, expected)
+        self.identity('admin')
         for headers in [{'Origin': 'https://evil.example'}, {'Sec-Fetch-Site': 'cross-site'},
                         {'Origin': 'null'}, {'Sec-Fetch-Site': 'same-site'}]:
             self.assertEqual(self.client.post('/api/ssh-trust/onboarding/inspect',
@@ -193,6 +215,8 @@ class OnboardingTests(unittest.TestCase):
             json=dict(self.endpoint, token=candidate['token'], confirmed=False))
         self.assertEqual(response.status_code, 400)
         self.assertFalse(self.store.exists())
+        self.assertEqual(probe.call_count, calls)
+        self.drop.assert_not_called()
 
     def test_inspect_rejects_auth_material_and_invalid_endpoints(self):
         for extra in [{'password': 'fixture'}, {'private_key': 'fixture'}, {'username': 'fixture'}]:

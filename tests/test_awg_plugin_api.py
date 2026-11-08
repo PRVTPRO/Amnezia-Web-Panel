@@ -85,7 +85,7 @@ class AwgPluginApiTests(unittest.TestCase):
     def test_status_requires_admin(self):
         client = TestClient(panel.app)
         response = client.get('/api/servers/0/awg-plugin/status')
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 401)
 
     def test_status_returns_components(self):
         response = self.client.get('/api/servers/0/awg-plugin/status')
