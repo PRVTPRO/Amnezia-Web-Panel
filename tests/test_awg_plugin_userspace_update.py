@@ -26,7 +26,8 @@ from tests.awg_plugin_fixtures import (
     inspect_json,
 )
 
-CLEANUP = 'rm -rf /tmp/awg-plugin-update /tmp/awg-plugin-backup-*'
+CLEANUP = ('rm -rf /tmp/awg-plugin-update /tmp/awg-plugin-backup-* '
+           '/tmp/awp-updater-warp-exclude.tgz /tmp/awp-restore.tgz')
 PROBE_PREFIX = 'docker run --rm --entrypoint sh'
 US_BINARY = '0.0.20250522'
 US_BINARY_OUTPUT = (
@@ -222,7 +223,7 @@ class RecreateTests(unittest.TestCase):
         self.assertEqual(result['state'], 'updated')
         run = _index(ssh.commands, 'docker run -d')
         connect = _index(ssh.commands, 'docker network connect amnezia-dns-net amnezia-awg3')
-        restore = _index(ssh.commands, '. amnezia-awg3:/opt/amnezia/')
+        restore = _index(ssh.commands, 'docker cp /tmp/awg-plugin-backup-amnezia-awg3 amnezia-awg3:/tmp/awp-restore.tgz')
         self.assertLess(run, connect)
         self.assertLess(connect, restore)
 
@@ -299,8 +300,10 @@ class CleanupSkipTests(unittest.TestCase):
             _RollbackFailedUpdater(ssh).update(USERSPACE, GO_NEW, allow_interrupt=True)
 
         self.assertEqual(ctx.exception.code, 'rollback_failed')
-        # The backup exists, so the absence of cleanup is a real decision.
-        self.assertTrue(ssh.find('docker cp amnezia-awg3:/opt/amnezia'))
+        # The backup archive exists, so the absence of cleanup is a real decision.
+        self.assertTrue(ssh.find(
+            'docker cp amnezia-awg3:/tmp/awp-updater-warp-exclude.tgz',
+        ))
         self.assertFalse([c for c in ssh.commands if CLEANUP in c])
 
 
@@ -317,8 +320,8 @@ class CancelTests(unittest.TestCase):
         self.assertFalse(ssh.find('docker stop'))
         self.assertFalse(ssh.find('docker build'))
         # Both containers were inspected and backed up before the cancel check.
-        self.assertTrue(ssh.find('docker cp amnezia-awg3:/opt/amnezia'))
-        self.assertTrue(ssh.find('docker cp amnezia-awg2:/opt/amnezia'))
+        self.assertTrue(ssh.find('docker cp amnezia-awg3:/tmp/awp-updater-warp-exclude.tgz'))
+        self.assertTrue(ssh.find('docker cp amnezia-awg2:/tmp/awp-updater-warp-exclude.tgz'))
 
 
 class UnsupportedShapeTests(unittest.TestCase):

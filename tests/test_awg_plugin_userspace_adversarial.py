@@ -34,7 +34,8 @@ from tests.awg_plugin_fixtures import (
     inspect_json,
 )
 
-CLEANUP = 'rm -rf /tmp/awg-plugin-update /tmp/awg-plugin-backup-*'
+CLEANUP = ('rm -rf /tmp/awg-plugin-update /tmp/awg-plugin-backup-* '
+           '/tmp/awp-updater-warp-exclude.tgz /tmp/awp-restore.tgz')
 PORTS = {'amnezia-awg3': 55424, 'amnezia-awg2': 55425}
 CONTAINERS = ('amnezia-awg3', 'amnezia-awg2')
 
@@ -328,7 +329,9 @@ class NetworkTests(_UserspaceAdversarialTest):
 
         for name in CONTAINERS:
             run = _index(ssh.commands, '--name %s' % name)
-            restore = _index(ssh.commands, '. %s:/opt/amnezia/' % name)
+            restore = _index(
+                ssh.commands, '%s:/tmp/awp-restore.tgz' % name,
+            )
             dns = _index(
                 ssh.commands, 'docker network connect amnezia-dns-net %s' % name,
             )
