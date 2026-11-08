@@ -60,12 +60,25 @@ class DnsSixTests(unittest.TestCase):
 
 
 class PeerStateTests(unittest.TestCase):
+    """clientsTable rows keep client fields inside `userData`.
+
+    A mock with the fields on the row top level hides a defect no live
+    instance can hit: the panel reports zero IPv6 peers on a server that
+    has them, and the host chip stays orange. The real shape is first.
+    """
+
     def test_counts_union_of_table_and_config(self):
         manager = make_manager()
         manager._get_clients_table = Mock(return_value=[
-            {'clientId': 'KEY_A', 'enabled': True, 'clientIpv6': 'fd42:8:1::a'},
-            {'clientId': 'KEY_B', 'enabled': True, 'clientIpv6': ''},
-            {'clientId': 'KEY_C', 'enabled': False, 'clientIpv6': 'fd42:8:1::c'},
+            {'clientId': 'KEY_A', 'userData': {
+                'enabled': True, 'clientIp': '10.8.1.2',
+                'clientIpv6': 'fd42:8:1::a'}},
+            {'clientId': 'KEY_B', 'userData': {
+                'enabled': True, 'clientIp': '10.8.1.3',
+                'clientIpv6': ''}},
+            {'clientId': 'KEY_C', 'userData': {
+                'enabled': False, 'clientIp': '10.8.1.4',
+                'clientIpv6': 'fd42:8:1::c'}},
         ])
         manager._get_server_config = Mock(return_value='[Peer]\nPublicKey = KEY_A\n')
         manager._parse_peers_from_config = Mock(return_value={'KEY_A': {}, 'KEY_D': {}})
@@ -75,10 +88,32 @@ class PeerStateTests(unittest.TestCase):
         self.assertEqual(peers, 3)
         self.assertEqual(v6, 1)
 
+    def test_live_row_with_ipv6_counts_even_when_absent_from_config(self):
+        """A row the panel wrote itself, including its IPv6 address."""
+        manager = make_manager()
+        manager._get_clients_table = Mock(return_value=[
+            {'clientId': 'JonInTMA7kQioR5gZw8D4mkEBLFOu1Z5EYPnwzS4BUI=',
+             'userData': {
+                 'clientName': 'kghf',
+                 'clientPrivateKey': 'priv',
+                 'clientIp': '10.8.1.2',
+                 'clientIpv6': 'fd42:8:1::2',
+                 'enabled': True,
+                 'psk': 'psk'}},
+        ])
+        manager._get_server_config = Mock(return_value='[Peer]\n')
+        manager._parse_peers_from_config = Mock(return_value={})
+        peers, v6, readable = manager._peers_state('awg3')
+        self.assertTrue(readable)
+        self.assertEqual(peers, 1)
+        self.assertEqual(v6, 1)
+
     def test_disabled_peer_does_not_make_ipv6_in_use(self):
         manager = make_manager()
         manager._get_clients_table = Mock(return_value=[
-            {'clientId': 'KEY_C', 'enabled': False, 'clientIpv6': 'fd42:8:1::c'},
+            {'clientId': 'KEY_C', 'userData': {
+                'enabled': False, 'clientIp': '10.8.1.4',
+                'clientIpv6': 'fd42:8:1::c'}},
         ])
         manager._get_server_config = Mock(return_value='[Peer]\nPublicKey = KEY_C\n')
         manager._parse_peers_from_config = Mock(return_value={'KEY_C': {}})
@@ -86,6 +121,19 @@ class PeerStateTests(unittest.TestCase):
         self.assertTrue(readable)
         self.assertEqual(peers, 1)
         self.assertEqual(v6, 0)
+
+    def test_top_level_fields_still_work_for_old_rows(self):
+        """Rows written without userData keep the legacy flat shape readable."""
+        manager = make_manager()
+        manager._get_clients_table = Mock(return_value=[
+            {'clientId': 'KEY_A', 'enabled': True, 'clientIpv6': 'fd42:8:1::a'},
+        ])
+        manager._get_server_config = Mock(return_value='[Peer]\n')
+        manager._parse_peers_from_config = Mock(return_value={})
+        peers, v6, readable = manager._peers_state('awg3')
+        self.assertTrue(readable)
+        self.assertEqual(peers, 1)
+        self.assertEqual(v6, 1)
 
     def test_unreadable_config_is_not_zero_peers(self):
         manager = make_manager()

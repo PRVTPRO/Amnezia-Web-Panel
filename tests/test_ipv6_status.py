@@ -223,7 +223,8 @@ class InstancePeersTests(unittest.TestCase):
     def test_peers_union_counts_config_peers(self):
         manager = AWGManager(Mock())
         manager._get_clients_table = Mock(return_value=[
-            {'clientId': 'A', 'enabled': True, 'clientIpv6': 'fd42:8:1::a'}])
+            {'clientId': 'A', 'userData': {
+                'enabled': True, 'clientIpv6': 'fd42:8:1::a'}}])
         manager._get_server_config = Mock(return_value='[Peer]\nPublicKey = A\n')
         manager._parse_peers_from_config = Mock(return_value={'A': {}, 'D': {}})
         peers, v6, readable = manager._peers_state('awg3')

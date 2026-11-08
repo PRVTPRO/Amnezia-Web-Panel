@@ -860,6 +860,24 @@ class AWGManager:
         info['flags_conflict'] = bool((out or '').strip())
         return info
 
+    @staticmethod
+    def _clients_row_ud(row):
+        """Real client data of one clientsTable row.
+
+        Every writer in this codebase stores client fields inside `userData`
+        (clientIp, clientIpv6, enabled, psk). Reading them off the row top
+        level silently reports zero peers with IPv6 on a live instance, which
+        is exactly how a server with IPv6 peers got the orange chip.
+        """
+        row = row or {}
+        ud = row.get('userData')
+        if isinstance(ud, dict):
+            merged = dict(row)
+            merged.pop('userData', None)
+            merged.update(ud)
+            return merged
+        return row
+
     def _peers_state(self, protocol_type):
         """Peer counters. readable=False when a read failed.
 
@@ -879,12 +897,16 @@ class AWGManager:
             config_peers = self._parse_peers_from_config(protocol_type) or {}
         except Exception:
             return 0, 0, False
-        known = {(row or {}).get('clientId') for row in table
-                 if (row or {}).get('clientId')
-                 and (row or {}).get('enabled', True) is not False}
+        known = set()
+        for row in table:
+            ud = self._clients_row_ud(row)
+            client_id = (row or {}).get('clientId')
+            if client_id and ud.get('enabled', True) is not False:
+                known.add(client_id)
         total = len(known | set(config_peers))
         for row in table:
-            if (row or {}).get('enabled', True) and (row or {}).get('clientIpv6'):
+            ud = self._clients_row_ud(row)
+            if ud.get('enabled', True) is not False and ud.get('clientIpv6'):
                 v6 += 1
         return total, v6, True
 
