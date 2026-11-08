@@ -118,15 +118,15 @@ class DnatCommandBuilderTests(unittest.TestCase):
             container_dests={4: '172.17.0.2:55424', 6: 'fd00::2:55424'})
         self.assertEqual(warning, '')
         self.assertIn(
-            "iptables -t nat -C PREROUTING -p udp --dport 8443 "
-            "-j DNAT --to-destination '172.17.0.2:55424' 2>/dev/null "
-            "|| iptables -t nat -I PREROUTING 1 -p udp --dport 8443 "
-            "-j DNAT --to-destination '172.17.0.2:55424'", cmds)
+            "sh -c 'iptables -t nat -C PREROUTING -p udp --dport 8443 "
+            '-j DNAT --to-destination "172.17.0.2:55424" 2>/dev/null '
+            '|| iptables -t nat -I PREROUTING 1 -p udp --dport 8443 '
+            '-j DNAT --to-destination "172.17.0.2:55424"\'', cmds)
         self.assertIn(
-            "ip6tables -t nat -C PREROUTING -p udp --dport 8443 "
-            "-j DNAT --to-destination 'fd00::2:55424' 2>/dev/null "
-            "|| ip6tables -t nat -I PREROUTING 1 -p udp --dport 8443 "
-            "-j DNAT --to-destination 'fd00::2:55424'", cmds)
+            "sh -c 'ip6tables -t nat -C PREROUTING -p udp --dport 8443 "
+            '-j DNAT --to-destination "fd00::2:55424" 2>/dev/null '
+            '|| ip6tables -t nat -I PREROUTING 1 -p udp --dport 8443 '
+            '-j DNAT --to-destination "fd00::2:55424"\'', cmds)
 
     def test_missing_destination_falls_back_to_redirect(self):
         cmds, _ = panel.public_port_forward_commands(
@@ -144,42 +144,59 @@ class DnatCommandBuilderTests(unittest.TestCase):
         for cmd in cmds:
             if 'DNAT' not in cmd:
                 continue
-            self.assertIn("--to-destination '", cmd, cmd)
-            self.assertNotIn("--to-destination [", cmd, cmd)
-            self.assertNotIn("--to-destination 1", cmd, cmd)
+            self.assertIn('--to-destination "', cmd)
+            self.assertNotIn('--to-destination [', cmd)
+            self.assertNotIn('--to-destination 1', cmd)
+
+    def test_every_command_runs_in_one_shell(self):
+        # run_sudo_command prefixes the whole string with sudo. A bare chain
+        # would run its right half unprivileged (xtables.lock error).
+        add, _ = panel.public_port_forward_commands(
+            'awg2', '8443', '55424',
+            container_dests={4: '172.17.0.2:55424', 6: 'fd00::2:55424'})
+        drop, _ = panel.public_port_forward_commands(
+            'awg2', '', '55424', '8443',
+            container_dests={4: '172.17.0.2:55424', 6: None})
+        for cmd in (add or []) + (drop or []):
+            self.assertTrue(cmd.startswith("sh -c '"), cmd)
+            self.assertTrue(cmd.endswith("'"), cmd)
+            for token in ('&&', '||', ';'):
+                idx = cmd.find(token)
+                if idx != -1:
+                    self.assertLess(cmd.find("sh -c '"), idx, cmd)
 
     def test_public_ip_scopes_the_family(self):
         cmds, _ = panel.public_port_forward_commands(
             'awg2', '8443', '55424', public_ip='203.0.113.9',
             container_dests={4: '172.17.0.2:55424', 6: 'fd00::2:55424'})
         self.assertEqual(len(cmds), 1)
-        self.assertTrue(cmds[0].startswith('iptables '), cmds)
+        self.assertTrue(cmds[0].startswith("sh -c 'iptables "), cmds)
         self.assertIn('-d 203.0.113.9 --dport 8443', cmds[0])
-        self.assertIn("-j DNAT --to-destination '172.17.0.2:55424'", cmds[0])
+        self.assertIn('-j DNAT --to-destination "172.17.0.2:55424"', cmds[0])
 
     def test_ipv6_public_ip_uses_ip6tables(self):
         cmds, _ = panel.public_port_forward_commands(
             'awg2', '8443', '55424', public_ip='[2001:db8::9]',
             container_dests={4: '172.17.0.2:55424', 6: 'fd00::2:55424'})
         self.assertEqual(len(cmds), 1)
-        self.assertTrue(cmds[0].startswith('ip6tables '), cmds)
+        self.assertTrue(cmds[0].startswith("sh -c 'ip6tables "), cmds)
         self.assertIn('-d 2001:db8::9 --dport 8443', cmds[0])
 
     def test_bracketed_ipv6_add_rule_keeps_the_docker_form(self):
         cmds, _ = panel.public_port_forward_commands(
             'awg2', '8443', '55424',
             container_dests={4: None, 6: '[fd00:42::4]:55424'})
-        v6 = [c for c in cmds if c.startswith('ip6tables ')]
+        v6 = [c for c in cmds if "sh -c 'ip6tables " in c]
         self.assertEqual(len(v6), 1, cmds)
-        self.assertIn("-j DNAT --to-destination '[fd00:42::4]:55424'", v6[0])
+        self.assertIn('-j DNAT --to-destination "[fd00:42::4]:55424"', v6[0])
 
     def test_tcp_for_xray(self):
         cmds, _ = panel.public_port_forward_commands(
             'xray', '8443', '443', container_dests={4: '172.17.0.2:443'})
         self.assertEqual(len(cmds), 2)  # v4 add + v6 REDIRECT fallback
-        v4 = [c for c in cmds if c.startswith('iptables ')][0]
+        v4 = [c for c in cmds if "sh -c 'iptables " in c][0]
         self.assertIn('-p tcp', v4)
-        self.assertIn("-j DNAT --to-destination '172.17.0.2:443'", v4)
+        self.assertIn('-j DNAT --to-destination "172.17.0.2:443"', v4)
 
     def test_clearing_removes_redirect_and_dnat(self):
         cmds, _ = panel.public_port_forward_commands(
@@ -188,9 +205,9 @@ class DnatCommandBuilderTests(unittest.TestCase):
         v4 = [c for c in cmds if 'iptables -t nat -D' in c]
         self.assertEqual(len(v4), 2, cmds)  # REDIRECT removal + DNAT removal
         self.assertTrue(any('-j REDIRECT --to-ports 55424' in c for c in v4), v4)
-        self.assertTrue(any("-j DNAT --to-destination '172.17.0.2:55424'" in c for c in v4), v4)
-        self.assertTrue(all(c.startswith('for i in 1 2 3; do ') for c in cmds), cmds)
-        self.assertTrue(all(c.endswith('2>/dev/null || break; done') for c in cmds), cmds)
+        self.assertTrue(any('-j DNAT --to-destination "172.17.0.2:55424"' in c for c in v4), v4)
+        self.assertTrue(all(c.startswith("sh -c 'for i in 1 2 3; do ") for c in cmds), cmds)
+        self.assertTrue(all(c.endswith("2>/dev/null || break; done'") for c in cmds), cmds)
 
     def test_clearing_without_destination_removes_only_redirect(self):
         cmds, _ = panel.public_port_forward_commands(
@@ -244,7 +261,7 @@ class DnatApiTests(unittest.TestCase):
                           'ip6tables -t nat -S DOCKER'])
         add = [c for c in ssh.forward_commands if '--dport 8443' in c and 'DNAT' in c]
         self.assertTrue(add, ssh.forward_commands)
-        self.assertIn("-j DNAT --to-destination '172.17.0.2:55424'", add[0])
+        self.assertIn('-j DNAT --to-destination "172.17.0.2:55424"', add[0])
         verify = [c for c in ssh.forward_commands if ' -C ' in c and 'DNAT' in c]
         self.assertTrue(verify, ssh.forward_commands)
 
@@ -292,7 +309,7 @@ class DnatRestoreTests(unittest.TestCase):
         add = [c for c in ssh.forward_commands
                if '--dport 8443' in c and 'DNAT' in c and '-I PREROUTING 1' in c]
         self.assertTrue(add, ssh.forward_commands)
-        self.assertIn("-j DNAT --to-destination '172.17.0.2:55424'", add[0])
+        self.assertIn('-j DNAT --to-destination "172.17.0.2:55424"', add[0])
 
     def test_repeated_restore_uses_the_guarded_add_not_a_bare_insert(self):
         ssh = FakeDockerSSH(DOCKER_V4)

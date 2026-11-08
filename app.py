@@ -7721,14 +7721,27 @@ def _forward_match(l4, addr, port, listen_port, container_dest=None):
     destination as `[addr]:port`, the command runs through a remote shell,
     and an unquoted bracket expression is a glob pattern there: a file named
     e.g. `d:55425` in the working directory would silently replace the
-    container address with garbage.
+    container address with garbage. Double quotes, so the match can sit
+    inside the single-quoted `sh -c` wrapper below.
     """
     scope = f' -d {addr}' if addr else ''
     if container_dest:
-        return (f"-p {l4}{scope} --dport {port} "
-                f"-j DNAT --to-destination '{container_dest}'")
+        return (f'-p {l4}{scope} --dport {port} '
+                f'-j DNAT --to-destination "{container_dest}"')
     return (f'-p {l4}{scope} --dport {port} '
             f'-j REDIRECT --to-ports {listen_port}')
+
+
+def _forward_shell(command):
+    """Run one privileged command chain inside a single shell.
+
+    run_sudo_command prefixes the whole string with sudo, so in `sudo a || b`
+    only `a` is privileged and the insert half runs as the panel's SSH user.
+    That broke every add on a non-root host (`can't open lock file
+    /run/xtables.lock`). Wrapping the chain in `sh -c` gives it to one root
+    shell, the pattern the rest of the panel already uses.
+    """
+    return "sh -c '" + command.replace("'", "'\\''") + "'"
 
 
 def public_port_forward_commands(protocol, public_port, listen_port, old_public_port='',
@@ -7750,6 +7763,9 @@ def public_port_forward_commands(protocol, public_port, listen_port, old_public_
     Removal drops both forms, but it can only name the DNAT rule when the
     container destination is known: if discovery failed, the DNAT rule of an
     earlier apply stays behind and the REDIRECT fallback is used for the add.
+
+    Every returned command is one `sh -c` chain: run_sudo_command prefixes
+    sudo to the whole string, so a bare `a || b` would run `b` unprivileged.
     """
     base = protocol_base(protocol)
     l4 = next((k for k, v in PUBLIC_FORWARD_L4.items() if base in v), None)
@@ -7771,12 +7787,14 @@ def public_port_forward_commands(protocol, public_port, listen_port, old_public_
             container_dest = dests.get(fkey)
             for addr in (addrs if addrs is not None else ['']):
                 legacy = _forward_match(l4, addr, port, listen_port)
-                commands.append(f'for i in 1 2 3; do {ipt} -t nat -D PREROUTING '
-                                f'{legacy} 2>/dev/null || break; done')
+                commands.append(_forward_shell(
+                    f'for i in 1 2 3; do {ipt} -t nat -D PREROUTING '
+                    f'{legacy} 2>/dev/null || break; done'))
                 if container_dest:
                     dnat = _forward_match(l4, addr, port, listen_port, container_dest)
-                    commands.append(f'for i in 1 2 3; do {ipt} -t nat -D PREROUTING '
-                                    f'{dnat} 2>/dev/null || break; done')
+                    commands.append(_forward_shell(
+                        f'for i in 1 2 3; do {ipt} -t nat -D PREROUTING '
+                        f'{dnat} 2>/dev/null || break; done'))
 
     for stale in {p for p in (old_public_port,) if p and p != public_port}:
         drop(stale)
@@ -7788,8 +7806,9 @@ def public_port_forward_commands(protocol, public_port, listen_port, old_public_
             container_dest = dests.get(fkey)
             for addr in (addrs if addrs is not None else ['']):
                 match = _forward_match(l4, addr, public_port, listen_port, container_dest)
-                commands.append(f'{ipt} -t nat -C PREROUTING {match} 2>/dev/null '
-                                f'|| {ipt} -t nat -I PREROUTING 1 {match}')
+                commands.append(_forward_shell(
+                    f'{ipt} -t nat -C PREROUTING {match} 2>/dev/null '
+                    f'|| {ipt} -t nat -I PREROUTING 1 {match}'))
     return (commands or None), warning
 
 

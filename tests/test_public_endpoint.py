@@ -512,7 +512,7 @@ class PublicPortForwardTests(PublicEndpointApiTests):
         self.assertEqual(warning, '')
         self.assertEqual(len(cmds), 2)
         for ipt in ('iptables', 'ip6tables'):
-            self.assertTrue(any(c.startswith(f'{ipt} -t nat -C PREROUTING -p udp --dport 8443') for c in cmds), cmds)
+            self.assertTrue(any(c.startswith(f"sh -c '{ipt} -t nat -C PREROUTING -p udp --dport 8443") for c in cmds), cmds)
 
     def test_command_builder_uses_tcp_for_xray_and_skips_services(self):
         tcp, _ = panel.public_port_forward_commands('xray', '8443', '443')
@@ -545,7 +545,7 @@ class PublicPortForwardTests(PublicEndpointApiTests):
         cmds, _ = panel.public_port_forward_commands(
             'awg3', '8443', '55425', public_ip='[2001:db8::9]')
         self.assertEqual(len(cmds), 1)
-        self.assertTrue(cmds[0].startswith('ip6tables -t nat -C PREROUTING -p udp '
+        self.assertTrue(cmds[0].startswith("sh -c 'ip6tables -t nat -C PREROUTING -p udp "
                                           '-d 2001:db8::9 --dport 8443'), cmds)
 
     def test_a_domain_resolves_into_per_family_scopes(self):
@@ -558,8 +558,8 @@ class PublicPortForwardTests(PublicEndpointApiTests):
                 'awg3', '8443', '55425', public_ip='vpn.example.com')
         self.assertEqual(warning, '')
         self.assertEqual(len(cmds), 2)
-        self.assertTrue(any('-d 203.0.113.9 --dport 8443' in c and c.startswith('iptables') for c in cmds), cmds)
-        self.assertTrue(any('-d 2001:db8::9 --dport 8443' in c and c.startswith('ip6tables') for c in cmds), cmds)
+        self.assertTrue(any('-d 203.0.113.9 --dport 8443' in c and "sh -c 'iptables " in c for c in cmds), cmds)
+        self.assertTrue(any('-d 2001:db8::9 --dport 8443' in c and "sh -c 'ip6tables " in c for c in cmds), cmds)
 
     def test_an_unresolvable_domain_falls_back_unrestricted_with_warning(self):
         with mock.patch.object(panel.socket, 'getaddrinfo',
@@ -577,15 +577,15 @@ class PublicPortForwardTests(PublicEndpointApiTests):
             container_dests={4: '172.17.0.2:55424'})
         self.assertEqual(warning, '')
         self.assertEqual(len(cmds), 2)  # v4 DNAT + v6 REDIRECT fallback
-        v4 = [c for c in cmds if c.startswith('iptables ')]
+        v4 = [c for c in cmds if "sh -c 'iptables " in c]
         self.assertEqual(len(v4), 1)
         self.assertEqual(
             v4[0],
-            "iptables -t nat -C PREROUTING -p udp --dport 8443 "
-            "-j DNAT --to-destination '172.17.0.2:55424' 2>/dev/null "
-            "|| iptables -t nat -I PREROUTING 1 -p udp --dport 8443 "
-            "-j DNAT --to-destination '172.17.0.2:55424'")
-        v6 = [c for c in cmds if c.startswith('ip6tables ')]
+            "sh -c 'iptables -t nat -C PREROUTING -p udp --dport 8443 "
+            '-j DNAT --to-destination "172.17.0.2:55424" 2>/dev/null '
+            '|| iptables -t nat -I PREROUTING 1 -p udp --dport 8443 '
+            '-j DNAT --to-destination "172.17.0.2:55424"\'')
+        v6 = [c for c in cmds if "sh -c 'ip6tables " in c]
         self.assertIn('-j REDIRECT --to-ports 55424', v6[0])
 
     def test_builder_uses_dnat_for_both_families(self):
@@ -593,10 +593,10 @@ class PublicPortForwardTests(PublicEndpointApiTests):
             'awg3', '8443', '55424',
             container_dests={4: '172.17.0.2:55424', 6: 'fd00::2:55424'})
         self.assertEqual(len(cmds), 2)
-        self.assertTrue(any("-j DNAT --to-destination '172.17.0.2:55424'" in c
-                            and c.startswith('iptables ') for c in cmds), cmds)
-        self.assertTrue(any("-j DNAT --to-destination 'fd00::2:55424'" in c
-                            and c.startswith('ip6tables ') for c in cmds), cmds)
+        self.assertTrue(any('-j DNAT --to-destination "172.17.0.2:55424"' in c
+                            and "sh -c 'iptables " in c for c in cmds), cmds)
+        self.assertTrue(any('-j DNAT --to-destination "fd00::2:55424"' in c
+                            and "sh -c 'ip6tables " in c for c in cmds), cmds)
 
     def test_builder_keeps_redirect_when_docker_does_not_publish_the_port(self):
         cmds, _ = panel.public_port_forward_commands(
@@ -619,7 +619,7 @@ class PublicPortForwardTests(PublicEndpointApiTests):
         v4 = [c for c in cmds if 'iptables -t nat -D' in c]
         self.assertEqual(len(v4), 2, cmds)  # REDIRECT first, then DNAT
         self.assertIn('-j REDIRECT --to-ports 55424', v4[0])
-        self.assertIn("--to-destination '172.17.0.2:55424'", v4[1])
+        self.assertIn('--to-destination "172.17.0.2:55424"', v4[1])
         v6 = [c for c in cmds if 'ip6tables -t nat -D' in c]
         self.assertEqual(len(v6), 1, cmds)  # no destination: only REDIRECT
         self.assertIn('-j REDIRECT --to-ports 55424', v6[0])
@@ -633,7 +633,7 @@ class PublicPortForwardTests(PublicEndpointApiTests):
         self.assertEqual(res.status_code, 200, res.text)
         self.assertEqual(res.json()['warning'], '')
         self.assertIn('iptables -t nat -S DOCKER', ssh.docker_queries)
-        self.assertTrue(any("-j DNAT --to-destination '172.17.0.2:55424'" in c
+        self.assertTrue(any('-j DNAT --to-destination "172.17.0.2:55424"' in c
                             for c in ssh.commands), ssh.commands)
         self.assertFalse(any('--to-ports 55424' in c for c in ssh.commands), ssh.commands)
 
@@ -646,7 +646,7 @@ class PublicPortForwardTests(PublicEndpointApiTests):
         verify = [c for c in ssh.commands if c.startswith('iptables -t nat -C PREROUTING')
                   and ' -d 203.0.113.9 ' in c]
         self.assertTrue(verify, ssh.commands)
-        self.assertIn("-j DNAT --to-destination '172.17.0.2:55424'", verify[0])
+        self.assertIn('-j DNAT --to-destination "172.17.0.2:55424"', verify[0])
 
     def test_saving_falls_back_to_redirect_without_a_docker_rule(self):
         client = self.client()
@@ -674,7 +674,7 @@ class PublicPortForwardTests(PublicEndpointApiTests):
             self.assertIn('iptables -t nat', cmd)
             self.assertIn('-p udp -d 203.0.113.9 --dport 8443', cmd)
             self.assertIn('--to-ports 55424', cmd)
-        self.assertFalse(any(c.startswith('ip6tables') for c in ssh.commands))
+        self.assertFalse(any("sh -c 'ip6tables" in c for c in ssh.commands))
 
     def test_saving_a_domain_scopes_each_family_to_its_address(self):
         client = self.client()
@@ -689,8 +689,8 @@ class PublicPortForwardTests(PublicEndpointApiTests):
                                     public_port='8443')
         self.assertEqual(res.status_code, 200, res.text)
         self.assertEqual(res.json()['warning'], '')
-        v4 = [c for c in ssh.commands if c.startswith('iptables')]
-        v6 = [c for c in ssh.commands if c.startswith('ip6tables')]
+        v4 = [c for c in ssh.commands if 'iptables -t nat' in c]
+        v6 = [c for c in ssh.commands if 'ip6tables -t nat' in c]
         self.assertEqual(len(v4), 2)  # add + verify
         self.assertEqual(len(v6), 2)
         self.assertTrue(all('-d 203.0.113.9 --dport 8443' in c for c in v4), v4)
@@ -825,10 +825,10 @@ class RestoreForwardTests(unittest.TestCase):
         # one discovery per distinct listen port (55424 awg2, 443 xray) x 2 families
         self.assertEqual(len(ssh.docker_queries), 4, ssh.docker_queries)
         self.assertTrue(any('-p udp -d 203.0.113.9 --dport 8443 '
-                            "-j DNAT --to-destination '172.17.0.2:55424'" in c
+                            '-j DNAT --to-destination "172.17.0.2:55424"' in c
                             for c in ssh.commands), ssh.commands)
         self.assertTrue(any('-p tcp -d 198.51.100.1 --dport 8443 '
-                            "-j DNAT --to-destination '172.17.0.3:443'" in c
+                            '-j DNAT --to-destination "172.17.0.3:443"' in c
                             for c in ssh.commands), ssh.commands)
 
     def test_restore_without_docker_rules_keeps_redirect(self):
