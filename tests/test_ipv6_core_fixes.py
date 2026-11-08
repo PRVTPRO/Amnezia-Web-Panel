@@ -208,7 +208,7 @@ class A5DisabledRowTests(unittest.TestCase):
     def test_disabled_clients_table_row_is_not_a_peer(self):
         manager = AWGManager(mock.Mock())
         manager._get_clients_table = mock.Mock(return_value=[
-            {'clientId': 'DISABLED', 'enabled': False}])
+            {'clientId': 'DISABLED', 'userData': {'enabled': False}}])
         manager._get_server_config = mock.Mock(return_value=SERVER_CONFIG)
         manager._parse_peers_from_config = mock.Mock(return_value={})
         peers, _v6, readable = manager._peers_state('awg3')

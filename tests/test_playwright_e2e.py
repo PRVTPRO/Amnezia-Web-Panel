@@ -11,6 +11,7 @@ files that call `sync_playwright()` themselves then fail inside that loop with
 "Playwright Sync API cannot be used inside the asyncio loop".
 """
 import unittest
+import urllib.request
 
 try:
     import pytest
@@ -24,6 +25,19 @@ BASE_URL = "http://127.0.0.1:8000"
 @pytest.fixture(scope="session")
 def base_url():
     return BASE_URL
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _panel_must_be_serving():
+    """Skip the whole module unless a panel answers on BASE_URL.
+
+    Without pytest-playwright the `page` fixture is missing, which used to show
+    up as collection errors; a reachable panel is the other precondition.
+    """
+    try:
+        urllib.request.urlopen(BASE_URL + "/login", timeout=5)
+    except Exception as exc:
+        pytest.skip(f"panel not serving on {BASE_URL}: {exc}")
 
 
 class TestLoginPage:
