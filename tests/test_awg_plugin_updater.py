@@ -456,6 +456,66 @@ class UserspaceUpdateTests(unittest.TestCase):
         # The old container is only removed after the new one is verified.
         self.assertTrue(ssh.find('docker rm -f amnezia-awg3.old-'))
 
+    def test_backup_uses_tar_with_warp_excludes(self):
+        ssh = FakeSSH(self._handler())
+        AwgPluginUpdater(ssh).update(USERSPACE, GO_NEW, allow_interrupt=True)
+
+        backups = ssh.find('tar czf')
+        self.assertEqual(len(backups), 1)
+        self.assertIn(
+            'docker exec amnezia-awg3 tar czf /tmp/awp-updater-warp-exclude.tgz '
+            '-C /opt/amnezia ',
+            backups[0],
+        )
+        self.assertIn("--exclude='./awg/warp'", backups[0])
+        self.assertIn("--exclude='./awg/warp-link-*'", backups[0])
+        self.assertIn("--exclude='./exit/warp'", backups[0])
+        # The whole /opt/amnezia directory is no longer copied directly.
+        self.assertFalse(
+            [c for c in ssh.commands if ':/opt/amnezia ' in c],
+            'plain docker cp of the config directory must be gone',
+        )
+        self.assertTrue(ssh.find(
+            'docker cp amnezia-awg3:/tmp/awp-updater-warp-exclude.tgz '
+            '/tmp/awg-plugin-backup-amnezia-awg3',
+        ))
+        self.assertTrue(ssh.find(
+            'docker exec amnezia-awg3 rm -f /tmp/awp-updater-warp-exclude.tgz',
+        ))
+
+    def test_restore_uses_tar_extract_and_keeps_warp_credentials(self):
+        ssh = FakeSSH(self._handler())
+        AwgPluginUpdater(ssh).update(USERSPACE, GO_NEW, allow_interrupt=True)
+
+        extracts = ssh.find('tar xzf')
+        self.assertEqual(len(extracts), 1)
+        self.assertIn(
+            'docker exec amnezia-awg3 tar xzf /tmp/awp-restore.tgz '
+            '-C /opt/amnezia',
+            extracts[0],
+        )
+        self.assertFalse(
+            [c for c in ssh.commands if c.startswith('docker cp /tmp/awg-plugin-backup')
+             and ':/opt/amnezia/' in c],
+            'a directory copy into /opt/amnezia/ must no longer be used',
+        )
+        self.assertTrue(ssh.find(
+            'docker cp /tmp/awg-plugin-backup-amnezia-awg3 '
+            'amnezia-awg3:/tmp/awp-restore.tgz',
+        ))
+        self.assertTrue(ssh.find(
+            'docker exec amnezia-awg3 rm -f /tmp/awp-restore.tgz',
+        ))
+
+    def test_cleanup_removes_both_temporary_archives(self):
+        ssh = FakeSSH(self._handler())
+        AwgPluginUpdater(ssh).update(USERSPACE, GO_NEW, allow_interrupt=True)
+
+        cleanup = [c for c in ssh.commands if c.startswith('rm -rf /tmp/awg-plugin-update')]
+        self.assertEqual(len(cleanup), 1)
+        self.assertIn('/tmp/awp-updater-warp-exclude.tgz', cleanup[0])
+        self.assertIn('/tmp/awp-restore.tgz', cleanup[0])
+
     def test_dropped_peers_roll_back(self):
         ssh = FakeSSH(self._handler(peers='5', peers_after='0'))
         with self.assertRaises(PluginUpdateError) as ctx:

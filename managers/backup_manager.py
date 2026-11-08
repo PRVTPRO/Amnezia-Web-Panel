@@ -212,6 +212,10 @@ copy_container_path() {{
 }}
 for p in {host_paths}; do copy_host_path "$p"; done
 for p in {container_paths}; do copy_container_path "$p"; done
+for root in "$work_dir/host" "$work_dir/container"; do
+  rm -rf "$root/opt/amnezia/awg/warp" "$root/opt/amnezia/exit/warp"
+  rm -f "$root/opt/amnezia/awg/"warp-link-*
+done
 if [ -n "$container" ] && docker inspect "$container" >/dev/null 2>&1; then
   docker inspect "$container" > "$work_dir/docker/inspect.json" 2>/dev/null || true
   docker logs --tail 300 "$container" > "$work_dir/docker/logs-tail.txt" 2>&1 || true

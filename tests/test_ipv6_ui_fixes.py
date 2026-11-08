@@ -31,7 +31,8 @@ NEW_KEYS = {
     "server_ipv6_apply_or_revert_hint",
 }
 
-BASE_KEY_COUNT = 1096
+# +27 srv_warp_* keys (issue #277) on top of the previous 1096.
+BASE_KEY_COUNT = 1123
 
 
 def read_text(path):

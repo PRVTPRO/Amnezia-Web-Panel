@@ -1117,6 +1117,74 @@
         </div>
     </div>
 
+    <!-- Cloudflare WARP Card (host-level app, per-instance egress) -->
+    <div class="card card-hover protocol-card protocol-warp" id="proto-warp">
+        <div class="protocol-card-head">
+            <div class="protocol-icon">☁️</div>
+            <div class="protocol-name">Cloudflare WARP</div>
+        </div>
+        <div class="protocol-desc">
+            {{ _('srv_warp_card_desc') }}
+        </div>
+        <div class="protocol-status" id="warp-status">
+            <span class="badge badge-warn"><span class="badge-dot"></span> {{ _('srv_warp_status_not_installed') }}</span>
+        </div>
+        <div id="warp-info" class="hidden">
+            <div class="protocol-info" id="warp-info-grid"></div>
+        </div>
+        <div class="flex gap-sm" id="warp-actions">
+            <button class="btn btn-primary btn-sm" onclick="installWarp()" id="warp-install-btn"
+                style="flex:1">
+                {{ _('srv_warp_install') }}
+            </button>
+        </div>
+        <div id="warp-installed-actions" style="display:none;">
+            <div class="flex gap-sm">
+                <button class="btn btn-secondary btn-sm" onclick="updateWarp()" id="warp-update-btn"
+                    style="flex:1">
+                    {{ _('srv_warp_update') }}
+                </button>
+                <button class="btn btn-danger btn-sm" onclick="uninstallWarp()" id="warp-uninstall-btn"
+                    style="flex:1">
+                    {{ _('srv_warp_delete') }}
+                </button>
+            </div>
+            <div class="form-hint" style="margin:10px 0 6px;">{{ _('srv_warp_link_hint') }}</div>
+            <div class="flex gap-sm">
+                <select id="warp-protocol-select" class="input" style="flex:1; min-width:140px;"
+                    onchange="syncWarpLinkButtons()">
+                    {%- for proto, info in (server.get('protocols') or {}).items()
+                        if proto.split('__')[0] in ['awg', 'awg2', 'awg3'] and info.get('installed') %}
+                    <option value="{{ proto }}">{{ info.get('display_name') or proto }}</option>
+                    {%- endfor %}
+                </select>
+                <button class="btn btn-primary btn-sm" onclick="linkWarp()" id="warp-link-btn">
+                    {{ _('srv_warp_link') }}
+                </button>
+                <button class="btn btn-secondary btn-sm" onclick="unlinkWarp()" id="warp-unlink-btn">
+                    {{ _('srv_warp_unlink') }}
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== Cloudflare WARP terms modal (srv-warp, not panel-warp) ===== -->
+    <div class="modal-backdrop" id="warpTosModal">
+        <div class="modal" style="max-width:560px;">
+            <div class="modal-header">
+                <h2 class="modal-title">{{ _('srv_warp_tos_title') }}</h2>
+                <button class="modal-close" onclick="resolveWarpTos(false)">×</button>
+            </div>
+            <div class="form-hint" style="white-space:pre-line;">{{ _('srv_warp_tos_text') }}</div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="resolveWarpTos(false)">{{ _('cancel') }}</button>
+                <button class="btn btn-primary" onclick="resolveWarpTos(true)" id="warpTosAcceptBtn">
+                    {{ _('srv_warp_tos_accept') }}
+                </button>
+            </div>
+        </div>
+    </div>
+
     <!-- ===== RKN Block scans modal ===== -->
     <div class="modal-backdrop" id="rknScansModal">
         <div class="modal" style="max-width:720px;">
@@ -2231,6 +2299,7 @@
         { proto: 'socks5', category: 'services', icon: '🧦', title: 'SOCKS5 Proxy', descKey: 'socks5_desc' },
         { proto: 'exit', category: 'services', icon: '🚪', title: 'Exit Node', descKey: 'exit_desc', badge: 'NEW' },
         { proto: 'smartroute', category: 'services', icon: '🧭', title: 'Smart Route', descKey: 'smartroute_desc', badge: 'NEW' },
+        { proto: 'warp', category: 'services', icon: '☁️', title: 'Cloudflare WARP', descKey: 'srv_warp_card_desc' },
         { proto: 'rknblock', category: 'services', icon: '🌈', title: 'RKN Block (C24Be)', descKey: 'rknblock_desc' },
         { proto: 'nginx', category: 'web_servers', icon: '🌐', title: 'NGINX', descKey: 'nginx_desc' },
     ];
@@ -2256,6 +2325,12 @@
     let rknBlockStatus = {{ server.get('rknblock') | tojson }};
     if (rknBlockStatus) rknBlockStatus = {...rknBlockStatus, available: false, agent_state: 'unknown', running: false, healthy: false};
     let rknBlockLoadId = 0, rknBlockBusy = false;
+    // Server-level WARP app state (GET /api/servers/{id}/warp/status).
+    // data.json keeps only the installed projection; everything else is a
+    // job-poll over the status endpoint.
+    let warpStatus = {installed: {{ (server.get('warp') or {}).get('installed', False) | tojson }}};
+    let warpLoadId = 0, warpBusy = false, warpStatusAt = 0, warpTosPending = null;
+    const WARP_STATUS_TTL = 5000;
 
     const AWG_PROTOCOLS = ['awg', 'awg2', 'awg3', 'awg_legacy'];
     // Protocols that hand out a client config or link, and therefore have an
@@ -2514,22 +2589,28 @@
                         ${apps.map(app => {
                             const isSmart = app.proto === 'smartroute';
                             const isRkn = app.proto === 'rknblock';
+                            const isWarp = app.proto === 'warp';
                             const rknUnknown = isRkn && (!rknBlockStatus || rknBlockStatus.available === false);
-                            const isHostApp = isSmart || isRkn;
+                            const isHostApp = isSmart || isRkn || isWarp;
                             const installed = isSmart ? !!(smartRouteStatus && smartRouteStatus.installed)
                                 : (isRkn ? !!(rknBlockStatus && rknBlockStatus.installed)
-                                    : baseInstalled(app.proto));
+                                    : (isWarp ? warpIsInstalled()
+                                        : baseInstalled(app.proto)));
                             const canInstallAnother = installed && isMultiInstanceBase(app.proto);
                             const action = isSmart
                                 ? `onclick="openSmartRouteModal()"`
-                                : (isRkn
-                                    ? (installed || rknUnknown ? 'disabled' : `onclick="closeModal('marketplaceModal'); installRknBlock()"`)
-                                    : (installed && !canInstallAnother ? 'disabled' : `onclick="installFromMarketplace('${app.proto}', ${canInstallAnother ? 'true' : 'false'})"`));
-                            const statusBadge = isHostApp
-                                ? (installed
-                                    ? `<span class="badge badge-success"><span class="badge-dot"></span> ${_('installed')}</span>`
-                                    : `<span class="badge badge-warn"><span class="badge-dot"></span> ${_(rknUnknown ? 'rknblock_state_unreachable' : 'not_installed')}</span>`)
-                                : marketplaceAppStatus(app.proto);
+                                : (isWarp
+                                    ? (installed ? 'disabled' : `onclick="closeModal('marketplaceModal'); installWarp()"`)
+                                    : (isRkn
+                                        ? (installed || rknUnknown ? 'disabled' : `onclick="closeModal('marketplaceModal'); installRknBlock()"`)
+                                        : (installed && !canInstallAnother ? 'disabled' : `onclick="installFromMarketplace('${app.proto}', ${canInstallAnother ? 'true' : 'false'})"`)));
+                            const statusBadge = isWarp
+                                ? warpAggregateBadge()
+                                : (isHostApp
+                                    ? (installed
+                                        ? `<span class="badge badge-success"><span class="badge-dot"></span> ${_('installed')}</span>`
+                                        : `<span class="badge badge-warn"><span class="badge-dot"></span> ${_(rknUnknown ? 'rknblock_state_unreachable' : 'not_installed')}</span>`)
+                                    : marketplaceAppStatus(app.proto));
                             return `
                                 <div class="marketplace-app-card">
                                     <div class="marketplace-app-top">
@@ -2604,6 +2685,8 @@
             // RKN Block is host-level (no container status): its card is
             // driven by rknBlockStatus further below.
             if (app.proto === 'rknblock') return;
+            // Cloudflare WARP is host-level too and stays visible.
+            if (app.proto === 'warp') return;
             const installed = isAppInstalled((currentProtocolStatus || {})[app.proto]);
             if (card) {
                 card.classList.toggle('installed-app-hidden', !installed);
@@ -2632,6 +2715,17 @@
         }
         if (rknInstalled) installedCount++;
         renderRknBlockCard();
+
+        // Cloudflare WARP card: host-level app. It stays on screen even when
+        // nothing is installed so the host-level install button is reachable;
+        // only the action set changes once WARP is present.
+        const warpCard = document.getElementById('proto-warp');
+        if (warpCard) {
+            warpCard.classList.remove('installed-app-hidden');
+            warpCard.classList.add('installed-app-visible');
+        }
+        installedCount++;
+        if (typeof renderWarpCard === 'function') renderWarpCard();
 
         orderedProtocolEntries(currentProtocolStatus || {}).forEach(([proto, info]) => {
             if (protoInstance(proto) > 1) {
@@ -3216,6 +3310,7 @@
     // ========== Server Check ==========
     async function checkServer() {
         loadRknBlock();
+        if (typeof loadWarpStatus === 'function') loadWarpStatus(true);
         setInstalledAppsLoading(true);
         const btn = document.getElementById('checkBtn');
         const text = document.getElementById('checkBtnText');
@@ -6572,6 +6667,327 @@
             showToast(_('error') + ': ' + (err.message || err), 'error');
         } finally {
             btn.disabled = false;
+        }
+    }
+
+    // ========== Cloudflare WARP (server app + per-instance egress) ==========
+    // Distinct from the panel-level `warp_*` keys: these are the per-server
+    // WARP app (`srv_warp_*`) driven by /api/servers/{id}/warp/status.
+    const WARP_AGGREGATE_KEYS = {
+        not_installed: 'srv_warp_status_not_installed',
+        installed: 'srv_warp_status_installed',
+        degraded: 'srv_warp_status_degraded',
+        unreachable: 'srv_warp_status_unreachable',
+    };
+    const WARP_STATE_KEYS = {
+        not_installed: 'srv_warp_status_not_installed',
+        available_not_linked: 'srv_warp_status_installed',
+        connected: 'srv_warp_state_connected',
+        connecting: 'srv_warp_state_connecting',
+        disconnected: 'srv_warp_state_disconnected',
+        error: 'srv_warp_state_error',
+        stopped: 'srv_warp_state_stopped',
+        unreachable: 'srv_warp_state_unreachable',
+        warp_rate_limited: 'srv_warp_state_rate_limited',
+    };
+    const WARP_ERROR_KEYS = {
+        srv_warp_xor_conflict: 'srv_warp_err_xor',
+        srv_warp_tos_required: 'srv_warp_err_tos',
+        srv_warp_job_busy: 'srv_warp_err_job_busy',
+    };
+
+    function warpAggregate() {
+        const d = warpStatus || {};
+        if (d.aggregate) return String(d.aggregate);
+        return d.installed ? 'installed' : 'not_installed';
+    }
+
+    function warpIsInstalled() {
+        const d = warpStatus || {};
+        if (d.installed) return true;
+        if (Array.isArray(d.instances) && d.instances.some(item => item && item.installed)) return true;
+        const agg = warpAggregate();
+        return agg === 'installed' || agg === 'degraded';
+    }
+
+    function warpBadgeClass(agg) {
+        if (agg === 'installed') return 'badge-success';
+        if (agg === 'unreachable') return 'badge-danger';
+        return 'badge-warn';
+    }
+
+    function warpAggregateBadge() {
+        const agg = warpAggregate();
+        const key = WARP_AGGREGATE_KEYS[agg] || 'srv_warp_status_not_installed';
+        return `<span class="badge ${warpBadgeClass(agg)}"><span class="badge-dot"></span> ${escapeHtml(_(key))}</span>`;
+    }
+
+    function warpJobs() {
+        return (warpStatus && Array.isArray(warpStatus.jobs)) ? warpStatus.jobs : [];
+    }
+
+    function warpSelectedProtocol() {
+        const select = document.getElementById('warp-protocol-select');
+        return (select && select.value) ? select.value : '';
+    }
+
+    function warpInstanceFor(proto) {
+        const instances = (warpStatus && Array.isArray(warpStatus.instances)) ? warpStatus.instances : [];
+        return instances.find(item => item && item.protocol === proto) || null;
+    }
+
+    function syncWarpLinkButtons() {
+        const linkBtn = document.getElementById('warp-link-btn');
+        const unlinkBtn = document.getElementById('warp-unlink-btn');
+        if (!linkBtn && !unlinkBtn) return;
+        const proto = warpSelectedProtocol();
+        const instance = warpInstanceFor(proto);
+        const linked = !!(instance && instance.link_active);
+        if (linkBtn) linkBtn.disabled = warpBusy || !warpIsInstalled() || !proto || linked;
+        if (unlinkBtn) unlinkBtn.disabled = warpBusy || !proto || !linked;
+    }
+
+    function renderWarpCard() {
+        const statusEl = document.getElementById('warp-status');
+        if (!statusEl) return;
+        const d = warpStatus || {};
+        const installed = warpIsInstalled();
+        const jobs = warpJobs();
+        const busy = warpBusy || jobs.length > 0;
+        const actions = document.getElementById('warp-actions');
+        const installedActions = document.getElementById('warp-installed-actions');
+        const infoEl = document.getElementById('warp-info');
+        const grid = document.getElementById('warp-info-grid');
+        const select = document.getElementById('warp-protocol-select');
+
+        if (actions) actions.style.display = installed || busy ? 'none' : '';
+        if (installedActions) installedActions.style.display = installed ? '' : 'none';
+
+        let badge = warpAggregateBadge();
+        if (jobs.length) {
+            const kind = jobs[0].kind || jobs[0].id || '';
+            badge += ` <span class="badge badge-info"><span class="badge-dot"></span> ${escapeHtml(_('srv_warp_job_running').replace('{kind}', kind))}</span>`;
+        }
+        statusEl.innerHTML = badge;
+
+        const instances = Array.isArray(d.instances) ? d.instances.filter(item => item && item.protocol) : [];
+        if (select && instances.length) {
+            const previous = select.value;
+            select.innerHTML = instances.map(item =>
+                `<option value="${escapeHtml(item.protocol)}">${escapeHtml(item.protocol)}</option>`).join('');
+            if (instances.some(item => item.protocol === previous)) select.value = previous;
+        }
+
+        if (infoEl && grid) {
+            if (!installed) {
+                infoEl.classList.add('hidden');
+            } else {
+                const rows = instances.map(item => {
+                    const stateKey = WARP_STATE_KEYS[item.state] || 'srv_warp_state_error';
+                    const bits = [`<b>${escapeHtml(item.protocol)}</b>: ${escapeHtml(_(stateKey))}`];
+                    if (item.link_active) bits.push(`☁️ ${escapeHtml(_('srv_warp_link'))}`);
+                    if (item.quarantine) bits.push('⚠️');
+                    if (item.client_mtu) bits.push(`MTU ${escapeHtml(String(item.client_mtu))}`);
+                    return `<div class="text-sm">${bits.join(' • ')}</div>`;
+                }).join('');
+                const budget = d.budget
+                    ? `<div class="text-sm">${escapeHtml(_('srv_warp_budget').replace('{mtu}', String(d.budget)))}</div>`
+                    : '';
+                grid.innerHTML = rows + budget;
+                if (rows || budget) infoEl.classList.remove('hidden');
+                else infoEl.classList.add('hidden');
+            }
+        }
+        syncWarpLinkButtons();
+        const card = document.getElementById('proto-warp');
+        if (location.hash === '#proto-warp' && card) {
+            setTimeout(() => card.scrollIntoView({ behavior: 'smooth', block: 'center' }), 300);
+        }
+    }
+
+    async function loadWarpStatus(force = false) {
+        if (warpBusy && !force) {
+            renderWarpCard();
+            return warpStatus;
+        }
+        if (!force && warpStatusAt && (Date.now() - warpStatusAt) < WARP_STATUS_TTL) {
+            renderWarpCard();
+            return warpStatus;
+        }
+        const loadId = ++warpLoadId;
+        try {
+            const status = await apiCall(`/api/servers/${SERVER_ID}/warp/status?server_uid=${encodeURIComponent(document.body.dataset.serverUid || '')}`, 'GET');
+            if (loadId !== warpLoadId) return warpStatus;
+            warpStatus = status || {};
+            warpStatusAt = Date.now();
+        } catch (err) {
+            if (loadId !== warpLoadId) return warpStatus;
+            warpStatus = {...(warpStatus || {}), aggregate: 'unreachable'};
+            console.warn('WARP status load failed:', err);
+        }
+        // Render failures must not escape: this also runs during page init.
+        try {
+            renderWarpCard();
+        } catch (err) {
+            console.error('WARP card render failed:', err);
+        }
+        applyInstalledAppsVisibility();
+        renderMarketplace();
+        return warpStatus;
+    }
+
+    function warpPost(path, body) {
+        const payload = Object.assign(
+            { server_uid: document.body.dataset.serverUid || '' }, body || {});
+        return apiCall(`/api/servers/${SERVER_ID}/warp/${path}`, 'POST', payload);
+    }
+
+    function warpErrorCode(err) {
+        const payload = (err && err.payload) || {};
+        return String(payload.code || payload.error || (err && err.message) || '');
+    }
+
+    function warpErrorMessage(err) {
+        return _(WARP_ERROR_KEYS[warpErrorCode(err)] || 'srv_warp_err_generic');
+    }
+
+    function showWarpTosModal() {
+        return new Promise(resolve => {
+            warpTosPending = resolve;
+            openModal('warpTosModal');
+        });
+    }
+
+    function resolveWarpTos(accepted) {
+        closeModal('warpTosModal');
+        const resolve = warpTosPending;
+        warpTosPending = null;
+        if (resolve) resolve(!!accepted);
+    }
+
+    // A missing ToS acknowledgement is a 409 before any job starts; show the
+    // terms once and repeat the same POST with accept_tos=true.
+    async function warpPostWithTos(path, body) {
+        try {
+            return await warpPost(path, body);
+        } catch (err) {
+            if (warpErrorCode(err) !== 'srv_warp_tos_required') throw err;
+            const accepted = await showWarpTosModal();
+            if (!accepted) return null;
+            return warpPost(path, {...(body || {}), accept_tos: true});
+        }
+    }
+
+    async function pollWarpJob(jobId, timeoutMs = 300000) {
+        if (!jobId) return warpStatus;
+        const started = Date.now();
+        while (Date.now() - started < timeoutMs) {
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            const status = await loadWarpStatus(true);
+            const jobs = (status && Array.isArray(status.jobs)) ? status.jobs : [];
+            if (!jobs.some(job => job && job.id === jobId)) return status;
+        }
+        return warpStatus;
+    }
+
+    async function installWarp(protocol) {
+        if (warpBusy) return;
+        warpBusy = true;
+        const btn = document.getElementById('warp-install-btn');
+        if (btn) btn.disabled = true;
+        renderWarpCard();
+        try {
+            // Host-level install: no protocol means every registered AWG
+            // instance; Update passes one explicitly.
+            const body = protocol ? {protocol} : {};
+            const res = await warpPostWithTos('install', body);
+            if (!res) return;
+            await pollWarpJob(res.job_id);
+            await loadWarpStatus(true);
+            showToast(_('installed'), 'success');
+        } catch (err) {
+            showToast(_('error') + ': ' + warpErrorMessage(err), 'error');
+        } finally {
+            warpBusy = false;
+            if (btn) btn.disabled = false;
+            renderWarpCard();
+        }
+    }
+
+    async function uninstallWarp(protocol, options = {}) {
+        if (warpBusy) return false;
+        // Delete on the host card removes every instance; Update passes the
+        // selected protocol explicitly.
+        const proto = protocol || '';
+        if (!options.skipConfirm && !confirm(_('srv_warp_delete') + '?')) return false;
+        warpBusy = true;
+        const btn = document.getElementById('warp-uninstall-btn');
+        if (btn) btn.disabled = true;
+        renderWarpCard();
+        try {
+            const body = proto ? {protocol: proto} : {};
+            const res = await warpPost('uninstall', body);
+            await pollWarpJob(res.job_id);
+            await loadWarpStatus(true);
+            if (!options.silent) showToast(_('done'), 'success');
+            return true;
+        } catch (err) {
+            showToast(_('error') + ': ' + warpErrorMessage(err), 'error');
+            return false;
+        } finally {
+            warpBusy = false;
+            if (btn) btn.disabled = false;
+            renderWarpCard();
+        }
+    }
+
+    // Reinstall: unlink is mandatory before a new registration, so Update is
+    // a delete-then-install cycle with the ToS acknowledgement preserved.
+    async function updateWarp() {
+        if (warpBusy) return;
+        if (!confirm(_('srv_warp_update') + '?')) return;
+        const protocol = warpSelectedProtocol();
+        const removed = await uninstallWarp(protocol, {skipConfirm: true, silent: true});
+        if (!removed) return;
+        await installWarp(protocol);
+    }
+
+    async function linkWarp(protocol) {
+        if (warpBusy) return;
+        const proto = protocol || warpSelectedProtocol();
+        if (!proto) return;
+        warpBusy = true;
+        renderWarpCard();
+        try {
+            const res = await warpPostWithTos('link', {protocol: proto});
+            if (!res) return;
+            await pollWarpJob(res.job_id);
+            await loadWarpStatus(true);
+            showToast(_('done'), 'success');
+        } catch (err) {
+            showToast(_('error') + ': ' + warpErrorMessage(err), 'error');
+        } finally {
+            warpBusy = false;
+            renderWarpCard();
+        }
+    }
+
+    async function unlinkWarp(protocol) {
+        if (warpBusy) return;
+        const proto = protocol || warpSelectedProtocol();
+        if (!proto) return;
+        warpBusy = true;
+        renderWarpCard();
+        try {
+            const res = await warpPost('unlink', {protocol: proto});
+            await pollWarpJob(res.job_id);
+            await loadWarpStatus(true);
+            showToast(_('done'), 'success');
+        } catch (err) {
+            showToast(_('error') + ': ' + warpErrorMessage(err), 'error');
+        } finally {
+            warpBusy = false;
+            renderWarpCard();
         }
     }
 

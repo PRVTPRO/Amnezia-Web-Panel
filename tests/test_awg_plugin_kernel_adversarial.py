@@ -18,7 +18,8 @@ from tests.awg_plugin_fixtures import FakeSSH, OLD, NEW, KVER
 
 ORIG = '/lib/modules/%s/updates/dkms/amneziawg.ko' % KVER
 BACKUP = '/var/lib/amnezia-plugin/amneziawg-%s.ko' % OLD
-CLEANUP = 'rm -rf /tmp/awg-plugin-update /tmp/awg-plugin-backup-*'
+CLEANUP = ('rm -rf /tmp/awg-plugin-update /tmp/awg-plugin-backup-* '
+           '/tmp/awp-updater-warp-exclude.tgz /tmp/awp-restore.tgz')
 
 
 def _index(commands, needle, start=0):

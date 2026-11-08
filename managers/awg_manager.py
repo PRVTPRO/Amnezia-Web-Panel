@@ -39,6 +39,7 @@ from base64 import b64encode, b64decode
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 from managers.clients_table import save_clients_table
+import warp_service as warp_logic
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +188,16 @@ MIN_CLIENT_MTU = 1280
 EXIT_HANDSHAKE_UP_SECONDS = 300  # REJECT_AFTER_TIME (180) + keepalive slack; 180 itself flaps on idle links
 DNS_NET = '172.29.172.0/24'      # amnezia-dns-net: AmneziaDNS / AdGuard live here, reached via eth1
 ENTRY_PRIVATE_KEY_PLACEHOLDER = '__ENTRY_PRIVATE_KEY__'
+
+# Policy-routing helpers shared by the exit-link and the WARP blocks. They are
+# idempotent on purpose: start.sh re-runs after every container restart and the
+# panel applies the same live block on link/switch.
+_IP_RULE_HELPERS = (
+    'x_rule()    { ip "$1" rule show 2>/dev/null | grep -q "^$2:" || ip "$1" rule add pref "$2" "${@:3}"; }\n'
+    'x_unrule()  { while ip "$1" rule del pref "$2" 2>/dev/null; do :; done; }\n'
+    'x_ipt_add() { iptables -t "$1" -C "${@:2}" 2>/dev/null || iptables -t "$1" -A "${@:2}"; }\n'
+    'x_ipt_del() { while iptables -t "$1" -D "${@:2}" 2>/dev/null; do :; done; }\n'
+)
 
 # Egress check: the container asks a public "what is my IP" service twice -
 # once bound to the tunnel gateway (that source address is what policy routing
@@ -2163,7 +2174,7 @@ done
 
     def install_protocol(self, protocol_type, port=None, awg_params=None,
                          mtu=None, dns=None, special_junk=None, dns6=None,
-                         progress=None, ipv6_preference=None):
+                         progress=None, ipv6_preference=None, warp_ctx=None):
         """
         Full installation of AWG or AWG-Legacy protocol.
         Steps: install docker -> prepare host -> build container ->
@@ -2408,7 +2419,7 @@ done
 
         # Step 7: Upload and run start script
         results.append("Starting AWG service...")
-        self._upload_start_script(protocol_type)
+        self._upload_start_script(protocol_type, warp_ctx=warp_ctx)
         self._verify_interface_up(protocol_type)
         results.append("AWG service started")
         flush('config', 90)
@@ -2772,38 +2783,67 @@ fi
 {extra}tail -f /dev/null
 """
 
-    def _render_start_script(self, protocol_type, config_path=None):
+    def _render_start_script(self, protocol_type=None, config_path=None,
+                             warp_ctx=None):
         """start.sh for one protocol instance. `config_path` overrides the
         default location - save_server_config passes the resolved path of an
         existing container. The exit-node block is always emitted: it is
         inert without exit0.conf and makes the container restart-safe for a
-        link written later."""
+        link written later. The WARP block is emitted only for an active
+        warp_ctx (boot fail-closed: the kill-switch exists before awg0)."""
         config_path = config_path or self._config_path(protocol_type)
         quick_bin = self._quick_binary(protocol_type)
         subnet_default = f"{AWG_DEFAULTS['subnet_ip']}/{AWG_DEFAULTS['subnet_cidr']}"
         functions = self._exit_shell_functions(config_path, quick_bin, subnet_default)
+        warp_functions = warp_pre = warp_extra = ''
+        if warp_ctx and warp_ctx.get('active'):
+            warp_functions = self._warp_shell_functions(
+                warp_ctx,
+                quick_bin,
+                self._wg_binary(protocol_type),
+                '$X_SUBNET',
+                '$X_IFACE',
+                '$X_SUBNET6',
+                pref_c2c=warp_logic.WARP_PREF_ENTRY_C2C,
+                dns_rules=self._warp_dns_rule_lines(warp_ctx),
+                transit_cidr=warp_ctx.get('transit_cidr') or '',
+                marker=warp_logic.marker_path(
+                    warp_ctx.get('protocol') or self._base_protocol(protocol_type)),
+                userspace='amneziawg-go' in self._docker_image(protocol_type),
+            )
+            warp_pre = 'x_warp_killswitch_on\n'
+            warp_extra = (
+                '# ---- WARP egress: bring it up now that the client tunnel exists ----\n'
+                'x_warp_up || echo "! warp link not applied, clients stay on the kill-switch"\n'
+            )
         return self._start_script_body(
             config_path,
             quick_bin,
             self._userspace_guard(protocol_type),
             subnet_default,
             self._bwlimits_path(),
-            pre_blocks=(functions + '[ -f "$EXIT_CONF" ] && x_killswitch_on\n',),
+            pre_blocks=(functions + warp_functions
+                        + '[ -f "$EXIT_CONF" ] && x_killswitch_on\n'
+                        + warp_pre,),
             extra_blocks=('# ---- Exit-node link: bring it up now that the client tunnel exists ----\n'
-                          'if [ -f "$EXIT_CONF" ]; then x_link_up || echo "! exit link not applied, clients stay on the kill-switch"; fi\n',),
+                          'if [ -f "$EXIT_CONF" ]; then x_link_up || echo "! exit link not applied, clients stay on the kill-switch"; fi\n'
+                          + warp_extra,),
         )
 
-    def _write_start_script(self, protocol_type, config_path=None):
+    def _write_start_script(self, protocol_type=None, config_path=None,
+                            warp_ctx=None):
         """Put a freshly rendered start.sh into the container (no restart)."""
         container_name = self._container_name(protocol_type)
-        self.ssh.upload_file(self._render_start_script(protocol_type, config_path), "/tmp/_amnz_start.sh")
+        self.ssh.upload_file(
+            self._render_start_script(protocol_type, config_path, warp_ctx=warp_ctx),
+            "/tmp/_amnz_start.sh")
         self.ssh.run_sudo_command(f"docker cp /tmp/_amnz_start.sh {container_name}:/opt/amnezia/start.sh")
         self.ssh.run_sudo_command(f"docker exec {container_name} chmod +x /opt/amnezia/start.sh")
         self.ssh.run_command("rm -f /tmp/_amnz_start.sh")
 
-    def _upload_start_script(self, protocol_type):
+    def _upload_start_script(self, protocol_type=None, warp_ctx=None):
         """Write the start script and restart the container to run it."""
-        self._write_start_script(protocol_type)
+        self._write_start_script(protocol_type, warp_ctx=warp_ctx)
         self.ssh.run_sudo_command(f"docker restart {self._container_name(protocol_type)}")
         time.sleep(5)
 
@@ -2822,11 +2862,7 @@ X_SUBNET=$(grep '^Address' $X_CONF | head -1 | cut -d'=' -f2 | cut -d',' -f1 | t
 [ -n "$X_SUBNET" ] || X_SUBNET=__SUBNET_DEFAULT__
 X_SUBNET6=$(grep '^Address' $X_CONF | head -1 | tr ',' '\\n' | grep ':' | sed 's/^[^=]*=//' | tr -d ' ' | head -1)
 
-x_rule()    { ip "$1" rule show 2>/dev/null | grep -q "^$2:" || ip "$1" rule add pref "$2" "${@:3}"; }
-x_unrule()  { while ip "$1" rule del pref "$2" 2>/dev/null; do :; done; }
-x_ipt_add() { iptables -t "$1" -C "${@:2}" 2>/dev/null || iptables -t "$1" -A "${@:2}"; }
-x_ipt_del() { while iptables -t "$1" -D "${@:2}" 2>/dev/null; do :; done; }
-
+__HELPERS__
 x_killswitch_on() {
   # Everything from the client subnet is answered by the exit table. Until
   # exit0 is up that table holds only a blackhole, so nothing falls through
@@ -2899,6 +2935,7 @@ x_exit_sync() {
         side effects by themselves): kill-switch, link up/down and the sync
         entry point used both by start.sh and by the live apply."""
         return (AWGManager._EXIT_SHELL_TEMPLATE
+                .replace('__HELPERS__', _IP_RULE_HELPERS)
                 .replace('__EXIT_CONF__', EXIT_CONF)
                 .replace('__EXIT_IF__', EXIT_IFACE)
                 .replace('__EXIT_TABLE__', str(EXIT_TABLE))
@@ -2906,6 +2943,131 @@ x_exit_sync() {
                 .replace('__CONF__', config_path)
                 .replace('__QUICK__', quick_bin)
                 .replace('__SUBNET_DEFAULT__', subnet_default))
+
+    _WARP_SHELL_TEMPLATE = """# ---- WARP egress (panel-managed; driven by __WARP_CONF__) ----
+WARP_CONF=__WARP_CONF__
+WARP_IF=warp0
+WARP_TABLE=__WARP_TABLE__
+WARP_MARKER=__WARP_MARKER__
+WARP_USERSPACE=__WARP_USERSPACE__
+WARP_SUBNET=__WARP_SUBNET__
+WARP_IFACE=__WARP_IFACE__
+WARP_QUICK=__WARP_QUICK__
+WARP_WG=__WARP_WG__
+WARP_TRANSIT_CIDR=__WARP_TRANSIT_CIDR__
+[ -n "$WARP_TRANSIT_CIDR" ] || WARP_TRANSIT_CIDR=$WARP_SUBNET
+
+__HELPERS__
+x_warp_killswitch_on() {
+  # Everything from the client/transit subnet is answered by the WARP table.
+  # Until warp0 is up that table holds only a blackhole, so nothing falls
+  # through to eth0 - this runs before the client tunnel comes up on purpose.
+  ip -4 route replace blackhole default metric 1000 table $WARP_TABLE
+  x_rule -4 __WARP_PREF_C2C__ from $WARP_SUBNET to $WARP_TRANSIT_CIDR lookup main
+__WARP_DNS_RULES__  x_rule -4 __WARP_PREF_CATCH_ALL__ from $WARP_SUBNET lookup $WARP_TABLE
+  if [ -n "__WARP_SUBNET6__" ]; then
+    # No IPv6 path through WARP yet: refuse fast instead of leaking via eth0
+    ip -6 route replace unreachable default table $WARP_TABLE
+    x_rule -6 __WARP_PREF_C2C__ from __WARP_SUBNET6__ to __WARP_SUBNET6__ lookup main
+    x_rule -6 __WARP_PREF_CATCH_ALL__ from __WARP_SUBNET6__ lookup $WARP_TABLE
+  fi
+}
+x_warp_egress() {
+  for u in __WARP_URLS__; do
+    r=$(curl -fsS -4 --max-time __WARP_TIMEOUT__ --interface ${WARP_SUBNET%%/*} "$u" 2>/dev/null | tr -d '[:space:]')
+    case "$r" in ""|*[!0-9.]*) ;; *) echo "$r"; return 0;; esac
+  done
+  return 1
+}
+x_warp_up() {
+  [ -f "$WARP_CONF" ] || { echo "! $WARP_CONF missing; clients stay on the kill-switch"; return 3; }
+  x_warp_killswitch_on
+  ip link del $WARP_IF 2>/dev/null
+  if [ "$WARP_USERSPACE" = "1" ]; then
+    amneziawg-go $WARP_IF || return 3
+  else
+    ip link add dev $WARP_IF type amneziawg || return 3
+  fi
+  ip link set dev $WARP_IF mtu __WARP_IFACE_MTU__ up
+  WARP_ADDR=$(grep '^Address' "$WARP_CONF" | head -1 | cut -d'=' -f2 | cut -d',' -f1 | tr -d ' ')
+  [ -n "$WARP_ADDR" ] && ip -4 addr add "$WARP_ADDR" dev $WARP_IF 2>/dev/null
+  $WARP_QUICK strip "$WARP_CONF" | $WARP_WG setconf $WARP_IF /dev/stdin || return 3
+  sysctl -w net.ipv4.conf.$WARP_IFACE.rp_filter=2 >/dev/null 2>&1 || true
+  sysctl -w net.ipv4.conf.$WARP_IF.rp_filter=2 >/dev/null 2>&1 || true
+  ip -4 route replace default dev $WARP_IF metric 100 table $WARP_TABLE
+  x_ipt_add filter FORWARD -i $WARP_IFACE -o $WARP_IF -s $WARP_SUBNET -j ACCEPT
+  x_ipt_add nat POSTROUTING -s $WARP_SUBNET -o $WARP_IF -j MASQUERADE
+  x_ipt_add mangle FORWARD -o $WARP_IF -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+  x_ipt_add mangle FORWARD -i $WARP_IF -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+  # NAT is decided once per flow: flows opened before the link were SNATed to
+  # eth0 and would leave warp0 with the wrong source. Drop them so they reopen.
+  if command -v conntrack >/dev/null 2>&1; then conntrack -D -s $WARP_SUBNET >/dev/null 2>&1
+  else echo "! conntrack-tools missing: client flows opened before the link keep leaving via eth0 until they end"; fi
+  WARP_EGRESS=$(x_warp_egress || true)
+  if [ -n "$WARP_EGRESS" ]; then echo "warp link up: egress $WARP_EGRESS"
+  else echo "! WARP egress probe failed"; fi
+  # Never report success while clients could still leave via eth0
+  if ! ip -4 rule show | grep -q "^$WARP_TABLE:" \\
+     || ! ip -4 route show table $WARP_TABLE | grep -q "^default dev $WARP_IF" \\
+     || ! iptables -t nat -C POSTROUTING -s $WARP_SUBNET -o $WARP_IF -j MASQUERADE 2>/dev/null \\
+     || ! iptables -C FORWARD -i $WARP_IFACE -o $WARP_IF -s $WARP_SUBNET -j ACCEPT 2>/dev/null; then
+    echo "! FATAL: WARP policy routing is not in place"
+    return 3
+  fi
+  touch $WARP_MARKER
+  echo "warp link up: $WARP_IF -> table $WARP_TABLE"
+}
+"""
+
+    @staticmethod
+    def _warp_shell_functions(warp_ctx, quick_bin, wg_bin,
+                              subnet_var, iface_var, subnet6_var,
+                              pref_c2c=warp_logic.WARP_PREF_ENTRY_C2C,
+                              dns_rules='', transit_cidr='', marker='',
+                              include_helpers=False, userspace=False):
+        """Shell block of the WARP egress. Same style as the exit-link block:
+        no side effects by themselves, the render site calls the kill-switch
+        before the client tunnel and x_warp_up after it."""
+        prefix = ((warp_ctx or {}).get('prefix')
+                  or '/opt/amnezia/awg/warp')
+        helpers = _IP_RULE_HELPERS if include_helpers else ''
+        return (AWGManager._WARP_SHELL_TEMPLATE
+                .replace('__HELPERS__', helpers)
+                .replace('__WARP_CONF__', f'{prefix}/warp0.conf')
+                .replace('__WARP_TABLE__', str(warp_logic.WARP_TABLE))
+                .replace('__WARP_MARKER__', marker)
+                .replace('__WARP_USERSPACE__', '1' if userspace else '0')
+                .replace('__WARP_SUBNET__', subnet_var)
+                .replace('__WARP_IFACE__', iface_var)
+                .replace('__WARP_QUICK__', quick_bin)
+                .replace('__WARP_WG__', wg_bin)
+                .replace('__WARP_TRANSIT_CIDR__', transit_cidr)
+                .replace('__WARP_PREF_C2C__', str(pref_c2c))
+                .replace('__WARP_PREF_CATCH_ALL__', str(warp_logic.WARP_TABLE))
+                .replace('__WARP_SUBNET6__', subnet6_var)
+                .replace('__WARP_DNS_RULES__', dns_rules)
+                .replace('__WARP_URLS__', ' '.join(EGRESS_CHECK_URLS))
+                .replace('__WARP_TIMEOUT__', str(EGRESS_CHECK_TIMEOUT))
+                .replace('__WARP_IFACE_MTU__', str(warp_logic.WARP_IFACE_MTU)))
+
+    @staticmethod
+    def _warp_dns_rule_lines(warp_ctx):
+        """Direct-DNS exceptions of the entry warp block (prefs 182/183..189).
+        With DNS through WARP there is nothing to except."""
+        if not warp_ctx or warp_ctx.get('dns_via_warp'):
+            return ''
+        ips = list(warp_ctx.get('dns_ips') or [])
+        try:
+            rules = warp_logic.dns_rule_targets(
+                ', '.join(ips), dns_via_warp=False, dns_net_cidr=DNS_NET)
+        except warp_logic.SrvWarpError:
+            rules = warp_logic.dns_rule_targets(
+                ', '.join(ips[:warp_logic.WARP_DNS_SLOTS]),
+                dns_via_warp=False, dns_net_cidr=DNS_NET)
+        return ''.join(
+            '  x_rule -4 %d from $WARP_SUBNET to %s lookup main\n'
+            % (rule['pref'], rule['to'])
+            for rule in rules)
 
     @staticmethod
     def _exit_conf_body(link):
@@ -2978,7 +3140,7 @@ x_exit_sync() {
             raise RuntimeError(f"exit link apply failed: {out or err or f'SSH exit code {code}'}")
         return out
 
-    def exit_link(self, protocol_type, link):
+    def exit_link(self, protocol_type, link, warp_ctx=None):
         """Write exit0.conf into the container, refresh start.sh (no restart)
         and bring the link up live. `link` carries transit_ip, subnet_cidr,
         exit_public_key, psk, endpoint_host, endpoint_port, obfuscation,
@@ -3001,7 +3163,9 @@ x_exit_sync() {
         finally:
             self.ssh.run_command("rm -f /tmp/_amnz_exit0.conf")
         # Resolved path: an older legacy install may keep its config at awg0.conf.
-        self._write_start_script(protocol_type, config_path=self._resolve_config_path(protocol_type))
+        self._write_start_script(protocol_type,
+                                 config_path=self._resolve_config_path(protocol_type),
+                                 warp_ctx=warp_ctx)
         return self._exit_apply(protocol_type)
 
     def exit_set_dns_via_exit(self, protocol_type, enabled):
@@ -3535,7 +3699,7 @@ done < "$BW"
                 lines.append(line)
         return '\n'.join(lines)
 
-    def save_server_config(self, protocol_type, config_content):
+    def save_server_config(self, protocol_type, config_content, warp_ctx=None):
         """Save the server WireGuard config and restart container."""
         config_content = self._sanitize_server_config(config_content)
         self._server_config_cache.pop(protocol_type, None)
@@ -3549,7 +3713,7 @@ done < "$BW"
         self.ssh.run_command("rm -f /tmp/_amnz_edit_config.conf")
 
         # Regenerate start script so iptables rules pick up the (possibly changed) subnet
-        self._write_start_script(protocol_type, config_path)
+        self._write_start_script(protocol_type, config_path, warp_ctx=warp_ctx)
 
         # Restart container to apply all changes (including port and interface changes)
         self.ssh.run_sudo_command(f"docker restart {container_name}")
@@ -4162,7 +4326,8 @@ done < "$BW"
 
     @_serialized_table_write
     def prepare_client(self, protocol_type, operation_id, client_name,
-                       private_key, public_key, server_host, port, public_port=None):
+                       private_key, public_key, server_host, port, public_port=None,
+                       warp_ctx=None):
         """Idempotently reserve an INACTIVE peer before publishing ownership.
 
         The caller journals operation_id and the keypair before calling SSH.
@@ -4203,10 +4368,12 @@ done < "$BW"
             clients.append({'clientId': public_key, 'userData': ud})
             self._save_clients_table(protocol_type, clients)
         return {'client_id': public_key, 'config': self.get_client_config(
-            protocol_type, public_key, server_host, port, public_port=public_port)}
+            protocol_type, public_key, server_host, port, public_port=public_port,
+            warp_ctx=warp_ctx)}
 
     @_serialized_table_write
-    def add_client(self, protocol_type, client_name, server_host, port, public_port=None):
+    def add_client(self, protocol_type, client_name, server_host, port, public_port=None,
+                   warp_ctx=None):
         """
         Add a new client/peer to the AWG config.
         Returns the client config as a string for the .conf file.
@@ -4279,6 +4446,15 @@ AllowedIPs = {allowed_ips}
         # Standard fields (dual-stack when the client has an IPv6 address)
         address_line = f"{client_ip}/32" + (f", {client_ipv6}/128" if client_ipv6 else "")
         dns6 = self._get_dns6(protocol_type) if client_ipv6 else ""
+        if warp_ctx and warp_ctx.get('active'):
+            # The warp budget overrides the server-wide MTU and any per-client
+            # resolver. IPv6 resolvers are unreachable through warp0, and the
+            # DNS toggle decides whether the client keeps direct DNS rules.
+            budget = warp_ctx.get('client_mtu')
+            mtu = int(budget) if budget else self._get_mtu(protocol_type)
+            dns = '1.1.1.1' if warp_ctx.get('dns_via_warp') \
+                else self._get_dns(protocol_type)
+            dns6 = ""
         # Guard against duplicates: a manually saved client config may
         # already carry the v6 resolver inside userData.dns.
         dns_line = dns + (", " + dns6 if dns6 and dns6 not in dns else "")
@@ -4342,7 +4518,8 @@ PersistentKeepalive = 25
             'config': client_config,
         }
 
-    def get_client_config(self, protocol_type, client_id, server_host, port, public_port=None):
+    def get_client_config(self, protocol_type, client_id, server_host, port, public_port=None,
+                          warp_ctx=None):
         """Reconstruct client config from stored data.
 
         `public_port` overrides the Endpoint port the same way it does in
@@ -4392,6 +4569,14 @@ PersistentKeepalive = 25
         # Standard fields (dual-stack when the client has an IPv6 address)
         address_line = f"{client_ip}/32" + (f", {client_ipv6}/128" if client_ipv6 else "")
         dns6 = self._get_dns6(protocol_type, ud) if client_ipv6 else ""
+        if warp_ctx and warp_ctx.get('active'):
+            # warp_ctx wins over userData overrides: the client packet must fit
+            # the warp0 budget, and warp0 cannot carry IPv6 resolvers.
+            budget = warp_ctx.get('client_mtu')
+            mtu = int(budget) if budget else self._get_mtu(protocol_type)
+            dns = '1.1.1.1' if warp_ctx.get('dns_via_warp') \
+                else self._get_dns(protocol_type)
+            dns6 = ""
         # Guard against duplicates: a manually saved client config may
         # already carry the v6 resolver inside userData.dns.
         dns_line = dns + (", " + dns6 if dns6 and dns6 not in dns else "")
@@ -4771,6 +4956,36 @@ PersistentKeepalive = 25
                     return value
         return None
 
+    def _read_config_key_live(self, protocol, key):
+        """Numeric value of the LAST `key = N` line in the live config.
+
+        Reads the file straight out of the container on every call: the budget
+        must follow what is actually on disk, so neither _get_server_config
+        (TTL cache) nor _batch_entry (poll snapshot) is allowed here. Both the
+        plain and the commented form are accepted; MTU lives commented out.
+        """
+        container_name = self._container_name(protocol)
+        config_path = self._resolve_config_path(protocol)
+        out, err, code = self.ssh.run_sudo_command(
+            f"docker exec -i {container_name} cat {config_path}")
+        if code != 0:
+            return None
+        value = None
+        for line in (out or '').split('\n'):
+            stripped = line.strip()
+            if stripped.startswith('#'):
+                stripped = stripped.lstrip('#').strip()
+            if '=' not in stripped:
+                continue
+            name, _, raw = stripped.partition('=')
+            if name.strip() != key:
+                continue
+            try:
+                value = int(raw.strip())
+            except (TypeError, ValueError):
+                continue
+        return value
+
     def _get_dns(self, protocol_type, user_data=None):
         """DNS servers for generated client configs.
 
@@ -4985,14 +5200,36 @@ PersistentKeepalive = 25
         return self._read_config_key(protocol_type, 'MTU') or AWG_DEFAULTS['mtu']
 
     @_serialized_table_write
-    def save_client_config(self, protocol_type, client_id, config_text):
+    def save_client_config(self, protocol_type, client_id, config_text, warp_ctx=None):
         """Persist a manually edited client config. Stored verbatim in
         clientsTable (userData.customConfig) and returned by get_client_config
         from now on; the DNS and MTU lines are indexed into userData as the
-        per-client overrides _get_dns/_get_mtu read on future regenerations."""
+        per-client overrides _get_dns/_get_mtu read on future regenerations.
+
+        While a WARP link is active the client MTU must fit ``warp0``: a saved
+        config above the budget is rejected instead of silently breaking the
+        tunnel. A config without an ``MTU`` line is left to pre-flight
+        detection and stored as is."""
         config_text = (config_text or '').strip()
         if not config_text:
             raise RuntimeError('Config is empty')
+        if warp_ctx and warp_ctx.get('active'):
+            budget = warp_ctx.get('client_mtu')
+            if budget:
+                from warp_service import SrvWarpError
+                for line in config_text.split('\n'):
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith('#') or '=' not in stripped:
+                        continue
+                    name, _, value = stripped.partition('=')
+                    if name.strip() != 'MTU':
+                        continue
+                    try:
+                        requested = int(value.strip())
+                    except (TypeError, ValueError):
+                        continue
+                    if requested > int(budget):
+                        raise SrvWarpError('srv_warp_budget_mismatch', 409)
         clients_table = self._get_clients_table(protocol_type)
         client = next((c for c in clients_table if c.get('clientId') == client_id), None)
         if client is None:

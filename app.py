@@ -63,7 +63,22 @@ from managers.backup_manager import BackupManager
 import telegram_bot as tg_bot
 
 from exit_link_service import ExitLinkError, ExitLinkService
-from smartroute_service import SmartRouteError, SmartRouteService
+from smartroute_service import SmartRouteError, SmartRouteService, split_instances
+from warp_service import (
+    INSTANCE_STATES,
+    SrvWarpError,
+    WarpStateStore,
+    WARP_CLIENT_MTU_CAP,
+    WARP_REGISTER_LIMIT,
+    aggregate_state,
+    classify_instance_state,
+    proto_record,
+    quota_exhausted,
+    register_timestamps,
+    warp_ctx_for,
+    warp_link,
+)
+from warp_runtime import WarpRuntime
 from mail_service import (
     DEFAULT_MAIL_SETTINGS,
     MailError,
@@ -261,6 +276,11 @@ DATA_FILE = os.path.abspath(os.path.expanduser(
 ssh_trust.configure(DATA_FILE)
 CURRENT_VERSION = "v1.8.7"
 
+# Authoritative operational state for WARP lives outside data.json: dozens of
+# panel writers save their own snapshots and would overwrite it.
+WARP_STATE_PATH = DATA_FILE + '.srv_warp_state.json'
+warp_state_store = WarpStateStore(WARP_STATE_PATH)
+
 # Custom protocol instance names: the rename modal caps input at 64 chars.
 CUSTOM_PROTOCOL_NAME_MAX = 64
 BIN_DIR = os.environ.get('TUNNEL_BIN_DIR', os.path.join(application_path, 'bin'))
@@ -359,6 +379,54 @@ async def lifecycle_busy_response(request, error):
 async def lifecycle_uncertain_response(request, error):
     return JSONResponse({'error': 'An SSH result is unknown. Administrator recovery is required.',
                          'code': error.code}, status_code=503)
+
+
+# --- WARP: error mapping, in-memory job registry, sync state reads ----------
+
+WARP_TOS_VERSION = 1
+_WARP_JOBS = {}
+_WARP_JOBS_LOCK = threading.Lock()
+_WARP_TASKS = set()
+
+
+@app.exception_handler(SrvWarpError)
+async def warp_error_response(request, error):
+    """User-facing warp failure: stable code for the UI/i18n, not a generic 500."""
+    return JSONResponse({'error': error.code, 'code': error.code},
+                        status_code=error.http_status)
+
+
+def _warp_job_active(uid):
+    with _WARP_JOBS_LOCK:
+        return bool(_WARP_JOBS.get(str(uid)))
+
+
+def _warp_job_begin(uid, kind):
+    uid = str(uid)
+    with _WARP_JOBS_LOCK:
+        if _WARP_JOBS.get(uid):
+            raise SrvWarpError('srv_warp_job_busy', 409)
+        job_id = uuid.uuid4().hex
+        _WARP_JOBS[uid] = {'id': job_id, 'kind': kind, 'started': time.time()}
+    return job_id
+
+
+def _warp_job_end(uid, job_id):
+    uid = str(uid)
+    with _WARP_JOBS_LOCK:
+        record = _WARP_JOBS.get(uid)
+        if record and record.get('id') == job_id:
+            _WARP_JOBS.pop(uid, None)
+
+
+def srv_warp_ctx(server, protocol):
+    """Synchronous state read for handlers that cannot await."""
+    return warp_ctx_for(warp_state_store.load(), server.get('uid'), protocol)
+
+
+# ``proto_record`` is also a local variable name in some handlers, so the
+# helper is aliased for module-level calls from those scopes.
+warp_proto_record = proto_record
 
 
 def load_data():
@@ -1746,6 +1814,7 @@ peer_creates = PeerCreateService(
     data_lock=DATA_LOCK, get_ssh=lambda server: get_ssh(server),
     get_manager=lambda ssh, protocol: get_protocol_manager(ssh, protocol),
     public_endpoint=lambda server, protocol: protocol_public_endpoint(server, protocol),
+    warp_ctx=lambda server, protocol: srv_warp_ctx(server, protocol),
 )
 
 
@@ -1807,6 +1876,16 @@ smartroute_svc = SmartRouteService(
     protocol_base=protocol_base,
     awg_protocols=AWG_PROTOCOLS,
     apply_dns_via_exit=lambda sid, proto, en: exit_link_svc.set_dns_via_exit(sid, proto, en),
+)
+
+warp_runtime = WarpRuntime(
+    load_data=load_data,
+    save_data=save_data,
+    data_lock=DATA_LOCK,
+    get_ssh=lambda server: get_ssh(server),
+    awg_manager_factory=lambda ssh: AWGManager(ssh),
+    state_store=warp_state_store,
+    job_end=_warp_job_end,
 )
 
 
@@ -2102,6 +2181,11 @@ async def perform_mass_operations(delete_uids: List[str] = None, toggle_uids: Li
                 
                 if c_req['protocol'] == 'wireguard':
                     res = await asyncio.to_thread(manager.add_client, c_req['name'], pub_host, public_port=pub_port)
+                elif protocol_base(c_req['protocol']) in AWG_PROTOCOLS:
+                    res = await asyncio.to_thread(
+                        _manager_call, manager, 'add_client', c_req['protocol'],
+                        c_req['name'], pub_host, port, public_port=pub_port,
+                        warp_ctx=srv_warp_ctx(srv, c_req['protocol']))
                 else:
                     res = await asyncio.to_thread(_manager_call, manager, 'add_client', c_req['protocol'], c_req['name'], pub_host, port, public_port=pub_port)
                 
@@ -2482,6 +2566,19 @@ class ExitFailoverRequest(BaseModel):
     handshake_max_age_seconds: Optional[int] = None
     auto_failback: Optional[bool] = None
     probe_egress: Optional[bool] = None
+
+
+class SrvWarpRequest(BaseModel):
+    """Body shared by every /warp POST (query-equivalent server_uid)."""
+    server_uid: Optional[str] = None
+    protocol: Optional[str] = None
+    confirm_regen: Optional[bool] = False
+    accept_tos: Optional[bool] = False
+    force_register: Optional[bool] = False
+    primary_uid: Optional[str] = None
+    backup_uids: Optional[List[str]] = None
+    dns_on: Optional[bool] = None
+    enable: Optional[bool] = None
 
 
 class SmartRouteOwnSubnetsRequest(BaseModel):
@@ -4888,6 +4985,309 @@ async def api_rkn_scans_clear(request: Request, server_id: int, server_uid: str 
     return {'status': 'cleared'}
 
 
+# ===== WARP: server app + per-instance egress (issue #277, S3a MVP) =====
+#
+# HTTP contract only: identity/XOR/ToS guards run synchronously, the SSH work
+# is queued as one in-memory job per server uid. State lives in the dedicated
+# .srv_warp_state.json store, never in a data.json snapshot.
+
+def _warp_awg_protocols(server):
+    return [proto for proto in (server.get('protocols') or {})
+            if protocol_base(proto) in ('awg', 'awg2', 'awg3')]
+
+
+def _warp_named_protocol(req, server=None, required=False):
+    protocol = (req.protocol or '').strip()
+    if not protocol and server is not None:
+        candidates = _warp_awg_protocols(server)
+        protocol = candidates[0] if candidates else ''
+    if not protocol:
+        if required:
+            protocol = 'awg'
+        else:
+            return None
+    if protocol_base(protocol) not in ('awg', 'awg2', 'awg3'):
+        raise SrvWarpError('srv_warp_protocol_unsupported', 409)
+    return protocol
+
+
+def _warp_registers(server, state, uid):
+    warp = server.get('warp') or {}
+    registers = warp.get('registers_ts')
+    if registers is None:
+        registers = warp.get('registers')
+    if registers is None:
+        record = (state.get('servers') or {}).get(str(uid)) or {}
+        registers = record.get('registers_ts') or record.get('registers') or []
+    return registers or []
+
+
+def _warp_status_payload(server, state):
+    uid = server.get('uid') or ''
+    protocols = list(_warp_awg_protocols(server))
+    server_state = (state.get('servers') or {}).get(str(uid)) or {}
+    for proto in (server_state.get('protocols') or {}):
+        if proto not in protocols and protocol_base(proto) in ('awg', 'awg2', 'awg3'):
+            protocols.append(proto)
+
+    registers = _warp_registers(server, state, uid)
+    rate_limited = quota_exhausted(registers)
+    instances = []
+    budgets = []
+    for proto in protocols:
+        record = proto_record(state, uid, proto)
+        warp_record = record.get('warp') or {}
+        link = warp_link(record)
+        # No live SSH probes in the status endpoint: the projection is the
+        # authoritative signal until the supervisor supplies handshake data.
+        installed = bool(warp_record.get('registered'))
+        instance_state = classify_instance_state(
+            installed=installed, link_active=bool(link),
+            rate_limited=rate_limited)
+        client_mtu = record.get('client_mtu_warp')
+        if client_mtu:
+            budgets.append(int(client_mtu))
+        instances.append({
+            'protocol': proto,
+            'state': instance_state,
+            'installed': installed,
+            'registered': bool(warp_record.get('registered')),
+            'link_active': bool(link),
+            'client_mtu': client_mtu,
+            'dns_via_warp': bool((link or {}).get('dns_via_warp')),
+            'quarantine': bool(warp_record.get('quarantine')),
+            'state_stale': bool((link or {}).get('stale')),
+        })
+
+    active_job = _WARP_JOBS.get(str(uid))
+    return {
+        'aggregate': aggregate_state([item['state'] for item in instances]),
+        'instances': instances,
+        'budget': min(budgets) if budgets else WARP_CLIENT_MTU_CAP,
+        'orphans': [],
+        'quota': {
+            'used': len(register_timestamps(registers, now=time.time())),
+            'limit': WARP_REGISTER_LIMIT,
+        },
+        'jobs': [dict(active_job)] if active_job else [],
+    }
+
+
+async def _warp_store_tos(uid):
+    async with DATA_LOCK:
+        data = load_data()
+        idx = _rkn_server_index(data, None, uid)
+        if idx is None:
+            return
+        warp = data['servers'][idx].setdefault('warp', {})
+        warp['tos_ack'] = {'version': WARP_TOS_VERSION, 'ts': int(time.time())}
+        save_data(data)
+
+
+async def _warp_require_tos(server, accept):
+    ack = (server.get('warp') or {}).get('tos_ack') or {}
+    if isinstance(ack, dict) and ack.get('version') == WARP_TOS_VERSION:
+        return
+    if not accept:
+        raise SrvWarpError('srv_warp_tos_required', 409)
+    await _warp_store_tos(server.get('uid'))
+
+
+def _warp_install_guard(server, uid, protocol):
+    state = warp_state_store.load()
+    protocols = [protocol] if protocol else _warp_awg_protocols(server)
+    for proto in protocols:
+        record = proto_record(state, uid, proto)
+        if (record.get('warp') or {}).get('registered') or warp_link(record):
+            raise SrvWarpError('srv_warp_registered_unlink_first', 409)
+
+
+def _warp_link_preflight(data, server_id, server, uid, protocol):
+    record = (server.get('protocols') or {}).get(protocol) or {}
+    if record.get('exit_link'):
+        raise SrvWarpError('srv_warp_xor_conflict', 409)
+    if split_instances(data, server_id):
+        raise SrvWarpError('srv_warp_xor_conflict', 409)
+    if warp_link(proto_record(warp_state_store.load(), uid, protocol)):
+        raise SrvWarpError('srv_warp_xor_conflict', 409)
+
+
+async def _warp_post(actor, request, server_id, req, kind, runner, *, tos=False,
+                     install_guard=False, link_preflight=False):
+    """Shared POST pre-flight: auth -> identity -> registry -> ToS -> XOR -> 202."""
+    if not actor or actor.get('role') not in ('admin', 'support'):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        idx = _rkn_server_index(data, server_id, req.server_uid)
+        if idx is None:
+            raise SrvWarpError('srv_warp_identity_mismatch', 409)
+        server = data['servers'][idx]
+        uid = server.get('uid') or ''
+        if not uid:
+            raise SrvWarpError('srv_warp_identity_mismatch', 409)
+        if _warp_job_active(uid):
+            raise SrvWarpError('srv_warp_job_busy', 409)
+
+        if kind in ('install', 'uninstall', 'repair'):
+            protocol = _warp_named_protocol(req, server=server, required=False)
+        elif kind == 'exit-egress':
+            protocol = None
+        else:
+            protocol = _warp_named_protocol(req, server=server, required=True)
+
+        if tos:
+            await _warp_require_tos(server, bool(req.accept_tos))
+        if install_guard:
+            _warp_install_guard(server, uid, protocol)
+        if link_preflight:
+            _warp_link_preflight(data, idx, server, uid, protocol)
+
+        job_id = _warp_job_begin(uid, kind)
+        task = asyncio.create_task(runner(server_id, uid, protocol, job_id))
+        _WARP_TASKS.add(task)
+        task.add_done_callback(_WARP_TASKS.discard)
+        return JSONResponse({'job_id': job_id, 'status': 'queued'},
+                            status_code=202)
+    except SrvWarpError as exc:
+        return JSONResponse({'error': exc.code, 'code': exc.code},
+                            status_code=exc.http_status)
+
+
+@app.get('/api/servers/{server_id}/warp/status', tags=["Servers"])
+async def api_srv_warp_status(request: Request, server_id: int,
+                              server_uid: str | None = None):
+    """Aggregate + per-instance warp state, quota and active jobs."""
+    actor = _request_user(request)
+    if not actor or actor.get('role') not in ('admin', 'support'):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    data = load_data()
+    idx = _rkn_server_index(data, server_id, server_uid)
+    if idx is None:
+        return JSONResponse(
+            {'error': 'Server not found', 'code': 'srv_warp_identity_mismatch'},
+            status_code=404)
+    return _warp_status_payload(data['servers'][idx], warp_state_store.load())
+
+
+@app.post('/api/servers/{server_id}/warp/install', tags=["Servers"])
+async def api_srv_warp_install(request: Request, server_id: int, req: SrvWarpRequest):
+    return await _warp_post(
+        _request_user(request), request, server_id, req, 'install',
+        lambda sid, uid, protocol, job_id: warp_runtime.install(
+            sid, uid, protocol=protocol, job_id=job_id),
+        tos=True, install_guard=True)
+
+
+@app.post('/api/servers/{server_id}/warp/uninstall', tags=["Servers"])
+async def api_srv_warp_uninstall(request: Request, server_id: int, req: SrvWarpRequest):
+    return await _warp_post(
+        _request_user(request), request, server_id, req, 'uninstall',
+        lambda sid, uid, protocol, job_id: warp_runtime.uninstall(
+            sid, uid, protocol=protocol, job_id=job_id))
+
+
+@app.post('/api/servers/{server_id}/warp/repair', tags=["Servers"])
+async def api_srv_warp_repair(request: Request, server_id: int, req: SrvWarpRequest):
+    return await _warp_post(
+        _request_user(request), request, server_id, req, 'repair',
+        lambda sid, uid, protocol, job_id: warp_runtime.repair(
+            sid, uid, protocol=protocol, job_id=job_id))
+
+
+@app.post('/api/servers/{server_id}/warp/link', tags=["Servers"])
+async def api_srv_warp_link(request: Request, server_id: int, req: SrvWarpRequest):
+    return await _warp_post(
+        _request_user(request), request, server_id, req, 'link',
+        lambda sid, uid, protocol, job_id: warp_runtime.link(
+            sid, uid, protocol, dns_via_warp=bool(req.dns_on), job_id=job_id),
+        tos=True, link_preflight=True)
+
+
+@app.post('/api/servers/{server_id}/warp/unlink', tags=["Servers"])
+async def api_srv_warp_unlink(request: Request, server_id: int, req: SrvWarpRequest):
+    return await _warp_post(
+        _request_user(request), request, server_id, req, 'unlink',
+        lambda sid, uid, protocol, job_id: warp_runtime.unlink(
+            sid, uid, protocol, job_id=job_id))
+
+
+@app.post('/api/servers/{server_id}/warp/force-unlink', tags=["Servers"])
+async def api_srv_warp_force_unlink(request: Request, server_id: int,
+                                    req: SrvWarpRequest):
+    return await _warp_post(
+        _request_user(request), request, server_id, req, 'force-unlink',
+        lambda sid, uid, protocol, job_id: warp_runtime.force_unlink(
+            sid, uid, protocol, job_id=job_id))
+
+
+@app.post('/api/servers/{server_id}/warp/switch', tags=["Servers"])
+async def api_srv_warp_switch(request: Request, server_id: int, req: SrvWarpRequest):
+    return await _warp_post(
+        _request_user(request), request, server_id, req, 'switch',
+        lambda sid, uid, protocol, job_id: warp_runtime.switch_egress(
+            sid, uid, protocol, job_id=job_id))
+
+
+@app.post('/api/servers/{server_id}/warp/dns', tags=["Servers"])
+async def api_srv_warp_dns(request: Request, server_id: int, req: SrvWarpRequest):
+    return await _warp_post(
+        _request_user(request), request, server_id, req, 'dns',
+        lambda sid, uid, protocol, job_id: warp_runtime.set_dns(
+            sid, uid, protocol, dns_on=bool(req.dns_on), job_id=job_id))
+
+
+@app.post('/api/servers/{server_id}/warp/reissue', tags=["Servers"])
+async def api_srv_warp_reissue(request: Request, server_id: int, req: SrvWarpRequest):
+    return await _warp_post(
+        _request_user(request), request, server_id, req, 'reissue',
+        lambda sid, uid, protocol, job_id: warp_runtime.reissue(
+            sid, uid, protocol, job_id=job_id))
+
+
+@app.post('/api/servers/{server_id}/warp/exit-egress', tags=["Servers"])
+async def api_srv_warp_exit_egress(request: Request, server_id: int,
+                                   req: SrvWarpRequest):
+    return await _warp_post(
+        _request_user(request), request, server_id, req, 'exit-egress',
+        lambda sid, uid, protocol, job_id: warp_runtime.exit_egress(
+            sid, uid, enable=bool(req.enable), job_id=job_id),
+        tos=True)
+
+
+@app.post('/api/servers/{server_id}/warp/failover', tags=["Servers"])
+async def api_srv_warp_failover(request: Request, server_id: int,
+                                req: SrvWarpRequest):
+    """Failover policy is configuration, not SSH: applied synchronously."""
+    actor = _request_user(request)
+    if not actor or actor.get('role') not in ('admin', 'support'):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        idx = _rkn_server_index(data, server_id, req.server_uid)
+        if idx is None:
+            raise SrvWarpError('srv_warp_identity_mismatch', 409)
+        uid = data['servers'][idx].get('uid') or ''
+        if _warp_job_active(uid):
+            raise SrvWarpError('srv_warp_job_busy', 409)
+        policy = {
+            'primary_uid': (req.primary_uid or '').strip(),
+            'backup_uids': [str(item) for item in (req.backup_uids or [])],
+        }
+        async with DATA_LOCK:
+            data = load_data()
+            idx = _rkn_server_index(data, server_id, uid)
+            if idx is None:
+                raise SrvWarpError('srv_warp_identity_mismatch', 409)
+            warp = data['servers'][idx].setdefault('warp', {})
+            warp['failover'] = policy
+            save_data(data)
+        return {'status': 'success', 'failover': policy}
+    except SrvWarpError as exc:
+        return JSONResponse({'error': exc.code, 'code': exc.code},
+                            status_code=exc.http_status)
+
+
 RKN_FLAG_CACHE = {}
 RKN_FLAG_CACHE_TTL = 900  # seconds; scan flags on the overview page
 
@@ -5422,6 +5822,13 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
         else:
             install_protocol = req.protocol
         install_base = protocol_base(install_protocol)
+        warp_record = warp_proto_record(warp_state_store.load(), server.get('uid'),
+                                        install_protocol)
+        if (warp_record.get('warp') or {}).get('registered') \
+                or warp_link(warp_record):
+            # A registered/linked instance must be unlinked before reinstall:
+            # a fresh container would silently lose its WARP state.
+            raise SrvWarpError('srv_warp_registered_unlink_first', 409)
         # A reinstalled entry keeps its exit link and is re-linked below
         previous_link = None
         # Where an instance is published is a property of the network, not
@@ -5675,6 +6082,8 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
         _install_finish(op, 'success', {'protocol': install_protocol,
                                         'display_name': proto_record['display_name']})
         return result
+    except SrvWarpError:
+        raise
     except Exception as e:
         logger.exception("Error installing protocol")
         if op is not None:
@@ -5849,9 +6258,15 @@ async def api_exit_link(request: Request, server_id: int, req: ExitLinkRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
+        data = load_data()
+        server = data['servers'][server_id] if 0 <= server_id < len(data['servers']) else None
+        if server is not None and srv_warp_ctx(server, req.protocol).get('active'):
+            raise SrvWarpError('srv_warp_xor_conflict', 409)
         result = await exit_link_svc.link(server_id, req.protocol, req.exit_uid.strip(), force=bool(req.force))
         _invalidate_ip_status_for_server(server_id)
         return result
+    except SrvWarpError:
+        raise
     except ExitLinkError as e:
         return _exit_link_error(e)
     except Exception as e:
@@ -5900,7 +6315,13 @@ async def api_exit_link_dns(request: Request, server_id: int, req: ExitDnsReques
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
+        data = load_data()
+        server = data['servers'][server_id] if 0 <= server_id < len(data['servers']) else None
+        if server is not None and srv_warp_ctx(server, req.protocol).get('active'):
+            raise SrvWarpError('srv_warp_xor_conflict', 409)
         return await exit_link_svc.set_dns_via_exit(server_id, req.protocol, req.enabled)
+    except SrvWarpError:
+        raise
     except ExitLinkError as e:
         return _exit_link_error(e)
     except Exception as e:
@@ -6444,6 +6865,9 @@ def api_awg_settings_save(request: Request, server_id: int, req: AwgSettingsRequ
         if server_id >= len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
+        if srv_warp_ctx(server, req.protocol).get('active'):
+            # The warp client budget/link owns MTU and DNS while linked.
+            raise SrvWarpError('srv_warp_settings_locked', 409)
         special_junk = {key: getattr(req, key) for key in ('i1', 'i2', 'i3', 'i4', 'i5')}
         if all(value is None for value in special_junk.values()):
             special_junk = None
@@ -6477,6 +6901,8 @@ def api_awg_settings_save(request: Request, server_id: int, req: AwgSettingsRequ
         settings['dns1'], settings['dns2'] = split_dns(settings.get('dns'))
         settings['status'] = 'success'
         return settings
+    except SrvWarpError:
+        raise
     except ValueError as e:
         return JSONResponse({'error': str(e)}, status_code=400)
     except Exception as e:
@@ -6879,6 +7305,10 @@ async def api_uninstall_protocol(request: Request, server_id: int, req: Protocol
         if guard is not None:
             return guard
         server = data['servers'][server_id]
+        if srv_warp_ctx(server, req.protocol).get('active'):
+            # Drop the warp link from the WARP card first: uninstall must not
+            # tear down a container whose egress rules are still applied.
+            raise SrvWarpError('srv_warp_xor_conflict', 409)
         base = protocol_base(req.protocol)
         if base in AWG_PROTOCOLS and ((server.get('protocols') or {}).get(req.protocol) or {}).get('exit_link'):
             # Drop our peer on the exit while the container still exists
@@ -6919,6 +7349,8 @@ async def api_uninstall_protocol(request: Request, server_id: int, req: Protocol
             if restored:
                 return {'status': 'success', 'dns_restored': restored}
         return {'status': 'success'}
+    except SrvWarpError:
+        raise
     except Exception as e:
         logger.exception("Error uninstalling protocol")
         return JSONResponse({'error': str(e)}, status_code=500)
@@ -7949,6 +8381,9 @@ def api_server_config_save(request: Request, server_id: int, req: ServerConfigSa
         server = data['servers'][server_id]
         if server_uid is not None and server.get('uid') != server_uid:
             return JSONResponse({'error': 'Server identity changed; refresh the inventory'}, status_code=409)
+        if srv_warp_ctx(server, req.protocol).get('active'):
+            # MTU/DNS come from the warp budget while the link is active.
+            raise SrvWarpError('srv_warp_settings_locked', 409)
         base = protocol_base(req.protocol)
         from peer_accounting import _protocol_scope
         scope = _protocol_scope(req.protocol)
@@ -8035,6 +8470,9 @@ def api_server_config_save(request: Request, server_id: int, req: ServerConfigSa
         if not protected and any(info.get('exit_link') for key, info in current['servers'][server_id].get('protocols', {}).items()
                                  if _protocol_scope(key) == scope):
             return JSONResponse({'error': 'Exit link changed; refresh the configuration'}, status_code=409)
+        if srv_warp_ctx(current['servers'][server_id], req.protocol).get('active'):
+            # A warp link created while SSH was connecting owns MTU/DNS too.
+            raise SrvWarpError('srv_warp_settings_locked', 409)
         if protected:
             mgr = get_protocol_manager(ssh, req.protocol)
             if base == 'xray':
@@ -8084,11 +8522,27 @@ def api_server_config_save(request: Request, server_id: int, req: ServerConfigSa
             from managers.nginx_manager import NginxManager
             mgr = NginxManager(ssh, req.protocol)
             mgr.save_server_config(req.protocol, req.config)
+        elif protocol_base(req.protocol) == 'exit':
+            # The exit container has its own path/template; AWGManager would
+            # write into the awg container instead.
+            from managers.exit_manager import ExitManager
+            mgr = ExitManager(ssh, req.protocol)
+            ctx = srv_warp_ctx(server, req.protocol)
+            if ctx.get('active'):
+                mgr.save_server_config(req.protocol, req.config, warp_ctx=ctx)
+            else:
+                mgr.save_server_config(req.protocol, req.config)
         else:
             mgr = AWGManager(ssh)
-            mgr.save_server_config(req.protocol, req.config)
+            ctx = srv_warp_ctx(server, req.protocol)
+            if ctx.get('active'):
+                mgr.save_server_config(req.protocol, req.config, warp_ctx=ctx)
+            else:
+                mgr.save_server_config(req.protocol, req.config)
         _invalidate_ip_status(server.get('uid'))
         return {'status': 'success'}
+    except SrvWarpError:
+        raise
     except Exception as e:
         logger.exception("Error saving server config")
         return JSONResponse({'error': str(e)}, status_code=500)
@@ -8217,7 +8671,9 @@ def api_add_connection(request: Request, server_id: int, req: AddConnectionReque
         elif protocol_base(req.protocol) == 'wireguard':
             result = manager.add_client(req.name, pub_host, public_port=pub_port)
         else:
-            result = manager.add_client(req.protocol, req.name, pub_host, port, public_port=pub_port)
+            result = manager.add_client(req.protocol, req.name, pub_host, port,
+                                        public_port=pub_port,
+                                        warp_ctx=srv_warp_ctx(server, req.protocol))
         ssh.disconnect()
 
         if result.get('config'):
@@ -8714,7 +9170,10 @@ def api_add_user(request: Request, req: AddUserRequest):
                         max_tcp_conns=req.telemt_max_conns
                     )
                 else:
-                    conn_result = manager.add_client(req.protocol, conn_name, pub_host, port, public_port=pub_port)
+                    conn_result = manager.add_client(
+                        req.protocol, conn_name, pub_host, port,
+                        public_port=pub_port,
+                        warp_ctx=srv_warp_ctx(server, req.protocol))
                 ssh.disconnect()
 
                 if conn_result.get('client_id'):
