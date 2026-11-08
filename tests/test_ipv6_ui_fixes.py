@@ -168,7 +168,9 @@ class TestC6Translations(unittest.TestCase):
         base = sets[LOCALES[0]]
         for locale in LOCALES[1:]:
             self.assertEqual(sets[locale], base, locale)
-        self.assertEqual(len(base), BASE_KEY_COUNT + len(NEW_KEYS))
+        # Not an exact count: other features add keys to the same files.
+        # The feature must only add keys and must never drop an old one.
+        self.assertGreaterEqual(len(base), BASE_KEY_COUNT + len(NEW_KEYS))
 
     def test_new_keys_present_in_every_locale(self):
         for locale in LOCALES:
