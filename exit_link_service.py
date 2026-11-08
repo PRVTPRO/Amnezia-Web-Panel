@@ -277,34 +277,26 @@ class ExitLinkService:
                 mtu = int(await asyncio.to_thread(awg._get_mtu, protocol) or 0)
             except (TypeError, ValueError):
                 mtu = 0
-            entry_config = None
-            reader = getattr(awg, '_get_server_config', None)
-            if reader is None:
-                # Adapter for callers whose AWG object only exposes the
-                # gateway helper (kept for backwards compatibility).
-                ipv6 = bool(await asyncio.to_thread(
-                    awg._get_subnet_ipv6_ip, protocol))
-            else:
-                try:
-                    entry_config = await asyncio.to_thread(
-                        reader, protocol)
-                except Exception:
-                    raise ExitLinkError(
-                        'state_unreadable',
-                        'Cannot read the instance config; retry')
-                if not (entry_config or '').strip():
-                    raise ExitLinkError(
-                        'state_unreadable',
-                        'Cannot read the instance config; retry')
-                ipv6 = False
-                for line in entry_config.splitlines():
-                    stripped = line.strip()
-                    if not stripped.startswith('Address'):
-                        continue
-                    if '=' in stripped:
-                        tokens = stripped.split('=', 1)[1].split(',')
-                        ipv6 = any(':' in token for token in tokens)
-                    break
+            try:
+                entry_config = await asyncio.to_thread(
+                    awg._get_server_config, protocol)
+            except Exception:
+                raise ExitLinkError(
+                    'state_unreadable',
+                    'Cannot read the instance config; retry')
+            if not (entry_config or '').strip():
+                raise ExitLinkError(
+                    'state_unreadable',
+                    'Cannot read the instance config; retry')
+            ipv6 = False
+            for line in entry_config.splitlines():
+                stripped = line.strip()
+                if not stripped.startswith('Address'):
+                    continue
+                if '=' in stripped:
+                    tokens = stripped.split('=', 1)[1].split(',')
+                    ipv6 = any(':' in token for token in tokens)
+                break
             if ipv6:
                 # The exit node publishes only IPv4: a dual-stack tunnel would
                 # send IPv6 into a black hole. Refuse at any peer count.
