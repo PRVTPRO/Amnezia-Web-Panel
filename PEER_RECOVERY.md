@@ -171,6 +171,22 @@ The admin-only `GET /api/connections/create-capabilities` reports exact instance
 whose native API exposes persistent `enabled` and runtime `in_runtime` state.
 Older runtimes are refused before mutation. Legacy credentials remain supported.
 
+Native link logging must also be private: explicitly set `[general.links] show = []`
+and the container environment `RUST_LOG=info,telemt::links=off`. In the tested
+Telemt 3.5.16 build, `show=[]` suppresses startup links but does not suppress
+hot-reload `telemt::links` output. The adapter verifies both conditions before
+creation and activation; it never edits/recreates a container to enforce them.
+Missing/ambiguous logging policy keeps capability false. Revocation remains
+available even if that logging policy subsequently changes. Configure the
+runtime through the normal administrator-controlled service procedure first.
+
+An empty user list is not evidence of native inactive-create support. The tested
+Telemt 3.5.16 runtime exits with `No users configured` before serving its API when
+`access.users` is empty. Seedless bootstrap through this API is therefore blocked,
+including retries: no legacy add, temporary active seed or config-write fallback
+is used. Supporting it needs a native zero-user bootstrap contract or a separately
+reviewed offline disabled-only initialization workflow, not relaxed validation.
+
 The intent durably stores one random secret and deterministic credential name.
 Native creation uses `enabled=false`, with persistent/native readback, before
 ownership is saved; activation follows a fresh user access check. Commenting a
@@ -179,6 +195,13 @@ preserves the secret across restarts. Credential identities cannot be renamed;
 the connection's display name is separate. Removal requires native confirmation.
 This does not add a Telemt traffic-accounting adapter; common user access and
 expiration policy still apply.
+
+Isolated protocol validation used a real obfuscated MTProto transport and a local
+DC peer (no public ports or external Telegram service). Native disable rejected
+new authentication and revoked an already forwarding session; normal user access
+restoration retained the same secret. This does not certify every Telemt build
+or the official Telegram application: preserve version/runtime checks and test
+the deployed runtime before enabling integrations.
 
 An uncertain API reply retains the same intent for retry/background recovery.
 Never delete the journal, rotate the secret or blindly remove a remote user.

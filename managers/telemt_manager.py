@@ -118,17 +118,37 @@ except Exception:
 
     def _native_users(self):
         users = self._lifecycle_api('GET', '/v1/users')
-        if (not isinstance(users, list) or not users or
+        if (not isinstance(users, list) or
                 any(not isinstance(u, dict) or not isinstance(u.get('username'), str)
                     or not isinstance(u.get('enabled'), bool) or not isinstance(u.get('in_runtime'), bool)
                     for u in users) or len({u['username'] for u in users}) != len(users)):
             raise RuntimeError('Telemt native disabled-user API is required')
+        if not users:
+            # An empty list proves no enabled/in_runtime contract. Telemt 3.5.16
+            # also refuses to boot with no configured users: do not bootstrap
+            # via legacy add_client or invent an active, unowned seed.
+            raise RuntimeError('Empty Telemt instance cannot prove native inactive-create support')
         return {u['username']: u for u in users}
 
     def supports_inactive_create(self):
         self._native_users()
         health = self._lifecycle_api('GET', '/v1/health')
-        return isinstance(health, dict) and health.get('read_only') is False
+        return isinstance(health, dict) and health.get('read_only') is False and self._private_logging()
+
+    def _private_logging(self, config_text=None):
+        """Startup links and reload links use different native output paths."""
+        try:
+            cfg = tomllib.loads(config_text if config_text is not None else self._get_server_config())
+            if cfg.get('general', {}).get('links', {}).get('show') != []:
+                return False
+            out, _, code = self.ssh.run_sudo_command(
+                'docker inspect --format ' + shlex.quote('{{json .Config.Env}}')
+                + ' ' + shlex.quote(self.container_name))
+            env = json.loads(out) if code == 0 else None
+            return (isinstance(env, list) and all(isinstance(v, str) for v in env)
+                    and [v for v in env if v.startswith('RUST_LOG=')] == ['RUST_LOG=info,telemt::links=off'])
+        except (ValueError, TypeError, AttributeError):
+            return False
 
     def _credential(self, client_id, expected_secret=None):
         text = self._get_server_config()
@@ -155,6 +175,8 @@ except Exception:
             raise RuntimeError('Telemt operation identity mismatch')
         runtime = self._native_users()  # Prove native fields before any write.
         text = self._get_server_config()
+        if not self._private_logging(text):
+            raise RuntimeError('Telemt private link logging is not configured')
         try:
             users = tomllib.loads(text)['access']['users']
         except (KeyError, TypeError, ValueError):
@@ -188,6 +210,8 @@ except Exception:
 
     def set_prepared_active(self, protocol_type, client_id, secret, enable):
         self._credential(client_id, secret)
+        if enable and not self._private_logging():
+            raise RuntimeError('Telemt private link logging is not configured')
         self._lifecycle_api('PATCH', '/v1/users/' + client_id, {'enabled': bool(enable)})
         for _ in range(20):
             self._credential(client_id, secret)

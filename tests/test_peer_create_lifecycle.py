@@ -410,6 +410,7 @@ class NativeTelemtFixture:
         self.release.set()
         self.old_api = False
         self.manager = TelemtManager(Mock(), protocol)
+        self.manager.ssh.run_sudo_command.return_value = ('["RUST_LOG=info,telemt::links=off"]', '', 0)
         self.manager._get_server_config = self.config
         self.manager._lifecycle_api = self.api
         self.manager._api_request = lambda *args, **kwargs: {'ok': True, 'data': self.api('GET', '/v1/users')}
@@ -431,7 +432,7 @@ class NativeTelemtFixture:
         self.manager.prepare_client, self.manager.set_prepared_active = prepared, activated
 
     def config(self):
-        rows = ['[censorship]', 'tls_emulation = true', 'tls_domain = "example.com"', '[access.users]']
+        rows = ['[general.links]', 'show = []', '[censorship]', 'tls_emulation = true', 'tls_domain = "example.com"', '[access.users]']
         rows += [key + ' = "' + value['secret'] + '"' for key, value in self.users.items()]
         rows += ['[access.user_enabled]']
         rows += [key + ' = false' for key, value in self.users.items() if not value['enabled']]
@@ -486,6 +487,40 @@ class TelemtCreateLifecycle(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((self.native.creates, self.native.enables), (1, 1))
         self.assertEqual(len(self.data['user_connections']), 1)
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+
+    async def test_first_credential_without_seed_or_capability_fails_before_mutation(self):
+        self.native.users.clear()
+        with self.assertRaisesRegex(RuntimeError, 'Empty Telemt instance'):
+            self.native.manager.supports_inactive_create()
+        self.assertEqual((await self.create()).status_code, 503)
+        intent = self.service.journal.read()[self.op_id]
+        self.assertEqual((await self.create()).status_code, 503)
+        self.assertEqual(self.service.journal.read()[self.op_id], intent)
+        self.assertEqual(intent['phase'], 'intent')
+        self.assertEqual(self.native.users, {})
+        self.assertEqual((self.native.creates, self.native.enables), (0, 0))
+        self.assertEqual(self.data['user_connections'], [])
+
+    async def test_native_reload_link_logging_must_be_suppressed_before_creation(self):
+        self.native.manager.ssh.run_sudo_command.return_value = ('[]', '', 0)
+        self.assertFalse(self.native.manager.supports_inactive_create())
+        self.assertEqual((await self.create()).status_code, 503)
+        self.assertEqual((self.native.creates, self.native.enables), (0, 0))
+        self.native.manager.ssh.run_sudo_command.return_value = ('["RUST_LOG=info,telemt::links=off"]', '', 0)
+        config = self.native.config
+        self.native.manager._get_server_config = lambda: config().replace('show = []', 'show = "*"')
+        self.assertFalse(self.native.manager.supports_inactive_create())
+        self.assertEqual((await self.create()).status_code, 503)
+        self.assertEqual((self.native.creates, self.native.enables), (0, 0))
+        self.native.manager._get_server_config = config
+        self.assertEqual((await self.create())['status'], 'success')
+        operation = self.service.journal.read()[self.op_id]
+        self.native.manager.ssh.run_sudo_command.return_value = ('[]', '', 0)
+        # Logging policy must never prevent revocation.
+        self.native.manager.toggle_client('telemt', operation['public'], False)
+        self.assertFalse(self.native.users[operation['public']]['enabled'])
+        with self.assertRaisesRegex(RuntimeError, 'private link logging'):
+            self.native.manager.toggle_client('telemt', operation['public'], True)
 
     async def test_timeout_after_preparation_restarts_without_regeneration(self):
         self.native.timeout_prepare = True
