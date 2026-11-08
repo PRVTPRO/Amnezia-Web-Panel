@@ -59,7 +59,8 @@ AWG_DEFAULTS = {
     'subnet_ip': '10.8.1.1',
     # IPv6 ULA subnet used for dual-stack tunnels (NAT66, no provider prefix needed)
     'subnet_ipv6_ip': 'fd42:8:1::1',
-    'subnet_ipv6_cidr': '64',    'dns1': '1.1.1.1',
+    'subnet_ipv6_cidr': '64',
+    'dns1': '1.1.1.1',
     'dns2': '1.0.0.1',
     # Default IPv6 resolver appended to client DNS when the tunnel is dual-stack
     'dns6': '2606:4700:4700::1111',
@@ -882,8 +883,8 @@ class AWGManager:
         """Peer counters. readable=False when a read failed.
 
         Counts the union of enabled clientsTable rows and config [Peer]
-        sections, the same rule as `clients_count` (:4313-4316). Disabled
-        rows are not live peers and must not block the zero-peer gate.
+        sections. Disabled rows are not live peers and must not block the
+        zero-peer gate that guards enabling IPv6.
         """
         total, v6 = 0, 0
         try:
@@ -1131,7 +1132,7 @@ class AWGManager:
         config.update({'ipv6': True, 'experimental': True})
         if not config.get('fixed-cidr-v6'):
             config['fixed-cidr-v6'] = 'fd00:42::/64'
-        if not self._docker_ipv6_info().get('ip6tables_ok'):
+        if not info.get('ip6tables_ok'):
             config.pop('ip6tables', None)
         else:
             config['ip6tables'] = True
@@ -2513,8 +2514,7 @@ done
 
         address_line = f"{subnet_ip}/{subnet_cidr}"
         if ipv6:
-            address_line += f", {ipv6_gateway}/{AWG_DEFAULTS['subnet_ipv6_cidr']}"     
-        
+            address_line += f", {ipv6_gateway}/{AWG_DEFAULTS['subnet_ipv6_cidr']}"
         # Build the server config generation script
         if self._base_protocol(protocol_type) in (self.AWG, self.AWG2, self.AWG3):
             config_script = f"""

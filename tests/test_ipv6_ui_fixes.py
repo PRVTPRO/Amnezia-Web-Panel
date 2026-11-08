@@ -31,7 +31,7 @@ NEW_KEYS = {
     "server_ipv6_apply_or_revert_hint",
 }
 
-BASE_KEY_COUNT = 1103
+BASE_KEY_COUNT = 1096
 
 
 def read_text(path):

@@ -37,7 +37,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
 from starlette.middleware.sessions import SessionMiddleware
 from pydantic import BaseModel, Field, StrictBool, constr, conint
-from typing import Optional, List, Dict
+from typing import Optional, List
 import uvicorn
 import httpx
 
@@ -53,8 +53,6 @@ from managers.awg_manager import AWGManager, normalize_special_junk
 from server_stats import collect_host_stats
 from managers.awg_plugin_updater import (
     COMPONENTS as AWG_PLUGIN_COMPONENTS,
-    KERNEL_MODULE as AWG_PLUGIN_KERNEL,
-    USERSPACE as AWG_PLUGIN_USERSPACE,
     TOTAL_STEPS as AWG_PLUGIN_TOTAL_STEPS,
     AwgPluginUpdater,
     PluginUpdateError,
