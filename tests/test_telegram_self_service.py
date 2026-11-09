@@ -93,6 +93,73 @@ class TestTelegramLanguagePreference(unittest.IsolatedAsyncioTestCase):
                          {'lang:en', 'lang:fa', 'lang:fr', 'lang:ru', 'lang:zh'})
 
 
+class TestTelegramPublicEndpoint(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.api = AsyncMock()
+        self.api.send_message = AsyncMock(return_value={'result': {'message_id': 10}})
+        self.api.edit_message = AsyncMock()
+        self.api.send_document = AsyncMock()
+        self.api.call = AsyncMock()
+        self.server = {
+            'host': '10.0.0.10',
+            'protocols': {
+                'awg3': {
+                    'port': '55424',
+                    'public_host': '144.31.0.0',
+                    'public_port': '443',
+                },
+            },
+        }
+        self.ssh = MagicMock()
+        self.manager = MagicMock()
+        self.endpoint = MagicMock(return_value=('144.31.0.0', '443'))
+
+    async def test_reissued_awg_configs_use_protocol_public_host_and_port(self):
+        self.manager.get_client_config.return_value = '[Peer]\nEndpoint = 144.31.0.0:443'
+        for protocol in ('awg2', 'awg3'):
+            with self.subTest(protocol=protocol):
+                self.server['protocols'][protocol] = self.server['protocols']['awg3']
+                self.endpoint.reset_mock()
+                self.manager.reset_mock()
+                self.manager.get_client_config.return_value = '[Peer]\nEndpoint = 144.31.0.0:443'
+                with patch.object(tg_bot, '_get_ssh_and_manager',
+                                  return_value=(self.ssh, self.manager)):
+                    await tg_bot._send_config_by_client(
+                        self.api, 111, self.server, protocol, 'peer', 'Phone',
+                        lambda *args: 'vpn://config', public_endpoint_fn=self.endpoint,
+                    )
+
+                self.endpoint.assert_called_once_with(self.server, protocol)
+                self.manager.get_client_config.assert_called_once_with(
+                    protocol, 'peer', '144.31.0.0', '55424', public_port='443',
+                )
+
+    async def test_admin_creation_uses_protocol_public_host_and_port(self):
+        self.manager.add_client.return_value = {
+            'client_id': 'peer',
+            'config': '[Peer]\nEndpoint = 144.31.0.0:443',
+        }
+        data = {'servers': [self.server], 'users': [], 'user_connections': []}
+        save = MagicMock()
+        with patch.object(tg_bot, '_get_ssh_and_manager',
+                          return_value=(self.ssh, self.manager)):
+            await tg_bot._admin_create_client(
+                self.api, 111, 42, 0, 'awg3', 'Phone', None,
+                lambda: data, save, lambda *args: 'vpn://config',
+                public_endpoint_fn=self.endpoint,
+            )
+
+        self.endpoint.assert_called_once_with(self.server, 'awg3')
+        self.manager.add_client.assert_called_once_with(
+            'awg3', 'Phone', '144.31.0.0', '55424', public_port='443',
+        )
+
+    def test_public_endpoint_falls_back_to_management_host(self):
+        server = {'host': '10.0.0.10', 'protocols': {'awg3': {'port': '55424'}}}
+        self.assertEqual(tg_bot._resolve_public_endpoint(server, 'awg3'),
+                         ('10.0.0.10', None))
+
+
 class TestUserSlashCommands(unittest.IsolatedAsyncioTestCase):
     """Test user slash commands shown in Telegram suggestions."""
 

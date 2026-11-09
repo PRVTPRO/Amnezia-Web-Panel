@@ -957,6 +957,14 @@ def _protocol_display_name(protocol: str, server=None) -> str:
     return name if idx <= 1 else f"{name} #{idx}"
 
 
+def _resolve_public_endpoint(server: dict, protocol: str):
+    """Return the client-facing endpoint for one protocol instance."""
+    info = (server.get("protocols") or {}).get(protocol) or {}
+    host = str(info.get("public_host") or "").strip() or server.get("host", "")
+    public_port = str(info.get("public_port") or "").strip() or None
+    return host, public_port
+
+
 def _find_user(load_data_fn: Callable, tg_id: str, username: Optional[str] = None):
     data = load_data_fn()
     tg_id_clean = str(tg_id).lstrip("@")
@@ -1424,18 +1432,22 @@ async def _handle_get_config(api: TelegramAPI, chat_id: int, message_id: int, ca
     await _send_config_by_client(api, chat_id, servers[sid], conn.get("protocol", "awg"), conn.get("client_id"), conn.get("name") or _tt(lang, "default_connection"), generate_vpn_link_fn, lang)
 
 
-async def _send_config_by_client(api: TelegramAPI, chat_id: int, server: dict, proto: str, client_id: str, conn_name: str, generate_vpn_link_fn: Callable, lang: str = "en"):
+async def _send_config_by_client(api: TelegramAPI, chat_id: int, server: dict, proto: str, client_id: str, conn_name: str, generate_vpn_link_fn: Callable, lang: str = "en", public_endpoint_fn: Optional[Callable] = None):
     loading_result = await api.send_message(chat_id, _tt(lang, "fetching_config_for", name=_e(conn_name)))
     loading_msg_id = loading_result.get("result", {}).get("message_id")
     try:
         proto_info = server.get("protocols", {}).get(proto, {})
         port = proto_info.get("port", "55424")
+        public_host, public_port = (public_endpoint_fn or _resolve_public_endpoint)(server, proto)
 
         def _get_cfg():
             ssh, manager = _get_ssh_and_manager(server, proto)
             try:
                 ssh.connect()
-                return _manager_call(manager, "get_client_config", proto, client_id, server["host"], port)
+                return _manager_call(
+                    manager, "get_client_config", proto, client_id,
+                    public_host, port, public_port=public_port,
+                )
             finally:
                 ssh.disconnect()
 
@@ -1764,7 +1776,7 @@ async def _admin_choose_client_user(api: TelegramAPI, chat_id: int, name: str, s
 
 
 @serialize_peer_lifecycle
-async def _admin_create_client(api: TelegramAPI, chat_id: int, message_id: int, server_id: int, proto: str, name: str, user_id: Optional[str], load_data_fn: Callable, save_data_fn: Optional[Callable], generate_vpn_link_fn: Callable, lang: str = "en"):
+async def _admin_create_client(api: TelegramAPI, chat_id: int, message_id: int, server_id: int, proto: str, name: str, user_id: Optional[str], load_data_fn: Callable, save_data_fn: Optional[Callable], generate_vpn_link_fn: Callable, lang: str = "en", public_endpoint_fn: Optional[Callable] = None):
     if not save_data_fn:
         await api.edit_message(chat_id, message_id, f"❌ {_tt(lang, 'saving_not_available')}")
         return
@@ -1775,15 +1787,18 @@ async def _admin_create_client(api: TelegramAPI, chat_id: int, message_id: int, 
         server = data["servers"][server_id]
         proto_info = (server.get("protocols", {}) or {}).get(proto, {})
         port = proto_info.get("port", "55424")
+        public_host, public_port = (public_endpoint_fn or _resolve_public_endpoint)(server, proto)
         ssh, manager = _get_ssh_and_manager(server, proto)
         try:
             ssh.connect()
             if protocol_base(proto) == "telemt":
-                result = manager.add_client(proto, name, server["host"], port)
+                result = manager.add_client(proto, name, public_host, public_port or port)
             elif protocol_base(proto) == "wireguard":
-                result = manager.add_client(name, server["host"])
+                result = manager.add_client(name, public_host, public_port=public_port)
             else:
-                result = manager.add_client(proto, name, server["host"], port)
+                result = manager.add_client(
+                    proto, name, public_host, port, public_port=public_port,
+                )
         finally:
             ssh.disconnect()
         client_id = result.get("client_id") or result.get("clientId")
