@@ -46,7 +46,7 @@ try:
 except ImportError:
     CaptchaGenerator = None
 
-from managers.ssh_manager import SSHManager
+from managers.ssh_manager import SSHManager, configure_jump_resolver
 from managers import ssh_trust
 from managers import split_tunnel
 from managers.awg_manager import AWGManager, normalize_special_junk
@@ -459,6 +459,7 @@ def load_data():
     })
     settings.setdefault('captcha', {'enabled': False})
     settings.setdefault('exit_nodes', {'default_exit_uid': ''})
+    settings.setdefault('ssh_jump', {'jump_host_uid': ''})
     settings.setdefault('telegram', {'token': '', 'enabled': False})
     mail = settings.setdefault('mail', dict(DEFAULT_MAIL_SETTINGS))
     for key, value in DEFAULT_MAIL_SETTINGS.items():
@@ -527,20 +528,73 @@ _SSH_POOL = {}
 _SSH_POOL_LOCK = threading.Lock()
 
 
+def _ssh_jump_server(data, target):
+    jump_uid = str(((data.get('settings', {}).get('ssh_jump') or {})
+                    .get('jump_host_uid') or '')).strip()
+    if not jump_uid or jump_uid == target.get('uid'):
+        return None
+    return next((server for server in data.get('servers', [])
+                 if server.get('uid') == jump_uid), None)
+
+
+def _ssh_manager_for(server, data, *, allow_jump=True):
+    jump = _ssh_jump_server(data, server) if allow_jump else None
+    jump_manager = (_ssh_manager_for(jump, data, allow_jump=False) if jump else None)
+    return SSHManager(
+        host=server['host'], port=server.get('ssh_port', 22),
+        username=server['username'], password=server.get('password'),
+        private_key=server.get('private_key'),
+        connect_cooldown_base=float(server.get('ssh_cooldown_base') or 30),
+        jump_manager=jump_manager,
+    )
+
+
+def _server_for_ssh_endpoint(data, host, port, username=''):
+    matches = [server for server in data.get('servers', [])
+               if server.get('host') == host
+               and int(server.get('ssh_port', 22)) == int(port)
+               and (not username or server.get('username') == username)]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _resolve_ssh_jump_manager(host, port, username):
+    data = load_data()
+    target = _server_for_ssh_endpoint(data, host, port, username)
+    if target is None:
+        return None
+    jump = _ssh_jump_server(data, target)
+    return _ssh_manager_for(jump, data, allow_jump=False) if jump else None
+
+
+def _resolve_ssh_trust_jump(server):
+    data = load_data()
+    target = (next((item for item in data.get('servers', [])
+                    if server.get('uid') and item.get('uid') == server.get('uid')), None)
+              or _server_for_ssh_endpoint(
+                  data, server.get('host'), server.get('ssh_port', 22),
+                  server.get('username', '')))
+    if target is None:
+        return None
+    jump = _ssh_jump_server(data, target)
+    return _ssh_manager_for(jump, data, allow_jump=False) if jump else None
+
+
+configure_jump_resolver(_resolve_ssh_jump_manager)
+ssh_trust.configure_jump_resolver(_resolve_ssh_trust_jump)
+
+
 def get_ssh(server):
-    key = (server['host'], int(server.get('ssh_port', 22)), server['username'])
+    data = load_data()
+    jump = _ssh_jump_server(data, server)
+    jump_identity = ((jump.get('uid'), jump['host'], int(jump.get('ssh_port', 22)),
+                      jump['username']) if jump else None)
+    key = (server['host'], int(server.get('ssh_port', 22)), server['username'],
+           jump_identity)
     cooldown_base = float(server.get('ssh_cooldown_base') or 30)
     with _SSH_POOL_LOCK:
         ssh = _SSH_POOL.get(key)
         if ssh is None:
-            ssh = SSHManager(
-                host=server['host'],
-                port=server.get('ssh_port', 22),
-                username=server['username'],
-                password=server.get('password'),
-                private_key=server.get('private_key'),
-                connect_cooldown_base=cooldown_base,
-            )
+            ssh = _ssh_manager_for(server, data)
             _SSH_POOL[key] = ssh
         # Apply edits without dropping the pooled connection.
         ssh._connect_cooldown_base = cooldown_base
@@ -551,10 +605,15 @@ def get_ssh(server):
 
 def drop_ssh(server):
     """Remove a server's pooled connection (on edit/delete) and close it."""
-    key = (server['host'], int(server.get('ssh_port', 22)), server['username'])
     with _SSH_POOL_LOCK:
-        ssh = _SSH_POOL.pop(key, None)
-    if ssh is not None:
+        removed = [ssh for key, ssh in list(_SSH_POOL.items())
+                   if key[:3] == (server['host'], int(server.get('ssh_port', 22)),
+                                  server['username'])]
+        for key in [key for key in list(_SSH_POOL)
+                    if key[:3] == (server['host'], int(server.get('ssh_port', 22)),
+                                   server['username'])]:
+            _SSH_POOL.pop(key, None)
+    for ssh in removed:
         try:
             ssh.force_disconnect()
         except Exception:
@@ -2789,6 +2848,10 @@ class CaptchaSettings(BaseModel):
     enabled: bool = False
 
 
+class SSHJumpSettings(BaseModel):
+    jump_host_uid: str = ''
+
+
 class SSLSettings(BaseModel):
     enabled: bool = False
     bind_all_interfaces: bool = False
@@ -2867,6 +2930,7 @@ class SaveSettingsRequest(BaseModel):
     appearance: AppearanceSettings
     sync: SyncSettings
     captcha: CaptchaSettings
+    ssh_jump: SSHJumpSettings = SSHJumpSettings()
     telegram: TelegramSettings
     ssl: SSLSettings
     auto_backup: AutoBackupSettings = AutoBackupSettings()
@@ -10616,6 +10680,13 @@ def save_settings(request: Request, payload: SaveSettingsRequest):
     settings['appearance'] = payload.appearance.dict()
     settings['sync'] = payload.sync.dict()
     settings['captcha'] = payload.captcha.dict()
+    jump_host_uid = (payload.ssh_jump.jump_host_uid or '').strip()
+    if jump_host_uid and not any(server.get('uid') == jump_host_uid
+                                 for server in data.get('servers', [])):
+        return JSONResponse({'error': 'Selected SSH jump host is no longer available'},
+                            status_code=400)
+    previous_jump_uid = ((settings.get('ssh_jump') or {}).get('jump_host_uid') or '')
+    settings['ssh_jump'] = {'jump_host_uid': jump_host_uid}
     settings['telegram'] = payload.telegram.dict()
     settings['ssl'] = payload.ssl.dict()
     settings['mail'] = merge_mail_settings(settings.get('mail'), payload.mail.dict())
@@ -10643,6 +10714,15 @@ def save_settings(request: Request, payload: SaveSettingsRequest):
         warnings.append('exit_default_cleared')
     settings['exit_nodes'] = {'default_exit_uid': default_exit_uid}
     save_data(data)
+    if previous_jump_uid != jump_host_uid:
+        with _SSH_POOL_LOCK:
+            pooled = list(_SSH_POOL.values())
+            _SSH_POOL.clear()
+        for ssh in pooled:
+            try:
+                ssh.force_disconnect()
+            except Exception:
+                pass
     logger.info("Settings saved (including captcha, telegram and auto backup)")
 
     # Handle bot start/stop based on new telegram settings

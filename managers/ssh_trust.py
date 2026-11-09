@@ -12,17 +12,24 @@ import sys
 import tempfile
 import threading
 import time
+from contextlib import closing
 
 import paramiko
 
 LOCK = threading.RLock()
 _SECRET = secrets.token_bytes(32)
 _DATA_FILE = None
+_JUMP_RESOLVER = None
 
 
 def configure(data_file):
     global _DATA_FILE
     _DATA_FILE = data_file
+
+
+def configure_jump_resolver(resolver):
+    global _JUMP_RESOLVER
+    _JUMP_RESOLVER = resolver
 
 
 def trust_path():
@@ -71,9 +78,19 @@ def panel_keys():
     return keys
 
 
-def probe(host, port):
+def probe(host, port, jump_manager=None):
     # No username, password, private key, SSH agent or auth method enters here.
-    with socket.create_connection((host, port), timeout=10) as sock:
+    if jump_manager is not None:
+        jump_manager.ensure_connected()
+        jump_transport = (jump_manager.client.get_transport()
+                          if jump_manager.client else None)
+        if not jump_transport or not jump_transport.is_active():
+            raise ConnectionError('SSH jump host transport is unavailable')
+        sock_context = closing(jump_transport.open_channel(
+            'direct-tcpip', (host, port), ('127.0.0.1', 0)))
+    else:
+        sock_context = socket.create_connection((host, port), timeout=10)
+    with sock_context as sock:
         transport = paramiko.Transport(sock)
         try:
             # Match SSHClient.connect: system pins take precedence, and its
@@ -119,7 +136,8 @@ def saved_status(server):
 
 def inspect(server):
     host, port = identity(server)
-    key = probe(host, port)
+    jump_manager = _JUMP_RESOLVER(server) if _JUMP_RESOLVER else None
+    key = probe(host, port, jump_manager)
     name = host_name(host, port)
     with LOCK:
         system, local = system_keys().lookup(name), panel_keys().lookup(name)
@@ -158,7 +176,8 @@ def prepare_enrollment(server, token):
     """Re-probe without authentication or inventory locks; do not write trust."""
     host, port = identity(server)
     payload = _confirmation(server, token)
-    key = probe(host, port)
+    jump_manager = _JUMP_RESOLVER(server) if _JUMP_RESOLVER else None
+    key = probe(host, port, jump_manager)
     if key.get_base64() != payload['key'] or key.get_name() != payload['algorithm']:
         raise ValueError('SSH candidate changed; inspect and verify again')
     return key
