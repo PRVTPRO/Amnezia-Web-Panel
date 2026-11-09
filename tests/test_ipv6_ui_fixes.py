@@ -36,7 +36,7 @@ NEW_KEYS = {
 # setting, seven localized dashboard-management messages, and four jump-host
 # settings messages. This test guards
 # the shared catalogue size as well as IPv6 keys.
-BASE_KEY_COUNT = 1189
+BASE_KEY_COUNT = 1209  # +20 server_load_* keys (2026-11-09)
 
 
 def read_text(path):
