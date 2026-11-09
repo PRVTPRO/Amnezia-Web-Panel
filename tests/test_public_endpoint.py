@@ -537,7 +537,9 @@ class PublicPortForwardTests(PublicEndpointApiTests):
         dropped, _ = panel.public_port_forward_commands(
             'awg3', '', '55425', '8443', public_ip='203.0.113.9')
         self.assertEqual(len(dropped), 1)
-        self.assertIn('-D PREROUTING -p udp -d 203.0.113.9 --dport 8443', dropped[0])
+        self.assertIn('-t nat -S PREROUTING', dropped[0])
+        self.assertIn('--dport 8443 ', dropped[0])
+        self.assertIn('"-d 203.0.113.9"', dropped[0])
 
     def test_rules_are_scoped_to_a_v6_public_ip(self):
         cmds, _ = panel.public_port_forward_commands(
@@ -577,12 +579,13 @@ class PublicPortForwardTests(PublicEndpointApiTests):
         self.assertEqual(len(cmds), 2)  # v4 DNAT + v6 REDIRECT fallback
         v4 = [c for c in cmds if "sh -c 'iptables " in c]
         self.assertEqual(len(v4), 1)
-        self.assertEqual(
-            v4[0],
+        self.assertTrue(v4[0].startswith(
             "sh -c 'iptables -t nat -C PREROUTING -p udp --dport 8443 "
-            '-j DNAT --to-destination "172.17.0.2:55424" 2>/dev/null '
-            '|| iptables -t nat -I PREROUTING 1 -p udp --dport 8443 '
-            '-j DNAT --to-destination "172.17.0.2:55424"\'')
+            '-j DNAT --to-destination "172.17.0.2:55424" 2>/dev/null || { '), v4[0])
+        self.assertIn('iptables -t nat -S PREROUTING | grep -F -- "--dport 8443 "', v4[0])
+        self.assertTrue(v4[0].endswith(
+            'iptables -t nat -I PREROUTING 1 -p udp --dport 8443 '
+            '-j DNAT --to-destination "172.17.0.2:55424"; }\''), v4[0])
         v6 = [c for c in cmds if "sh -c 'ip6tables " in c]
         self.assertIn('-j REDIRECT --to-ports 55424', v6[0])
 
@@ -610,17 +613,19 @@ class PublicPortForwardTests(PublicEndpointApiTests):
         self.assertTrue(all('-p tcp' in c for c in cmds), cmds)
         self.assertTrue(all('-j DNAT' in c for c in cmds), cmds)
 
-    def test_clearing_removes_the_redirect_and_the_dnat_forms(self):
+    def test_clearing_scrubs_every_form_for_the_port(self):
         cmds, _ = panel.public_port_forward_commands(
             'awg3', '', '55424', '8443',
             container_dests={4: '172.17.0.2:55424', 6: None})
-        v4 = [c for c in cmds if 'iptables -t nat -D' in c]
-        self.assertEqual(len(v4), 2, cmds)  # REDIRECT first, then DNAT
-        self.assertIn('-j REDIRECT --to-ports 55424', v4[0])
-        self.assertIn('--to-destination "172.17.0.2:55424"', v4[1])
-        v6 = [c for c in cmds if 'ip6tables -t nat -D' in c]
-        self.assertEqual(len(v6), 1, cmds)  # no destination: only REDIRECT
-        self.assertIn('-j REDIRECT --to-ports 55424', v6[0])
+        v4 = [c for c in cmds if "sh -c 'iptables " in c]
+        self.assertEqual(len(v4), 1, cmds)  # one scrub covers both forms
+        self.assertIn('-t nat -S PREROUTING', v4[0])
+        self.assertIn('--dport 8443 ', v4[0])
+        self.assertIn('-t nat -D PREROUTING $spec', v4[0])
+        self.assertNotIn('--to-destination', v4[0])
+        v6 = [c for c in cmds if "sh -c 'ip6tables " in c]
+        self.assertEqual(len(v6), 1, cmds)
+        self.assertNotIn('DNAT', v6[0])
 
     def test_saving_discovers_docker_and_installs_dnat(self):
         client = self.client()
@@ -734,9 +739,10 @@ class PublicPortForwardTests(PublicEndpointApiTests):
             res = self.set_endpoint(client, protocol='awg2', public_host='203.0.113.9',
                                     public_port='')
         self.assertEqual(res.status_code, 200, res.text)
-        self.assertEqual(len(ssh.commands), 1)  # v4 drop only, scoped like the add
-        self.assertIn('-D PREROUTING', ssh.commands[0])
-        self.assertIn('-d 203.0.113.9 --dport 8443', ssh.commands[0])
+        self.assertEqual(len(ssh.commands), 1)  # v4 scrub only, scoped like the add
+        self.assertIn('-t nat -S PREROUTING', ssh.commands[0])
+        self.assertIn('--dport 8443 ', ssh.commands[0])
+        self.assertIn('"-d 203.0.113.9"', ssh.commands[0])
 
     def test_a_box_that_is_down_keeps_the_setting_and_warns(self):
         client = self.client()

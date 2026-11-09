@@ -112,21 +112,23 @@ class DockerDnatDiscoveryTests(unittest.TestCase):
 
 
 class DnatCommandBuilderTests(unittest.TestCase):
-    def test_dnat_add_is_exactly_guarded(self):
+    def test_dnat_add_probes_the_live_rule_before_rebuilding_it(self):
         cmds, warning = panel.public_port_forward_commands(
             'awg2', '8443', '55424',
             container_dests={4: '172.17.0.2:55424', 6: 'fd00::2:55424'})
         self.assertEqual(warning, '')
-        self.assertIn(
-            "sh -c 'iptables -t nat -C PREROUTING -p udp --dport 8443 "
-            '-j DNAT --to-destination "172.17.0.2:55424" 2>/dev/null '
-            '|| iptables -t nat -I PREROUTING 1 -p udp --dport 8443 '
-            '-j DNAT --to-destination "172.17.0.2:55424"\'', cmds)
-        self.assertIn(
-            "sh -c 'ip6tables -t nat -C PREROUTING -p udp --dport 8443 "
-            '-j DNAT --to-destination "fd00::2:55424" 2>/dev/null '
-            '|| ip6tables -t nat -I PREROUTING 1 -p udp --dport 8443 '
-            '-j DNAT --to-destination "fd00::2:55424"\'', cmds)
+        v4 = [c for c in cmds if c.startswith("sh -c 'iptables ")][0]
+        v6 = [c for c in cmds if c.startswith("sh -c 'ip6tables ")][0]
+        # Healthy box: the -C probe succeeds and nothing is written.
+        self.assertIn('-C PREROUTING -p udp --dport 8443 '
+                      '-j DNAT --to-destination "172.17.0.2:55424"', v4)
+        self.assertIn('2>/dev/null || {', v4)
+        # Stale rule (a recreated container got another address): scrub by
+        # (address, port) first, then insert the current destination.
+        self.assertIn('-t nat -S PREROUTING | grep -F -- "--dport 8443 "', v4)
+        self.assertIn('-I PREROUTING 1 -p udp --dport 8443 '
+                      '-j DNAT --to-destination "172.17.0.2:55424"; }', v4)
+        self.assertIn('-j DNAT --to-destination "fd00::2:55424"; }', v6)
 
     def test_missing_destination_falls_back_to_redirect(self):
         cmds, _ = panel.public_port_forward_commands(
@@ -198,22 +200,31 @@ class DnatCommandBuilderTests(unittest.TestCase):
         self.assertIn('-p tcp', v4)
         self.assertIn('-j DNAT --to-destination "172.17.0.2:443"', v4)
 
-    def test_clearing_removes_redirect_and_dnat(self):
+    def test_clearing_scrubs_every_rule_for_the_port(self):
         cmds, _ = panel.public_port_forward_commands(
             'awg2', '', '55424', '8443',
             container_dests={4: '172.17.0.2:55424', 6: None})
-        v4 = [c for c in cmds if 'iptables -t nat -D' in c]
-        self.assertEqual(len(v4), 2, cmds)  # REDIRECT removal + DNAT removal
-        self.assertTrue(any('-j REDIRECT --to-ports 55424' in c for c in v4), v4)
-        self.assertTrue(any('-j DNAT --to-destination "172.17.0.2:55424"' in c for c in v4), v4)
-        self.assertTrue(all(c.startswith("sh -c 'for i in 1 2 3; do ") for c in cmds), cmds)
-        self.assertTrue(all(c.endswith("2>/dev/null || break; done'") for c in cmds), cmds)
+        v4 = [c for c in cmds if c.startswith("sh -c 'iptables ")]
+        self.assertEqual(len(v4), 1, cmds)  # one reconcile, not one per form
+        self.assertIn('-t nat -S PREROUTING', v4[0])
+        self.assertIn('--dport 8443 ', v4[0])
+        self.assertIn('-t nat -D PREROUTING $spec', v4[0])
+        # Reconciles by port, so a rule pointing at any container address
+        # (including one Docker has already replaced) is gone.
+        self.assertNotIn('--to-destination', v4[0])
 
-    def test_clearing_without_destination_removes_only_redirect(self):
+    def test_clearing_without_a_docker_destination_uses_the_same_scrub(self):
         cmds, _ = panel.public_port_forward_commands(
             'awg2', '', '55424', '8443', container_dests={4: None, 6: None})
-        self.assertTrue(all('-j REDIRECT' in c for c in cmds), cmds)
-        self.assertFalse(any('DNAT' in c for c in cmds), cmds)
+        self.assertTrue(all('-t nat -S PREROUTING' in c for c in cmds), cmds)
+        self.assertFalse(any('--to-destination' in c for c in cmds), cmds)
+
+    def test_reconcile_is_scoped_to_the_public_address(self):
+        cmds, _ = panel.public_port_forward_commands(
+            'awg2', '8443', '55424', public_ip='203.0.113.9',
+            container_dests={4: '172.17.0.2:55424'})
+        self.assertEqual(len(cmds), 1)
+        self.assertIn('| grep -F -- "-d 203.0.113.9"', cmds[0])
 
     def test_same_port_and_services_need_no_rule(self):
         self.assertIsNone(panel.public_port_forward_commands(
