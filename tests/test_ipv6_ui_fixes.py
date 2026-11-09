@@ -32,9 +32,8 @@ NEW_KEYS = {
 }
 
 # +13 install stage keys (staged marketplace installs) on top of 1123.
-# 1136 + 10 rknblock/smartroute stage keys from the store-install commit
-# + 6 srv_warp_stage_* keys (WARP store install).
-BASE_KEY_COUNT = 1146
+# 1155 + 31 split-tunnel keys merged from upstream/main.
+BASE_KEY_COUNT = 1177
 
 
 def read_text(path):

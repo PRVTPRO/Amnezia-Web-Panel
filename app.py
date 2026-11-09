@@ -48,6 +48,7 @@ except ImportError:
 
 from managers.ssh_manager import SSHManager
 from managers import ssh_trust
+from managers import split_tunnel
 from managers.awg_manager import AWGManager, normalize_special_junk
 from server_stats import collect_host_stats
 from managers.awg_plugin_updater import (
@@ -274,6 +275,8 @@ DATA_FILE = os.path.abspath(os.path.expanduser(
     os.environ.get('DATA_FILE') or os.path.join(application_path, 'data.json')
 ))
 ssh_trust.configure(DATA_FILE)
+# Client configs read the bypass list from whatever DATA_FILE is at call time.
+split_tunnel.configure(lambda: DATA_FILE)
 CURRENT_VERSION = "v1.8.7"
 
 # Authoritative operational state for WARP lives outside data.json: dozens of
@@ -460,6 +463,11 @@ def load_data():
     mail = settings.setdefault('mail', dict(DEFAULT_MAIL_SETTINGS))
     for key, value in DEFAULT_MAIL_SETTINGS.items():
         mail.setdefault(key, value)
+    # Imported here so isolated handler/AST tests can run load_data on its own.
+    from managers.split_tunnel import default_settings as split_tunnel_defaults
+    bypass = settings.setdefault('split_tunnel', split_tunnel_defaults())
+    for key, value in split_tunnel_defaults().items():
+        bypass.setdefault(key, value)
     settings.setdefault('ssl', {
         'enabled': False,
         'domain': '',
@@ -9403,12 +9411,16 @@ def api_save_connection_config(request: Request, server_id: int, req: SaveConnec
             return JSONResponse({'error': 'Config is required'}, status_code=400)
         if not req.client_id:
             return JSONResponse({'error': 'Client ID is required'}, status_code=400)
+        # The editor shows the config with the bypass list expanded; store it
+        # folded so the client keeps following later changes to the list.
+        config_text = split_tunnel.fold_config(config_text)
         ssh = get_ssh(server)
         ssh.connect()
         manager = get_protocol_manager(ssh, req.protocol)
         _manager_call(manager, 'save_client_config', req.protocol, req.client_id, config_text)
         ssh.disconnect()
-        return {'status': 'success', **config_payloads(config_text, server, req.protocol)}
+        shown = split_tunnel.apply_to_config(config_text)
+        return {'status': 'success', **config_payloads(shown, server, req.protocol)}
     except Exception as e:
         logger.exception("Error saving connection config")
         return JSONResponse({'error': str(e)}, status_code=500)
@@ -10255,6 +10267,84 @@ def api_my_connection_config(request: Request, connection_id: str):
     except Exception as e:
         logger.exception("Error getting my connection config")
         return JSONResponse({'error': str(e)}, status_code=500)
+
+
+# ======================== SPLIT TUNNEL: NETWORKS OUTSIDE THE VPN ========================
+
+class SplitTunnelSaveRequest(BaseModel):
+    enabled: bool = False
+    networks: str = ''
+    source: str = 'manual'
+
+
+class SplitTunnelPublicRequest(BaseModel):
+    country: str = 'RU'
+    shorten: bool = True
+
+
+def _split_tunnel_error(exc: split_tunnel.SplitTunnelError):
+    status = 502 if exc.code == 'fetch_failed' else 400
+    return JSONResponse({'error': str(exc), 'code': exc.code, **exc.details}, status_code=status)
+
+
+@app.get('/api/settings/split-tunnel', tags=["Settings"])
+def api_split_tunnel_get(request: Request):
+    """The bypass list and what it costs a client (AllowedIPs entries)."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    return split_tunnel.describe(load_data()['settings'].get('split_tunnel'))
+
+
+@app.post('/api/settings/split-tunnel', tags=["Settings"])
+def api_split_tunnel_save(request: Request, req: SplitTunnelSaveRequest):
+    """Store a typed or uploaded list and the on/off switch. Every WireGuard/
+    AmneziaWG config generated afterwards routes these networks outside the
+    tunnel; server-side peers are not touched."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        networks, invalid, ipv6_skipped = split_tunnel.parse_networks(req.networks)
+        if invalid:
+            return JSONResponse({'error': 'Invalid networks', 'code': 'invalid_networks',
+                                 'invalid': invalid[:20], 'invalid_count': len(invalid)},
+                                status_code=400)
+        data = load_data()
+        settings = data['settings']
+        current = settings.get('split_tunnel') or {}
+        networks = split_tunnel.normalize(networks)
+        if networks == list(current.get('networks') or []):
+            # Same list (a toggle, or a re-save): keep where it came from.
+            updated = {**current, 'enabled': bool(req.enabled)}
+        else:
+            source = req.source if req.source in ('manual', 'file') else 'manual'
+            updated = split_tunnel.settings_update(current, networks, source, enabled=req.enabled)
+        settings['split_tunnel'] = updated
+        save_data(data)
+    except split_tunnel.SplitTunnelError as exc:
+        return _split_tunnel_error(exc)
+    return {**split_tunnel.describe(updated), 'ipv6_skipped': ipv6_skipped}
+
+
+@app.post('/api/settings/split-tunnel/public', tags=["Settings"])
+def api_split_tunnel_public(request: Request, req: SplitTunnelPublicRequest):
+    """One click: fetch the country's networks from public registries
+    (RIPEstat, then ipdeny / country-ip-blocks), shorten them unless told
+    not to, store the list and switch it on."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        result = split_tunnel.build_public_list(req.country, shorten_list=req.shorten)
+        data = load_data()
+        settings = data['settings']
+        updated = split_tunnel.settings_update(
+            settings.get('split_tunnel'), result['networks'], result['source'],
+            source_detail=result['source_detail'], shortened=result['shortened'], enabled=True)
+        settings['split_tunnel'] = updated
+        save_data(data)
+    except split_tunnel.SplitTunnelError as exc:
+        return _split_tunnel_error(exc)
+    return {**split_tunnel.describe(updated), 'full_count': result['full_count'],
+            'unresolved_hosts': result['unresolved_hosts']}
 
 
 # ======================== EMAIL DELIVERY (admin) ========================

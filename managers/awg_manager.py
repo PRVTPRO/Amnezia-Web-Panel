@@ -40,6 +40,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 from managers.clients_table import save_clients_table
 import warp_service as warp_logic
+from managers import split_tunnel
 
 logger = logging.getLogger(__name__)
 
@@ -4515,7 +4516,7 @@ PersistentKeepalive = 25
             'client_name': client_name,
             'client_id': client_pub_key,
             'client_ip': client_ip,
-            'config': client_config,
+            'config': split_tunnel.apply_to_config(client_config),
         }
 
     def get_client_config(self, protocol_type, client_id, server_host, port, public_port=None,
@@ -4537,7 +4538,7 @@ PersistentKeepalive = 25
 
         ud = client.get('userData', {})
         if ud.get('customConfig'):
-            return ud['customConfig']
+            return split_tunnel.apply_to_config(ud['customConfig'])
         client_priv_key = ud.get('clientPrivateKey', '')
         client_ip = ud.get('clientIp', '')
         psk = ud.get('psk', '')
@@ -4628,7 +4629,7 @@ AllowedIPs = {peer_allowed_ips}
 Endpoint = {server_host}:{public_port or port}
 PersistentKeepalive = 25
 """
-        return config
+        return split_tunnel.apply_to_config(config)
 
     @_serialized_table_write
     def toggle_client(self, protocol_type, client_id, enable):
