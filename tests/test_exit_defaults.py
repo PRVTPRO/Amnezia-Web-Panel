@@ -125,7 +125,14 @@ class DefaultExitNodeSettingsTests(unittest.TestCase):
         self.assertIn('id="exitDefaultNode"', page)
         self.assertRegex(page, r"async function loadExitNodes\(")
         self.assertIn("const exit_nodes = { default_exit_uid:", page)
-        self.assertIn('self_service, ssh_jump, exit_nodes })', page)
+        save = page[page.index('async function saveSettings()'):]
+        payload = re.search(r'body:\s*JSON\.stringify\(\s*\{([^{}]*)\}\s*\)', save)
+        self.assertIsNotNone(payload, 'settings save must serialize its fields')
+        fields = [field.strip() for field in payload.group(1).split(',')]
+        expected = {'appearance', 'sync', 'captcha', 'telegram', 'ssl', 'mail',
+                    'auto_backup', 'self_service', 'ssh_jump', 'exit_nodes', 'panel_access'}
+        self.assertEqual(set(fields), expected)
+        self.assertEqual(len(fields), len(expected), 'duplicate settings field')
         # the saved uid comes from the server, so it is not interpolated raw
         self.assertIn("| tojson }};", page[page.index('async function loadExitNodes'):][:600])
 

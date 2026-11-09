@@ -4,6 +4,7 @@ The checked artefacts are text only: templates/server.html,
 static/css/style.css and translations/*.json. No browser and no server.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -31,12 +32,20 @@ NEW_KEYS = {
     "server_ipv6_apply_or_revert_hint",
 }
 
-# +13 install stage keys (staged marketplace installs) on top of 1123.
-# 1155 + 31 split-tunnel keys merged from upstream/main, the panel bind
-# setting, seven localized dashboard-management messages, and four jump-host
-# settings messages. This test guards
-# the shared catalogue size as well as IPv6 keys.
-BASE_KEY_COUNT = 1209  # +20 server_load_* keys (2026-11-09)
+# The 1218 key names at 20fc73c, immediately before panel access (#305).
+# Freeze names, not translated values: a count alone misses a removed key
+# replaced by an unrelated one. Register future additions explicitly below.
+PRE_PANEL_ACCESS_KEYS_SHA256 = 'c70dff505a825b0a8506b2d1ca7d76fca9378e3f9514cc44231f7fd2a847af36'
+PANEL_ACCESS_KEYS = {
+    'panel_access_title',
+    'panel_access_intro',
+    'panel_access_ip_enable',
+    'panel_access_ip_hint',
+    'panel_access_ip_list_label',
+    'panel_access_domain_only',
+    'panel_access_domain_hint',
+    'panel_access_domain_label',
+}
 
 
 def read_text(path):
@@ -182,12 +191,16 @@ class TestC6Translations(unittest.TestCase):
         base = sets[LOCALES[0]]
         for locale in LOCALES[1:]:
             self.assertEqual(sets[locale], base, locale)
-        self.assertEqual(len(base), BASE_KEY_COUNT + len(NEW_KEYS))
+        self.assertTrue(PANEL_ACCESS_KEYS <= base, 'panel access translations missing')
+        previous = '\n'.join(sorted(base - PANEL_ACCESS_KEYS))
+        self.assertEqual(hashlib.sha256(previous.encode('utf-8')).hexdigest(),
+                         PRE_PANEL_ACCESS_KEYS_SHA256,
+                         'Existing catalogue changed outside the declared additions')
 
     def test_new_keys_present_in_every_locale(self):
         for locale in LOCALES:
             data = translation(locale)
-            for key in NEW_KEYS:
+            for key in NEW_KEYS | PANEL_ACCESS_KEYS:
                 self.assertIn(key, data)
                 self.assertTrue(str(data[key]).strip(), "%s empty in %s" % (key, locale))
 
