@@ -81,6 +81,7 @@
         text-align: left;
     }
 </style>
+<link rel="stylesheet" href="/static/css/server-load.css?v={{ static_v }}">
 {% endblock %}
 
 {% block content %}
@@ -95,6 +96,15 @@
             <a href="/servers/new" class="btn btn-primary">
                 <span>＋</span> {{ _('add_server') }}
             </a>
+            <button type="button" class="btn btn-secondary" id="serverLoadBtn" onclick="openServerLoad()">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M3 3v18h18" />
+                    <path d="M7 14l4-4 3 3 5-6" />
+                </svg>
+                <span data-i18n="server_load_button">{{ _('server_load_button') }}</span>
+                <i class="server-load-live-dot" aria-hidden="true"></i>
+            </button>
             {% else %}
             <span class="text-muted text-sm">{{ _('add_server_admin_only') }}</span>
             {% endif %}
@@ -390,6 +400,41 @@
     </div>
 </div>
 {% endif %}
+<!-- ===== Server load modal ===== -->
+<div class="modal-backdrop" id="serverLoadModal">
+    <div class="modal server-load-modal" role="dialog" aria-modal="true" aria-label="{{ _('server_load_title') }}">
+        <div class="modal-header server-load-header">
+            <div class="server-load-heading">
+                <h2 class="modal-title" data-i18n="server_load_title">{{ _('server_load_title') }}</h2>
+                <p class="server-load-subtitle" id="serverLoadSubtitle"></p>
+            </div>
+            <div class="server-load-header__actions">
+                <button type="button" class="btn btn-secondary btn-sm btn-icon" onclick="refreshServerLoad()"
+                    aria-label="{{ _('server_load_refresh') }}" title="{{ _('server_load_refresh') }}">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                        stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M21 12a9 9 0 1 1-3-6.7" />
+                        <path d="M21 3v6h-6" />
+                    </svg>
+                </button>
+                <button type="button" class="modal-close" onclick="closeServerLoad()"
+                    aria-label="{{ _('close') }}">×</button>
+            </div>
+        </div>
+        <div class="server-load-grid" id="serverLoadGrid"></div>
+        <div class="modal-footer server-load-footer">
+            <span class="server-load-hint" data-i18n="server_load_auto">{{ _('server_load_auto') }}</span>
+            <button type="button" class="btn btn-secondary" onclick="refreshServerLoad()">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M21 12a9 9 0 1 1-3-6.7" />
+                    <path d="M21 3v6h-6" />
+                </svg>
+                <span data-i18n="server_load_refresh">{{ _('server_load_refresh') }}</span>
+            </button>
+        </div>
+    </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -905,4 +950,15 @@
         }
     }
 </script>
+<script>
+    window.SERVER_LOAD_I18N = {{ {
+        'button': _('server_load_button'), 'title': _('server_load_title'), 'refresh': _('server_load_refresh'),
+        'updated': _('server_load_updated'), 'auto': _('server_load_auto'), 'uptime': _('server_load_uptime'),
+        'offline': _('server_load_offline'), 'loading': _('server_load_loading'), 'critical': _('server_load_critical'),
+        'disk_low': _('server_load_disk_low'), 'ram_high': _('server_load_ram_high'), 'cpu_high': _('server_load_cpu_high'),
+        'error': _('server_load_error'), 'empty': _('server_load_empty'), 'retry': _('server_load_retry'),
+        'cpu': _('server_load_cpu'), 'ram': _('server_load_ram'), 'disk': _('server_load_disk'), 'net': _('server_load_net')
+    } | tojson }};
+</script>
+<script src="/static/js/server-load.js?v={{ static_v }}" defer></script>
 {% endblock %}

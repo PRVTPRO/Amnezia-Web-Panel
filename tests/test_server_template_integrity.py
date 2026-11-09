@@ -61,7 +61,7 @@ class TestServerTemplateIntegrity(unittest.TestCase):
         after the reveal makes the card pop in a round-trip after every other
         badge (the owner-reported flicker)."""
         source = SERVER_TEMPLATE.read_text(encoding="utf-8")
-        start = source.index("async function checkServer()")
+        start = source.index("async function checkServer(")
         end = source.index("function updateStatusCounts", start)
         body = source[start:end]
 
@@ -89,11 +89,11 @@ class TestServerTemplateIntegrity(unittest.TestCase):
         """The entry point must live in the existing header action row."""
         source = SERVER_TEMPLATE.read_text(encoding="utf-8")
         header = source.index('class="page-header__actions"')
-        check_btn = source.index('id="checkBtn"', header)
         plugin_btn = source.index('id="awgPluginBtn"', header)
-        self.assertLess(plugin_btn, check_btn)
-        self.assertIn('onclick="openAwgPluginModal()"', source[plugin_btn:check_btn])
-        self.assertIn('class="awg-plugin-dot"', source[plugin_btn:check_btn])
+        ip_btn = source.index('id="ipSettingsBtn"', header)
+        self.assertLess(plugin_btn, ip_btn)
+        self.assertIn('onclick="openAwgPluginModal()"', source[plugin_btn:ip_btn])
+        self.assertIn('class="awg-plugin-dot"', source[plugin_btn:ip_btn])
 
     def test_awg_plugin_modal_uses_the_shared_modal_shell(self):
         source = SERVER_TEMPLATE.read_text(encoding="utf-8")

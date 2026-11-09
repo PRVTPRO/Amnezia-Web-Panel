@@ -193,6 +193,125 @@
         .awg-progress-fill { transition: none; }
         .awg-progress-fill::after { animation: none; }
     }
+    /* Server load: the four stat pills collapsed into a single button with a
+       popover, so the header keeps one control at any viewport width. */
+    .server-stats-wrap { position: relative; display: inline-flex; }
+    .server-stats-btn { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; }
+    .server-stats-btn svg { flex: 0 0 auto; opacity: .85; }
+    .server-stats-btn[aria-expanded="true"] { border-color: var(--border-focus); }
+    .server-stats-chevron { font-size: .72rem; line-height: 1; transition: transform var(--transition-fast); }
+    .server-stats-btn[aria-expanded="true"] .server-stats-chevron { transform: rotate(180deg); }
+    .server-stats-popover {
+        position: absolute;
+        top: calc(100% + 8px);
+        inset-inline-end: 0;
+        z-index: 1200;
+        width: 340px;
+        max-width: calc(100vw - 24px);
+        background: var(--bg-card);
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-lg);
+        box-shadow: var(--shadow-lg);
+        padding: 13px 14px 11px;
+    }
+    .server-stats-head,
+    .server-stats-foot {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        font-family: 'SF Mono', 'Fira Code', monospace;
+        font-size: .66rem;
+        color: var(--text-muted);
+    }
+    .server-stats-head { padding-bottom: 8px; border-bottom: 1px solid var(--border-color); }
+    .server-stats-foot { padding-top: 9px; border-top: 1px solid var(--border-color); }
+    .server-stats-title { font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+    .server-stats-time { font-variant-numeric: tabular-nums; }
+    .server-stat-row {
+        display: grid;
+        grid-template-columns: 17px minmax(0, 1fr) auto;
+        gap: 3px 8px;
+        align-items: center;
+        padding: 9px 0;
+        border-bottom: 1px solid var(--border-color);
+    }
+    .server-stat-row:last-child { border-bottom: 0; }
+    .server-stat-ico { display: inline-flex; align-items: center; justify-content: center; color: var(--text-muted); }
+    .server-stat-ico svg { width: 13px; height: 13px; }
+    .server-stat-label {
+        font-size: .7rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: .08em;
+        color: var(--text-secondary);
+    }
+    .server-stat-value {
+        font-family: 'SF Mono', 'Fira Code', monospace;
+        font-size: .82rem;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+        color: var(--text-primary);
+    }
+    .server-stat-value.is-small,
+    .server-stat-value .is-small { font-size: .68rem; }
+    .server-stat-value .unit { font-size: .64rem; font-weight: 500; color: var(--text-muted); margin-left: 2px; }
+    .server-stat-bar {
+        grid-column: 2 / -1;
+        height: 5px;
+        border-radius: 999px;
+        background: var(--bg-primary);
+        border: 1px solid var(--border-color);
+        overflow: hidden;
+    }
+    .server-stat-bar > span { display: block; height: 100%; background: var(--success); border-radius: inherit; }
+    .server-stat-bar.is-warn > span { background: var(--warning); }
+    .server-stat-bar.is-danger > span { background: var(--danger); }
+    .server-stat-split { display: flex; }
+    .server-stat-split > span { border-radius: 0; }
+    .server-stat-split .rx { background: var(--success); }
+    .server-stat-split .tx { background: var(--accent-light); }
+    .server-stat-sub {
+        grid-column: 2 / -1;
+        font-family: 'SF Mono', 'Fira Code', monospace;
+        font-size: .62rem;
+        color: var(--text-muted);
+        font-variant-numeric: tabular-nums;
+    }
+    .server-stat-alert {
+        margin-top: 8px;
+        padding: 5px 8px;
+        border: 1px solid var(--danger-border);
+        border-radius: var(--radius-sm);
+        background: var(--danger-bg);
+        color: var(--danger);
+        font-size: .68rem;
+        font-weight: 600;
+    }
+    .server-stats-skel {
+        height: 9px;
+        margin: 10px 0;
+        border-radius: 999px;
+        background: var(--bg-secondary);
+        animation: serverStatsPulse 1.2s ease-in-out infinite;
+    }
+    @keyframes serverStatsPulse { 0%, 100% { opacity: 1; } 50% { opacity: .38; } }
+    @media (prefers-reduced-motion: reduce) {
+        .server-stats-skel { animation: none; }
+    }
+    @media (max-width: 520px) {
+        .server-stats-popover {
+            position: fixed;
+            inset-inline: 12px;
+            /* `top: 100%` would resolve against the viewport once the popover
+               is fixed, so anchor it to the bottom edge instead. */
+            top: auto;
+            bottom: 12px;
+            width: auto;
+            max-width: none;
+        }
+    }
 </style>
 {% endblock %}
 
@@ -353,18 +472,55 @@
         }
     }
 
-    async function loadAwgPluginStatus() {
+    const AWG_PLUGIN_CACHE_TTL = 12 * 60 * 60 * 1000;
+    // The badge is cosmetic: one probe per browser per half-day is enough, and
+    // a known-but-old state beats "unknown" right after a page reload.
+    const AWG_PLUGIN_CACHE_KEY = 'awgPluginStatus:v1:' + {{ (server.uid or server.host) | tojson }};
+
+    function readAwgPluginCache() {
         try {
-            awgPluginStatus = await apiCall('/api/servers/{{ server_id }}/awg-plugin/status');
-            const components = Object.values(awgPluginStatus.components || {});
-            setAwgPluginButton(components.some(item => item.update_available) ? 'update' : 'ok');
+            const raw = window.localStorage.getItem(AWG_PLUGIN_CACHE_KEY);
+            if (!raw) return null;
+            const entry = JSON.parse(raw);
+            if (!entry || !entry.ts || typeof entry.data === 'undefined') return null;
+            return entry;
         } catch (error) {
+            return null;
+        }
+    }
+
+    function writeAwgPluginCache(data) {
+        try {
+            window.localStorage.setItem(AWG_PLUGIN_CACHE_KEY, JSON.stringify({ts: Date.now(), data: data}));
+        } catch (error) {
+            // Private mode or quota: the cache is an optimisation only.
+        }
+    }
+
+    function applyAwgPluginStatus(data) {
+        awgPluginStatus = data;
+        const components = Object.values((data && data.components) || {});
+        setAwgPluginButton(components.some(item => item.update_available) ? 'update' : 'ok');
+        return awgPluginStatus;
+    }
+
+    async function loadAwgPluginStatus(force) {
+        const cached = readAwgPluginCache();
+        if (!force && cached && Date.now() - cached.ts < AWG_PLUGIN_CACHE_TTL) {
+            return applyAwgPluginStatus(cached.data);
+        }
+        try {
+            const data = await apiCall('/api/servers/{{ server_id }}/awg-plugin/status');
+            writeAwgPluginCache(data);
+            return applyAwgPluginStatus(data);
+        } catch (error) {
+            if (cached && cached.data) return applyAwgPluginStatus(cached.data);
             awgPluginStatus = null;
             setAwgPluginButton('unknown');
             const btn = document.getElementById('awgPluginBtn');
             if (btn) btn.title = error.message;
+            return awgPluginStatus;
         }
-        return awgPluginStatus;
     }
 
     function openAwgPluginModal() {
@@ -664,7 +820,7 @@
                 if (logBox) logBox.open = true;
             }
             if (data.state === 'success' || data.state === 'manual_step_required') {
-                await loadAwgPluginStatus();
+                await loadAwgPluginStatus(true);
             }
             delete awgPluginOps[component];
         } catch (error) {
@@ -899,9 +1055,9 @@
 <!-- Server Info Header -->
 <div class="card page-header-card">
     <div class="page-header page-header--card">
-        <div class="flex items-center gap-md">
+        <div class="server-header__identity flex items-center gap-md">
             <div class="server-icon" style="width:56px; height:56px; font-size:1.6rem;">🖥</div>
-            <div>
+            <div class="server-header__details">
                 <h1 style="font-size:1.4rem; font-weight:700;">{{ server.name }}</h1>
                 <div class="font-mono text-muted text-sm">{{ server.host }}:{{ server.ssh_port }} • {{ server.username
                     }}</div>
@@ -909,7 +1065,29 @@
             </div>
         </div>
         <div class="page-header__actions">
-            <div class="flex gap-sm items-center" id="serverStats" style="display:none;"></div>
+                        <div class="server-stats-wrap" id="serverStatsWrap">
+                <button class="btn btn-secondary btn-sm server-stats-btn" id="serverStatsBtn" type="button"
+                        onclick="toggleServerStats(event)" aria-expanded="false" aria-controls="serverStatsPopover">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M3 3v18h18"></path>
+                        <path d="M7 15l4-5 3 3 5-7"></path>
+                    </svg>
+                    <span>{{ _('server_load_short') }}</span>
+                    <span class="server-stats-chevron" aria-hidden="true">▾</span>
+                </button>
+                <div class="server-stats-popover" id="serverStatsPopover" role="dialog"
+                     aria-label="{{ _('server_load_title') }}" hidden>
+                    <div class="server-stats-head">
+                        <span class="server-stats-title">{{ _('server_load_title') }}</span>
+                        <span class="server-stats-time" id="serverStatsTime"></span>
+                    </div>
+                    <div id="serverStatsBody">
+                        <div class="server-stats-skel"></div>
+                    </div>
+                    <div class="server-stats-foot" id="serverStatsFoot" hidden></div>
+                </div>
+            </div>
             {% if current_user and current_user.role == 'admin' %}
             <button class="btn btn-sm ssh-trust-btn" type="button" id="sshTrustBtn" onclick="openSSHTrustModal()">
                 <span class="ssh-trust-dot" id="sshTrustDot"></span>
@@ -923,10 +1101,6 @@
             {% endif %}
             <button class="btn btn-secondary btn-sm" onclick="openIpSettings()" id="ipSettingsBtn">
                 <span>🌐</span> {{ _('server_ipv6_configure_ip') }}
-            </button>
-            <button class="btn btn-secondary btn-sm" onclick="checkServer()" id="checkBtn">
-                <span id="checkBtnText">{{ _('server_check') }}</span>
-                <div class="spinner hidden" id="checkSpinner"></div>
             </button>
         </div>
     </div>
@@ -2685,7 +2859,7 @@
             serverUid: document.body.dataset.serverUid || '',
             sshCooldown: SSH_COOLDOWN_BASE,
             peerPollInterval: PEER_POLL_INTERVAL,
-            onCheck: checkServer,
+            onCheck: () => checkServer(true),
             onCooldownChange(value) { SSH_COOLDOWN_BASE = value; },
             onPollChange(value) {
                 PEER_POLL_INTERVAL = value;
@@ -2920,23 +3094,142 @@
     }
 
     // ========== Server Stats ==========
-    async function loadServerStats() {
+    // One button + popover replaces the four header pills: the endpoint is
+    // polled at most once per 15 s and only when the popover is opened.
+    const SERVER_STAT_ICONS = {
+        cpu: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2"></rect><path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3"></path></svg>',
+        ram: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="18" height="10" rx="1"></rect><path d="M7 17v3M12 17v3M17 17v3M7 12h2M11 12h2M15 12h2"></path></svg>',
+        disk: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M3 14h18M7 17h.01M11 17h.01"></path></svg>',
+        net: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 20V4M7 4L4 7M7 4l3 3M17 4v16M17 20l-3-3M17 20l3-3"></path></svg>'
+    };
+    let serverStatsLast = {data: null, ts: 0};
+
+    function serverStatsPct(value) {
+        const num = Number(value);
+        if (!isFinite(num)) return 0;
+        return Math.max(0, Math.min(100, num));
+    }
+
+    function serverStatsBarClass(pct) {
+        if (pct >= 90) return 'is-danger';
+        if (pct >= 75) return 'is-warn';
+        return '';
+    }
+
+    // value/bar/sub are ready HTML: only the wrapper structure lives here.
+    function serverStatsRow(icon, label, value, bar, sub) {
+        return '<div class="server-stat-row">' +
+            '<span class="server-stat-ico" aria-hidden="true">' + (SERVER_STAT_ICONS[icon] || '') + '</span>' +
+            '<span class="server-stat-label">' + escapeHtml(label) + '</span>' +
+            '<span class="server-stat-value">' + value + '</span>' +
+            (bar || '') +
+            (sub ? '<span class="server-stat-sub">' + sub + '</span>' : '') +
+            '</div>';
+    }
+
+    function renderServerStats(stats) {
+        const body = document.getElementById('serverStatsBody');
+        const foot = document.getElementById('serverStatsFoot');
+        if (!body || !foot) return;
+        const data = stats || {};
+        const failed = data.errors || {};
+        const ok = field => !(field in failed);
+        const value = (pct, fresh) => fresh
+            ? serverStatsPct(pct) + '<span class="unit">%</span>'
+            : '—';
+        const bar = (pct, fresh) => fresh
+            ? '<span class="server-stat-bar ' + serverStatsBarClass(serverStatsPct(pct)) + '">' +
+              '<span style="width:' + serverStatsPct(pct) + '%"></span></span>'
+            : '';
+        const ratio = (used, total) => formatBytes(used) + ' / ' + formatBytes(total);
+
+        const cpuPct = serverStatsPct(data.cpu);
+        const ramPct = serverStatsPct(data.ram_percent);
+        const diskPct = serverStatsPct(data.disk_percent);
+        const rx = Number(data.net_rx) || 0;
+        const tx = Number(data.net_tx) || 0;
+        // A split bar needs a ratio; with no traffic at all show it half/half
+        // instead of a zero-width segment.
+        const rxShare = (rx + tx) > 0 ? (rx / (rx + tx)) * 100 : 50;
+
+        let html = '';
+        html += serverStatsRow('cpu', _('server_load_cpu'), value(cpuPct, ok('cpu')), bar(cpuPct, ok('cpu')), '');
+        html += serverStatsRow('ram', _('server_load_ram'), value(ramPct, ok('ram')), bar(ramPct, ok('ram')),
+            ok('ram') && data.ram_total ? ratio(data.ram_used, data.ram_total) : '');
+        html += serverStatsRow('disk', _('server_load_disk'), value(diskPct, ok('disk')), bar(diskPct, ok('disk')),
+            ok('disk') && data.disk_total ? ratio(data.disk_used, data.disk_total) : '');
+        html += serverStatsRow('net', _('server_load_net'),
+            ok('network')
+                ? '<span class="is-small">↓ ' + formatBytes(rx) + ' · ↑ ' + formatBytes(tx) + '</span>'
+                : '—',
+            ok('network')
+                ? '<span class="server-stat-bar server-stat-split">' +
+                  '<span class="rx" style="width:' + rxShare + '%"></span>' +
+                  '<span class="tx" style="width:' + (100 - rxShare) + '%"></span></span>'
+                : '', '');
+
+        if (ok('cpu') && cpuPct >= 90) html += '<div class="server-stat-alert">' + escapeHtml(_('server_load_cpu_high')) + '</div>';
+        if (ok('ram') && ramPct >= 90) html += '<div class="server-stat-alert">' + escapeHtml(_('server_load_ram_high')) + '</div>';
+        if (ok('disk') && diskPct >= 90) html += '<div class="server-stat-alert">' + escapeHtml(_('server_load_disk_low')) + '</div>';
+        body.innerHTML = html;
+
+        const now = new Date();
+        const localTime = now.toLocaleTimeString();
+        const time = document.getElementById('serverStatsTime');
+        if (time) time.textContent = localTime;
+        foot.innerHTML =
+            '<span>' + escapeHtml(_('server_load_uptime')) + ': ' + escapeHtml(String(data.uptime || '—')) + '</span>' +
+            '<span>' + escapeHtml(_('server_load_updated')) + ' ' + escapeHtml(localTime) + '</span>';
+        foot.hidden = false;
+    }
+
+    async function loadServerStats(force) {
+        if (!force && serverStatsLast.data && Date.now() - serverStatsLast.ts < 15000) {
+            return serverStatsLast.data;
+        }
+        // Deliberately keep the previous reading on a failed refresh: a flaky
+        // link should not blank a popover the user is already looking at.
         try {
             const stats = await apiCall(`/api/servers/${SERVER_ID}/stats`, 'POST');
-            const el = document.getElementById('serverStats');
-            el.style.display = '';
-            const failed = stats.errors || {};
-            const percent = (field, value) => field in failed ? '—' : `${value || 0}%`;
-            el.innerHTML = `
-                <span class="stat-pill" title="CPU">⚡ ${percent('cpu', stats.cpu)}</span>
-                <span class="stat-pill" title="RAM: ${formatBytes(stats.ram_used)} / ${formatBytes(stats.ram_total)}">🧠 ${percent('ram', stats.ram_percent)}</span>
-                <span class="stat-pill" title="Disk: ${formatBytes(stats.disk_used)} / ${formatBytes(stats.disk_total)}">💾 ${percent('disk', stats.disk_percent)}</span>
-                <span class="stat-pill" title="Network">🌐 ${'network' in failed ? '—' : `↓${formatBytes(stats.net_rx)} ↑${formatBytes(stats.net_tx)}`}</span>
-            `;
+            serverStatsLast = {data: stats, ts: Date.now()};
+            renderServerStats(stats);
         } catch (err) {
             console.warn('Stats load failed:', err);
+            if (!serverStatsLast.data) {
+                const body = document.getElementById('serverStatsBody');
+                if (body) body.innerHTML = '<div class="server-stat-alert">' + escapeHtml(_('server_load_error')) + '</div>';
+            }
         }
+        return serverStatsLast.data;
     }
+
+    function toggleServerStats(event) {
+        if (event) event.stopPropagation();
+        const popover = document.getElementById('serverStatsPopover');
+        const btn = document.getElementById('serverStatsBtn');
+        if (!popover || !btn) return;
+        const opening = popover.hidden;
+        popover.hidden = !opening;
+        btn.setAttribute('aria-expanded', opening ? 'true' : 'false');
+        // Stale data is refreshed on open, but never on every click: the
+        // endpoint shells out to the host.
+        if (opening && Date.now() - serverStatsLast.ts > 30000) loadServerStats();
+    }
+
+    function closeServerStats() {
+        const popover = document.getElementById('serverStatsPopover');
+        const btn = document.getElementById('serverStatsBtn');
+        if (popover) popover.hidden = true;
+        if (btn) btn.setAttribute('aria-expanded', 'false');
+    }
+
+    document.addEventListener('click', (event) => {
+        const target = event.target;
+        if (!target || !target.closest || !target.closest('.server-stats-wrap')) closeServerStats();
+    });
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') closeServerStats();
+    });
 
     // ========== IPv4 / IPv6 ==========
     let ipStatusCache = null;
@@ -3441,16 +3734,12 @@
     }
 
     // ========== Server Check ==========
-    async function checkServer() {
+    async function checkServer(forcePlugins) {
         loadRknBlock();
         if (typeof loadWarpStatus === 'function') loadWarpStatus(true);
         setInstalledAppsLoading(true);
-        const btn = document.getElementById('checkBtn');
-        const text = document.getElementById('checkBtnText');
-        const spinner = document.getElementById('checkSpinner');
-        btn.disabled = true;
-        text.textContent = _('server_checking');
-        spinner.classList.remove('hidden');
+        // Manual check bypasses the 12 h plugin cache.
+        if (forcePlugins) loadAwgPluginStatus(true);
         // Smart Route is host-level: its status is a separate probe, not part
         // of the /check payload. Start it in parallel with the check and
         // settle it before updateStatusCounts() reveals the grid, otherwise
@@ -3522,9 +3811,6 @@
             // the spinner and the retry button blocked.
             setInstalledAppsLoading(false);
             applyInstalledAppsVisibility();
-            btn.disabled = false;
-            text.textContent = _('server_check');
-            spinner.classList.add('hidden');
         }
     }
 

@@ -1,0 +1,498 @@
+/* ============================================================
+   Server load — live load cards for the servers list page
+   Every colour comes from the global design tokens, so the
+   light and dark themes follow automatically. All selectors
+   are scoped to .server-load-* except the reused .modal shell.
+   ============================================================ */
+
+/* ===== Live dot in the page-header button ===== */
+.server-load-live-dot {
+    display: inline-block;
+    flex: 0 0 auto;
+    width: 6px;
+    height: 6px;
+    margin-inline-start: 2px;
+    border-radius: var(--radius-full);
+    background: var(--success);
+    box-shadow: 0 0 0 3px var(--success-bg);
+    animation: serverLoadPulse 2.4s ease-in-out infinite;
+}
+
+@keyframes serverLoadPulse {
+    0%, 100% { box-shadow: 0 0 0 2px var(--success-bg); }
+    50% { box-shadow: 0 0 0 4px transparent; }
+}
+
+/* ===== Modal shell ===== */
+.modal.server-load-modal {
+    display: flex;
+    flex-direction: column;
+    width: 94%;
+    max-width: 1150px;
+    max-height: 90vh;
+    overflow: hidden;
+    padding: var(--space-lg);
+}
+
+.server-load-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-md);
+    margin-bottom: var(--space-md);
+}
+
+.server-load-heading {
+    min-width: 0;
+}
+
+.server-load-subtitle {
+    margin: 4px 0 0;
+    color: var(--text-muted);
+    font-size: var(--text-sm);
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+}
+
+.server-load-header__actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    flex: 0 0 auto;
+}
+
+/* ===== Grid ===== */
+.server-load-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-content: start;
+    gap: var(--space-md);
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding-inline-end: 2px;
+}
+
+@media (min-width: 760px) {
+    .server-load-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (min-width: 1100px) {
+    .server-load-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+}
+
+.server-load-empty {
+    grid-column: 1 / -1;
+    padding: var(--space-2xl) var(--space-md);
+    text-align: center;
+    color: var(--text-muted);
+    font-size: var(--text-sm);
+}
+
+/* ===== Card ===== */
+.server-load-card {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+    min-width: 0;
+    padding: var(--space-md);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    background: var(--bg-secondary);
+    transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.server-load-card:hover {
+    border-color: var(--border-hover);
+    box-shadow: var(--shadow-sm);
+}
+
+.server-load-card.is-critical {
+    border-color: var(--danger-border);
+    box-shadow: inset 0 0 0 1px var(--danger-border);
+}
+
+.server-load-card.is-offline {
+    opacity: 0.7;
+}
+
+/* ===== Card head ===== */
+.server-load-card__head {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    min-width: 0;
+}
+
+.server-load-card__dot {
+    flex: 0 0 auto;
+    width: 8px;
+    height: 8px;
+    border-radius: var(--radius-full);
+    background: var(--success);
+    box-shadow: 0 0 0 3px var(--success-bg);
+}
+
+.server-load-card.is-offline .server-load-card__dot {
+    background: var(--text-muted);
+    box-shadow: 0 0 0 3px var(--border-color);
+}
+
+.server-load-card.is-critical .server-load-card__dot {
+    background: var(--danger);
+    box-shadow: 0 0 0 3px var(--danger-bg);
+}
+
+.server-load-card__name {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-primary);
+    font-size: var(--text-base);
+    font-weight: 600;
+}
+
+.server-load-badge {
+    flex: 0 0 auto;
+    padding: 2px 8px;
+    border: 1px solid var(--danger-border);
+    border-radius: var(--radius-full);
+    background: var(--danger-bg);
+    color: var(--danger);
+    font-size: var(--text-xs);
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+}
+
+.server-load-badge[hidden] {
+    display: none;
+}
+
+.server-load-card__host {
+    margin-top: calc(-1 * var(--space-xs));
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    direction: ltr;
+    unicode-bidi: isolate;
+    overflow-wrap: anywhere;
+}
+
+/* ===== CPU figure + sparkline ===== */
+.server-load-cpu {
+    display: flex;
+    align-items: center;
+    gap: var(--space-md);
+    min-width: 0;
+}
+
+.server-load-cpu__fig {
+    display: flex;
+    align-items: baseline;
+    gap: 2px;
+    flex: 0 0 auto;
+}
+
+.server-load-cpu__value {
+    color: var(--text-primary);
+    font-size: 1.7rem;
+    font-weight: 700;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+}
+
+.server-load-cpu__unit {
+    color: var(--text-muted);
+    font-size: var(--text-sm);
+    font-weight: 600;
+}
+
+.server-load-cpu__spark {
+    display: block;
+    flex: 1 1 auto;
+    width: 100%;
+    min-width: 0;
+    height: 40px;
+    color: var(--accent);
+}
+
+.server-load-cpu.is-warning .server-load-cpu__spark {
+    color: var(--warning);
+}
+
+.server-load-cpu.is-critical .server-load-cpu__spark {
+    color: var(--danger);
+}
+
+.server-load-spark__line {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    vector-effect: non-scaling-stroke;
+}
+
+.server-load-spark__area {
+    fill: currentColor;
+    stroke: none;
+    opacity: 0.07;
+}
+
+/* ===== RAM / disk rows ===== */
+.server-load-row {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+
+.server-load-row__top {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-sm);
+}
+
+.server-load-row__label {
+    color: var(--text-secondary);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.server-load-row__pct {
+    color: var(--text-primary);
+    font-size: var(--text-sm);
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+
+.server-load-bar {
+    height: 4px;
+    border-radius: var(--radius-full);
+    background: var(--bg-card-hover);
+    overflow: hidden;
+}
+
+.server-load-bar__fill {
+    display: block;
+    width: 0;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--success);
+    transition: width var(--transition-base), background var(--transition-fast);
+}
+
+.server-load-row.is-warning .server-load-bar__fill {
+    background: var(--warning);
+}
+
+.server-load-row.is-critical .server-load-bar__fill {
+    background: var(--danger);
+}
+
+.server-load-row__meta {
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    font-variant-numeric: tabular-nums;
+    direction: ltr;
+    unicode-bidi: isolate;
+    overflow-wrap: anywhere;
+}
+
+/* ===== Network I/O strip ===== */
+.server-load-io {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-md);
+    padding-top: var(--space-sm);
+    border-top: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    font-size: var(--text-xs);
+    font-variant-numeric: tabular-nums;
+}
+
+.server-load-io__item {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    direction: ltr;
+    unicode-bidi: isolate;
+}
+
+.server-load-io__arrow {
+    color: var(--accent);
+    font-weight: 700;
+}
+
+/* ===== Alerts ===== */
+.server-load-alerts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.server-load-alerts[hidden] {
+    display: none;
+}
+
+.server-load-alert {
+    padding: 2px 8px;
+    border: 1px solid var(--warning-border);
+    border-radius: var(--radius-full);
+    background: var(--warning-bg);
+    color: var(--warning);
+    font-size: var(--text-xs);
+    font-weight: 600;
+}
+
+.server-load-alert.is-danger {
+    border-color: var(--danger-border);
+    background: var(--danger-bg);
+    color: var(--danger);
+}
+
+/* ===== Card footer ===== */
+.server-load-card__foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-sm);
+    margin-top: auto;
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    font-variant-numeric: tabular-nums;
+}
+
+.server-load-card__clock {
+    flex: 0 0 auto;
+    direction: ltr;
+    unicode-bidi: isolate;
+}
+
+.server-load-card__uptime {
+    overflow: hidden;
+    text-align: end;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    direction: ltr;
+    unicode-bidi: isolate;
+}
+
+/* ===== Per-card error state ===== */
+.server-load-error {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-sm);
+    padding: var(--space-sm);
+    border: 1px dashed var(--border-color);
+    border-radius: var(--radius-md);
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+}
+
+.server-load-error[hidden] {
+    display: none;
+}
+
+/* ===== Loading skeleton (no layout shift) ===== */
+.server-load-skel {
+    border-radius: var(--radius-sm);
+    background: linear-gradient(90deg,
+            var(--bg-card) 25%,
+            var(--bg-card-hover) 37%,
+            var(--bg-card) 63%);
+    background-size: 400% 100%;
+    animation: serverLoadShimmer 1.4s ease infinite;
+}
+
+.server-load-skel.is-title {
+    width: 62%;
+    height: 14px;
+}
+
+.server-load-skel.is-sub {
+    width: 42%;
+    height: 10px;
+}
+
+.server-load-skel.is-cpu {
+    height: 42px;
+}
+
+.server-load-skel.is-row {
+    height: 26px;
+}
+
+.server-load-skel.is-foot {
+    width: 55%;
+    height: 10px;
+}
+
+@keyframes serverLoadShimmer {
+    0% { background-position: 100% 0; }
+    100% { background-position: 0 0; }
+}
+
+/* ===== Modal footer ===== */
+.server-load-modal .server-load-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: var(--space-md);
+}
+
+.server-load-hint {
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+}
+
+/* ===== Small screens ===== */
+@media (max-width: 520px) {
+    .modal.server-load-modal {
+        width: 96%;
+        max-height: 92vh;
+        padding: var(--space-md);
+    }
+
+    .server-load-modal .server-load-footer {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .server-load-footer .btn {
+        width: 100%;
+    }
+
+    .server-load-cpu__value {
+        font-size: 1.4rem;
+    }
+}
+
+/* ===== Reduced motion ===== */
+@media (prefers-reduced-motion: reduce) {
+    .server-load-live-dot,
+    .server-load-skel {
+        animation: none;
+    }
+
+    .server-load-skel {
+        background: var(--bg-card-hover);
+    }
+
+    .server-load-bar__fill {
+        transition: none;
+    }
+}

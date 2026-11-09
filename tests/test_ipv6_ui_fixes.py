@@ -36,7 +36,7 @@ NEW_KEYS = {
 # setting, seven localized dashboard-management messages, and four jump-host
 # settings messages. This test guards
 # the shared catalogue size as well as IPv6 keys.
-BASE_KEY_COUNT = 1189
+BASE_KEY_COUNT = 1209  # +20 server_load_* keys (2026-11-09)
 
 
 def read_text(path):
@@ -165,6 +165,15 @@ class TestC5Styles(unittest.TestCase):
         self.assertIn("@media (max-width: 640px)", self.css)
         self.assertIn(".ip-modal-table tr {", self.css)
         self.assertIn("attr(data-label)", self.css)
+
+    def test_server_ip_chips_stack_without_resizing_header_actions(self):
+        template = read_text(TEMPLATE_FILE)
+        self.assertIn('class="server-header__identity flex items-center gap-md"', template)
+        self.assertIn('class="server-header__details"', template)
+        chips = self.css[self.css.index('.ip-chips {'):]
+        self.assertIn('flex-direction: column', chips[:240])
+        self.assertIn('.page-header--card .page-header__actions {', self.css)
+        self.assertIn('flex: 0 0 auto', self.css)
 
 
 class TestC6Translations(unittest.TestCase):
