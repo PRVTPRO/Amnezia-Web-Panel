@@ -313,14 +313,21 @@ def _ip_allowed(client_ip, entries):
     return False
 
 
+_PANEL_NOT_FOUND_BODY = (
+    b'<html>\r\n<head><title>404 Not Found</title></head>\r\n'
+    b'<body>\r\n<center><h1>404 Not Found</h1></center>\r\n'
+    b'<hr><center>nginx</center>\r\n</body>\r\n</html>\r\n')
+
+
 def _panel_access_denied(kind):
-    message = ('This panel only answers on its configured domain.' if kind == 'domain'
-               else 'Your IP is not allowed to access this panel.')
-    response = HTMLResponse(
-        '<!doctype html><html><head><meta name="robots" content="noindex,nofollow">'
-        '<title>403</title></head><body><h1>403</h1><p>' + message + '</p></body></html>',
-        status_code=403)
-    response.headers['X-Robots-Tag'] = 'noindex, nofollow'
+    """A stock 404 of a generic web server, for denied callers.
+
+    Nothing here may hint that a panel lives behind the address: body, status
+    and headers are what an empty nginx returns. Loopback and the allowed
+    hosts are the only callers that ever reach the real handlers.
+    """
+    response = HTMLResponse(content=_PANEL_NOT_FOUND_BODY, status_code=404)
+    response.headers['Server'] = 'nginx'
     return response
 
 
@@ -11571,18 +11578,32 @@ if __name__ == '__main__':
                 with open(key_file, 'w') as f:
                     f.write(ssl_conf['key_text'].strip() + '\n')
 
+    public_port = int(ssl_conf.get('panel_port', 5000))
+    front_enabled = os.environ.get('PANEL_FRONT') == '1'
+    internal_port = int(os.environ.get('PANEL_INTERNAL_PORT', '5001')) if front_enabled else public_port
+
     uvicorn_kwargs = {
         "app": app,
-        "host": panel_bind_host(ssl_conf),
-        "port": ssl_conf.get('panel_port', 5000)
+        "host": '127.0.0.1' if front_enabled else panel_bind_host(ssl_conf),
+        "port": internal_port,
+        # uvicorn's own "server: uvicorn" header fingerprints the panel; the
+        # public front answers like an empty nginx instead.
+        "server_header": False,
     }
-    
+
     if ssl_conf.get('enabled') and cert_file and key_file:
         if os.path.exists(cert_file) and os.path.exists(key_file):
-            logger.info(f"Starting panel with HTTPS enabled on domain: {ssl_conf.get('domain')} at port {uvicorn_kwargs['port']}")
+            logger.info(f"Starting panel with HTTPS enabled on domain: {ssl_conf.get('domain')} at port {internal_port}")
             uvicorn_kwargs["ssl_certfile"] = cert_file
             uvicorn_kwargs["ssl_keyfile"] = key_file
         else:
             logger.error("SSL certificates not found at specified paths. Starting with HTTP.")
 
-    uvicorn.run(**uvicorn_kwargs)
+    if front_enabled:
+        import panel_front
+        threading.Thread(target=lambda: uvicorn.run(**uvicorn_kwargs), daemon=True).start()
+        logger.info(f"Panel front on 0.0.0.0:{public_port} -> 127.0.0.1:{internal_port}")
+        panel_front.serve(host='0.0.0.0', port=public_port,
+                          backend=('127.0.0.1', internal_port))
+    else:
+        uvicorn.run(**uvicorn_kwargs)
