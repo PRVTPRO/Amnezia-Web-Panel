@@ -1196,5 +1196,13 @@
   "srv_warp_stage_register": "ثبت‌نام در Cloudflare",
   "srv_warp_stage_profile": "آماده‌سازی پروفایل WARP",
   "srv_warp_stage_startsh": "به‌روزرسانی اسکریپت راه‌اندازی کانتینر",
-  "srv_warp_stage_done": "WARP نصب شد"
+  "srv_warp_stage_done": "WARP نصب شد",
+  "panel_access_title": "دسترسی به پنل",
+  "panel_access_intro": "محدود کردن افرادی که می‌توانند پنل را باز کنند.",
+  "panel_access_ip_enable": "فقط آدرس‌های IP فهرست‌شده مجاز باشند",
+  "panel_access_ip_hint": "در هر خط یک IP یا CIDR. Loopback و سرورهای مدیریت‌شده همیشه مجاز هستند.",
+  "panel_access_ip_list_label": "آدرس‌های IP مجاز",
+  "panel_access_domain_only": "پاسخ فقط روی دامنه پیکربندی‌شده",
+  "panel_access_domain_hint": "درخواست‌هایی که با IP یا نام میزبان دیگری ارسال شوند 403 می‌گیرند. Loopback همیشه مجاز است.",
+  "panel_access_domain_label": "دامنه پنل"
 }

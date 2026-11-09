@@ -1196,5 +1196,13 @@
   "srv_warp_stage_register": "Registering with Cloudflare",
   "srv_warp_stage_profile": "Preparing the WARP profile",
   "srv_warp_stage_startsh": "Updating the container start script",
-  "srv_warp_stage_done": "WARP installed"
+  "srv_warp_stage_done": "WARP installed",
+  "panel_access_title": "Panel access",
+  "panel_access_intro": "Restrict who may open the panel.",
+  "panel_access_ip_enable": "Allow only listed IP addresses",
+  "panel_access_ip_hint": "One IP or CIDR per line. Loopback and the managed fleet servers are always allowed.",
+  "panel_access_ip_list_label": "Allowed IP addresses",
+  "panel_access_domain_only": "Answer only on the configured domain",
+  "panel_access_domain_hint": "Requests addressed to an IP or another hostname get 403. Loopback is always allowed.",
+  "panel_access_domain_label": "Panel domain"
 }

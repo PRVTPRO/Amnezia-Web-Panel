@@ -4,6 +4,7 @@ import json
 import logging
 import base64
 import hashlib
+import ipaddress
 import secrets
 import uuid
 import asyncio
@@ -237,6 +238,116 @@ async def api_auth_status_middleware(request, call_next):
                 normalized.headers[key] = value
         return normalized
     return response
+
+
+# ---- Panel access control: IP allowlist + domain-only mode ----------------
+# Cached copy of settings.panel_access: the middleware runs on every request,
+# and re-reading data.json (hundreds of KB) per hit would be wasteful. The
+# cache is rebuilt on startup and right after the settings are saved.
+_PANEL_ACCESS = {
+    'ip_allowlist_enabled': False, 'ip_allowlist': [],
+    'domain_only': False, 'allowed_domain': '', 'fleet_ips': [],
+}
+
+
+def _refresh_panel_access(data=None):
+    global _PANEL_ACCESS
+    try:
+        doc = data if data is not None else load_data()
+    except Exception as exc:
+        logger.warning("Panel access cache refresh failed: %s", exc)
+        return
+    sec = ((doc.get('settings') or {}).get('panel_access') or {})
+    _PANEL_ACCESS = {
+        'ip_allowlist_enabled': bool(sec.get('ip_allowlist_enabled')),
+        'ip_allowlist': [str(e).strip() for e in (sec.get('ip_allowlist') or [])
+                         if str(e).strip()],
+        'domain_only': bool(sec.get('domain_only')),
+        'allowed_domain': str(sec.get('allowed_domain') or '').strip().lower(),
+        'fleet_ips': [str(s.get('host') or '').strip()
+                      for s in (doc.get('servers') or [])
+                      if str(s.get('host') or '').strip()],
+    }
+
+
+def _is_loopback_ip(value):
+    try:
+        return ipaddress.ip_address(str(value or '').strip()).is_loopback
+    except ValueError:
+        return False
+
+
+def _request_client_ip(request):
+    """Caller address. X-Forwarded-For is honoured only when the immediate
+    peer is loopback (a local reverse proxy); a public peer could forge it."""
+    peer = request.client.host if request.client else ''
+    forwarded = (request.headers.get('x-forwarded-for') or '').split(',')[0].strip()
+    if forwarded and _is_loopback_ip(peer):
+        return forwarded
+    return str(peer or '')
+
+
+def _host_header_name(value):
+    """Host header hostname without the port; IPv6 literals arrive bracketed."""
+    host = str(value or '').strip()
+    if host.startswith('['):
+        close = host.find(']')
+        return (host[1:close] if close != -1 else host[1:]).lower()
+    if ':' in host:
+        return host.rsplit(':', 1)[0].lower()
+    return host.lower()
+
+
+def _ip_allowed(client_ip, entries):
+    try:
+        addr = ipaddress.ip_address(str(client_ip).strip())
+    except ValueError:
+        return False
+    for entry in entries or []:
+        try:
+            net = ipaddress.ip_network(str(entry).strip(), strict=False)
+        except ValueError:
+            continue
+        if addr.version == net.version and addr in net:
+            return True
+    return False
+
+
+def _panel_access_denied(kind):
+    message = ('This panel only answers on its configured domain.' if kind == 'domain'
+               else 'Your IP is not allowed to access this panel.')
+    response = HTMLResponse(
+        '<!doctype html><html><head><meta name="robots" content="noindex,nofollow">'
+        '<title>403</title></head><body><h1>403</h1><p>' + message + '</p></body></html>',
+        status_code=403)
+    response.headers['X-Robots-Tag'] = 'noindex, nofollow'
+    return response
+
+
+@app.middleware("http")
+async def panel_access_middleware(request, call_next):
+    """IP allowlist and domain-only mode from the global settings.
+
+    Registered after the other middlewares, so it runs first: a denied caller
+    never reaches auth, templates or static files. Loopback stays allowed so
+    the admin can always recover through an SSH tunnel; the managed fleet
+    hosts are allowed implicitly (data.json servers[].host).
+    """
+    access = _PANEL_ACCESS
+    if not access.get('ip_allowlist_enabled') and not access.get('domain_only'):
+        return await call_next(request)
+    client_ip = _request_client_ip(request)
+    loopback = _is_loopback_ip(client_ip)
+    if access.get('domain_only') and not loopback:
+        allowed = access.get('allowed_domain') or ''
+        host = _host_header_name(request.headers.get('host', ''))
+        if not allowed or (host != allowed and not host.endswith('.' + allowed)):
+            return _panel_access_denied('domain')
+    if access.get('ip_allowlist_enabled') and not loopback:
+        entries = list(access.get('ip_allowlist') or []) + list(access.get('fleet_ips') or [])
+        if not _ip_allowed(client_ip, entries):
+            return _panel_access_denied('ip')
+    return await call_next(request)
 
 
 # Sessions must wrap every other middleware: the auth middleware above
@@ -2926,6 +3037,13 @@ class ExitNodesSettings(BaseModel):
     default_exit_uid: str = ''
 
 
+class PanelAccessSettings(BaseModel):
+    ip_allowlist_enabled: bool = False
+    ip_allowlist: str = ''
+    domain_only: bool = False
+    allowed_domain: str = ''
+
+
 class SaveSettingsRequest(BaseModel):
     appearance: AppearanceSettings
     sync: SyncSettings
@@ -2937,6 +3055,7 @@ class SaveSettingsRequest(BaseModel):
     self_service: SelfServiceSettings = SelfServiceSettings()
     exit_nodes: ExitNodesSettings = ExitNodesSettings()
     mail: MailSettings = MailSettings()
+    panel_access: PanelAccessSettings = PanelAccessSettings()
 
 
 class ToggleUserRequest(BaseModel):
@@ -3057,6 +3176,7 @@ async def startup():
     _panel_lease = PanelLease(DATA_FILE, runtime=True)
     _panel_lease.acquire()
     data = load_data()
+    _refresh_panel_access(data)
     if data.get(DISASTER_HOLD):
         raise RuntimeError('Disaster recovery requires independent node reconciliation before startup')
     _start_conn_monitor()
@@ -10706,6 +10826,46 @@ def save_settings(request: Request, payload: SaveSettingsRequest):
     settings['ssl'] = payload.ssl.dict()
     settings['mail'] = merge_mail_settings(settings.get('mail'), payload.mail.dict())
 
+    # Panel access control: validate the list before storing anything, so a
+    # typo cannot leave the panel half-configured.
+    raw_entries = [ln.strip() for ln in (payload.panel_access.ip_allowlist or '').splitlines()
+                   if ln.strip()]
+    access_entries = []
+    for entry in raw_entries:
+        try:
+            access_entries.append(str(ipaddress.ip_network(entry, strict=False)))
+        except ValueError:
+            return JSONResponse({'error': 'invalid_ip_allowlist_entry', 'entry': entry},
+                                status_code=400)
+    access_domain = (payload.panel_access.allowed_domain or '').strip().lower()
+    if payload.panel_access.domain_only:
+        access_domain = access_domain or str(settings['ssl'].get('domain') or '').strip().lower()
+        if not access_domain:
+            return JSONResponse({'error': 'domain_required_for_domain_only'},
+                                status_code=400)
+    # Never lock the admin out with the very save that enables the list: the
+    # caller's own address is added when the submitted list does not cover it.
+    if payload.panel_access.ip_allowlist_enabled:
+        client_ip = _request_client_ip(request)
+        try:
+            me = ipaddress.ip_address(client_ip)
+            covered = False
+            for entry in access_entries:
+                net = ipaddress.ip_network(entry, strict=False)
+                if me.version == net.version and me in net:
+                    covered = True
+                    break
+            if not covered:
+                access_entries.append(str(me))
+        except ValueError:
+            pass
+    settings['panel_access'] = {
+        'ip_allowlist_enabled': bool(payload.panel_access.ip_allowlist_enabled),
+        'ip_allowlist': access_entries,
+        'domain_only': bool(payload.panel_access.domain_only),
+        'allowed_domain': access_domain,
+    }
+
     old_auto_backup = settings.get('auto_backup', {}) or {}
     interval_hours = max(1, min(24, int(payload.auto_backup.interval_hours or 24)))
     settings['auto_backup'] = {
@@ -10729,6 +10889,7 @@ def save_settings(request: Request, payload: SaveSettingsRequest):
         warnings.append('exit_default_cleared')
     settings['exit_nodes'] = {'default_exit_uid': default_exit_uid}
     save_data(data)
+    _refresh_panel_access(data)
     if previous_jump_uid != jump_host_uid:
         with _SSH_POOL_LOCK:
             pooled = list(_SSH_POOL.values())

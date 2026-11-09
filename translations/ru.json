@@ -1196,5 +1196,13 @@
   "srv_warp_stage_register": "Регистрация в Cloudflare",
   "srv_warp_stage_profile": "Подготовка профиля WARP",
   "srv_warp_stage_startsh": "Обновление скрипта запуска контейнера",
-  "srv_warp_stage_done": "WARP установлен"
+  "srv_warp_stage_done": "WARP установлен",
+  "panel_access_title": "Доступ к панели",
+  "panel_access_intro": "Ограничьте, кому разрешено открывать панель.",
+  "panel_access_ip_enable": "Разрешить только указанные IP-адреса",
+  "panel_access_ip_hint": "По одному IP или CIDR в строке. Loopback и серверы флота разрешены всегда.",
+  "panel_access_ip_list_label": "Разрешённые IP-адреса",
+  "panel_access_domain_only": "Отвечать только по настроенному домену",
+  "panel_access_domain_hint": "Запросы по IP или другому имени получают 403. Loopback разрешён всегда.",
+  "panel_access_domain_label": "Домен панели"
 }

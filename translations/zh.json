@@ -1196,5 +1196,13 @@
   "srv_warp_stage_register": "正在向 Cloudflare 注册",
   "srv_warp_stage_profile": "正在准备 WARP 配置文件",
   "srv_warp_stage_startsh": "正在更新容器启动脚本",
-  "srv_warp_stage_done": "WARP 已安装"
+  "srv_warp_stage_done": "WARP 已安装",
+  "panel_access_title": "面板访问",
+  "panel_access_intro": "限制谁可以打开面板。",
+  "panel_access_ip_enable": "仅允许列出的 IP 地址",
+  "panel_access_ip_hint": "每行一个 IP 或 CIDR。Loopback 和受管服务器始终允许。",
+  "panel_access_ip_list_label": "允许的 IP 地址",
+  "panel_access_domain_only": "仅在配置的域名上响应",
+  "panel_access_domain_hint": "发往 IP 或其他主机名的请求将收到 403。Loopback 始终允许。",
+  "panel_access_domain_label": "面板域名"
 }

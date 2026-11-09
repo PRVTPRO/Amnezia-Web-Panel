@@ -1196,5 +1196,13 @@
   "srv_warp_stage_register": "Enregistrement auprès de Cloudflare",
   "srv_warp_stage_profile": "Préparation du profil WARP",
   "srv_warp_stage_startsh": "Mise à jour du script de démarrage du conteneur",
-  "srv_warp_stage_done": "WARP installé"
+  "srv_warp_stage_done": "WARP installé",
+  "panel_access_title": "Accès au panneau",
+  "panel_access_intro": "Restreindre qui peut ouvrir le panneau.",
+  "panel_access_ip_enable": "Autoriser uniquement les adresses IP listées",
+  "panel_access_ip_hint": "Une IP ou un CIDR par ligne. Loopback et les serveurs du parc sont toujours autorisés.",
+  "panel_access_ip_list_label": "Adresses IP autorisées",
+  "panel_access_domain_only": "Répondre uniquement sur le domaine configuré",
+  "panel_access_domain_hint": "Les requêtes adressées à une IP ou à un autre nom d'hôte reçoivent 403. Loopback est toujours autorisé.",
+  "panel_access_domain_label": "Domaine du panneau"
 }
