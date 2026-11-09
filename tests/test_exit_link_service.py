@@ -36,6 +36,7 @@ class FakeAWG:
         self.events = events if events is not None else []
         self.mtu = '1376'
         self.ipv6 = ''
+        self.config_error = None        # _get_server_config raises this
         self.link_error = None
         self.status_sequence = None       # list of exit_link_status answers
         self.handshake_age = 3
@@ -60,6 +61,15 @@ class FakeAWG:
 
     def _get_subnet_ipv6_ip(self, protocol):
         return self.ipv6
+
+    def _get_server_config(self, protocol):
+        if self.config_error:
+            raise RuntimeError(self.config_error)
+        address = '10.8.1.1/24'
+        if self.ipv6:
+            address += ', ' + self.ipv6 + '/64'
+        return (f'[Interface]\nAddress = {address}\n'
+                f'ListenPort = 55424\n')
 
     def exit_link(self, protocol, link):
         self.calls.append(('exit_link', protocol, link))
@@ -321,10 +331,27 @@ class LinkTests(unittest.TestCase):
         result = run(h.service.link(0, 'awg2', 'exit-a', force=True))
         self.assertEqual(result['status'], 'success')
 
-    def test_ipv6_instances_are_flagged(self):
+    def test_ipv6_instance_is_refused_before_touching_the_exit(self):
+        # The exit node publishes only IPv4, so a dual-stack entry would send
+        # IPv6 into a black hole. Refuse at any peer count, with no side effect.
         h = Harness()
         h.awg().ipv6 = 'fd42:8:1::1'
-        self.assertTrue(run(h.service.link(0, 'awg2', 'exit-a'))['ipv6_refused'])
+        with self.assertRaises(ExitLinkError) as ctx:
+            run(h.service.link(0, 'awg2', 'exit-a'))
+        self.assertEqual(ctx.exception.code, 'exit_link_ipv6')
+        self.assertEqual(h.exit().calls, [])
+        self.assertFalse((h.record().get('exit_link') or {}).get('exit_uid'))
+
+    def test_unreadable_config_is_refused_instead_of_assuming_ipv4(self):
+        # A dead SSH link must not look like "IPv6 is absent": linking an
+        # instance whose config cannot be read would silently blackhole IPv6.
+        h = Harness()
+        h.awg().config_error = 'ssh down'
+        with self.assertRaises(ExitLinkError) as ctx:
+            run(h.service.link(0, 'awg2', 'exit-a'))
+        self.assertEqual(ctx.exception.code, 'state_unreadable')
+        self.assertEqual(h.exit().calls, [])
+        self.assertFalse((h.record().get('exit_link') or {}).get('exit_uid'))
 
     def test_switching_exits_drops_the_old_peer_only_after_the_new_link_is_confirmed(self):
         h = Harness()

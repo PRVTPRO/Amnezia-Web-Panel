@@ -10,6 +10,7 @@ from managers.smartroute_manager import (
     CONTAINER_APPLY_FINAL, CONTAINER_APPLY_SCRIPT,
     CONTAINER_DISABLE_SCRIPT, CONTAINER_ENABLE_SCRIPT,
     SMARTR_ACCT_CHAIN, SMARTR_ACCT_CHAIN_IN,
+    SMARTR_INSTALL_PHASES,
     SMARTR_INSTANCES, SMARTR_MIN_PREFIXES, SMARTR_TABLE,
     SmartRouteManager, SmartRouteError, SOURCES_V4, SOURCES_V6,
     build_install_script, build_remove_script, build_update_script,
@@ -217,16 +218,34 @@ class UpdateScriptTests(unittest.TestCase):
 
 class InstallRemoveScriptTests(unittest.TestCase):
     def test_install_writes_everything_and_enables_timer(self):
-        script = build_install_script()
+        scripts = {phase: build_install_script(phase) for phase in SMARTR_INSTALL_PHASES}
+        for phase, script in scripts.items():
+            self.assertIn('#!/bin/bash', script, phase)
+        script = '\n'.join(scripts.values())
         for needle in ('/usr/local/sbin/smartroute-update.sh',
                        'smartroute.service', 'smartroute.timer',
                        'systemctl enable --now smartroute.timer',
                        'RandomizedDelaySec=900', 'Persistent=true'):
             self.assertIn(needle, script)
-        self.assertIn('smartroute-update.sh', script)  # first run at install
+        self.assertIn('smartroute-update.sh', scripts['script'])  # updater payload
         # first run is background: worst-case fallback walk exceeds any SSH timeout
-        self.assertIn('nohup', script)
-        self.assertIn('running in background', script)
+        self.assertIn('nohup', scripts['download'])
+        self.assertIn('running in background', scripts['verify'])
+
+    def test_every_phase_echoes_its_actions(self):
+        # Each phase must emit at least one output line: the panel only moves
+        # the progress bar when a phase reports something.
+        for phase in SMARTR_INSTALL_PHASES:
+            script = build_install_script(phase)
+            self.assertGreaterEqual(script.count('echo "smartroute:'), 1, phase)
+        self.assertIn('echo "smartroute: activate: timer enabled and started"',
+                      build_install_script('activate'))
+        self.assertIn('systemctl is-enabled --quiet smartroute.timer',
+                      build_install_script('verify'))
+
+    def test_unknown_phase_is_rejected(self):
+        with self.assertRaises(SmartRouteError):
+            build_install_script('nope')
 
     def test_remove_cleans_all(self):
         script = build_remove_script()
@@ -273,6 +292,25 @@ class ManagerFlowTests(unittest.TestCase):
         self.assertIn('/tmp/_smartr.sh', paths)
         self.assertIn('bash /tmp/_smartr.sh', self.ssh.commands)
         self.assertIn('rm -f /tmp/_smartr.sh', self.ssh.commands)
+
+    def test_each_phase_is_its_own_ssh_call(self):
+        self.mgr.install('prepare')
+        self.mgr.install('script')
+        self.assertEqual(len(self.ssh.uploads), 2)
+        self.assertEqual([p for p, _ in self.ssh.uploads],
+                         ['/tmp/_smartr.sh', '/tmp/_smartr.sh'])
+        self.assertIn('mkdir -p', self.ssh.uploads[0][1])
+        self.assertIn('SMARPBIN', self.ssh.uploads[1][1])
+
+    def test_phase_output_reaches_the_line_callback(self):
+        class EchoSSH(FakeSSH):
+            def run_sudo_command(self, cmd, timeout=60):
+                super().run_sudo_command(cmd, timeout)
+                return 'smartroute: activate: timer enabled and started\n', '', 0
+
+        seen = []
+        SmartRouteManager(EchoSSH()).install('activate', on_line=seen.append)
+        self.assertEqual(seen, ['smartroute: activate: timer enabled and started'])
 
     def test_install_failure_raises(self):
         class FailSSH(FakeSSH):

@@ -58,6 +58,8 @@ _tag_cache = {}
 
 CONTAINER_CONFIG_DIR = '/opt/amnezia'
 CONTAINER_CONFIG_SUBDIR = '/opt/amnezia/awg'
+UPDATER_BACKUP_TMP = '/tmp/awp-updater-warp-exclude.tgz'
+UPDATER_RESTORE_TMP = '/tmp/awp-restore.tgz'
 KERNEL_BACKUP_DIR = '/var/lib/amnezia-plugin'
 DOCKER_NETWORK_SKIP = ('bridge', 'host', 'none')
 
@@ -1065,7 +1067,11 @@ class AwgPluginUpdater:
 
     def _cleanup_tmp(self, log):
         """Remove build/backup artefacts; keep them only after a failed rollback."""
-        self._run('rm -rf /tmp/awg-plugin-update /tmp/awg-plugin-backup-*', log, 'cleanup')
+        self._run(
+            'rm -rf /tmp/awg-plugin-update /tmp/awg-plugin-backup-* '
+            '%s %s' % (UPDATER_BACKUP_TMP, UPDATER_RESTORE_TMP),
+            log, 'cleanup',
+        )
 
     def _prepare_container_update(self, name, log):
         """Validate and back up one container before touching anything."""
@@ -1087,10 +1093,22 @@ class AwgPluginUpdater:
         backup = '/tmp/awg-plugin-backup-%s' % name
         self._run('rm -rf %s' % backup, log, 'prepare')
         out, err, code = self._run(
-            'docker cp %s:%s %s' % (name, CONTAINER_CONFIG_DIR, backup), log, 'backup',
+            "docker exec %s tar czf %s -C %s "
+            "--exclude='./awg/warp' --exclude='./awg/warp-link-*' "
+            "--exclude='./exit/warp' ."
+            % (name, UPDATER_BACKUP_TMP, CONTAINER_CONFIG_DIR),
+            log, 'backup',
         )
         if code != 0:
             raise PluginUpdateError('update_failed', 'cannot back up %s configuration' % name)
+        out, err, code = self._run(
+            'docker cp %s:%s %s' % (name, UPDATER_BACKUP_TMP, backup), log, 'backup',
+        )
+        if code != 0:
+            raise PluginUpdateError('update_failed', 'cannot back up %s configuration' % name)
+        self._run(
+            'docker exec %s rm -f %s' % (name, UPDATER_BACKUP_TMP), log, 'backup',
+        )
         peers_out, _, _ = self._run(
             "docker exec %s sh -c \"grep -c '^\\[Peer\\]' %s/*.conf 2>/dev/null\" "
             % (name, CONTAINER_CONFIG_SUBDIR),
@@ -1111,6 +1129,28 @@ class AwgPluginUpdater:
                 if net not in DOCKER_NETWORK_SKIP
             ],
         }
+
+    def _restore_container_config(self, name, backup, log, stage='restore'):
+        """Copy the tar backup into the container and extract it in place.
+
+        Extraction never removes the warp credentials that live under
+        ``/opt/amnezia``: the archive simply does not contain them, so an
+        update keeps an installed WARP link intact.
+        """
+        out, err, code = self._run(
+            'docker cp %s %s:%s' % (backup, name, UPDATER_RESTORE_TMP), log, stage,
+        )
+        if code != 0:
+            return code
+        out, err, code = self._run(
+            'docker exec %s tar xzf %s -C %s'
+            % (name, UPDATER_RESTORE_TMP, CONTAINER_CONFIG_DIR),
+            log, stage,
+        )
+        self._run(
+            'docker exec %s rm -f %s' % (name, UPDATER_RESTORE_TMP), log, stage,
+        )
+        return code
 
     def _apply_container_update(self, item, version, log, should_cancel=None):
         name = item['name']
@@ -1176,10 +1216,7 @@ class AwgPluginUpdater:
             if code != 0:
                 raise PluginUpdateError('update_failed', 'cannot attach %s to %s' % (name, network))
 
-        out, err, code = self._run(
-            'docker cp %s/. %s:%s/' % (item['backup'], name, CONTAINER_CONFIG_DIR),
-            log, 'restore',
-        )
+        code = self._restore_container_config(name, item['backup'], log)
         if code != 0:
             raise PluginUpdateError('update_failed', 'cannot restore the configuration of %s' % name)
         out, err, code = self._run('docker restart %s' % name, log, 'restore')
@@ -1301,4 +1338,13 @@ class AwgPluginUpdater:
             if code != 0:
                 log('rollback', 'ERROR: %s did not start' % name)
                 failures.append(name)
+            else:
+                # The predecessor kept its own filesystem, but re-applying the
+                # archive through the same tar path keeps rollback and update
+                # symmetric (and never removes warp credentials).
+                restore_code = self._restore_container_config(
+                    name, item.get('backup'), log, stage='rollback',
+                )
+                if restore_code != 0:
+                    log('rollback', 'WARNING: could not restore the configuration of %s' % name)
         return failures

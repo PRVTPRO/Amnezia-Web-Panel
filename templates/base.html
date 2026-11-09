@@ -269,7 +269,19 @@
             }
         }
 
+        function canCloseModal(id) {
+            // A modal with unsaved changes may veto the close. Only the IPv6
+            // preference modal defines the hook; every other modal closes as
+            // before.
+            if (id === 'ipSettingsModal'
+                && typeof window.ipSettingsCanClose === 'function') {
+                return window.ipSettingsCanClose() !== false;
+            }
+            return true;
+        }
+
         function closeModal(id) {
+            if (!canCloseModal(id)) return;
             const modal = document.getElementById(id);
             if (modal) {
                 modal.classList.remove('active');
@@ -287,7 +299,7 @@
         });
         document.addEventListener('click', (e) => {
             if (e.target.classList.contains('modal-backdrop') && e.target.classList.contains('active')
-                && backdropPressTarget === e.target) {
+                && backdropPressTarget === e.target && canCloseModal(e.target.id)) {
                 e.target.classList.remove('active');
                 document.body.style.overflow = '';
             }
@@ -298,7 +310,7 @@
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') {
                 document.querySelectorAll('.modal-backdrop.active').forEach(m => {
-                    m.classList.remove('active');
+                    closeModal(m.id);
                 });
                 document.body.style.overflow = '';
             }

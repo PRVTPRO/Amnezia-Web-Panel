@@ -124,6 +124,7 @@ def _entries(data_file, trust_file, system_trust):
     result = {'state/data.json': data}
     optional = {'state/data.json.peer-creates.json': Path(str(data) + '.peer-creates.json'),
                 'state/data.json.lifecycle-uncertain.json': Path(str(data) + '.lifecycle-uncertain.json'),
+                'state/data.json.srv_warp_state.json': Path(str(data) + '.srv_warp_state.json'),
                 'trust/ssh_known_hosts': _path(trust_file)}
     if system_trust is not None:
         optional['trust/system_known_hosts'] = _path(system_trust)
@@ -242,7 +243,9 @@ def _member(name):
             any(s in ('', '.', '..') for s in name.split('/')) or p.as_posix() != name):
         raise BackupError('unsafe_archive_path')
     fixed = {'state/data.json', 'state/data.json.peer-creates.json',
-             'state/data.json.lifecycle-uncertain.json', 'trust/ssh_known_hosts', 'trust/system_known_hosts'}
+             'state/data.json.lifecycle-uncertain.json',
+             'state/data.json.srv_warp_state.json',
+             'trust/ssh_known_hosts', 'trust/system_known_hosts'}
     if name not in fixed and not name.startswith('state/data.json.recovery/'):
         raise BackupError('unexpected_archive_member')
     return p

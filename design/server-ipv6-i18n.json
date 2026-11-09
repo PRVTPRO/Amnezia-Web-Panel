@@ -1,0 +1,471 @@
+{
+  "server_ipv6_configure_ip": {
+    "ru": "Настроить IP",
+    "en": "Configure IP",
+    "fr": "Configurer l'IP",
+    "zh": "配置 IP",
+    "fa": "پیکربندی IP"
+  },
+  "server_ipv6_modal_title": {
+    "ru": "IP-адреса сервера",
+    "en": "Server IP addresses",
+    "fr": "Adresses IP du serveur",
+    "zh": "服务器 IP 地址",
+    "fa": "آدرس‌های IP سرور"
+  },
+  "server_ipv6_allow_label": {
+    "ru": "Разрешить IPv6 для новых инстансов",
+    "en": "Allow IPv6 for new instances",
+    "fr": "Autoriser IPv6 pour les nouvelles instances",
+    "zh": "允许新实例使用 IPv6",
+    "fa": "مجوز IPv6 برای نمونه‌های جدید"
+  },
+  "server_ipv6_allow_hint": {
+    "ru": "Существующие инстансы не меняются. IPv6 у существующего включается только в его настройках и только пока в нём нет пиров.",
+    "en": "Existing instances are not affected. IPv6 for existing instances can only be enabled in its settings while it has no peers.",
+    "fr": "Les instances existantes ne sont pas affectées. IPv6 ne peut être activé pour les instances existantes que dans leurs paramètres, tant qu'elles n'ont pas de pairs.",
+    "zh": "现有实例不受影响。现有实例的 IPv6 只能在设置中启用，且仅在其没有对等体时。",
+    "fa": "نمونه‌های موجود تحت تأثیر قرار نمی‌گیرند. IPv6 برای نمونه‌های موجود فقط در تنظیمات آن‌ها و زمانی که همتایی ندارند قابل فعال‌سازی است."
+  },
+  "server_ipv6_pref_auto": {
+    "ru": "Авто (как раньше)",
+    "en": "Auto (as before)",
+    "fr": "Auto (comme avant)",
+    "zh": "自动（如之前）",
+    "fa": "خودکار (مانند قبل)"
+  },
+  "server_ipv6_pref_on": {
+    "ru": "Включено",
+    "en": "Enabled",
+    "fr": "Activé",
+    "zh": "已启用",
+    "fa": "فعال شد"
+  },
+  "server_ipv6_pref_off": {
+    "ru": "Выключено",
+    "en": "Disabled",
+    "fr": "Désactivé",
+    "zh": "已禁用",
+    "fa": "غیرفعال شد"
+  },
+  "server_ipv6_docker_warning_title": {
+    "ru": "Docker IPv6 ещё не включён",
+    "en": "Docker IPv6 not yet enabled",
+    "fr": "Docker IPv6 pas encore activé",
+    "zh": "尚未启用 Docker IPv6",
+    "fa": "IPv6 داکر هنوز فعال نشده است"
+  },
+  "server_ipv6_docker_warning_body": {
+    "ru": "Настройка сохранена, но контейнеры не получат IPv6, пока Docker не перезапущен. Перезапуск затронет все контейнеры на сервере: VPN-сессии отвалятся на 10–30 секунд.",
+    "en": "Settings saved, but containers won't get IPv6 until Docker is restarted. Restart will affect all containers on this server: VPN sessions will drop for 10–30 seconds.",
+    "fr": "Paramètres enregistrés, mais les conteneurs n'auront pas IPv6 tant que Docker ne sera pas redémarré. Le redémarrage affectera tous les conteneurs sur ce serveur : les sessions VPN seront interrompues pendant 10 à 30 secondes.",
+    "zh": "设置已保存，但 Docker 重启前容器无法获得 IPv6。重启将影响此服务器上的所有容器：VPN 会话将中断 10–30 秒。",
+    "fa": "تنظیمات ذخیره شد، اما کانتینرها تا زمان راه‌اندازی مجدد داکر IPv6 دریافت نخواهند کرد. راه‌اندازی مجدد روی همه کانتینرهای این سرور تأثیر خواهد گذاشت: جلسات VPN برای ۱۰ تا ۳۰ ثانیه قطع می‌شوند."
+  },
+  "server_ipv6_restart_docker_confirm": {
+    "ru": "Понимаю, что все VPN-сессии прервутся",
+    "en": "I understand that all VPN sessions will drop",
+    "fr": "Je comprends que toutes les sessions VPN seront interrompues",
+    "zh": "我明白所有 VPN 会话将中断",
+    "fa": "می‌دانم که همه نشست‌های VPN قطع می‌شوند"
+  },
+  "server_ipv6_apply_restart": {
+    "ru": "Применить и перезапустить Docker",
+    "en": "Apply and restart Docker",
+    "fr": "Appliquer et redémarrer Docker",
+    "zh": "应用并重启 Docker",
+    "fa": "اعمال و راه‌اندازی مجدد داکر"
+  },
+  "server_ipv6_usage_title": {
+    "ru": "Использование IPv6 по инстансам",
+    "en": "IPv6 usage per instance",
+    "fr": "Utilisation IPv6 par instance",
+    "zh": "各实例的 IPv6 使用情况",
+    "fa": "مصرف IPv6 بر اساس نمونه"
+  },
+  "server_ipv6_table_instance": {
+    "ru": "Инстанс",
+    "en": "Instance",
+    "fr": "Instance",
+    "zh": "实例",
+    "fa": "نمونه"
+  },
+  "server_ipv6_table_subnet": {
+    "ru": "Подсеть",
+    "en": "Subnet",
+    "fr": "Sous-réseau",
+    "zh": "子网",
+    "fa": "زیرشبکه"
+  },
+  "server_ipv6_table_peers": {
+    "ru": "Пиры",
+    "en": "Peers",
+    "fr": "Pairs",
+    "zh": "对等体",
+    "fa": "همتایان"
+  },
+  "server_ipv6_table_action": {
+    "ru": "Действие",
+    "en": "Action",
+    "fr": "Action",
+    "zh": "操作",
+    "fa": "عملیات"
+  },
+  "server_ipv6_cancel": {
+    "ru": "Отмена",
+    "en": "Cancel",
+    "fr": "Annuler",
+    "zh": "取消",
+    "fa": "لغو"
+  },
+  "server_ipv6_save_preference": {
+    "ru": "Сохранить",
+    "en": "Save",
+    "fr": "Enregistrer",
+    "zh": "保存",
+    "fa": "ذخیره"
+  },
+  "server_ipv6_toggle_issue_label": {
+    "ru": "Выдавать IPv6-адреса клиентам",
+    "en": "Issue IPv6 addresses to clients",
+    "fr": "Attribuer des adresses IPv6 aux clients",
+    "zh": "向客户端分配 IPv6 地址",
+    "fa": "تخصيص آدرس‌های IPv6 به مشتریان"
+  },
+  "server_ipv6_unlock_hint": {
+    "ru": "Снимите флажок — инстанс будет выдавать только IPv4. Пока пиров нет, это безопасно.",
+    "en": "Uncheck to make the instance IPv4-only. While there are no peers, this is safe.",
+    "fr": "Décochez pour rendre l'instance IPv4 uniquement. Tant qu'il n'y a pas de pairs, c'est sûr.",
+    "zh": "取消选中可使实例仅使用 IPv4。在没有对等体时，这是安全的。",
+    "fa": "با لغو انتخاب، نمونه فقط IPv4 را تخصیص خواهد داد. زمانی که همتایی وجود ندارد، این کار ایمن است."
+  },
+  "server_ipv6_apply": {
+    "ru": "Применить",
+    "en": "Apply",
+    "fr": "Appliquer",
+    "zh": "应用",
+    "fa": "اعمال"
+  },
+  "server_ipv6_state_in_use": {
+    "ru": "Используется",
+    "en": "In use",
+    "fr": "En utilisation",
+    "zh": "使用中",
+    "fa": "در حال استفاده"
+  },
+  "server_ipv6_state_host_only": {
+    "ru": "не используется",
+    "en": "not in use",
+    "fr": "non utilisé",
+    "zh": "未使用",
+    "fa": "استفاده نمی‌شود"
+  },
+  "server_ipv6_state_enabled_no_peers": {
+    "ru": "готов, клиентов пока нет",
+    "en": "ready, no clients yet",
+    "fr": "prêt, pas encore de clients",
+    "zh": "就绪，尚无客户端",
+    "fa": "آماده است، هنوز کاربری نیست"
+  },
+  "server_ipv6_state_absent": {
+    "ru": "нет на хосте",
+    "en": "not on host",
+    "fr": "absent de l'hôte",
+    "zh": "主机上不存在",
+    "fa": "روی میزبان وجود ندارد"
+  },
+  "server_ipv6_state_no_route": {
+    "ru": "адрес есть, маршрута нет",
+    "en": "address present, no route",
+    "fr": "adresse présente, pas de route",
+    "zh": "有地址，无路由",
+    "fa": "آدرس موجود است، مسیر نیست"
+  },
+  "server_ipv6_state_disabled": {
+    "ru": "выключен в системе",
+    "en": "disabled in the system",
+    "fr": "désactivé dans le système",
+    "zh": "系统已禁用",
+    "fa": "در سیستم غیرفعال است"
+  },
+  "server_ipv6_state_unknown": {
+    "ru": "нет связи с сервером",
+    "en": "no connection to server",
+    "fr": "pas de connexion au serveur",
+    "zh": "与服务器无连接",
+    "fa": "ارتباط با سرور قطع است"
+  },
+  "server_ipv6_table_has_peers": {
+    "ru": "есть пиры",
+    "en": "has peers",
+    "fr": "a des pairs",
+    "zh": "有对等体",
+    "fa": "همتا دارد"
+  },
+  "server_ipv6_blocked_exit_link": {
+    "ru": "инстанс связан с exit-нодой",
+    "en": "linked to an exit node",
+    "fr": "lié à un nœud de sortie",
+    "zh": "已连接到出口节点",
+    "fa": "به گره خروجی متصل است"
+  },
+  "server_ipv6_chip_docker_ipv6": {
+    "ru": "Docker IPv6",
+    "en": "Docker IPv6",
+    "fr": "Docker IPv6",
+    "zh": "Docker IPv6",
+    "fa": "IPv6 داکر"
+  },
+  "server_ipv6_after_docker_restart": {
+    "ru": "IPv6 применится после рестарта Docker",
+    "en": "IPv6 will apply after Docker restart",
+    "fr": "IPv6 sera appliqué après redémarrage de Docker",
+    "zh": "IPv6 将在 Docker 重启后生效",
+    "fa": "IPv6 پس از راه‌اندازی مجدد داکر اعمال خواهد شد"
+  },
+  "server_ipv6_needs_recreate": {
+    "ru": "нужна пересборка контейнера",
+    "en": "container rebuild needed",
+    "fr": "reconstruction du conteneur requise",
+    "zh": "需要重建容器",
+    "fa": "نیاز به بازسازی کانتینر"
+  },
+  "server_ipv6_err_docker_bridge_missing": {
+    "ru": "Docker перезапущен, но сеть bridge осталась без IPv6. Перезагрузите хост или настройте Docker вручную.",
+    "en": "Docker restarted, but the bridge network has no IPv6. Reboot the host or configure Docker by hand.",
+    "fr": "Docker a redémarré, mais le réseau bridge n'a pas d'IPv6. Redémarrez l'hôte ou configurez Docker à la main.",
+    "zh": "Docker 已重启,但 bridge 网络仍无 IPv6。请重启主机或手动配置 Docker。",
+    "fa": "داکر راه‌اندازی شد، اما شبکه bridge هنوز IPv6 ندارد. میزبان را دوباره راه‌اندازی کنید یا Docker را دستی تنظیم کنید."
+  },
+  "server_ipv6_err_daemon_json_invalid": {
+    "ru": "Файл /etc/docker/daemon.json содержит ошибку. Исправьте его вручную и повторите.",
+    "en": "/etc/docker/daemon.json is not valid. Fix it by hand and retry.",
+    "fr": "/etc/docker/daemon.json n'est pas valide. Corrigez-le à la main et réessayez.",
+    "zh": "/etc/docker/daemon.json 无效。请手动修复后重试。",
+    "fa": "فایل /etc/docker/daemon.json معتبر نیست. آن را دستی اصلاح کنید و دوباره تلاش کنید."
+  },
+  "server_ipv6_err_confirm_required": {
+    "ru": "Подтвердите, что понимаете последствия.",
+    "en": "Confirm that you understand the consequences.",
+    "fr": "Confirmez que vous comprenez les conséquences.",
+    "zh": "请确认你了解后果。",
+    "fa": "تأیید کنید که پیامدها را می‌دانید."
+  },
+  "server_ipv6_badge_peers_appeared": {
+    "ru": "во время пересборки появились пиры",
+    "en": "peers appeared during the rebuild",
+    "fr": "des pairs sont apparus pendant la reconstruction",
+    "zh": "重建期间出现了对等端",
+    "fa": "در حین بازسازی همتا اضافه شد"
+  },
+  "server_ipv6_badge_pool_exhausted": {
+    "ru": "IPv6-подсеть занята",
+    "en": "IPv6 subnet already in use",
+    "fr": "sous-réseau IPv6 déjà utilisé",
+    "zh": "IPv6 子网已被占用",
+    "fa": "زیرشبکه IPv6 اشغال شده است"
+  },
+  "server_ipv6_badge_flags_conflict": {
+    "ru": "Docker запущен с флагами IPv6",
+    "en": "Docker runs with IPv6 flags",
+    "fr": "Docker tourne avec des options IPv6",
+    "zh": "Docker 以 IPv6 参数运行",
+    "fa": "داکر با پرچم‌های IPv6 اجرا شده است"
+  },
+  "server_ipv6_badge_sysctl_disabled": {
+    "ru": "IPv6 выключен в системе",
+    "en": "IPv6 is disabled in the system",
+    "fr": "IPv6 est désactivé dans le système",
+    "zh": "系统已禁用 IPv6",
+    "fa": "IPv6 در سیستم غیرفعال است"
+  },
+  "server_ipv6_badge_docker_recovery": {
+    "ru": "Docker не запустился, настройки возвращены",
+    "en": "Docker failed to start, settings restored",
+    "fr": "Docker n'a pas démarré, réglages restaurés",
+    "zh": "Docker 未能启动,设置已恢复",
+    "fa": "داکر اجرا نشد، تنظیمات بازگردانده شد"
+  },
+  "server_ipv6_badge_operation_busy": {
+    "ru": "другая операция уже идёт",
+    "en": "another operation is running",
+    "fr": "une autre opération est en cours",
+    "zh": "另一个操作正在进行",
+    "fa": "عملیات دیگری در حال اجراست"
+  },
+  "server_ipv6_err_not_awg": {
+    "ru": "не AmneziaWG",
+    "en": "not AmneziaWG",
+    "fr": "pas AmneziaWG",
+    "zh": "不是 AmneziaWG",
+    "fa": "AmneziaWG نیست"
+  },
+  "server_ipv6_state_env_off": {
+    "ru": "IPv6 выключен настройкой сервера",
+    "en": "IPv6 is disabled by the server setting",
+    "fr": "IPv6 est désactivé par le réglage du serveur",
+    "zh": "IPv6 已被服务器设置禁用",
+    "fa": "IPv6 توسط تنظیم سرور غیرفعال است"
+  },
+  "server_ipv6_state_env_on": {
+    "ru": "IPv6 включён настройкой сервера",
+    "en": "IPv6 is forced on by the server setting",
+    "fr": "IPv6 est imposé par le réglage du serveur",
+    "zh": "IPv6 已被服务器设置强制启用",
+    "fa": "IPv6 توسط تنظیم سرور اجباری فعال است"
+  },
+  "server_ipv6_badge_peer_lifecycle_busy": {
+    "ru": "Операция с клиентами уже выполняется",
+    "en": "A client operation is already running",
+    "fr": "Une opération client est déjà en cours",
+    "zh": "客户端操作正在进行",
+    "fa": "یک عملیات کاربر در حال اجراست"
+  },
+  "server_ipv6_badge_ip6tables_unsupported": {
+    "ru": "ip6tables не поддерживается",
+    "en": "ip6tables is not supported",
+    "fr": "ip6tables n'est pas pris en charge",
+    "zh": "不支持 ip6tables",
+    "fa": "ip6tables پشتیبانی نمی‌شود"
+  },
+  "server_ipv6_action_repair": {
+    "ru": "Выключить (ремонт)",
+    "en": "Disable (repair)",
+    "fr": "Désactiver (réparation)",
+    "zh": "禁用(修复)",
+    "fa": "غیرفعال‌سازی (تعمیر)"
+  },
+  "server_ipv6_action_disable": {
+    "ru": "Выключить",
+    "en": "Disable",
+    "fr": "Désactiver",
+    "zh": "禁用",
+    "fa": "غیرفعال‌سازی"
+  },
+  "server_ipv6_action_rebuild": {
+    "ru": "Пересобрать и включить",
+    "en": "Rebuild and enable",
+    "fr": "Reconstruire et activer",
+    "zh": "重建并启用",
+    "fa": "بازسازی و فعال‌سازی"
+  },
+  "server_ipv6_action_enable": {
+    "ru": "Включить",
+    "en": "Enable",
+    "fr": "Activer",
+    "zh": "启用",
+    "fa": "فعال‌سازی"
+  },
+  "server_ipv6_state_in_use_desc": {
+    "ru": "Инстансы: {n} · Пиры: {m}",
+    "en": "Instances: {n} · Peers: {m}",
+    "fr": "Instances: {n} · Pairs: {m}",
+    "zh": "实例: {n} · 对等体: {m}",
+    "fa": "مثیل‌ها: {n} · همتایان: {m}"
+  },
+  "server_ipv6_chip_restart": {
+    "ru": "нужен перезапуск",
+    "en": "restart needed",
+    "fr": "redémarrage requis",
+    "zh": "需要重启",
+    "fa": "نیاز به راه‌اندازی دوباره"
+  },
+  "server_ipv6_discard_confirm": {
+    "ru": "Есть несохранённые изменения. Закрыть без сохранения?",
+    "en": "There are unsaved changes. Close without saving?",
+    "fr": "Des modifications ne sont pas enregistrées. Fermer sans enregistrer ?",
+    "zh": "有未保存的更改。关闭而不保存？",
+    "fa": "تغییرات ذخیره‌نشده وجود دارد. بدون ذخیره بسته شود؟"
+  },
+  "server_ipv6_env_override": {
+    "ru": "переопределение AWG_IPV6",
+    "en": "AWG_IPV6 override",
+    "fr": "priorité AWG_IPV6",
+    "zh": "AWG_IPV6 覆盖",
+    "fa": "بازنویسی AWG_IPV6"
+  },
+  "server_ipv6_enable_docker_first": {
+    "ru": "Сначала включите Docker IPv6",
+    "en": "Enable Docker IPv6 first",
+    "fr": "Activez d'abord IPv6 pour Docker",
+    "zh": "请先启用 Docker IPv6",
+    "fa": "ابتدا IPv6 داکر را فعال کنید"
+  },
+  "server_ipv6_disabled_server": {
+    "ru": "IPv6 выключен на сервере — инстанс будет IPv4-only.",
+    "en": "IPv6 is disabled on the server — the instance will be IPv4-only.",
+    "fr": "IPv6 est désactivé sur le serveur — l'instance sera IPv4 uniquement.",
+    "zh": "服务器已禁用 IPv6 — 实例将仅使用 IPv4。",
+    "fa": "IPv6 روی سرور غیرفعال است — نمونه فقط IPv4 خواهد بود."
+  },
+  "server_ipv6_install_ipv6_auto": {
+    "ru": "IPv6: включён автоматически",
+    "en": "IPv6: automatically enabled",
+    "fr": "IPv6 : activé automatiquement",
+    "zh": "IPv6：已自动启用",
+    "fa": "IPv6: به‌طور خودکار فعال شد"
+  },
+  "server_ipv6_install_ipv6_auto_desc": {
+    "ru": "Сервер разрешает IPv6, Docker IPv6 работает. Новый инстанс получит /64 и будет выдавать клиентам IPv6-адреса.",
+    "en": "Server allows IPv6, Docker IPv6 is running. The new instance will get a /64 subnet and issue IPv6 addresses to clients.",
+    "fr": "Le serveur autorise IPv6, Docker IPv6 est actif. La nouvelle instance obtiendra un sous-réseau /64 et attribuera des adresses IPv6 aux clients.",
+    "zh": "服务器允许 IPv6，Docker IPv6 正在运行。新实例将获取 /64 子网并向客户端分配 IPv6 地址。",
+    "fa": "سرور IPv6 را مجاز می‌داند، IPv6 داکر در حال اجراست. نمونه جدید یک زیرشبکه /64 دریافت کرده و به مشتریان آدرس IPv6 تخصیص خواهد داد."
+  },
+  "server_ipv6_auto_from_server": {
+    "ru": "авто от сервера",
+    "en": "auto from server",
+    "fr": "auto du serveur",
+    "zh": "服务器自动",
+    "fa": "خودکار از سرور"
+  },
+  "server_ipv6_operation_failed": {
+    "ru": "Операция не удалась",
+    "en": "Operation failed",
+    "fr": "L'opération a échoué",
+    "zh": "操作失败",
+    "fa": "عملیات شکست خورد"
+  },
+  "server_ipv6_operation_interrupted": {
+    "ru": "Операция прервана перезапуском панели",
+    "en": "Operation interrupted by a panel restart",
+    "fr": "Opération interrompue par un redémarrage du panneau",
+    "zh": "面板重启中断了操作",
+    "fa": "عملیات با راه‌اندازی دوباره پنل قطع شد"
+  },
+  "server_ipv6_error_timeout": {
+    "ru": "истекло время ожидания",
+    "en": "timed out",
+    "fr": "délai dépassé",
+    "zh": "超时",
+    "fa": "زمان تمام شد"
+  },
+  "server_ipv6_operation_started": {
+    "ru": "Операция запущена, это может занять до 30 секунд",
+    "en": "Operation started, this can take up to 30 seconds",
+    "fr": "Opération lancée, cela peut prendre jusqu'à 30 secondes",
+    "zh": "操作已开始,最多需要 30 秒",
+    "fa": "عملیات آغاز شد، تا ۳۰ ثانیه طول می‌کشد"
+  },
+  "server_ipv6_repair_confirm": {
+    "ru": "Инстанс связан с exit-нодой и имеет пиры. IPv6 у клиентов перестанет работать, IPv4 не затрагивается. Продолжить?",
+    "en": "The instance is linked to an exit node and has peers. IPv6 will stop working for clients; IPv4 is not affected. Continue?",
+    "fr": "L'instance est liée à un nœud de sortie et a des pairs. IPv6 cessera de fonctionner pour les clients ; IPv4 n'est pas affecté. Continuer ?",
+    "zh": "该实例已连接到出口节点并有对等端。客户端的 IPv6 将停止工作,IPv4 不受影响。继续?",
+    "fa": "این نمونه به گره خروجی متصل است و همتا دارد. IPv6 برای کاربران قطع می‌شود؛ IPv4 آسیبی نمی‌بیند. ادامه می‌دهید؟"
+  },
+  "server_ipv6_apply_or_revert_hint": {
+    "ru": "Сначала примените или отмените изменение IPv6.",
+    "en": "Apply or revert the IPv6 change first.",
+    "fr": "Appliquez ou annulez d'abord le changement IPv6.",
+    "zh": "请先应用或撤销 IPv6 更改。",
+    "fa": "ابتدا تغییر IPv6 را اعمال یا لغو کنید."
+  },
+  "server_ipv6_blocked_peers": {
+    "ru": "IPv6 для клиентов заблокирован: в инстансе уже есть пиры.",
+    "en": "IPv6 for clients is blocked: the instance already has peers.",
+    "fr": "IPv6 est bloqué pour les clients : l'instance a déjà des pairs.",
+    "zh": "客户端的 IPv6 被阻止：实例已有对等体。",
+    "fa": "IPv6 برای مشتریان مسدود است: نمونه هم‌اکنون همتا دارد."
+  }
+}

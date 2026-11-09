@@ -673,6 +673,224 @@
         }
     }
 
+    // ========== Generic install operation progress (shared by protocol, smartroute, rknblock) ==========
+    // The installModal already contains the progress UI (bar, stage label, log, done button).
+    // This renderer wires it to the backend poll endpoint which returns the same shape as awg-plugin:
+    // {operation_id, flow, state, step, total, percent, result, error, started_at, finished_at, lines:[{ts,stage,text}], next_offset}
+
+    // Map backend stage keys to translation keys for each flow
+    const INSTALL_STAGE_TRANSLATIONS = {
+        protocol: {
+            start: 'install_starting', docker: 'check_docker', host: 'prepare_host',
+            build: 'build_container', run: 'install_stage_run',
+            config: 'install_stage_config', firewall: 'install_stage_firewall',
+            done: 'install_stage_done', error: 'error'
+        },
+        smartroute: {
+            start: 'smartroute_stage_start', prepare: 'smartroute_stage_prepare',
+            script: 'smartroute_stage_script', units: 'smartroute_stage_units',
+            activate: 'smartroute_stage_activate', download: 'smartroute_stage_download',
+            verify: 'smartroute_stage_verify', done: 'smartroute_stage_done',
+            error: 'error'
+        },
+        rknblock: {
+            start: 'rknblock_stage_start', preflight: 'rknblock_stage_preflight',
+            packages: 'rknblock_stage_packages', download: 'rknblock_stage_download',
+            files: 'rknblock_stage_files', services: 'rknblock_stage_services',
+            blocking: 'rknblock_stage_blocking', verify: 'rknblock_stage_verify',
+            done: 'rknblock_stage_done', error: 'error'
+        },
+        warp: {
+            start: 'srv_warp_stage_start', arch: 'srv_warp_stage_download',
+            download: 'srv_warp_stage_download', register: 'srv_warp_stage_register',
+            profile: 'srv_warp_stage_profile', startsh: 'srv_warp_stage_startsh',
+            done: 'srv_warp_stage_done', error: 'error'
+        }
+    };
+
+    let installOp = null; // {opId, flow, timer, offset, creep, creepRunning, display, cap, step, total}
+
+    function renderInstallOpProgress(opId, flow) {
+        installOp = {opId, flow, offset: 0, timer: null, creep: null, creepRunning: false, display: 0, cap: 0, step: 0, total: 0};
+        document.getElementById('installForm').classList.add('hidden');
+        document.getElementById('installDone').style.display = 'none';
+        const progressDiv = document.getElementById('installProgress');
+        progressDiv.classList.remove('hidden');
+        const logEl = document.getElementById('installLog');
+        const fillEl = document.getElementById('installProgressFill');
+        const percentEl = document.getElementById('installPercent');
+        const trackEl = document.getElementById('installProgressTrack');
+        const stepEl = document.getElementById('installStep');
+        const stageEl = document.getElementById('installStage');
+        logEl.textContent = '';
+        fillEl.style.width = '0%';
+        fillEl.style.background = '';
+        if (percentEl) percentEl.textContent = '0%';
+        if (trackEl) trackEl.setAttribute('aria-valuenow', '0');
+        if (stepEl) stepEl.textContent = _('awg_plugin_step').replace('{step}', '0').replace('{total}', '10');
+        // Use flow-specific translation for initial stage
+        const initialStageMap = {
+            protocol: 'install_starting',
+            smartroute: 'smartroute_stage_start',
+            rknblock: 'rknblock_stage_start',
+            warp: 'srv_warp_stage_start'
+        };
+        if (stageEl) stageEl.textContent = _(initialStageMap[flow] || 'install_starting');
+        // Set modal title based on flow
+        const titleEl = document.getElementById('installModalTitle');
+        if (titleEl) {
+            if (flow === 'smartroute') titleEl.textContent = _('smartroute_install');
+            else if (flow === 'rknblock') titleEl.textContent = _('rkn_block_title');
+            else if (flow === 'warp') titleEl.textContent = 'Cloudflare WARP';
+            else titleEl.textContent = _('install_protocol');
+        }
+        openModal('installModal');
+        pollInstallOp();
+    }
+
+    function setInstallOpProgress(step, total, percent, running, stageKey) {
+        if (!installOp) return;
+        installOp.step = step || installOp.step || 0;
+        installOp.total = total || installOp.total || 10;
+        installOp.percent = Math.max(installOp.percent || 0, percent || 0);
+        const fillEl = document.getElementById('installProgressFill');
+        const percentEl = document.getElementById('installPercent');
+        const trackEl = document.getElementById('installProgressTrack');
+        const stepEl = document.getElementById('installStep');
+        const stageEl = document.getElementById('installStage');
+        if (running) {
+            installOp.cap = Math.min(99, installOp.percent + 9);
+            if (!installOp.creep) {
+                installOp.creep = setInterval(() => {
+                    if (!installOp || !installOp.creepRunning || installOp.display >= installOp.cap) return;
+                    installOp.display = Math.min(installOp.cap, (installOp.display || 0) + 1);
+                    if (fillEl) fillEl.style.width = installOp.display + '%';
+                    if (percentEl) percentEl.textContent = installOp.display + '%';
+                    if (trackEl) trackEl.setAttribute('aria-valuenow', String(installOp.display));
+                }, 900);
+            }
+            installOp.creepRunning = true;
+            installOp.display = Math.max(installOp.display || 0, installOp.percent);
+        } else {
+            installOp.creepRunning = false;
+            if (installOp.creep) { clearInterval(installOp.creep); installOp.creep = null; }
+            installOp.display = installOp.percent;
+        }
+        if (percentEl) percentEl.textContent = (installOp.display || 0) + '%';
+        if (fillEl) fillEl.style.width = (installOp.display || 0) + '%';
+        if (trackEl) trackEl.setAttribute('aria-valuenow', String(installOp.display || 0));
+        if (stepEl) stepEl.textContent = _('awg_plugin_step').replace('{step}', String(installOp.step || 0)).replace('{total}', String(installOp.total || 10));
+        if (stageEl && stageKey) {
+            const transMap = INSTALL_STAGE_TRANSLATIONS[installOp.flow] || {};
+            const translationKey = transMap[stageKey] || stageKey;
+            stageEl.textContent = _(translationKey);
+        }
+    }
+
+    function appendInstallOpLines(lines) {
+        const logEl = document.getElementById('installLog');
+        if (!logEl || !lines?.length) return;
+        lines.forEach(line => {
+            const row = document.createElement('div');
+            const caveat = (line.text || '').startsWith('!');
+            row.className = caveat ? 'log-line warning' : 'log-line info';
+            row.textContent = '[' + line.ts + '] ' + (line.stage ? line.stage + ': ' : '') + (caveat ? line.text.slice(1) : line.text);
+            logEl.appendChild(row);
+        });
+        logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    async function pollInstallOp() {
+        if (!installOp) return;
+        const logEl = document.getElementById('installLog');
+        try {
+            const url = installOp.flow === 'warp'
+                ? `/api/servers/${SERVER_ID}/install/progress?operation_id=${encodeURIComponent(installOp.opId)}&offset=${installOp.offset}`
+                : `/api/servers/${SERVER_ID}/${installOp.flow}/install/${encodeURIComponent(installOp.opId)}?offset=${installOp.offset}`;
+            const data = await apiCall(url, 'GET');
+            installOp.offset = data.next_offset || installOp.offset;
+            setInstallOpProgress(data.step, data.total, data.percent, data.state === 'running', data.stage);
+            appendInstallOpLines(data.lines);
+            if (data.state === 'running') {
+                installOp.timer = setTimeout(pollInstallOp, 1000);
+                return;
+            }
+            // Terminal state
+            const stageEl = document.getElementById('installStage');
+            const fillEl = document.getElementById('installProgressFill');
+            const flow = installOp.flow;
+            const opId = installOp.opId;
+            if (data.state === 'success') {
+                if (stageEl) {
+                    stageEl.textContent = _('install_stage_done');
+                    stageEl.className = 'awg-plugin-stage awg-plugin-updated';
+                }
+                setInstallOpProgress(data.total, data.total, 100, false);
+                if (fillEl) fillEl.style.background = 'var(--success, #4ade80)';
+                showToast(_('install_success'), 'success');
+                document.getElementById('installDone').style.display = '';
+                // Flow-specific completion handling
+                if (flow === 'smartroute') {
+                    smartRouteBusy = false;
+                    smartRouteStatus = await loadSmartRouteStatus();
+                    renderSmartRouteCard();
+                    applyInstalledAppsVisibility();
+                    renderMarketplace();
+                    // Refresh modal if open
+                    const modal = document.getElementById('smartRouteModal');
+                    if (modal?.classList.contains('active')) {
+                        renderSmartRouteModal(smartRouteStatus);
+                    }
+                } else if (flow === 'rknblock') {
+                    rknBlockBusy = false;
+                    await loadRknBlock();
+                    applyInstalledAppsVisibility();
+                    renderMarketplace();
+                } else if (flow === 'warp') {
+                    warpBusy = false;
+                    await loadWarpStatus(true);
+                    applyInstalledAppsVisibility();
+                    renderMarketplace();
+                } else {
+                    // Protocol install
+                    setTimeout(() => checkServer(), 800);
+                }
+            } else if (data.state === 'failed' || data.state === 'error') {
+                if (flow === 'smartroute') smartRouteBusy = false;
+                else if (flow === 'rknblock') rknBlockBusy = false;
+                else if (flow === 'warp') warpBusy = false;
+                if (stageEl) {
+                    stageEl.textContent = _('error') + ': ' + (data.error?.message || _('install_error'));
+                    stageEl.style.color = 'var(--danger)';
+                }
+                if (fillEl) {
+                    fillEl.style.width = '100%';
+                    fillEl.style.background = 'linear-gradient(135deg, #ef4444, #dc2626)';
+                }
+                const errDiv = document.createElement('div');
+                errDiv.className = 'log-line error';
+                errDiv.textContent = `✕ ${_('error')}: ${data.error?.message || _('install_error')}`;
+                logEl.appendChild(errDiv);
+                logEl.scrollTop = logEl.scrollHeight;
+                showToast(_('install_error') + ': ' + (data.error?.message || _('install_error')), 'error');
+                if (flow === 'warp') {
+                    await loadWarpStatus(true);
+                    applyInstalledAppsVisibility();
+                    renderMarketplace();
+                }
+                document.getElementById('installDone').style.display = '';
+            } else if (data.state === 'cancelled') {
+                if (flow === 'smartroute') smartRouteBusy = false;
+                else if (flow === 'rknblock') rknBlockBusy = false;
+                if (stageEl) stageEl.textContent = _('awg_plugin_cancelled');
+            }
+            installOp = null;
+        } catch (error) {
+            if (logEl) logEl.textContent += error.message + '\n';
+            installOp.timer = setTimeout(pollInstallOp, 3000);
+        }
+    }
+
     document.addEventListener('DOMContentLoaded', loadAwgPluginStatus);
 </script>
 {% endif %}
@@ -687,7 +905,7 @@
                 <h1 style="font-size:1.4rem; font-weight:700;">{{ server.name }}</h1>
                 <div class="font-mono text-muted text-sm">{{ server.host }}:{{ server.ssh_port }} • {{ server.username
                     }}</div>
-                <div class="font-mono text-muted text-sm" id="serverIpv6" style="display:none;" title="IPv6"></div>
+                <div class="ip-chips" id="serverIpChips" hidden></div>
             </div>
         </div>
         <div class="page-header__actions">
@@ -703,6 +921,9 @@
                 <span id="awgPluginBtnText">{{ _('awg_plugin_button') }}</span>
             </button>
             {% endif %}
+            <button class="btn btn-secondary btn-sm" onclick="openIpSettings()" id="ipSettingsBtn">
+                <span>🌐</span> {{ _('server_ipv6_configure_ip') }}
+            </button>
             <button class="btn btn-secondary btn-sm" onclick="checkServer()" id="checkBtn">
                 <span id="checkBtnText">{{ _('server_check') }}</span>
                 <div class="spinner hidden" id="checkSpinner"></div>
@@ -1086,7 +1307,7 @@
         </div>
         <div class="flex gap-sm" id="rknblock-actions">
             <button class="btn btn-primary btn-sm" onclick="installRknBlock()" id="rknblock-install-btn"
-                style="flex:1">
+                style="flex:1" title="{{ _('rknblock_install_wait') }}">
                 {{ _('install') }}
             </button>
         </div>
@@ -1111,6 +1332,74 @@
                 style="flex:1">
                 {{ _('rknblock_delete') }}
             </button>
+        </div>
+    </div>
+
+    <!-- Cloudflare WARP Card (host-level app, per-instance egress) -->
+    <div class="card card-hover protocol-card protocol-warp installed-app-hidden" id="proto-warp">
+        <div class="protocol-card-head">
+            <div class="protocol-icon">☁️</div>
+            <div class="protocol-name">Cloudflare WARP</div>
+        </div>
+        <div class="protocol-desc">
+            {{ _('srv_warp_card_desc') }}
+        </div>
+        <div class="protocol-status" id="warp-status">
+            <span class="badge badge-warn"><span class="badge-dot"></span> {{ _('srv_warp_status_not_installed') }}</span>
+        </div>
+        <div id="warp-info" class="hidden">
+            <div class="protocol-info" id="warp-info-grid"></div>
+        </div>
+        <div class="flex gap-sm" id="warp-actions">
+            <button class="btn btn-primary btn-sm" onclick="installWarp()" id="warp-install-btn"
+                style="flex:1">
+                {{ _('srv_warp_install') }}
+            </button>
+        </div>
+        <div id="warp-installed-actions" style="display:none;">
+            <div class="flex gap-sm">
+                <button class="btn btn-secondary btn-sm" onclick="updateWarp()" id="warp-update-btn"
+                    style="flex:1">
+                    {{ _('srv_warp_update') }}
+                </button>
+                <button class="btn btn-danger btn-sm" onclick="uninstallWarp()" id="warp-uninstall-btn"
+                    style="flex:1">
+                    {{ _('srv_warp_delete') }}
+                </button>
+            </div>
+            <div class="form-hint" style="margin:10px 0 6px;">{{ _('srv_warp_link_hint') }}</div>
+            <div class="flex gap-sm">
+                <select id="warp-protocol-select" class="input" style="flex:1; min-width:140px;"
+                    onchange="syncWarpLinkButtons()">
+                    {%- for proto, info in (server.get('protocols') or {}).items()
+                        if proto.split('__')[0] in ['awg', 'awg2', 'awg3'] and info.get('installed') %}
+                    <option value="{{ proto }}">{{ info.get('display_name') or proto }}</option>
+                    {%- endfor %}
+                </select>
+                <button class="btn btn-primary btn-sm" onclick="linkWarp()" id="warp-link-btn">
+                    {{ _('srv_warp_link') }}
+                </button>
+                <button class="btn btn-secondary btn-sm" onclick="unlinkWarp()" id="warp-unlink-btn">
+                    {{ _('srv_warp_unlink') }}
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== Cloudflare WARP terms modal (srv-warp, not panel-warp) ===== -->
+    <div class="modal-backdrop" id="warpTosModal">
+        <div class="modal" style="max-width:560px;">
+            <div class="modal-header">
+                <h2 class="modal-title">{{ _('srv_warp_tos_title') }}</h2>
+                <button class="modal-close" onclick="resolveWarpTos(false)">×</button>
+            </div>
+            <div class="form-hint" style="white-space:pre-line;">{{ _('srv_warp_tos_text') }}</div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="resolveWarpTos(false)">{{ _('cancel') }}</button>
+                <button class="btn btn-primary" onclick="resolveWarpTos(true)" id="warpTosAcceptBtn">
+                    {{ _('srv_warp_tos_accept') }}
+                </button>
+            </div>
         </div>
     </div>
 
@@ -1425,12 +1714,13 @@
                         <label class="form-label">DNS 2</label>
                         <input class="form-input" type="text" id="installAwgDns2" value="1.0.0.1">
                     </div>
-                    <div class="form-group">
+                    <div class="form-group" id="installAwgDns6Group">
                         <label class="form-label">DNS IPv6</label>
                         <input class="form-input" type="text" id="installAwgDns6" value="2606:4700:4700::1111">
                         <div class="form-hint">{{ _('awg_dns6_hint') }}</div>
                     </div>
                 </div>
+                <div class="ip-note" data-kind="info" id="installIpv6Note" style="display:none;"></div>
                 <div id="installAwgJunk">
                     <div class="form-group">
                         <label class="form-label" style="display:flex; justify-content:space-between; align-items:center;">
@@ -1572,9 +1862,17 @@
         </div>
 
         <div id="installProgress" class="hidden">
-            <div class="progress-bar">
-                <div class="progress-fill" id="installProgressFill" style="width: 0%"></div>
+            <div class="awg-progress">
+                <div class="awg-progress-head">
+                    <span id="installStep"></span>
+                    <span class="awg-progress-percent" id="installPercent">0%</span>
+                </div>
+                <div class="awg-progress-track" id="installProgressTrack" role="progressbar"
+                     aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                    <div class="awg-progress-fill" id="installProgressFill"></div>
+                </div>
             </div>
+            <div class="awg-plugin-stage" id="installStage"></div>
             <div class="log-output" id="installLog"></div>
             <div class="mt-md" id="installDone" style="display:none;">
                 <button class="btn btn-primary" onclick="closeModal('installModal'); window.location.reload();"
@@ -1587,6 +1885,70 @@
 </div>
 
 <!-- ===== AmneziaWG Settings Modal ===== -->
+<div class="modal-backdrop" id="ipSettingsModal">
+    <div class="modal" style="max-width:720px;">
+        <div class="modal-header">
+            <h2 class="modal-title">{{ _('server_ipv6_modal_title') }}</h2>
+            <button class="modal-close" onclick="closeIpSettings()">×</button>
+        </div>
+        <div id="ipHostSummary" class="form-hint" style="margin-bottom:var(--space-md);"></div>
+        <div class="seg-row">
+            <div class="seg-label">
+                {{ _('server_ipv6_allow_label') }}
+                <div class="form-hint">{{ _('server_ipv6_allow_hint') }}</div>
+            </div>
+            <div class="seg-group" role="radiogroup" aria-label="{{ _('server_ipv6_allow_label') }}"
+                 id="ipPrefGroup">
+                <input type="radio" name="ipv6_pref" id="ipPrefAuto" value="auto"
+                       onchange="markIpv6PrefDirty()">
+                <label class="seg-btn" for="ipPrefAuto">{{ _('server_ipv6_pref_auto') }}</label>
+                <input type="radio" name="ipv6_pref" id="ipPrefOn" value="on"
+                       onchange="markIpv6PrefDirty()">
+                <label class="seg-btn" for="ipPrefOn">{{ _('server_ipv6_pref_on') }}</label>
+                <input type="radio" name="ipv6_pref" id="ipPrefOff" value="off"
+                       onchange="markIpv6PrefDirty()">
+                <label class="seg-btn" for="ipPrefOff">{{ _('server_ipv6_pref_off') }}</label>
+            </div>
+        </div>
+        <div class="ip-note" data-kind="warn" id="ipDockerNote" style="display:none;">
+            <div style="flex:1;">
+                <strong>{{ _('server_ipv6_docker_warning_title') }}</strong>
+                <div>{{ _('server_ipv6_docker_warning_body') }}</div>
+                <label class="ip-note-check">
+                    <input type="checkbox" id="ipDockerConfirm">
+                    <span>{{ _('server_ipv6_restart_docker_confirm') }}</span>
+                </label>
+            </div>
+            <button class="btn btn-primary btn-sm" id="ipDockerApplyBtn" onclick="applyDockerIpv6()">
+                {{ _('server_ipv6_apply_restart') }}
+            </button>
+        </div>
+        <h3 class="form-label" style="margin-top:var(--space-md);">{{ _('server_ipv6_usage_title') }}</h3>
+        <div style="overflow-x:auto;">
+            <table class="ip-modal-table">
+                <thead>
+                    <tr>
+                        <th>{{ _('server_ipv6_table_instance') }}</th>
+                        <th>{{ _('server_ipv6_table_subnet') }}</th>
+                        <th>{{ _('server_ipv6_table_peers') }}</th>
+                        <th>IPv6</th>
+                        <th>{{ _('server_ipv6_table_action') }}</th>
+                    </tr>
+                </thead>
+                <tbody id="ipInstancesBody"></tbody>
+            </table>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary"
+                    onclick="closeIpSettings()">{{ _('server_ipv6_cancel') }}</button>
+            <button class="btn btn-primary" id="ipPrefSave"
+                    onclick="saveIpv6Preference()" disabled>
+                {{ _('server_ipv6_save_preference') }}
+            </button>
+        </div>
+    </div>
+</div>
+
 <div class="modal-backdrop" id="awgSettingsModal">
     <div class="modal" style="max-width:640px;">
         <div class="modal-header">
@@ -1616,6 +1978,24 @@
                 <input class="form-input" type="text" id="awgSetDns6" placeholder="2606:4700:4700::1111">
                 <div class="form-hint">{{ _('awg_dns6_hint') }}</div>
             </div>
+        </div>
+        <div class="seg-row" id="awgSetIpv6Row">
+            <div class="seg-label">
+                {{ _('server_ipv6_toggle_issue_label') }}
+                <div class="form-hint" id="awgSetIpv6Hint">{{ _('server_ipv6_unlock_hint') }}</div>
+            </div>
+            <div class="seg-group" role="radiogroup" aria-label="{{ _('server_ipv6_toggle_issue_label') }}"
+                 id="awgSetIpv6Group">
+                <input type="radio" name="awg_ipv6" id="awgIpv6On" value="on"
+                       onchange="updateAwgIpv6Dirty()">
+                <label class="seg-btn" for="awgIpv6On">{{ _('server_ipv6_pref_on') }}</label>
+                <input type="radio" name="awg_ipv6" id="awgIpv6Off" value="off"
+                       onchange="updateAwgIpv6Dirty()">
+                <label class="seg-btn" for="awgIpv6Off">{{ _('server_ipv6_pref_off') }}</label>
+            </div>
+            <button class="btn btn-secondary btn-sm" id="awgSetIpv6Apply" onclick="saveInstanceIpv6()">
+                {{ _('server_ipv6_apply') }}
+            </button>
         </div>
         <div class="form-group" id="awgSetJunkGroup">
             <label class="form-label" style="display:flex; justify-content:space-between; align-items:center;">
@@ -2137,6 +2517,7 @@
         { proto: 'socks5', category: 'services', icon: '🧦', title: 'SOCKS5 Proxy', descKey: 'socks5_desc' },
         { proto: 'exit', category: 'services', icon: '🚪', title: 'Exit Node', descKey: 'exit_desc', badge: 'NEW' },
         { proto: 'smartroute', category: 'services', icon: '🧭', title: 'Smart Route', descKey: 'smartroute_desc', badge: 'NEW' },
+        { proto: 'warp', category: 'services', icon: '☁️', title: 'Cloudflare WARP', descKey: 'srv_warp_card_desc' },
         { proto: 'rknblock', category: 'services', icon: '🌈', title: 'RKN Block (C24Be)', descKey: 'rknblock_desc' },
         { proto: 'nginx', category: 'web_servers', icon: '🌐', title: 'NGINX', descKey: 'nginx_desc' },
     ];
@@ -2158,10 +2539,17 @@
     let currentAwgProto = 'awg2';
     // Smart Route app state (GET /api/servers/{id}/smartroute/status); null = not loaded.
     let smartRouteStatus = null;
+    let smartRouteBusy = false;
     // RKN Block app state (GET /api/servers/{id}/rkn_scans); null = not loaded.
     let rknBlockStatus = {{ server.get('rknblock') | tojson }};
     if (rknBlockStatus) rknBlockStatus = {...rknBlockStatus, available: false, agent_state: 'unknown', running: false, healthy: false};
     let rknBlockLoadId = 0, rknBlockBusy = false;
+    // Server-level WARP app state (GET /api/servers/{id}/warp/status).
+    // data.json keeps only the installed projection; everything else is a
+    // job-poll over the status endpoint.
+    let warpStatus = {installed: {{ (server.get('warp') or {}).get('installed', False) | tojson }}};
+    let warpLoadId = 0, warpBusy = false, warpStatusAt = 0, warpTosPending = null;
+    const WARP_STATUS_TTL = 5000;
 
     const AWG_PROTOCOLS = ['awg', 'awg2', 'awg3', 'awg_legacy'];
     // Protocols that hand out a client config or link, and therefore have an
@@ -2256,6 +2644,12 @@
         const portInput = document.getElementById('installPort');
         const portHint = document.getElementById('installPortHint');
         const btn = document.getElementById('installBtn');
+        // A pending Docker restart keeps the button blocked: the port check
+        // must not re-enable it.
+        if (btn.dataset.ipv6Pending === 'true') {
+            btn.disabled = true;
+            return;
+        }
         if (portInput.disabled || SKIP_PORT_CHECK.has(protoBase(currentInstallProto))) return;
         const owner = portTakenBy(portInput.value, currentInstallProto);
         if (owner) {
@@ -2414,22 +2808,28 @@
                         ${apps.map(app => {
                             const isSmart = app.proto === 'smartroute';
                             const isRkn = app.proto === 'rknblock';
+                            const isWarp = app.proto === 'warp';
                             const rknUnknown = isRkn && (!rknBlockStatus || rknBlockStatus.available === false);
-                            const isHostApp = isSmart || isRkn;
+                            const isHostApp = isSmart || isRkn || isWarp;
                             const installed = isSmart ? !!(smartRouteStatus && smartRouteStatus.installed)
                                 : (isRkn ? !!(rknBlockStatus && rknBlockStatus.installed)
-                                    : baseInstalled(app.proto));
+                                    : (isWarp ? warpIsInstalled()
+                                        : baseInstalled(app.proto)));
                             const canInstallAnother = installed && isMultiInstanceBase(app.proto);
                             const action = isSmart
                                 ? `onclick="openSmartRouteModal()"`
-                                : (isRkn
-                                    ? (installed || rknUnknown ? 'disabled' : `onclick="closeModal('marketplaceModal'); installRknBlock()"`)
-                                    : (installed && !canInstallAnother ? 'disabled' : `onclick="installFromMarketplace('${app.proto}', ${canInstallAnother ? 'true' : 'false'})"`));
-                            const statusBadge = isHostApp
-                                ? (installed
-                                    ? `<span class="badge badge-success"><span class="badge-dot"></span> ${_('installed')}</span>`
-                                    : `<span class="badge badge-warn"><span class="badge-dot"></span> ${_(rknUnknown ? 'rknblock_state_unreachable' : 'not_installed')}</span>`)
-                                : marketplaceAppStatus(app.proto);
+                                : (isWarp
+                                    ? (installed ? 'disabled' : `onclick="closeModal('marketplaceModal'); installWarp()"`)
+                                    : (isRkn
+                                        ? (installed || rknUnknown ? 'disabled' : `onclick="closeModal('marketplaceModal'); installRknBlock()"`)
+                                        : (installed && !canInstallAnother ? 'disabled' : `onclick="installFromMarketplace('${app.proto}', ${canInstallAnother ? 'true' : 'false'})"`)));
+                            const statusBadge = isWarp
+                                ? warpAggregateBadge()
+                                : (isHostApp
+                                    ? (installed
+                                        ? `<span class="badge badge-success"><span class="badge-dot"></span> ${_('installed')}</span>`
+                                        : `<span class="badge badge-warn"><span class="badge-dot"></span> ${_(rknUnknown ? 'rknblock_state_unreachable' : 'not_installed')}</span>`)
+                                    : marketplaceAppStatus(app.proto));
                             return `
                                 <div class="marketplace-app-card">
                                     <div class="marketplace-app-top">
@@ -2504,6 +2904,9 @@
             // RKN Block is host-level (no container status): its card is
             // driven by rknBlockStatus further below.
             if (app.proto === 'rknblock') return;
+            // Cloudflare WARP is host-level too: its card is driven by
+            // warpIsInstalled() further below, not by container status.
+            if (app.proto === 'warp') return;
             const installed = isAppInstalled((currentProtocolStatus || {})[app.proto]);
             if (card) {
                 card.classList.toggle('installed-app-hidden', !installed);
@@ -2532,6 +2935,17 @@
         }
         if (rknInstalled) installedCount++;
         renderRknBlockCard();
+
+        // Cloudflare WARP card: host-level app. It is shown only once WARP is
+        // installed; before that the marketplace is the entry point.
+        const warpInstalled = warpIsInstalled();
+        const warpCard = document.getElementById('proto-warp');
+        if (warpCard) {
+            warpCard.classList.toggle('installed-app-hidden', !warpInstalled);
+            warpCard.classList.toggle('installed-app-visible', warpInstalled);
+        }
+        if (warpInstalled) installedCount++;
+        if (typeof renderWarpCard === 'function') renderWarpCard();
 
         orderedProtocolEntries(currentProtocolStatus || {}).forEach(([proto, info]) => {
             if (protoInstance(proto) > 1) {
@@ -2606,22 +3020,517 @@
                 <span class="stat-pill" title="Disk: ${formatBytes(stats.disk_used)} / ${formatBytes(stats.disk_total)}">💾 ${percent('disk', stats.disk_percent)}</span>
                 <span class="stat-pill" title="Network">🌐 ${'network' in failed ? '—' : `↓${formatBytes(stats.net_rx)} ↑${formatBytes(stats.net_tx)}`}</span>
             `;
-            const ipv6 = Array.isArray(stats.ipv6) ? stats.ipv6 : [];
-            const ipv6El = document.getElementById('serverIpv6');
-            if (ipv6.length) {
-                ipv6El.textContent = ipv6.join(' • ');
-                ipv6El.style.display = '';
-            } else {
-                ipv6El.style.display = 'none';
-            }
         } catch (err) {
             console.warn('Stats load failed:', err);
+        }
+    }
+
+    // ========== IPv4 / IPv6 ==========
+    let ipStatusCache = null;
+
+    const IP_STATE_KEYS = {
+        in_use: 'server_ipv6_state_in_use',
+        host_only: 'server_ipv6_state_host_only',
+        enabled_no_peers: 'server_ipv6_state_enabled_no_peers',
+        absent: 'server_ipv6_state_absent',
+        no_route: 'server_ipv6_state_no_route',
+        disabled: 'server_ipv6_state_disabled',
+        unknown: 'server_ipv6_state_unknown',
+    };
+
+    const IP_BLOCKED_KEYS = {
+        peers: 'server_ipv6_table_has_peers',
+        exit_link: 'server_ipv6_blocked_exit_link',
+        docker_off: 'server_ipv6_chip_docker_ipv6',
+        docker_pending: 'server_ipv6_after_docker_restart',
+        needs_recreate: 'server_ipv6_needs_recreate',
+        server_off: 'server_ipv6_state_unknown',
+        state_unreadable: 'server_ipv6_state_unknown',
+        docker_bridge_ipv6_missing: 'server_ipv6_err_docker_bridge_missing',
+        daemon_json_invalid: 'server_ipv6_err_daemon_json_invalid',
+        confirm_required: 'server_ipv6_err_confirm_required',
+        peers_appeared: 'server_ipv6_badge_peers_appeared',
+        ipv6_pool_exhausted: 'server_ipv6_badge_pool_exhausted',
+        docker_flags_conflict: 'server_ipv6_badge_flags_conflict',
+        ipv6_disabled_by_sysctl: 'server_ipv6_badge_sysctl_disabled',
+        docker_recovery_failed: 'server_ipv6_badge_docker_recovery',
+        operation_busy: 'server_ipv6_badge_operation_busy',
+        not_awg: 'server_ipv6_err_not_awg',
+        env_off: 'server_ipv6_state_env_off',
+        env_on: 'server_ipv6_state_env_on',
+        peer_lifecycle_busy: 'server_ipv6_badge_peer_lifecycle_busy',
+        ip6tables_unsupported: 'server_ipv6_badge_ip6tables_unsupported',
+    };
+
+    // A blocked_reason the panel can fix on its own when the admin acts.
+    const IP_AUTO_FIXABLE = new Set(['needs_recreate']);
+
+    function ipStateText(state) {
+        return _(IP_STATE_KEYS[state] || 'server_ipv6_state_unknown');
+    }
+
+    function ipBlockedText(reason) {
+        return _(IP_BLOCKED_KEYS[reason] || 'server_ipv6_state_unknown');
+    }
+
+    // The button says what it will do, not what the instance is now.
+    function ipActionText(inst) {
+        if (ipIsRepair(inst)) return _('server_ipv6_action_repair');
+        if (inst.ipv6_enabled) return _('server_ipv6_action_disable');
+        if (inst.blocked_reason === 'needs_recreate') return _('server_ipv6_action_rebuild');
+        return _('server_ipv6_action_enable');
+    }
+
+    // A broken exit link may drop IPv6 even with peers: IPv4 keeps working.
+    function ipIsRepair(inst) {
+        return !!inst.ipv6_enabled && !!inst.exit_linked && !!inst.can_disable
+            && (inst.peers || 0) > 0;
+    }
+
+    // A reason is never shown as raw code.
+    function ipCodeText(code) {
+        const key = IP_BLOCKED_KEYS[code];
+        return key ? _(key) : _('server_ipv6_state_unknown');
+    }
+
+    function ipChip(state, glyph, text, title) {
+        return `<span class="ip-chip" data-state="${state}" role="status"`
+            + ` aria-label="${escapeHtml(text)}" title="${escapeHtml(title || text)}">`
+            + `<span class="glyph" aria-hidden="true">${glyph}</span>`
+            + `<span dir="ltr">${escapeHtml(text)}</span></span>`;
+    }
+
+    // Colour + glyph for a host IP state. Red is a real absence, grey is unknown.
+    function ipHostChipStyle(state) {
+        if (state === 'in_use') return { state: 'on', glyph: '✓' };
+        if (state === 'host_only' || state === 'enabled_no_peers') {
+            return { state: 'warn', glyph: '!' };
+        }
+        if (state === 'absent' || state === 'no_route' || state === 'disabled') {
+            return { state: 'bad', glyph: '✕' };
+        }
+        return { state: 'neutral', glyph: '?' };
+    }
+
+    // The chip carries the address, then the state or the usage counts.
+    function ipHostChipText(label, address, state, counts) {
+        const parts = [`${label} ${address || ''}`.trim()];
+        if (state === 'in_use' && counts) {
+            parts.push(_('server_ipv6_state_in_use_desc')
+                .replace('{n}', counts.instances)
+                .replace('{m}', counts.peers));
+        } else {
+            parts.push(ipStateText(state));
+        }
+        return parts.join(' · ');
+    }
+
+    function renderIpChips(data) {
+        const box = document.getElementById('serverIpChips');
+        if (!box) return;
+        const host = data.host || {};
+        const docker = data.docker || {};
+        const instances = data.instances || [];
+        const chips = [];
+        // Older payloads omit ipv4_state: keep the previous green default then.
+        const v4 = host.ipv4_state || 'in_use';
+        const v4Style = ipHostChipStyle(v4);
+        const v4Counts = {
+            instances: instances.filter(item => item.subnet_v4).length,
+            peers: instances.reduce((sum, item) => sum + (item.peers || 0), 0),
+        };
+        const v4Title = `IPv4 ${host.ipv4 || ''}`.trim();
+        chips.push(ipChip(v4Style.state, v4Style.glyph,
+            ipHostChipText('IPv4', host.ipv4, v4, v4Counts), v4Title));
+        const v6 = host.ipv6_state || 'unknown';
+        const v6Style = ipHostChipStyle(v6);
+        const v6Counts = {
+            instances: instances.filter(item => item.ipv6_enabled).length,
+            peers: instances.reduce((sum, item) => sum + (item.peers_v6 || 0), 0),
+        };
+        const v6Title = host.ipv6 || ipStateText(v6);
+        chips.push(ipChip(v6Style.state, v6Style.glyph,
+            ipHostChipText('IPv6', host.ipv6, v6, v6Counts), v6Title));
+        // Docker is only worth a chip when it is not green.
+        if (!docker.installed) {
+            chips.push(ipChip('off', '✕', `${_('server_ipv6_chip_docker_ipv6')}: ${_('server_ipv6_state_unknown')}`));
+        } else if (docker.flags_conflict) {
+            chips.push(ipChip('warn', '!', _('server_ipv6_badge_flags_conflict')));
+        } else if (!docker.ipv6_enabled) {
+            const dstate = docker.restart_required ? 'warn' : 'off';
+            const dtext = docker.restart_required
+                ? _('server_ipv6_chip_restart')
+                : _('server_ipv6_state_host_only');
+            const dtitle = docker.restart_required
+                ? _('server_ipv6_after_docker_restart') : dtext;
+            chips.push(ipChip(dstate, '!',
+                `${_('server_ipv6_chip_docker_ipv6')}: ${dtext}`, dtitle));
+        }
+        box.innerHTML = chips.join('');
+        box.hidden = false;
+    }
+
+    let ipv6PreferenceSaved = 'auto';
+    let ipv6PrefDirty = false;
+
+    function selectedIpv6Preference() {
+        const checked = document.querySelector('input[name="ipv6_pref"]:checked');
+        return checked ? checked.value : null;
+    }
+
+    function markIpv6PrefDirty() {
+        ipv6PrefDirty = selectedIpv6Preference() !== ipv6PreferenceSaved;
+        const saveBtn = document.getElementById('ipPrefSave');
+        if (saveBtn) saveBtn.disabled = !ipv6PrefDirty;
+    }
+
+    // Cancel and the close button return the form to the stored value.
+    function restoreIpv6Preference() {
+        const id = ipv6PreferenceSaved === 'on' ? 'ipPrefOn'
+            : (ipv6PreferenceSaved === 'off' ? 'ipPrefOff' : 'ipPrefAuto');
+        const input = document.getElementById(id);
+        if (input) input.checked = true;
+        ipv6PrefDirty = false;
+        const saveBtn = document.getElementById('ipPrefSave');
+        if (saveBtn) saveBtn.disabled = true;
+    }
+
+    // Backdrop click and Escape go through closeModal; this hook lets them
+    // ask before unsaved IPv6 preference changes are discarded.
+    window.ipSettingsCanClose = function () {
+        if (ipv6PrefDirty) {
+            return window.confirm(_('server_ipv6_discard_confirm'));
+        }
+        return true;
+    };
+
+    function closeIpSettings() {
+        if (!window.ipSettingsCanClose()) return;
+        restoreIpv6Preference();
+        closeModal('ipSettingsModal');
+    }
+
+    function renderIpSettings(data) {
+        const prefObj = data.preference || {};
+        const pref = (prefObj && typeof prefObj === 'object')
+            ? prefObj.new_instances : prefObj;
+        const envOverride = (prefObj && typeof prefObj === 'object')
+            ? prefObj.env_override : 'auto';
+        document.getElementById('ipPrefAuto').checked = pref === null || pref === undefined;
+        document.getElementById('ipPrefOn').checked = pref === true;
+        document.getElementById('ipPrefOff').checked = pref === false;
+        const selected = document.querySelector('input[name="ipv6_pref"]:checked');
+        ipv6PreferenceSaved = selected ? selected.value : 'auto';
+        ipv6PrefDirty = false;
+        const prefSaveBtn = document.getElementById('ipPrefSave');
+        if (prefSaveBtn) prefSaveBtn.disabled = true;
+        const writable = !!data.can_write;
+        const envLocked = envOverride === 'off' || envOverride === 'on';
+        ['ipPrefAuto', 'ipPrefOn', 'ipPrefOff'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.disabled = !writable || envLocked;
+        });
+        const host = data.host || {};
+        const docker = data.docker || {};
+        document.getElementById('ipHostSummary').textContent =
+            `${host.ipv4 || '—'} · ${host.ipv6 || '—'} · IPv6: ${ipStateText(host.ipv6_state)}`
+            + (host.ipv6_default_route ? '' : ` (${_('server_ipv6_state_no_route')})`)
+            + (envLocked ? ` · ${_('server_ipv6_env_override')}: ${envOverride}` : '');
+        const note = document.getElementById('ipDockerNote');
+        const showNote = writable
+            && ((docker.installed && !docker.ipv6_enabled) || docker.flags_conflict);
+        note.style.display = showNote ? '' : 'none';
+        document.getElementById('ipDockerApplyBtn').disabled = !writable || !!docker.flags_conflict;
+        const body = document.getElementById('ipInstancesBody');
+        const rows = (data.instances || []).map(inst => {
+            const on = !!inst.ipv6_enabled;
+            const peers = (inst.peers === null || inst.peers === undefined)
+                ? '—' : `${inst.peers} <span class="muted" style="font-size:11px;">(v6: ${inst.peers_v6 || 0})</span>`;
+            const reasonText = (inst.blocked_reason && inst.blocked_reason !== 'none')
+                ? ipBlockedText(inst.blocked_reason) : '';
+            const reason = reasonText
+                ? `<span class="badge ${IP_AUTO_FIXABLE.has(inst.blocked_reason) ? 'badge-info' : 'badge-warn'}">`
+                    + `${escapeHtml(reasonText)}</span>`
+                : '';
+            // needs_recreate is not a refusal: the panel rebuilds the container.
+            const repair = ipIsRepair(inst);
+            const blocked = inst.blocked_reason !== 'none'
+                && !IP_AUTO_FIXABLE.has(inst.blocked_reason) && !repair;
+            // Repair always disables; a plain switch flips the current state.
+            const args = repair ? 'false, true' : `${on ? 'false' : 'true'}`;
+            const action = writable
+                ? `<span class="ip-action"><button class="btn btn-secondary btn-sm"`
+                    + ` onclick="setInstanceIpv6('${escapeHtml(inst.proto)}', ${args})"`
+                    + ` ${blocked ? 'disabled' : ''}>${escapeHtml(ipActionText(inst))}</button>${reason}</span>`
+                : reason;
+            return `<tr><td data-label="${escapeHtml(_('server_ipv6_table_instance'))}">${escapeHtml(inst.proto)}</td>`
+                + `<td class="font-mono" dir="ltr" data-label="${escapeHtml(_('server_ipv6_table_subnet'))}">${escapeHtml(inst.subnet_v4 || '')}</td>`
+                + `<td data-label="${escapeHtml(_('server_ipv6_table_peers'))}">${peers}</td>`
+                + `<td data-label="IPv6">${on ? `<span class="badge badge-success mono" dir="ltr">${escapeHtml(inst.subnet_v6 || '')}</span>` : '—'}</td>`
+                + `<td data-label="${escapeHtml(_('server_ipv6_table_action'))}">${action}</td></tr>`;
+        });
+        body.innerHTML = rows.length ? rows.join('')
+            : `<tr><td colspan="5">${_('server_ipv6_state_unknown')}</td></tr>`;
+    }
+
+    async function loadIpStatus() {
+        try {
+            const data = await apiCall(`/api/servers/${SERVER_ID}/ip-status`, 'GET');
+            ipStatusCache = data;
+            renderIpChips(data);
+            if (document.getElementById('ipSettingsModal').classList.contains('active')) {
+                renderIpSettings(data);
+            }
+            if (document.getElementById('installModal').classList.contains('active')) {
+                renderInstallIpv6Note();
+            }
+        } catch (err) {
+            console.warn('IP status failed:', err);
+        }
+    }
+
+    async function openIpSettings() {
+        openModal('ipSettingsModal');
+        await loadIpStatus();
+    }
+
+    // The install button mirrors the IPv6 gate: a pending Docker restart
+    // cannot produce a dual-stack container, so the install is blocked.
+    function setInstallIpv6Pending(pending) {
+        const btn = document.getElementById('installBtn');
+        if (!btn) return;
+        btn.dataset.ipv6Pending = pending ? 'true' : 'false';
+        btn.disabled = !!pending;
+        const text = document.getElementById('installBtnText');
+        if (text) {
+            text.textContent = pending
+                ? _('server_ipv6_enable_docker_first') : _('install');
+        }
+    }
+
+    // What a new instance on this server will get, shown in the install modal.
+    function renderInstallIpv6Note() {
+        const note = document.getElementById('installIpv6Note');
+        if (!note) return;
+        const dns6Group = document.getElementById('installAwgDns6Group');
+        const data = ipStatusCache;
+        if (!data) {
+            note.style.display = 'none';
+            if (dns6Group) dns6Group.style.display = '';
+            setInstallIpv6Pending(false);
+            return;
+        }
+        const prefObj = data.preference || {};
+        const pref = (typeof prefObj === 'object') ? prefObj.new_instances : prefObj;
+        const docker = data.docker || {};
+        const envOverride = (typeof prefObj === 'object') ? prefObj.env_override : undefined;
+        // env_override is fixed by the server admin and overrides the preference
+        if (envOverride === 'off') {
+            note.textContent = _('server_ipv6_disabled_server');
+            note.dataset.kind = 'warn';
+            note.style.display = '';
+            if (dns6Group) dns6Group.style.display = 'none';
+            setInstallIpv6Pending(false);
+            return;
+        }
+        let text;
+        let kind = 'info';
+        if (envOverride === 'on') {
+            // AWG_IPV6=on still cannot build a dual-stack container until
+            // Docker itself has IPv6.
+            if (docker.ipv6_enabled) {
+                text = _('server_ipv6_install_ipv6_auto');
+            } else {
+                text = _('server_ipv6_after_docker_restart');
+                kind = 'pending';
+            }
+        } else if (pref === false) {
+            text = _('server_ipv6_disabled_server');
+            kind = 'warn';
+        } else if (docker.ipv6_enabled) {
+            text = _('server_ipv6_install_ipv6_auto_desc');
+        } else if (pref === true) {
+            // The container would stay IPv4-only until Docker is restarted.
+            text = _('server_ipv6_after_docker_restart');
+            kind = 'pending';
+        } else {
+            text = _('server_ipv6_auto_from_server');
+        }
+        note.textContent = text;
+        note.dataset.kind = kind;
+        note.style.display = '';
+        if (dns6Group) dns6Group.style.display = pref === false ? 'none' : '';
+        setInstallIpv6Pending(kind === 'pending');
+    }
+
+    async function saveIpv6Preference() {
+        const value = selectedIpv6Preference();
+        if (!value) return;
+        const btn = document.getElementById('ipPrefSave');
+        if (btn) btn.disabled = true;
+        const enabled = value === 'auto' ? null : value === 'on';
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/ipv6`, 'POST', { enabled });
+            ipv6PreferenceSaved = value;
+            ipv6PrefDirty = false;
+            showToast(_('saved'), 'success');
+            await loadIpStatus();
+        } catch (err) {
+            showToast(_('error') + ': ' + err.message, 'error');
+            if (btn) btn.disabled = !ipv6PrefDirty;
+        }
+    }
+
+    // Long operations run in the background and are polled by id.
+    async function waitOperation(opId) {
+        const deadline = Date.now() + 180000;
+        while (Date.now() < deadline) {
+            await new Promise(resolve => setTimeout(resolve, 1500));
+            try {
+                const op = await apiCall(
+                    `/api/servers/${SERVER_ID}/operations/${encodeURIComponent(opId)}`, 'GET');
+                if (op.state !== 'running') return op;
+            } catch (err) {
+                return { state: 'failed', reason: 'state_unreadable' };
+            }
+        }
+        return { state: 'failed', reason: 'timeout' };
+    }
+
+    function opFailureText(op) {
+        if (!op || !op.reason) return _('server_ipv6_operation_failed');
+        if (op.reason === 'interrupted') return _('server_ipv6_operation_interrupted');
+        if (op.reason === 'timeout') return _('server_ipv6_error_timeout');
+        return ipCodeText(op.reason);
+    }
+
+    async function applyDockerIpv6() {
+        const confirmBox = document.getElementById('ipDockerConfirm');
+        if (!confirmBox.checked) {
+            showToast(_('server_ipv6_restart_docker_confirm'), 'error');
+            return;
+        }
+        const btn = document.getElementById('ipDockerApplyBtn');
+        btn.disabled = true;
+        try {
+            const res = await apiCall(`/api/servers/${SERVER_ID}/docker/ipv6/apply`,
+                'POST', { confirm: 'restart-docker' });
+            showToast(_('server_ipv6_operation_started'), 'info');
+            const op = await waitOperation(res.op_id);
+            if (op.state === 'done') showToast(_('saved'), 'success');
+            else showToast(_('error') + ': ' + opFailureText(op), 'error');
+            await loadIpStatus();
+        } catch (err) {
+            showToast(_('error') + ': ' + ipErrorText(err), 'error');
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    // A blocked_reason code is shown as a translated sentence, never raw.
+    function ipErrorText(err) {
+        const code = (err.payload && err.payload.code) || '';
+        return code && IP_BLOCKED_KEYS[code] ? _(IP_BLOCKED_KEYS[code]) : err.message;
+    }
+
+    async function setInstanceIpv6(proto, enabled, repair) {
+        if (repair && !window.confirm(_('server_ipv6_repair_confirm'))) return false;
+        try {
+            const res = await apiCall(
+                `/api/servers/${SERVER_ID}/protocol/${encodeURIComponent(proto)}/ipv6`,
+                'POST', { enabled, repair: !!repair });
+            if (res.op_id) {
+                showToast(_('server_ipv6_operation_started'), 'info');
+                const op = await waitOperation(res.op_id);
+                if (op.state === 'done') {
+                    showToast(_('saved'), 'success');
+                } else {
+                    showToast(_('error') + ': ' + opFailureText(op), 'error');
+                    await loadIpStatus();
+                    return false;
+                }
+            } else {
+                showToast(_('saved'), 'success');
+            }
+            await loadIpStatus();
+            return true;
+        } catch (err) {
+            showToast(_('error') + ': ' + ipErrorText(err), 'error');
+            return false;
+        }
+    }
+
+    // Legacy AWG has no IPv6 switch; DNS6 only matters on a dual-stack tunnel.
+    let awgIpv6Loaded = null;
+    let awgIpv6CanWrite = true;
+    let awgIpv6HintKey = 'server_ipv6_unlock_hint';
+
+    function awgIpv6Changed() {
+        const checked = document.querySelector('input[name="awg_ipv6"]:checked');
+        if (!checked || awgIpv6Loaded === null) return false;
+        return (checked.value === 'on') !== awgIpv6Loaded;
+    }
+
+    function renderAwgIpv6Hint() {
+        const hint = document.getElementById('awgSetIpv6Hint');
+        if (!hint) return;
+        if (awgIpv6Changed()) {
+            hint.textContent = _('server_ipv6_apply_or_revert_hint');
+            return;
+        }
+        hint.textContent = _(awgIpv6HintKey);
+    }
+
+    // The general AWG Save must not race the separate IPv6 Apply.
+    function updateAwgIpv6Dirty() {
+        const saveBtn = document.getElementById('awgSaveBtn');
+        if (saveBtn) saveBtn.disabled = awgIpv6Changed();
+        renderAwgIpv6Hint();
+    }
+
+    function renderAwgIpv6Row(proto, ipv6Enabled, exitLinked, peers,
+        canEnable, canWrite, blockedReason) {
+        const row = document.getElementById('awgSetIpv6Row');
+        const on = document.getElementById('awgIpv6On');
+        const off = document.getElementById('awgIpv6Off');
+        if (!row || !on || !off) return;
+        row.style.display = protoBase(proto || '') === 'awg_legacy' ? 'none' : '';
+        awgIpv6Loaded = !!ipv6Enabled;
+        awgIpv6CanWrite = canWrite !== false;
+        const enableAllowed = canEnable !== false;
+        (ipv6Enabled ? on : off).checked = true;
+        on.disabled = !!exitLinked || !enableAllowed || !awgIpv6CanWrite;
+        off.disabled = !awgIpv6CanWrite;
+        const applyBtn = document.getElementById('awgSetIpv6Apply');
+        if (applyBtn) applyBtn.disabled = !awgIpv6CanWrite;
+        const dns6 = document.getElementById('awgSetDns6');
+        if (dns6) dns6.disabled = !ipv6Enabled || !awgIpv6CanWrite;
+        let key = 'server_ipv6_unlock_hint';
+        if (blockedReason === 'peers' || (!blockedReason && peers > 0)) {
+            key = 'server_ipv6_blocked_peers';
+        } else if (blockedReason) {
+            key = IP_BLOCKED_KEYS[blockedReason] || 'server_ipv6_unlock_hint';
+        } else if (exitLinked && !ipv6Enabled) {
+            key = 'server_ipv6_blocked_exit_link';
+        }
+        awgIpv6HintKey = key;
+        updateAwgIpv6Dirty();
+    }
+
+    async function saveInstanceIpv6() {
+        const value = document.querySelector('input[name="awg_ipv6"]:checked')?.value;
+        if (!value || !currentAwgProto) return;
+        const ok = await setInstanceIpv6(currentAwgProto, value === 'on');
+        if (ok) {
+            awgIpv6Loaded = value === 'on';
+            updateAwgIpv6Dirty();
         }
     }
 
     // ========== Server Check ==========
     async function checkServer() {
         loadRknBlock();
+        if (typeof loadWarpStatus === 'function') loadWarpStatus(true);
         setInstalledAppsLoading(true);
         const btn = document.getElementById('checkBtn');
         const text = document.getElementById('checkBtnText');
@@ -3608,6 +4517,7 @@
             document.getElementById('installAwgDns1').value = '1.1.1.1';
             document.getElementById('installAwgDns2').value = '1.0.0.1';
             document.getElementById('installAwgDns6').value = '2606:4700:4700::1111';
+            renderInstallIpv6Note();
             resetSpecialJunkFields('installAwg');
         }
 
@@ -3639,20 +4549,64 @@
         return err instanceof TypeError || /Failed to fetch|NetworkError|Load failed/i.test(err && err.message || '');
     }
 
-    // Poll /check until the just-installed protocol shows up on the server
-    // (or give up after ~10 minutes). Returns true when the install
-    // evidently completed despite the aborted fetch.
-    async function waitForInstallVisible(protocol, timeoutMs = 600000, intervalMs = 10000) {
-        const deadline = Date.now() + timeoutMs;
-        while (Date.now() < deadline) {
-            await new Promise(r => setTimeout(r, intervalMs));
-            try {
-                const data = await apiCall(`/api/servers/${SERVER_ID}/check`, 'POST');
-                const info = (data.protocols || {})[protocol];
-                if (info && (info.container_exists || info.installed)) return true;
-            } catch (_) { /* panel or network not reachable yet — keep polling */ }
+    // Real install progress, polled independently of the POST: a slow build
+    // may outlive the request deadline while the worker keeps going.
+    const INSTALL_STAGE_KEYS = {
+        start: 'install_starting', docker: 'check_docker', host: 'prepare_host',
+        build: 'build_container', run: 'install_stage_run',
+        config: 'install_stage_config', firewall: 'install_stage_firewall',
+        done: 'install_stage_done', error: 'error'
+    };
+
+    function renderInstallProgress(data) {
+        const fill = document.getElementById('installProgressFill');
+        const percent = document.getElementById('installPercent');
+        const track = document.getElementById('installProgressTrack');
+        const step = document.getElementById('installStep');
+        const stage = document.getElementById('installStage');
+        const log = document.getElementById('installLog');
+        const pct = Math.max(0, Math.min(100, data.percent || 0));
+        if (fill) fill.style.width = pct + '%';
+        if (percent) percent.textContent = pct + '%';
+        if (track) track.setAttribute('aria-valuenow', String(pct));
+        if (step) {
+            step.textContent = _('awg_plugin_step')
+                .replace('{step}', data.step || 0)
+                .replace('{total}', data.total || 10);
         }
-        return false;
+        if (stage) stage.textContent = _(INSTALL_STAGE_KEYS[data.stage] || 'install_starting');
+        (data.lines || []).forEach(line => {
+            if (!log) return;
+            const row = document.createElement('div');
+            const caveat = (line.text || '').startsWith('!');
+            row.className = caveat ? 'log-line warning' : 'log-line info';
+            row.textContent = '[' + line.ts + '] ' + (caveat ? line.text.slice(1) : line.text);
+            log.appendChild(row);
+        });
+        if (log) log.scrollTop = log.scrollHeight;
+    }
+
+    async function pollInstallProgress(protocol, postPending) {
+        let offset = 0;
+        const deadline = Date.now() + 20 * 60 * 1000;
+        while (Date.now() < deadline) {
+            await new Promise(r => setTimeout(r, 900));
+            try {
+                const data = await apiCall(`/api/servers/${SERVER_ID}/install/progress?protocol=${encodeURIComponent(protocol)}&offset=${offset}`);
+                offset = data.next_offset || offset;
+                renderInstallProgress(data);
+                if (data.state !== 'running') return data;
+            } catch (err) {
+                // The op appears as soon as the POST passes validation.
+                if (err.payload && err.payload.code === 'install_not_found') {
+                    if (postPending()) continue;
+                    throw err;
+                }
+                if (isNetworkAbort(err)) continue;
+                throw err;
+            }
+        }
+        throw new Error(_('install_error'));
     }
 
     async function installProtocol() {
@@ -3660,6 +4614,10 @@
         const btn = document.getElementById('installBtn');
         const text = document.getElementById('installBtnText');
         const spinner = document.getElementById('installSpinner');
+        if (btn.dataset.ipv6Pending === 'true') {
+            showToast(_('server_ipv6_enable_docker_first'), 'error');
+            return;
+        }
         btn.disabled = true;
         text.textContent = _('installing');
         spinner.classList.remove('hidden');
@@ -3668,25 +4626,15 @@
         progressDiv.classList.remove('hidden');
         const logEl = document.getElementById('installLog');
         const fillEl = document.getElementById('installProgressFill');
-        logEl.innerHTML = `<div class="log-line info">${_('install_starting')}</div>`;
-        fillEl.style.width = '10%';
+        const percentEl = document.getElementById('installPercent');
+        logEl.textContent = '';
+        fillEl.style.width = '0%';
         fillEl.style.background = '';
-        let progressInterval = null;
+        if (percentEl) percentEl.textContent = '0%';
+        let postPending = true;
+        let postError = null;
+        let postErrorCode = '';
         try {
-            const progressSteps = [
-                { pct: 20, msg: _('check_docker') },
-                { pct: 40, msg: _('prepare_host') },
-                { pct: 50, msg: _('build_container') },
-            ];
-            let stepIdx = 0;
-            progressInterval = setInterval(() => {
-                if (stepIdx < progressSteps.length) {
-                    fillEl.style.width = progressSteps[stepIdx].pct + '%';
-                    logEl.innerHTML += `<div class="log-line info">${progressSteps[stepIdx].msg}</div>`;
-                    logEl.scrollTop = logEl.scrollHeight;
-                    stepIdx++;
-                }
-            }, 2000);
             const params = {
                 protocol: currentInstallProto, port: port, install_another: currentInstallAnother,
             };
@@ -3723,54 +4671,40 @@
                     });
                 }
             }
-            const result = await apiCall(`/api/servers/${SERVER_ID}/install`, 'POST', params);
-            clearInterval(progressInterval);
-            fillEl.style.width = '100%';
-            if (result.log) {
-                result.log.forEach(line => {
-                    // Installers mark a line that succeeded with a caveat by
-                    // prefixing it with "!" - a green tick would hide it.
-                    logEl.innerHTML += line.startsWith('!')
-                        ? `<div class="log-line warning">⚠ ${line.slice(1).trim()}</div>`
-                        : `<div class="log-line success">✓ ${line}</div>`;
-                });
+            // The POST may outlive its 120s response deadline while the worker
+            // continues; the poll is the source of truth, not the fetch result.
+            const request = apiCall(`/api/servers/${SERVER_ID}/install`, 'POST', params)
+                .catch(err => {
+                    postError = err;
+                    postErrorCode = (err.payload && err.payload.code) || '';
+                })
+                .finally(() => { postPending = false; });
+            const final = await pollInstallProgress(currentInstallProto, () => postPending);
+            await request;
+            if (final.state !== 'success') {
+                postError = new Error((final.error && final.error.message) || _('install_error'));
+                throw postError;
             }
-            logEl.scrollTop = logEl.scrollHeight;
+            // Lines were already rendered by the poll; only finish the bar.
+            renderInstallProgress({...final, lines: [], percent: 100,
+                                   step: final.total, stage: 'done'});
             showToast(_('install_success'), 'success');
             document.getElementById('installDone').style.display = '';
             setTimeout(() => checkServer(), 800);
         } catch (err) {
-            clearInterval(progressInterval);
             fillEl.style.width = '100%';
-            // Connection died mid-install: the server side may still complete
-            // fine. Poll for the protocol instead of declaring failure.
-            if (isNetworkAbort(err)) {
-                const waitDiv = document.createElement('div');
-                waitDiv.className = 'log-line info';
-                waitDiv.textContent = `… ${_('install_conn_interrupted')}`;
-                logEl.appendChild(waitDiv);
-                logEl.scrollTop = logEl.scrollHeight;
-                if (await waitForInstallVisible(currentInstallProto)) {
-                    const okDiv = document.createElement('div');
-                    okDiv.className = 'log-line success';
-                    okDiv.textContent = `✓ ${_('install_success')}`;
-                    logEl.appendChild(okDiv);
-                    logEl.scrollTop = logEl.scrollHeight;
-                    showToast(_('install_success'), 'success');
-                    document.getElementById('installDone').style.display = '';
-                    setTimeout(() => checkServer(), 800);
-                    return;
-                }
-            }
             fillEl.style.background = 'linear-gradient(135deg, #ef4444, #dc2626)';
+            const detail = postErrorCode === 'docker_pending'
+                ? _('server_ipv6_enable_docker_first')
+                : ((postError && postError.message) || err.message);
             // textContent, not innerHTML: build logs can contain sequences
             // that parse as HTML and silently swallow the rest of the error.
             const errDiv = document.createElement('div');
             errDiv.className = 'log-line error';
-            errDiv.textContent = `✕ ${_('error')}: ${err.message}`;
+            errDiv.textContent = `✕ ${_('error')}: ${detail}`;
             logEl.appendChild(errDiv);
             logEl.scrollTop = logEl.scrollHeight;
-            showToast(_('install_error') + err.message, 'error');
+            showToast(_('install_error') + detail, 'error');
             document.getElementById('installDone').style.display = '';
         }
     }
@@ -4013,6 +4947,15 @@
             awgSafeMtu = Number(data.safe_mtu || 0);
             awgTransportOverhead = Number(data.transport_overhead || 0);
             updateAwgMtuSafeHint();
+            // The peer count decides whether the IPv6 switch is locked.
+            if (!ipStatusCache) await loadIpStatus();
+            const ipInst = ((ipStatusCache && ipStatusCache.instances) || [])
+                .find(item => item.proto === proto);
+            renderAwgIpv6Row(proto, !!data.ipv6_enabled, !!data.exit_linked,
+                ipInst ? (ipInst.peers || 0) : 0,
+                ipInst ? ipInst.can_enable !== false : true,
+                ipStatusCache ? ipStatusCache.can_write !== false : true,
+                ipInst ? (ipInst.blocked_reason || '') : '');
             const junkGroup = document.getElementById('awgSetJunkGroup');
             junkGroup.style.display = data.supports_special_junk ? '' : 'none';
             SPECIAL_JUNK_KEYS.forEach(key => {
@@ -4051,7 +4994,7 @@
         } catch (err) {
             showToast(_('error') + ': ' + err.message, 'error');
         } finally {
-            btn.disabled = false;
+            btn.disabled = awgIpv6Changed();
             text.textContent = _('save');
             spinner.classList.add('hidden');
         }
@@ -4063,7 +5006,7 @@
     let currentExitLinkState = null;
     const EXIT_LINK_ERROR_KEYS = ['exit_no_handshake', 'exit_mtu_too_big', 'exit_self', 'exit_legacy_obfuscation',
         'exit_not_found', 'exit_apply_failed', 'exit_in_use', 'exit_egress_failed', 'exit_dns_needs_dns',
-        'not_linked', 'failover_no_backups'];
+        'not_linked', 'failover_no_backups', 'exit_link_ipv6'];
     let currentExitFailoverBackups = [];
     let currentExitNodes = [];
 
@@ -4667,18 +5610,18 @@
     }
 
     async function installSmartRoute() {
+        if (smartRouteBusy) return;
+        smartRouteBusy = true;
         const btn = document.getElementById('smartRouteInstallBtn');
         btn.disabled = true;
+        closeModal('smartRouteModal');
         try {
-            await apiCall(`/api/servers/${SERVER_ID}/smartroute/install`, 'POST');
-            showToast(_('smartroute_installed_toast'), 'success');
-            smartRouteStatus = await loadSmartRouteStatus();
-            renderSmartRouteModal(smartRouteStatus);
-            renderSmartRouteCard();
-            applyInstalledAppsVisibility();
+            const res = await apiCall(`/api/servers/${SERVER_ID}/smartroute/install`, 'POST');
+            if (!res?.operation_id) throw new Error('No operation_id returned');
+            renderInstallOpProgress(res.operation_id, 'smartroute');
         } catch (err) {
             showToast(_('error') + ': ' + smartrouteErrorText(err), 'error');
-        } finally {
+            smartRouteBusy = false;
             btn.disabled = false;
         }
     }
@@ -5530,9 +6473,12 @@
     }
 
     function escapeHtml(str) {
-        const div = document.createElement('div');
-        div.textContent = str;
-        return div.innerHTML;
+        return String(str == null ? '' : str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
     }
 
     function escapeJs(str) {
@@ -5803,55 +6749,15 @@
         if (rknBlockBusy || !rknBlockStatus || rknBlockStatus.available === false || rknBlockStatus.installed) return;
         rknBlockBusy = true;
         ++rknBlockLoadId;
-        closeModal('marketplaceModal');
         const btn = document.getElementById('rknblock-install-btn');
         if (btn) btn.disabled = true;
-        const titleEl = document.getElementById('installModalTitle');
-        if (titleEl) titleEl.textContent = 'RKN Block (C24Be)';
-        document.getElementById('installForm').classList.add('hidden');
-        document.getElementById('installDone').style.display = 'none';
-        const progressDiv = document.getElementById('installProgress');
-        progressDiv.classList.remove('hidden');
-        const logEl = document.getElementById('installLog');
-        const fillEl = document.getElementById('installProgressFill');
-        fillEl.style.width = '10%';
-        fillEl.style.background = '';
-        logEl.innerHTML = `<div class="log-line info">${_('install_starting')}</div>`;
-        openModal('installModal');
-        // The install is one long SSH call; its internals are not observable
-        // here. Do not invent per-stage progress, just say it takes a while.
-        logEl.innerHTML += `<div class="log-line info">${_('rknblock_install_wait')}</div>`;
-        logEl.scrollTop = logEl.scrollHeight;
-        let pct = 10;
-        const progressInterval = setInterval(() => {
-            pct = Math.min(90, pct + 2);
-            fillEl.style.width = pct + '%';
-        }, 2000);
+        closeModal('marketplaceModal');
         try {
-            await apiCall(`/api/servers/${SERVER_ID}/rknblock/install?server_uid=${encodeURIComponent(document.body.dataset.serverUid || '')}`, 'POST');
-            rknBlockStatus = {installed: true, available: false, agent_state: 'unknown', running: false, healthy: false};
-            rknBlockBusy = false;
-            clearInterval(progressInterval);
-            fillEl.style.width = '100%';
-            fillEl.style.background = 'var(--success, #4ade80)';
-            logEl.innerHTML += `<div class="log-line success">✓ ${_('rknblock_installed_toast')}</div>`;
-            logEl.scrollTop = logEl.scrollHeight;
-            showToast(_('rknblock_installed_toast'), 'success');
-            await loadRknBlock();
-            applyInstalledAppsVisibility();
-            renderMarketplace();
-            document.getElementById('installDone').style.display = '';
+            const res = await apiCall(`/api/servers/${SERVER_ID}/rknblock/install?server_uid=${encodeURIComponent(document.body.dataset.serverUid || '')}`, 'POST');
+            if (!res?.operation_id) throw new Error('No operation_id returned');
+            renderInstallOpProgress(res.operation_id, 'rknblock');
         } catch (err) {
-            clearInterval(progressInterval);
-            rknBlockStatus = {...(rknBlockStatus || {}), available: false, agent_state: 'unknown', running: false, healthy: false};
-            applyInstalledAppsVisibility();
-            renderMarketplace();
-            fillEl.style.background = 'var(--danger, #f85149)';
-            logEl.innerHTML += `<div class="log-line error">${_('error')}: ${escapeHtml(err.message || err)}</div>`;
-            logEl.scrollTop = logEl.scrollHeight;
             showToast(_('error') + ': ' + (err.message || err), 'error');
-            document.getElementById('installDone').style.display = '';
-        } finally {
             rknBlockBusy = false;
             if (btn) btn.disabled = false;
         }
@@ -5944,9 +6850,351 @@
         }
     }
 
+    // ========== Cloudflare WARP (server app + per-instance egress) ==========
+    // Distinct from the panel-level `warp_*` keys: these are the per-server
+    // WARP app (`srv_warp_*`) driven by /api/servers/{id}/warp/status.
+    const WARP_AGGREGATE_KEYS = {
+        not_installed: 'srv_warp_status_not_installed',
+        installed: 'srv_warp_status_installed',
+        degraded: 'srv_warp_status_degraded',
+        unreachable: 'srv_warp_status_unreachable',
+    };
+    const WARP_STATE_KEYS = {
+        not_installed: 'srv_warp_status_not_installed',
+        available_not_linked: 'srv_warp_status_installed',
+        connected: 'srv_warp_state_connected',
+        connecting: 'srv_warp_state_connecting',
+        disconnected: 'srv_warp_state_disconnected',
+        error: 'srv_warp_state_error',
+        stopped: 'srv_warp_state_stopped',
+        unreachable: 'srv_warp_state_unreachable',
+        warp_rate_limited: 'srv_warp_state_rate_limited',
+    };
+    const WARP_ERROR_KEYS = {
+        srv_warp_xor_conflict: 'srv_warp_err_xor',
+        srv_warp_tos_required: 'srv_warp_err_tos',
+        srv_warp_job_busy: 'srv_warp_err_job_busy',
+    };
+
+    function warpAggregate() {
+        const d = warpStatus || {};
+        if (d.aggregate) return String(d.aggregate);
+        return d.installed ? 'installed' : 'not_installed';
+    }
+
+    function warpIsInstalled() {
+        const d = warpStatus || {};
+        if (d.installed) return true;
+        if (Array.isArray(d.instances) && d.instances.some(item => item && item.installed)) return true;
+        const agg = warpAggregate();
+        return agg === 'installed' || agg === 'degraded';
+    }
+
+    function warpBadgeClass(agg) {
+        if (agg === 'installed') return 'badge-success';
+        if (agg === 'unreachable') return 'badge-danger';
+        return 'badge-warn';
+    }
+
+    function warpAggregateBadge() {
+        const agg = warpAggregate();
+        const key = WARP_AGGREGATE_KEYS[agg] || 'srv_warp_status_not_installed';
+        return `<span class="badge ${warpBadgeClass(agg)}"><span class="badge-dot"></span> ${escapeHtml(_(key))}</span>`;
+    }
+
+    function warpJobs() {
+        return (warpStatus && Array.isArray(warpStatus.jobs)) ? warpStatus.jobs : [];
+    }
+
+    function warpSelectedProtocol() {
+        const select = document.getElementById('warp-protocol-select');
+        return (select && select.value) ? select.value : '';
+    }
+
+    function warpInstanceFor(proto) {
+        const instances = (warpStatus && Array.isArray(warpStatus.instances)) ? warpStatus.instances : [];
+        return instances.find(item => item && item.protocol === proto) || null;
+    }
+
+    function syncWarpLinkButtons() {
+        const linkBtn = document.getElementById('warp-link-btn');
+        const unlinkBtn = document.getElementById('warp-unlink-btn');
+        if (!linkBtn && !unlinkBtn) return;
+        const proto = warpSelectedProtocol();
+        const instance = warpInstanceFor(proto);
+        const linked = !!(instance && instance.link_active);
+        if (linkBtn) linkBtn.disabled = warpBusy || !warpIsInstalled() || !proto || linked;
+        if (unlinkBtn) unlinkBtn.disabled = warpBusy || !proto || !linked;
+    }
+
+    function renderWarpCard() {
+        const statusEl = document.getElementById('warp-status');
+        if (!statusEl) return;
+        const d = warpStatus || {};
+        const installed = warpIsInstalled();
+        const jobs = warpJobs();
+        const busy = warpBusy || jobs.length > 0;
+        const actions = document.getElementById('warp-actions');
+        const installedActions = document.getElementById('warp-installed-actions');
+        const infoEl = document.getElementById('warp-info');
+        const grid = document.getElementById('warp-info-grid');
+        const select = document.getElementById('warp-protocol-select');
+
+        if (actions) actions.style.display = installed || busy ? 'none' : '';
+        if (installedActions) installedActions.style.display = installed ? '' : 'none';
+        const installBtn = document.getElementById('warp-install-btn');
+        if (installBtn) installBtn.disabled = busy;
+
+        let badge = warpAggregateBadge();
+        if (jobs.length) {
+            const kind = jobs[0].kind || jobs[0].id || '';
+            badge += ` <span class="badge badge-info"><span class="badge-dot"></span> ${escapeHtml(_('srv_warp_job_running').replace('{kind}', kind))}</span>`;
+        }
+        statusEl.innerHTML = badge;
+
+        const instances = Array.isArray(d.instances) ? d.instances.filter(item => item && item.protocol) : [];
+        if (select && instances.length) {
+            const previous = select.value;
+            select.innerHTML = instances.map(item =>
+                `<option value="${escapeHtml(item.protocol)}">${escapeHtml(item.protocol)}</option>`).join('');
+            if (instances.some(item => item.protocol === previous)) select.value = previous;
+        }
+
+        if (infoEl && grid) {
+            if (!installed) {
+                infoEl.classList.add('hidden');
+            } else {
+                const rows = instances.map(item => {
+                    const stateKey = WARP_STATE_KEYS[item.state] || 'srv_warp_state_error';
+                    const bits = [`<b>${escapeHtml(item.protocol)}</b>: ${escapeHtml(_(stateKey))}`];
+                    if (item.link_active) bits.push(`☁️ ${escapeHtml(_('srv_warp_link'))}`);
+                    if (item.quarantine) bits.push('⚠️');
+                    if (item.client_mtu) bits.push(`MTU ${escapeHtml(String(item.client_mtu))}`);
+                    return `<div class="text-sm">${bits.join(' • ')}</div>`;
+                }).join('');
+                const budget = d.budget
+                    ? `<div class="text-sm">${escapeHtml(_('srv_warp_budget').replace('{mtu}', String(d.budget)))}</div>`
+                    : '';
+                grid.innerHTML = rows + budget;
+                if (rows || budget) infoEl.classList.remove('hidden');
+                else infoEl.classList.add('hidden');
+            }
+        }
+        syncWarpLinkButtons();
+        const card = document.getElementById('proto-warp');
+        if (location.hash === '#proto-warp' && card) {
+            setTimeout(() => card.scrollIntoView({ behavior: 'smooth', block: 'center' }), 300);
+        }
+    }
+
+    async function loadWarpStatus(force = false) {
+        if (warpBusy && !force) {
+            renderWarpCard();
+            return warpStatus;
+        }
+        if (!force && warpStatusAt && (Date.now() - warpStatusAt) < WARP_STATUS_TTL) {
+            renderWarpCard();
+            return warpStatus;
+        }
+        const loadId = ++warpLoadId;
+        try {
+            const status = await apiCall(`/api/servers/${SERVER_ID}/warp/status?server_uid=${encodeURIComponent(document.body.dataset.serverUid || '')}`, 'GET');
+            if (loadId !== warpLoadId) return warpStatus;
+            warpStatus = status || {};
+            warpStatusAt = Date.now();
+        } catch (err) {
+            if (loadId !== warpLoadId) return warpStatus;
+            warpStatus = {...(warpStatus || {}), aggregate: 'unreachable'};
+            console.warn('WARP status load failed:', err);
+        }
+        // Render failures must not escape: this also runs during page init.
+        try {
+            renderWarpCard();
+        } catch (err) {
+            console.error('WARP card render failed:', err);
+        }
+        applyInstalledAppsVisibility();
+        renderMarketplace();
+        return warpStatus;
+    }
+
+    function warpPost(path, body) {
+        const payload = Object.assign(
+            { server_uid: document.body.dataset.serverUid || '' }, body || {});
+        return apiCall(`/api/servers/${SERVER_ID}/warp/${path}`, 'POST', payload);
+    }
+
+    function warpErrorCode(err) {
+        const payload = (err && err.payload) || {};
+        return String(payload.code || payload.error || (err && err.message) || '');
+    }
+
+    function warpErrorMessage(err) {
+        return _(WARP_ERROR_KEYS[warpErrorCode(err)] || 'srv_warp_err_generic');
+    }
+
+    function showWarpTosModal() {
+        return new Promise(resolve => {
+            warpTosPending = resolve;
+            openModal('warpTosModal');
+        });
+    }
+
+    function resolveWarpTos(accepted) {
+        closeModal('warpTosModal');
+        const resolve = warpTosPending;
+        warpTosPending = null;
+        if (resolve) resolve(!!accepted);
+    }
+
+    // A missing ToS acknowledgement is a 409 before any job starts; show the
+    // terms once and repeat the same POST with accept_tos=true.
+    async function warpPostWithTos(path, body) {
+        try {
+            return await warpPost(path, body);
+        } catch (err) {
+            if (warpErrorCode(err) !== 'srv_warp_tos_required') throw err;
+            const accepted = await showWarpTosModal();
+            if (!accepted) return null;
+            return warpPost(path, {...(body || {}), accept_tos: true});
+        }
+    }
+
+    async function pollWarpJob(jobId, timeoutMs = 300000) {
+        if (!jobId) return warpStatus;
+        const started = Date.now();
+        while (Date.now() - started < timeoutMs) {
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            const status = await loadWarpStatus(true);
+            const jobs = (status && Array.isArray(status.jobs)) ? status.jobs : [];
+            if (!jobs.some(job => job && job.id === jobId)) return status;
+        }
+        return warpStatus;
+    }
+
+    async function installWarp(protocol) {
+        if (warpBusy) return;
+        closeModal('marketplaceModal');
+        warpBusy = true;
+        renderWarpCard();
+        let started = false;
+        try {
+            // Host-level install: no protocol means every registered AWG
+            // instance; Update passes one explicitly.
+            const body = protocol ? {protocol} : {};
+            const res = await warpPostWithTos('install', body);
+            if (!res) {
+                warpBusy = false;
+                renderWarpCard();
+                return;
+            }
+            if (res.operation_id) {
+                // Store install flow: the shared poller renders stages and
+                // refreshes the WARP card when the operation finishes.
+                started = true;
+                renderInstallOpProgress(res.operation_id, 'warp');
+                return;
+            }
+            // Legacy job response from an older panel.
+            await pollWarpJob(res.job_id);
+            await loadWarpStatus(true);
+            showToast(_('installed'), 'success');
+        } catch (err) {
+            showToast(_('error') + ': ' + warpErrorMessage(err), 'error');
+        } finally {
+            if (!started) {
+                warpBusy = false;
+                renderWarpCard();
+            }
+        }
+    }
+
+    async function uninstallWarp(protocol, options = {}) {
+        if (warpBusy) return false;
+        // Delete on the host card removes every instance; Update passes the
+        // selected protocol explicitly.
+        const proto = protocol || '';
+        if (!options.skipConfirm && !confirm(_('srv_warp_delete') + '?')) return false;
+        warpBusy = true;
+        const btn = document.getElementById('warp-uninstall-btn');
+        if (btn) btn.disabled = true;
+        renderWarpCard();
+        try {
+            const body = proto ? {protocol: proto} : {};
+            const res = await warpPost('uninstall', body);
+            await pollWarpJob(res.job_id);
+            await loadWarpStatus(true);
+            if (!options.silent) showToast(_('done'), 'success');
+            return true;
+        } catch (err) {
+            showToast(_('error') + ': ' + warpErrorMessage(err), 'error');
+            return false;
+        } finally {
+            warpBusy = false;
+            if (btn) btn.disabled = false;
+            renderWarpCard();
+        }
+    }
+
+    // Reinstall: unlink is mandatory before a new registration, so Update is
+    // a delete-then-install cycle with the ToS acknowledgement preserved.
+    async function updateWarp() {
+        if (warpBusy) return;
+        if (!confirm(_('srv_warp_update') + '?')) return;
+        const protocol = warpSelectedProtocol();
+        const removed = await uninstallWarp(protocol, {skipConfirm: true, silent: true});
+        if (!removed) return;
+        await installWarp(protocol);
+    }
+
+    async function linkWarp(protocol) {
+        if (warpBusy) return;
+        const proto = protocol || warpSelectedProtocol();
+        if (!proto) return;
+        warpBusy = true;
+        renderWarpCard();
+        try {
+            const res = await warpPostWithTos('link', {protocol: proto});
+            if (!res) return;
+            await pollWarpJob(res.job_id);
+            await loadWarpStatus(true);
+            showToast(_('done'), 'success');
+        } catch (err) {
+            showToast(_('error') + ': ' + warpErrorMessage(err), 'error');
+        } finally {
+            warpBusy = false;
+            renderWarpCard();
+        }
+    }
+
+    async function unlinkWarp(protocol) {
+        if (warpBusy) return;
+        const proto = protocol || warpSelectedProtocol();
+        if (!proto) return;
+        warpBusy = true;
+        renderWarpCard();
+        try {
+            const res = await warpPost('unlink', {protocol: proto});
+            await pollWarpJob(res.job_id);
+            await loadWarpStatus(true);
+            showToast(_('done'), 'success');
+        } catch (err) {
+            showToast(_('error') + ': ' + warpErrorMessage(err), 'error');
+        } finally {
+            warpBusy = false;
+            renderWarpCard();
+        }
+    }
+
     // ========== Init ==========
     applyInstalledAppsVisibility();
     checkServer();
     loadServerStats();
+    loadIpStatus();
+    let ipStatusPoller = null;
+    if (!ipStatusPoller) {
+        ipStatusPoller = setInterval(() => { if (!document.hidden) loadIpStatus(); }, 60000);
+    }
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) loadIpStatus(); });
 </script>
 {% endblock %}
