@@ -19,6 +19,7 @@
     <a href="#settings-mail">{{ _('mail_title') }}</a>
     <a href="#settings-split-tunnel">{{ _('split_title') }}</a>
     <a href="#settings-tunnels">{{ _('tunnels_title') }}</a>
+    <a href="#settings-ssh-jump">{{ _('ssh_jump_title') }}</a>
     <a href="#settings-ssl">{{ _('ssl_title') }}</a>
     <a href="#settings-duckdns">{{ _('duckdns_title') }}</a>
     <a href="#settings-import">{{ _('import_users_title') }}</a>
@@ -531,6 +532,23 @@
                     </div>
                 </div>
             </form>
+        </div>
+
+        <!-- BLOCK: SSH jump host -->
+        <div class="card" id="settings-ssh-jump">
+            <h3 class="card-title" style="margin-bottom: var(--space-lg);">{{ _('ssh_jump_title') }}</h3>
+            <div class="form-group">
+                <label class="form-label" for="ssh_jump_host_uid">{{ _('ssh_jump_server_label') }}</label>
+                <select class="form-select" id="ssh_jump_host_uid">
+                    <option value="">{{ _('ssh_jump_off') }}</option>
+                    {% for s in servers %}
+                    <option value="{{ s.uid }}" {% if settings.get('ssh_jump', {}).get('jump_host_uid', '') == s.uid %}selected{% endif %}>
+                        {{ s.name or s.host }} ({{ s.host }}:{{ s.ssh_port or 22 }})
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+            <p class="form-hint">{{ _('ssh_jump_hint') }}</p>
         </div>
 
         <!-- BLOCK: Simple Backup -->
@@ -1120,6 +1138,9 @@
         };
 
         const exit_nodes = { default_exit_uid: document.getElementById('exitDefaultNode').value || '' };
+        const ssh_jump = {
+            jump_host_uid: document.getElementById('ssh_jump_host_uid').value
+        };
 
         // The password field is intentionally never pre-filled; an empty value
         // tells the server to keep the stored one.
@@ -1140,7 +1161,7 @@
             const res = await fetch('/api/settings/save', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ appearance, sync, captcha, telegram, ssl, mail, auto_backup, self_service, exit_nodes })
+                body: JSON.stringify({ appearance, sync, captcha, telegram, ssl, mail, auto_backup, self_service, ssh_jump, exit_nodes })
             });
             if (!res.ok) throw new Error(_('error'));
             const saved = await res.json();

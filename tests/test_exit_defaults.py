@@ -125,7 +125,7 @@ class DefaultExitNodeSettingsTests(unittest.TestCase):
         self.assertIn('id="exitDefaultNode"', page)
         self.assertRegex(page, r"async function loadExitNodes\(")
         self.assertIn("const exit_nodes = { default_exit_uid:", page)
-        self.assertIn('self_service, exit_nodes })', page)
+        self.assertIn('self_service, ssh_jump, exit_nodes })', page)
         # the saved uid comes from the server, so it is not interpolated raw
         self.assertIn("| tojson }};", page[page.index('async function loadExitNodes'):][:600])
 
