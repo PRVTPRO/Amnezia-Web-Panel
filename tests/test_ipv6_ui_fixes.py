@@ -32,9 +32,10 @@ NEW_KEYS = {
 }
 
 # +13 install stage keys (staged marketplace installs) on top of 1123.
-# 1155 + 31 split-tunnel keys merged from upstream/main, plus the panel bind
-# setting. This test guards the shared catalogue size as well as IPv6 keys.
-BASE_KEY_COUNT = 1178
+# 1155 + 31 split-tunnel keys merged from upstream/main, the panel bind
+# setting, and seven localized dashboard-management messages. This test guards
+# the shared catalogue size as well as IPv6 keys.
+BASE_KEY_COUNT = 1185
 
 
 def read_text(path):

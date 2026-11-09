@@ -4170,8 +4170,11 @@ async def api_reorder_servers(request: Request, req: ReorderServersRequest):
 @app.post('/api/servers/{server_id}/delete', tags=["Servers"])
 @serialize_peer_lifecycle
 async def api_delete_server(request: Request, server_id: int, server_uid: Optional[str] = None,
-                            archive_blocking: bool = False):
+                            archive_blocking: bool = False, panel_only: bool = False):
     """Remove a server from the panel inventory.
+
+    ``panel_only`` removes only local panel state and never contacts the remote
+    server. Leftover connection rows are archived with unverified final counters.
 
     A leftover ``user_connections`` row is accounting ownership and normally
     blocks deletion (possibly forever, when its peer no longer exists). With
@@ -4188,7 +4191,7 @@ async def api_delete_server(request: Request, server_id: int, server_uid: Option
     uid = selected['uid']
     data = load_data()
     guard = _traffic_removal_guard(data, server_id=server_id)
-    if guard is not None and not archive_blocking:
+    if guard is not None and not archive_blocking and not panel_only:
         return guard
 
     async def delete():
@@ -4200,6 +4203,60 @@ async def api_delete_server(request: Request, server_id: int, server_uid: Option
                     index, server = find_server_by_uid(load_data(), uid)
                     if server is None:
                         return {'status': 'success', 'already_deleted': True}
+                if panel_only:
+                    async with DATA_LOCK:
+                        before = pathlib_read_data_bytes() if os.path.exists(DATA_FILE) else b''
+                        data = load_data()
+                        index, current = find_server_by_uid(data, uid)
+                        if current is None:
+                            return {'status': 'success', 'already_deleted': True}
+                        blocked = ownership_rows(data, server_id=index)
+                        operation_id = uuid.uuid4().hex
+                        actor = _actor_id(request, authorized)
+                        for conn in list(blocked):
+                            finalize_connection_record(
+                                data, conn, current, None, time.time(),
+                                'server_panel_remove_unverified', operation_id, False)
+
+                        # Links on other inventory entries cannot be cleaned on
+                        # the removed exit node. Retain their metadata as stale
+                        # so the panel can show and repair the orphaned route.
+                        for other in data.get('servers', []):
+                            if other.get('uid') == uid:
+                                continue
+                            for record in (other.get('protocols') or {}).values():
+                                link = record.get('exit_link') or {}
+                                if link.get('exit_uid') == uid:
+                                    link['stale'] = 'exit_server_removed_from_panel'
+
+                        data['servers'].pop(index)
+                        for conn in data.get('user_connections', []):
+                            if isinstance(conn.get('server_id'), int) and conn['server_id'] > index:
+                                conn['server_id'] -= 1
+
+                        settings = data.setdefault('settings', {})
+                        exit_settings = settings.setdefault('exit_nodes', {})
+                        if exit_settings.get('default_exit_uid') == uid:
+                            exit_settings['default_exit_uid'] = ''
+                        sync = settings.setdefault('sync', {})
+                        sync_server_id = sync.get('remnawave_server_id')
+                        if sync_server_id == index:
+                            sync['remnawave_server_id'] = 0
+                            sync['remnawave_create_conns'] = False
+                        elif isinstance(sync_server_id, int) and sync_server_id > index:
+                            sync['remnawave_server_id'] = sync_server_id - 1
+
+                        result = await asyncio.to_thread(
+                            commit_finalize, DATA_FILE, operation_id, actor,
+                            'server_panel_remove',
+                            recovery_digest({'server_uid': uid, 'mode': 'panel_only'}),
+                            before, data)
+                    deletion_committed = True
+                    await _finish_locked_worker(lambda: drop_ssh(server))
+                    return {
+                        'status': 'success', 'panel_only': True,
+                        'archived': len(blocked),
+                    }
                 results = []
                 if (server.get('protocols') or {}).get('exit'):
                     results.extend(await exit_link_svc.detach_entries_for_exit(uid, 'exit_server_deleted'))

@@ -1,0 +1,14 @@
+<!-- Shared server-management modal used by the dashboard and server detail page. -->
+<div class="modal-backdrop" id="serverManagementModal">
+    <div class="modal" style="max-width: 520px;">
+        <div class="modal-header">
+            <div>
+                <h2 class="modal-title">⚙️ {{ _('server_management') }}</h2>
+                <div class="text-muted text-sm">{{ _('server_management_desc') }}</div>
+            </div>
+            <button class="modal-close" onclick="closeModal('serverManagementModal')">×</button>
+        </div>
+        <div id="serverManagementContent"></div>
+    </div>
+</div>
+<script src="/static/js/server-management.js?v={{ static_v }}"></script>

@@ -939,7 +939,7 @@
                 <button class="btn btn-primary btn-sm" onclick="openMarketplaceModal()" id="marketplaceBtn">
                     <span>🛒</span> {{ _('marketplace') }}
                 </button>
-                <button class="btn btn-secondary btn-sm" onclick="openManagementModal()" id="managementBtn">
+                <button class="btn btn-secondary btn-sm" onclick="openServerManagement()" id="managementBtn">
                     <span>⚙️</span> {{ _('management') }}
                 </button>
                 <button class="btn btn-secondary btn-sm" onclick="openHostTuning()" id="hostTuningBtn">
@@ -1668,19 +1668,7 @@
     </div>
 </div>
 
-<!-- ===== Management Modal ===== -->
-<div class="modal-backdrop" id="managementModal">
-    <div class="modal" style="max-width: 520px;">
-        <div class="modal-header">
-            <div>
-                <h2 class="modal-title">⚙️ {{ _('server_management') }}</h2>
-                <div class="text-muted text-sm">{{ _('server_management_desc') }}</div>
-            </div>
-            <button class="modal-close" onclick="closeModal('managementModal')">×</button>
-        </div>
-        <div id="managementContent"></div>
-    </div>
-</div>
+{% include '_server_management_modal.html' %}
 
 <!-- ===== Install Protocol Modal ===== -->
 <div class="modal-backdrop" id="installModal">
@@ -2486,7 +2474,6 @@
     let SSH_COOLDOWN_BASE = {{ (server.get('ssh_cooldown_base') or 30) | tojson }};
     // Live peer-list refresh interval in seconds; 0 = off (opt-in per server).
     let PEER_POLL_INTERVAL = {{ (server.get('peer_poll_interval') or 0) | tojson }};
-    const PEER_POLL_STEPS = [0, 5, 10, 15, 20, 45, 120, 300, 600];
     document.body.dataset.serverUid = {{ (server.uid or '') | tojson }};
     const SERVER_HOST = "{{ server.host }}";
     const CUSTOM_PROTO_NAMES = {
@@ -2686,102 +2673,28 @@
 
     function switchCategory(cat) {
         if (cat === 'management') {
-            openManagementModal();
+            openServerManagement();
             return;
         }
         applyInstalledAppsVisibility();
     }
 
-    function renderManagementModal() {
-        const el = document.getElementById('managementContent');
-        if (!el) return;
-        el.innerHTML = `
-            <div class="flex" style="flex-direction: column; gap: var(--space-sm);">
-                <button class="btn btn-secondary" onclick="closeModal('managementModal'); checkServer();" style="justify-content: flex-start; padding: 12px 20px;">
-                    <span style="font-size: 1.2rem; margin-right: 8px;">🔄</span> ${_('check_server_services')}
-                </button>
-                <button class="btn btn-warning" onclick="closeModal('managementModal'); rebootServer();" style="justify-content: flex-start; padding: 12px 20px;">
-                    <span style="font-size: 1.2rem; margin-right: 8px;">🔁</span> ${_('reboot_server')}
-                </button>
-                <button class="btn btn-danger" onclick="closeModal('managementModal'); clearServer();" style="justify-content: flex-start; padding: 12px 20px;">
-                    <span style="font-size: 1.2rem; margin-right: 8px;">🧹</span> ${_('clear_server')}
-                </button>
-                <button class="btn btn-danger" onclick="closeModal('managementModal'); deleteServer();" style="justify-content: flex-start; padding: 12px 20px;">
-                    <span class="btn-text-with-icon">${ICON_TRASH}</span> ${_('remove_server')}
-                </button>
-                <div style="margin-top: var(--space-md); padding-top: var(--space-md); border-top: 1px solid var(--border);">
-                    <label for="sshCooldownInput" style="display:block; font-size:0.85rem; margin-bottom:6px;">${_('ssh_cooldown_title')}</label>
-                    <div class="flex" style="gap:8px;">
-                        <input class="form-input" id="sshCooldownInput" type="number" min="5" max="300" step="1" value="${SSH_COOLDOWN_BASE}" style="max-width:120px;">
-                        <button class="btn btn-secondary btn-sm" onclick="saveSshCooldown()" id="sshCooldownSaveBtn">💾</button>
-                    </div>
-                    <div class="text-muted" style="font-size:0.78rem; margin-top:6px;">${_('ssh_cooldown_hint')}</div>
-                </div>
-                <div style="margin-top: var(--space-md); padding-top: var(--space-md); border-top: 1px solid var(--border);">
-                    <label for="peerPollSelect" style="display:block; font-size:0.85rem; margin-bottom:6px;">${_('peer_poll_title')}</label>
-                    <div class="flex" style="gap:8px;">
-                        <select class="form-select" id="peerPollSelect" style="max-width:160px;">
-                            ${PEER_POLL_STEPS.map(s => `<option value="${s}"${s === PEER_POLL_INTERVAL ? ' selected' : ''}>${s === 0 ? _('peer_poll_off') : s + ' ' + _('peer_poll_sec')}</option>`).join('')}
-                        </select>
-                        <button class="btn btn-secondary btn-sm" onclick="savePeerPollInterval()" id="peerPollSaveBtn">💾</button>
-                    </div>
-                    <div class="text-muted" style="font-size:0.78rem; margin-top:6px;">${_('peer_poll_hint')}</div>
-                </div>
-            </div>
-        `;
-    }
-
-    async function savePeerPollInterval() {
-        const select = document.getElementById('peerPollSelect');
-        const btn = document.getElementById('peerPollSaveBtn');
-        if (!select) return;
-        const seconds = parseInt(select.value, 10);
-        if (!PEER_POLL_STEPS.includes(seconds)) {
-            showToast(_('peer_poll_title') + ': ' + PEER_POLL_STEPS.join('/'), 'error');
-            return;
-        }
-        if (btn) { btn.disabled = true; btn.innerHTML = '<div class="spinner"></div>'; }
-        try {
-            const res = await apiCall(`/api/servers/${SERVER_ID}/peer_poll_interval`, 'POST', { seconds });
-            PEER_POLL_INTERVAL = res.peer_poll_interval;
-            // Reschedule (or stop) the live refresh with the new interval.
-            clearTimeout(window.connPollTimer);
-            if (PEER_POLL_INTERVAL > 0 && document.getElementById('connectionsSection').style.display !== 'none') {
-                window.connPollTimer = setTimeout(function() { loadConnections(true); }, PEER_POLL_INTERVAL * 1000);
-            }
-            showToast('✓', 'success');
-        } catch (err) {
-            showToast(_('error') + ': ' + err.message, 'error');
-        } finally {
-            if (btn) { btn.disabled = false; btn.textContent = '💾'; }
-        }
-    }
-
-    async function saveSshCooldown() {
-        const input = document.getElementById('sshCooldownInput');
-        const btn = document.getElementById('sshCooldownSaveBtn');
-        if (!input) return;
-        const seconds = parseFloat(input.value);
-        if (!Number.isFinite(seconds) || seconds < 5 || seconds > 300) {
-            showToast(_('ssh_cooldown_title') + ': 5–300', 'error');
-            return;
-        }
-        if (btn) { btn.disabled = true; btn.innerHTML = '<div class="spinner"></div>'; }
-        try {
-            const res = await apiCall(`/api/servers/${SERVER_ID}/ssh_cooldown`, 'POST', { seconds });
-            SSH_COOLDOWN_BASE = res.ssh_cooldown_base;
-            input.value = res.ssh_cooldown_base;
-            showToast('✓', 'success');
-        } catch (err) {
-            showToast(_('error') + ': ' + err.message, 'error');
-        } finally {
-            if (btn) { btn.disabled = false; btn.textContent = '💾'; }
-        }
-    }
-
-    function openManagementModal() {
-        renderManagementModal();
-        openModal('managementModal');
+    function openServerManagement() {
+        ServerManagement.open({
+            serverId: SERVER_ID,
+            serverUid: document.body.dataset.serverUid || '',
+            sshCooldown: SSH_COOLDOWN_BASE,
+            peerPollInterval: PEER_POLL_INTERVAL,
+            onCheck: checkServer,
+            onCooldownChange(value) { SSH_COOLDOWN_BASE = value; },
+            onPollChange(value) {
+                PEER_POLL_INTERVAL = value;
+                clearTimeout(window.connPollTimer);
+                if (PEER_POLL_INTERVAL > 0 && document.getElementById('connectionsSection').style.display !== 'none') {
+                    window.connPollTimer = setTimeout(function() { loadConnections(true); }, PEER_POLL_INTERVAL * 1000);
+                }
+            },
+        });
     }
 
     function isAppInstalled(info) {
@@ -6485,68 +6398,6 @@
         return str.replace(/'/g, "\\'").replace(/"/g, '\\"');
     }
 
-    // ========== Management ==========
-    async function rebootServer() {
-        if (!confirm('Are you sure you want to reboot the server? Disconnections will occur.')) return;
-        try {
-            showToast('Rebooting server...', 'info');
-            await apiCall(`/api/servers/${SERVER_ID}/reboot`, 'POST');
-            showToast('Server is rebooting', 'success');
-        } catch (err) {
-            showToast('Error: ' + err.message, 'error');
-        }
-    }
-
-    async function clearServer() {
-        if (!confirm("⚠️ WARNING: This will completely delete all Amnezia configurations, containers, and data from /opt/amnezia on the server! Are you absolutely sure?")) return;
-        try {
-            showToast('Clearing server from Amnezia software...', 'info');
-            await apiCall(`/api/servers/${SERVER_ID}/clear?server_uid=${encodeURIComponent(document.body.dataset.serverUid || '')}`, 'POST');
-            showToast('Server cleared successfully!', 'success');
-            setTimeout(() => location.reload(), 1500);
-        } catch (err) {
-            showToast('Error: ' + err.message, 'error');
-        }
-    }
-
-    async function removeServer() {
-        if (!confirm("Are you sure you want to remove this server from the panel? (The server itself will not be erased).")) return;
-        const base = `/api/servers/${SERVER_ID}/delete?server_uid=${encodeURIComponent(document.body.dataset.serverUid || '')}`;
-        try {
-            const res = await apiCall(base, 'POST');
-            if (res && res.archived) {
-                showToast(_('delete_server_archived').replace('{count}', res.archived), 'success');
-            }
-            window.location.href = '/';
-        } catch (err) {
-            const payload = err.payload || {};
-            if (payload.code === 'traffic_finalization_required'
-                    && Array.isArray(payload.blocking) && payload.blocking.length) {
-                const details = payload.blocking
-                    .map(b => `• ${b.user_id || '?'} / ${b.protocol || '?'} / ${b.client_id || '?'}`)
-                    .join('\n');
-                const message = _('delete_server_blocked_confirm').replace('{count}', payload.blocking.length)
-                    + '\n\n' + details;
-                if (!confirm(message)) return;
-                try {
-                    const res = await apiCall(base + '&archive_blocking=true', 'POST');
-                    if (res && res.archived) {
-                        showToast(_('delete_server_archived').replace('{count}', res.archived), 'success');
-                    }
-                    window.location.href = '/';
-                } catch (retryErr) {
-                    const extra = retryErr.payload || {};
-                    if (extra.code === 'blocked_peer_still_active') {
-                        showToast(_('delete_server_blocked_still_active'), 'error');
-                    } else {
-                        showToast('Error: ' + retryErr.message, 'error');
-                    }
-                }
-                return;
-            }
-            showToast('Error: ' + err.message, 'error');
-        }
-    }
 
     // ========== RKN extra block (C24Be lists) — raw prototype ==========
     // Well-known destination ports: what service the scanner was poking.

@@ -51,7 +51,7 @@ class InventoryBrowserTests(unittest.TestCase):
             self.skipTest('Playwright is not installed')
         source = (Path(__file__).resolve().parents[1] / 'templates/index.html').read_text(encoding='utf-8')
         functions = []
-        for name in ['deleteServer', 'submitEditServer', 'persistServerOrder']:
+        for name in ['submitEditServer', 'persistServerOrder']:
             match = re.search(r'    async function ' + name + r'\([^)]*\) \{.*?\n    \}', source, re.S)
             self.assertIsNotNone(match)
             functions.append(match[0])
@@ -74,12 +74,10 @@ const showToast = () => {};
 window.confirm = () => true;
 window.setTimeout = () => 0;
 """ + '\n'.join(functions))
-                page.evaluate('deleteServer(0)')
                 page.evaluate('submitEditServer({preventDefault(){}})')
                 page.evaluate("persistServerOrder(document.getElementById('grid'))")
                 calls = page.evaluate('calls')
-                self.assertEqual(calls[0]['url'], '/api/servers/0/delete?server_uid=a')
-                self.assertEqual(calls[1]['url'], '/api/servers/0/edit?server_uid=a')
-                self.assertEqual(calls[2]['body'], {'order': [1, 0], 'server_uids': ['b', 'a']})
+                self.assertEqual(calls[0]['url'], '/api/servers/0/edit?server_uid=a')
+                self.assertEqual(calls[1]['body'], {'order': [1, 0], 'server_uids': ['b', 'a']})
             finally:
                 browser.close()
