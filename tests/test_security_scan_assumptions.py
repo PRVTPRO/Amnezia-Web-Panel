@@ -39,9 +39,20 @@ class ScanAssumptionTests(unittest.TestCase):
             self.assertEqual(sorted(p.name for p in Path(directory).iterdir()), ['ngrok.exe'])
 
     def test_backup_download_is_admin_only(self):
-        with patch.object(panel, '_check_admin', return_value=False):
-            response = TestClient(panel.app).get('/api/settings/backup/download')
-        self.assertEqual(response.status_code, 403)
+        user = {'id': 'fixture', 'username': 'fixture', 'password_hash': 'fixture',
+                'role': 'user', 'enabled': True}
+        with patch.object(panel, 'load_data', return_value={'users': [user]}), \
+             patch.object(panel, 'verify_password', return_value=True), \
+             patch.object(panel, 'FileResponse') as download:
+            client = TestClient(panel.app)
+            self.addCleanup(client.close)
+            login = client.post('/api/auth/login', json={'username': 'fixture', 'password': 'fixture'})
+            self.assertEqual(login.status_code, 200)
+            for role in ('user', 'support'):
+                user['role'] = role
+                response = client.get('/api/settings/backup/download')
+                self.assertEqual(response.status_code, 403)
+            download.assert_not_called()
 
     def test_jinja_autoescapes_untrusted_html(self):
         template = panel.templates.env.from_string('<p>{{ value }}</p>')
