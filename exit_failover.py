@@ -5,7 +5,7 @@ are unit-tested without a panel. ExitLinkService applies the decisions using
 the existing link primitives (stable server uid, restore-on-failure switch).
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 DEFAULT_CHECK_INTERVAL_SECONDS = 45
 DEFAULT_FAILURE_THRESHOLD = 3
@@ -238,7 +238,7 @@ def parse_ts(value):
 
 
 def isoformat(now):
-    return datetime.fromtimestamp(now).isoformat()
+    return datetime.fromtimestamp(now, timezone.utc).isoformat()
 
 
 def due_for_check(state, interval_seconds, now):

@@ -58,6 +58,22 @@ class ParseTsTests(unittest.TestCase):
         utc_now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
         self.assertIsNotNone(policy.parse_ts(utc_now))
 
+    def test_isoformat_is_offset_aware(self):
+        """Stamps written by our own isoformat() must carry the UTC offset."""
+        for instant in (0.0, 1e9):
+            stamp = policy.isoformat(instant)
+            self.assertIn('T', stamp)
+            time_part = stamp.split('T', 1)[1]
+            self.assertTrue(
+                time_part.endswith('Z') or '+' in time_part or '-' in time_part,
+                f'expected UTC offset in {stamp!r} for instant={instant}',
+            )
+            parsed = datetime.fromisoformat(stamp)
+            self.assertIsNotNone(parsed.tzinfo, f'{stamp!r} is not offset-aware')
+            parsed_ts = policy.parse_ts(stamp)
+            self.assertIsNotNone(parsed_ts, stamp)
+            self.assertAlmostEqual(parsed_ts, instant, delta=1.0, msg=stamp)
+
 
 if __name__ == '__main__':
     unittest.main()
