@@ -149,7 +149,7 @@ If you require any custom features not currently available in the panel, **let u
 
 ## 🏗 Prerequisites
 
-*   **Python 3.10+**
+*   **Python 3.11–3.13** (CI: 3.11 и 3.13; проверено на Debian 13/trixie)
 *   Target servers: **Ubuntu 20.04/22.04/24.04** (Architecture: x86_64 or ARM64).
 *   SSH access to target servers (Password or Private Key).
 
