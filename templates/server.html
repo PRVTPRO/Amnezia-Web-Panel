@@ -673,6 +673,203 @@
         }
     }
 
+    // ========== Generic install operation progress (shared by protocol, smartroute, rknblock) ==========
+    // The installModal already contains the progress UI (bar, stage label, log, done button).
+    // This renderer wires it to the backend poll endpoint which returns the same shape as awg-plugin:
+    // {operation_id, flow, state, step, total, percent, result, error, started_at, finished_at, lines:[{ts,stage,text}], next_offset}
+
+    // Map backend stage keys to translation keys for each flow
+    const INSTALL_STAGE_TRANSLATIONS = {
+        protocol: {
+            start: 'install_starting', docker: 'check_docker', host: 'prepare_host',
+            build: 'build_container', run: 'install_stage_run',
+            config: 'install_stage_config', firewall: 'install_stage_firewall',
+            done: 'install_stage_done', error: 'error'
+        },
+        smartroute: {
+            start: 'smartroute_stage_start', prepare: 'smartroute_stage_prepare',
+            script: 'smartroute_stage_script', units: 'smartroute_stage_units',
+            activate: 'smartroute_stage_activate', download: 'smartroute_stage_download',
+            verify: 'smartroute_stage_verify', done: 'smartroute_stage_done',
+            error: 'error'
+        },
+        rknblock: {
+            start: 'rknblock_stage_start', preflight: 'rknblock_stage_preflight',
+            packages: 'rknblock_stage_packages', download: 'rknblock_stage_download',
+            files: 'rknblock_stage_files', services: 'rknblock_stage_services',
+            blocking: 'rknblock_stage_blocking', verify: 'rknblock_stage_verify',
+            done: 'rknblock_stage_done', error: 'error'
+        }
+    };
+
+    let installOp = null; // {opId, flow, timer, offset, creep, creepRunning, display, cap, step, total}
+
+    function renderInstallOpProgress(opId, flow) {
+        installOp = {opId, flow, offset: 0, timer: null, creep: null, creepRunning: false, display: 0, cap: 0, step: 0, total: 0};
+        document.getElementById('installForm').classList.add('hidden');
+        document.getElementById('installDone').style.display = 'none';
+        const progressDiv = document.getElementById('installProgress');
+        progressDiv.classList.remove('hidden');
+        const logEl = document.getElementById('installLog');
+        const fillEl = document.getElementById('installProgressFill');
+        const percentEl = document.getElementById('installPercent');
+        const trackEl = document.getElementById('installProgressTrack');
+        const stepEl = document.getElementById('installStep');
+        const stageEl = document.getElementById('installStage');
+        logEl.textContent = '';
+        fillEl.style.width = '0%';
+        fillEl.style.background = '';
+        if (percentEl) percentEl.textContent = '0%';
+        if (trackEl) trackEl.setAttribute('aria-valuenow', '0');
+        if (stepEl) stepEl.textContent = _('awg_plugin_step').replace('{step}', '0').replace('{total}', '10');
+        // Use flow-specific translation for initial stage
+        const initialStageMap = {
+            protocol: 'install_starting',
+            smartroute: 'smartroute_stage_start',
+            rknblock: 'rknblock_stage_start'
+        };
+        if (stageEl) stageEl.textContent = _(initialStageMap[flow] || 'install_starting');
+        // Set modal title based on flow
+        const titleEl = document.getElementById('installModalTitle');
+        if (titleEl) {
+            if (flow === 'smartroute') titleEl.textContent = _('smartroute_install');
+            else if (flow === 'rknblock') titleEl.textContent = _('rkn_block_title');
+            else titleEl.textContent = _('install_protocol');
+        }
+        openModal('installModal');
+        pollInstallOp();
+    }
+
+    function setInstallOpProgress(step, total, percent, running, stageKey) {
+        if (!installOp) return;
+        installOp.step = step || installOp.step || 0;
+        installOp.total = total || installOp.total || 10;
+        installOp.percent = Math.max(installOp.percent || 0, percent || 0);
+        const fillEl = document.getElementById('installProgressFill');
+        const percentEl = document.getElementById('installPercent');
+        const trackEl = document.getElementById('installProgressTrack');
+        const stepEl = document.getElementById('installStep');
+        const stageEl = document.getElementById('installStage');
+        if (running) {
+            installOp.cap = Math.min(99, installOp.percent + 9);
+            if (!installOp.creep) {
+                installOp.creep = setInterval(() => {
+                    if (!installOp || !installOp.creepRunning || installOp.display >= installOp.cap) return;
+                    installOp.display = Math.min(installOp.cap, (installOp.display || 0) + 1);
+                    if (fillEl) fillEl.style.width = installOp.display + '%';
+                    if (percentEl) percentEl.textContent = installOp.display + '%';
+                    if (trackEl) trackEl.setAttribute('aria-valuenow', String(installOp.display));
+                }, 900);
+            }
+            installOp.creepRunning = true;
+            installOp.display = Math.max(installOp.display || 0, installOp.percent);
+        } else {
+            installOp.creepRunning = false;
+            if (installOp.creep) { clearInterval(installOp.creep); installOp.creep = null; }
+            installOp.display = installOp.percent;
+        }
+        if (percentEl) percentEl.textContent = (installOp.display || 0) + '%';
+        if (fillEl) fillEl.style.width = (installOp.display || 0) + '%';
+        if (trackEl) trackEl.setAttribute('aria-valuenow', String(installOp.display || 0));
+        if (stepEl) stepEl.textContent = _('awg_plugin_step').replace('{step}', String(installOp.step || 0)).replace('{total}', String(installOp.total || 10));
+        if (stageEl && stageKey) {
+            const transMap = INSTALL_STAGE_TRANSLATIONS[installOp.flow] || {};
+            const translationKey = transMap[stageKey] || stageKey;
+            stageEl.textContent = _(translationKey);
+        }
+    }
+
+    function appendInstallOpLines(lines) {
+        const logEl = document.getElementById('installLog');
+        if (!logEl || !lines?.length) return;
+        lines.forEach(line => {
+            const row = document.createElement('div');
+            const caveat = (line.text || '').startsWith('!');
+            row.className = caveat ? 'log-line warning' : 'log-line info';
+            row.textContent = '[' + line.ts + '] ' + (line.stage ? line.stage + ': ' : '') + (caveat ? line.text.slice(1) : line.text);
+            logEl.appendChild(row);
+        });
+        logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    async function pollInstallOp() {
+        if (!installOp) return;
+        const logEl = document.getElementById('installLog');
+        try {
+            const url = `/api/servers/${SERVER_ID}/${installOp.flow}/install/${encodeURIComponent(installOp.opId)}?offset=${installOp.offset}`;
+            const data = await apiCall(url, 'GET');
+            installOp.offset = data.next_offset || installOp.offset;
+            setInstallOpProgress(data.step, data.total, data.percent, data.state === 'running', data.stage);
+            appendInstallOpLines(data.lines);
+            if (data.state === 'running') {
+                installOp.timer = setTimeout(pollInstallOp, 1000);
+                return;
+            }
+            // Terminal state
+            const stageEl = document.getElementById('installStage');
+            const fillEl = document.getElementById('installProgressFill');
+            const flow = installOp.flow;
+            const opId = installOp.opId;
+            if (data.state === 'success') {
+                if (stageEl) {
+                    stageEl.textContent = _('install_stage_done');
+                    stageEl.className = 'awg-plugin-stage awg-plugin-updated';
+                }
+                setInstallOpProgress(data.total, data.total, 100, false);
+                if (fillEl) fillEl.style.background = 'var(--success, #4ade80)';
+                showToast(_('install_success'), 'success');
+                document.getElementById('installDone').style.display = '';
+                // Flow-specific completion handling
+                if (flow === 'smartroute') {
+                    smartRouteBusy = false;
+                    smartRouteStatus = await loadSmartRouteStatus();
+                    renderSmartRouteCard();
+                    applyInstalledAppsVisibility();
+                    renderMarketplace();
+                    // Refresh modal if open
+                    const modal = document.getElementById('smartRouteModal');
+                    if (modal?.classList.contains('active')) {
+                        renderSmartRouteModal(smartRouteStatus);
+                    }
+                } else if (flow === 'rknblock') {
+                    rknBlockBusy = false;
+                    await loadRknBlock();
+                    applyInstalledAppsVisibility();
+                    renderMarketplace();
+                } else {
+                    // Protocol install
+                    setTimeout(() => checkServer(), 800);
+                }
+            } else if (data.state === 'failed') {
+                if (flow === 'smartroute') smartRouteBusy = false;
+                else if (flow === 'rknblock') rknBlockBusy = false;
+                if (stageEl) {
+                    stageEl.textContent = _('error') + ': ' + (data.error?.message || _('install_error'));
+                    stageEl.style.color = 'var(--danger)';
+                }
+                if (fillEl) {
+                    fillEl.style.width = '100%';
+                    fillEl.style.background = 'linear-gradient(135deg, #ef4444, #dc2626)';
+                }
+                const errDiv = document.createElement('div');
+                errDiv.className = 'log-line error';
+                errDiv.textContent = `✕ ${_('error')}: ${data.error?.message || _('install_error')}`;
+                logEl.appendChild(errDiv);
+                logEl.scrollTop = logEl.scrollHeight;
+                showToast(_('install_error') + ': ' + (data.error?.message || _('install_error')), 'error');
+                document.getElementById('installDone').style.display = '';
+            } else if (data.state === 'cancelled') {
+                if (flow === 'smartroute') smartRouteBusy = false;
+                else if (flow === 'rknblock') rknBlockBusy = false;
+                if (stageEl) stageEl.textContent = _('awg_plugin_cancelled');
+            }
+            installOp = null;
+        } catch (error) {
+            if (logEl) logEl.textContent += error.message + '\n';
+            installOp.timer = setTimeout(pollInstallOp, 3000);
+        }
+    }
+
     document.addEventListener('DOMContentLoaded', loadAwgPluginStatus);
 </script>
 {% endif %}
@@ -1089,7 +1286,7 @@
         </div>
         <div class="flex gap-sm" id="rknblock-actions">
             <button class="btn btn-primary btn-sm" onclick="installRknBlock()" id="rknblock-install-btn"
-                style="flex:1">
+                style="flex:1" title="{{ _('rknblock_install_wait') }}">
                 {{ _('install') }}
             </button>
         </div>
@@ -2321,6 +2518,7 @@
     let currentAwgProto = 'awg2';
     // Smart Route app state (GET /api/servers/{id}/smartroute/status); null = not loaded.
     let smartRouteStatus = null;
+    let smartRouteBusy = false;
     // RKN Block app state (GET /api/servers/{id}/rkn_scans); null = not loaded.
     let rknBlockStatus = {{ server.get('rknblock') | tojson }};
     if (rknBlockStatus) rknBlockStatus = {...rknBlockStatus, available: false, agent_state: 'unknown', running: false, healthy: false};
@@ -5390,18 +5588,18 @@
     }
 
     async function installSmartRoute() {
+        if (smartRouteBusy) return;
+        smartRouteBusy = true;
         const btn = document.getElementById('smartRouteInstallBtn');
         btn.disabled = true;
+        closeModal('smartRouteModal');
         try {
-            await apiCall(`/api/servers/${SERVER_ID}/smartroute/install`, 'POST');
-            showToast(_('smartroute_installed_toast'), 'success');
-            smartRouteStatus = await loadSmartRouteStatus();
-            renderSmartRouteModal(smartRouteStatus);
-            renderSmartRouteCard();
-            applyInstalledAppsVisibility();
+            const res = await apiCall(`/api/servers/${SERVER_ID}/smartroute/install`, 'POST');
+            if (!res?.operation_id) throw new Error('No operation_id returned');
+            renderInstallOpProgress(res.operation_id, 'smartroute');
         } catch (err) {
             showToast(_('error') + ': ' + smartrouteErrorText(err), 'error');
-        } finally {
+            smartRouteBusy = false;
             btn.disabled = false;
         }
     }
@@ -6529,55 +6727,15 @@
         if (rknBlockBusy || !rknBlockStatus || rknBlockStatus.available === false || rknBlockStatus.installed) return;
         rknBlockBusy = true;
         ++rknBlockLoadId;
-        closeModal('marketplaceModal');
         const btn = document.getElementById('rknblock-install-btn');
         if (btn) btn.disabled = true;
-        const titleEl = document.getElementById('installModalTitle');
-        if (titleEl) titleEl.textContent = 'RKN Block (C24Be)';
-        document.getElementById('installForm').classList.add('hidden');
-        document.getElementById('installDone').style.display = 'none';
-        const progressDiv = document.getElementById('installProgress');
-        progressDiv.classList.remove('hidden');
-        const logEl = document.getElementById('installLog');
-        const fillEl = document.getElementById('installProgressFill');
-        fillEl.style.width = '10%';
-        fillEl.style.background = '';
-        logEl.innerHTML = `<div class="log-line info">${_('install_starting')}</div>`;
-        openModal('installModal');
-        // The install is one long SSH call; its internals are not observable
-        // here. Do not invent per-stage progress, just say it takes a while.
-        logEl.innerHTML += `<div class="log-line info">${_('rknblock_install_wait')}</div>`;
-        logEl.scrollTop = logEl.scrollHeight;
-        let pct = 10;
-        const progressInterval = setInterval(() => {
-            pct = Math.min(90, pct + 2);
-            fillEl.style.width = pct + '%';
-        }, 2000);
+        closeModal('marketplaceModal');
         try {
-            await apiCall(`/api/servers/${SERVER_ID}/rknblock/install?server_uid=${encodeURIComponent(document.body.dataset.serverUid || '')}`, 'POST');
-            rknBlockStatus = {installed: true, available: false, agent_state: 'unknown', running: false, healthy: false};
-            rknBlockBusy = false;
-            clearInterval(progressInterval);
-            fillEl.style.width = '100%';
-            fillEl.style.background = 'var(--success, #4ade80)';
-            logEl.innerHTML += `<div class="log-line success">✓ ${_('rknblock_installed_toast')}</div>`;
-            logEl.scrollTop = logEl.scrollHeight;
-            showToast(_('rknblock_installed_toast'), 'success');
-            await loadRknBlock();
-            applyInstalledAppsVisibility();
-            renderMarketplace();
-            document.getElementById('installDone').style.display = '';
+            const res = await apiCall(`/api/servers/${SERVER_ID}/rknblock/install?server_uid=${encodeURIComponent(document.body.dataset.serverUid || '')}`, 'POST');
+            if (!res?.operation_id) throw new Error('No operation_id returned');
+            renderInstallOpProgress(res.operation_id, 'rknblock');
         } catch (err) {
-            clearInterval(progressInterval);
-            rknBlockStatus = {...(rknBlockStatus || {}), available: false, agent_state: 'unknown', running: false, healthy: false};
-            applyInstalledAppsVisibility();
-            renderMarketplace();
-            fillEl.style.background = 'var(--danger, #f85149)';
-            logEl.innerHTML += `<div class="log-line error">${_('error')}: ${escapeHtml(err.message || err)}</div>`;
-            logEl.scrollTop = logEl.scrollHeight;
             showToast(_('error') + ': ' + (err.message || err), 'error');
-            document.getElementById('installDone').style.display = '';
-        } finally {
             rknBlockBusy = false;
             if (btn) btn.disabled = false;
         }

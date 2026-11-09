@@ -4424,12 +4424,10 @@ def api_server_stats(request: Request, server_id: int):
 RKN_RAW_BASE = ('https://raw.githubusercontent.com/PRVTPRO/Amnezia-Web-Panel/'
                 'main/scripts/rknblock')
 
-RKN_INSTALL_CMD = (
-    'tmp_dir=$(mktemp -d /tmp/amnezia-rkn.XXXXXXXXXX) || exit $?; '
-    'trap \'rm -rf -- "$tmp_dir"\' EXIT; '
-    f'curl -fsSL {RKN_RAW_BASE}/install-rkn-extra.sh '
-    '-o "$tmp_dir/rkn-install.sh" && bash "$tmp_dir/rkn-install.sh"'
-)
+# The installer ships with this panel checkout, not from GitHub main: the
+# phased install must work immediately without waiting for an upstream merge.
+RKN_INSTALL_CMD = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               'scripts', 'rknblock', 'install-rkn-extra.sh')
 
 RKN_SCRIPT_URL = f'{RKN_RAW_BASE}/rkn-extra-block.sh'
 
@@ -4473,6 +4471,21 @@ systemctl enable --now rkn-extra-block.timer
 systemctl enable rkn-extra-block.service
 /usr/local/sbin/rkn-extra-block repair
 """
+
+
+def _rkn_install_script(phase='all'):
+    """Remote command that runs one phase of the bundled installer.
+
+    The installer is embedded as base64 for the same reason as the repair
+    script: it works over both root and sudo SSH without SFTP access to /etc.
+    """
+    with open(RKN_INSTALL_CMD, 'r', encoding='utf-8') as fh:
+        content = fh.read().replace('\r\n', '\n')
+    encoded = base64.b64encode(content.encode('utf-8')).decode('ascii')
+    return ('tmp_dir=$(mktemp -d /tmp/amnezia-rkn.XXXXXXXXXX) || exit $?; '
+            'trap \'rm -rf -- "$tmp_dir"\' EXIT; '
+            f'printf \'%s\' \'{encoded}\' | base64 -d > "$tmp_dir/install-rkn-extra.sh" '
+            f'&& bash "$tmp_dir/install-rkn-extra.sh" {phase}')
 
 
 def _rkn_run_cmd(subcommand):
@@ -4570,7 +4583,11 @@ async def _rkn_ssh_run(server, cmd, timeout):
 @app.post('/api/servers/{server_id}/rknblock/install', tags=["Servers"])
 @serialize_peer_lifecycle
 async def api_rknblock_install(request: Request, server_id: int, server_uid: str | None = None):
-    """Install the RKN/VK network blocking app (rkn-extra-block contour)."""
+    """Install the RKN/VK network blocking app (rkn-extra-block contour).
+
+    The installer runs phase by phase over one SSH session in the background;
+    the page polls ``/rknblock/install/{operation_id}`` for staged progress.
+    """
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     data = load_data()
@@ -4580,21 +4597,132 @@ async def api_rknblock_install(request: Request, server_id: int, server_uid: str
     server = dict(data['servers'][server_id])
     if _rkn_record(server).get('installed'):
         return JSONResponse({'error': 'App is already installed; refresh its status'}, status_code=409)
+    if (server_id, 'rknblock') in _INSTALL_ACTIVE:
+        return JSONResponse(
+            {'error': 'RKN Block installation is already running',
+             'code': 'install_in_progress'},
+            status_code=409)
     server_uid = server.get('uid')
-    err = await _rkn_ssh_run(server, RKN_INSTALL_CMD, 420)
-    if err is not None:
-        return err
+    op = op_create(server_id, 'rknblock', RKNBLOCK_INSTALL_TOTAL)
+    asyncio.create_task(_run_rknblock_install(op['id'], server_id, server_uid))
+    return {'operation_id': op['id']}
 
-    def mark(rec):
-        rec['installed'] = True
-        rec['enabled'] = True
-        rec['last_error'] = None
 
-    rec = await _rkn_store_record(server_id, server_uid, mark, server)
-    if rec is None:
-        return JSONResponse({'error': 'Server not found'}, status_code=404)
-    RKN_FLAG_CACHE.clear()
-    return {'status': 'success', 'installed': True, 'enabled': True}
+async def _rkn_install_phases(server, phases, timeout, on_phase=None, on_start=None):
+    """Run installer phases one by one over a single SSH session.
+
+    Auth/sudo behaviour is exactly what the other RKN endpoints use (the same
+    get_ssh + run_sudo_script pair). Returns None on success or a JSONResponse
+    describing the failure, like _rkn_ssh_run.
+    """
+    ssh = await asyncio.to_thread(get_ssh, server)
+    try:
+        await asyncio.to_thread(ssh.connect)
+        if _rkn_server_index(load_data(), None, server.get('uid'), server) is None:
+            return JSONResponse({'error': 'Server identity changed; refresh the inventory',
+                                 'code': 'server_changed'},
+                                status_code=409)
+        for phase in phases:
+            if on_start is not None:
+                on_start(phase)
+            out, err, code = await asyncio.to_thread(
+                ssh.run_sudo_script, _rkn_install_script(phase), timeout)
+            if on_phase is not None:
+                on_phase(phase, out, err, code)
+            if code != 0:
+                detail = (err or out or '').strip()
+                hint = ''
+                if ('dpkg is in an inconsistent state' in detail
+                        or 'dpkg returned an error code' in detail):
+                    hint = " Run 'sudo dpkg --configure -a' on the server, then retry."
+                return JSONResponse(
+                    {'error': f'command failed: {detail[-1500:]}{hint}'},
+                    status_code=500)
+    finally:
+        try:
+            ssh.disconnect()
+        except Exception:
+            pass
+    if _rkn_server_index(load_data(), None, server.get('uid'), server) is None:
+        return JSONResponse({'error': 'Server identity changed; refresh the inventory',
+                             'code': 'server_changed'},
+                            status_code=409)
+    return None
+
+
+async def _run_rknblock_install(op_id, server_id, server_uid):
+    """Background worker: phases -> staged lines -> record only on success."""
+    op = _INSTALL_OPS.get(op_id)
+    if not op:
+        return
+    data = load_data()
+    idx = _rkn_server_index(data, server_id, server_uid)
+    if idx is None:
+        op_finish(op, 'failed', error={'code': 'server_changed',
+                                       'message': 'Server not found; refresh the inventory'})
+        return
+    server = dict(data['servers'][idx])
+    server_id = idx
+
+    def report(phase, out, err, code):
+        for line in (out or '').splitlines():
+            if line.strip():
+                op_log(op, phase, line)
+        if code != 0:
+            for line in (err or '').splitlines():
+                if line.strip():
+                    op_log(op, phase, line)
+
+    try:
+        op_log(op, 'start', 'RKN Block installation started')
+        failure = await _rkn_install_phases(
+            server, RKN_INSTALL_PHASES, 420, report,
+            on_start=lambda phase: op_log(op, phase, f'phase start: {phase}'))
+        if failure is not None:
+            try:
+                body = json.loads(failure.body)
+            except Exception:
+                body = {}
+            detail = body.get('error') or 'install failed'
+            code = body.get('code') or 'install_failed'
+            op_log(op, 'error', f"installation stopped: {detail}")
+            op_finish(op, 'failed',
+                      error={'code': code, 'message': detail[:1500]})
+            return
+
+        def mark(rec):
+            rec['installed'] = True
+            rec['enabled'] = True
+            rec['last_error'] = None
+
+        rec = await _rkn_store_record(server_id, server_uid, mark, server)
+        if rec is None:
+            op_finish(op, 'failed', error={'code': 'server_changed',
+                                           'message': 'Server not found; refresh the inventory'})
+            return
+        RKN_FLAG_CACHE.clear()
+        op_log(op, 'done', 'RKN Block installed and enabled')
+        op_finish(op, 'success',
+                  result={'status': 'success', 'installed': True, 'enabled': True})
+    except Exception as e:
+        logger.exception("RKN Block install failed")
+        op_finish(op, 'failed', error={'code': 'internal_error', 'message': str(e)})
+
+
+@app.get('/api/servers/{server_id}/rknblock/install/{op_id}', tags=["Servers"])
+def api_rknblock_install_status(request: Request, server_id: int, op_id: str):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    _install_ops_load()
+    op = _install_op_of_server(op_id, server_id)
+    if not op:
+        return JSONResponse({'error': 'Operation not found', 'code': 'not_found'},
+                            status_code=404)
+    try:
+        offset = max(0, int(request.query_params.get('offset', 0)))
+    except (TypeError, ValueError):
+        offset = 0
+    return _install_op_payload(op, offset)
 
 
 @app.post('/api/servers/{server_id}/rknblock/uninstall', tags=["Servers"])
@@ -5700,50 +5828,179 @@ def api_used_ports(request: Request, server_id: int):
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
+# ===== staged install operations (marketplace apps and protocols) =====
+#
+# Every long install (protocol, Smart Route, RKN Block) runs as a background
+# task and reports the same staged progress the AWG plugin updater reports.
+# There is deliberately no cancel: an interrupted install leaves the server in
+# an unknown state, so it always runs to the end.
+#
+# Explicit step numbers per flow: the UI shows "step N of TOTAL" and the bar
+# only moves when a stage boundary is crossed, never backwards.
+
+PROTOCOL_INSTALL_STAGES = {'start': 1, 'docker': 2, 'host': 3, 'build': 4,
+                           'run': 6, 'config': 8, 'firewall': 9, 'done': 10}
+PROTOCOL_INSTALL_TOTAL = 10
+
+SMARTROUTE_INSTALL_STAGES = {'start': 1, 'prepare': 2, 'script': 3,
+                             'units': 4, 'activate': 5, 'download': 6,
+                             'verify': 7, 'done': 8}
+SMARTROUTE_INSTALL_TOTAL = 8
+
+# The bundled installer runs these phases one by one over the same SSH session.
+RKN_INSTALL_PHASES = ('preflight', 'packages', 'download', 'files',
+                      'services', 'blocking', 'verify')
+RKNBLOCK_INSTALL_STAGES = {'start': 1, 'preflight': 2, 'packages': 3,
+                           'download': 4, 'files': 5, 'services': 6,
+                           'blocking': 7, 'verify': 8, 'done': 9}
+RKNBLOCK_INSTALL_TOTAL = 9
+
+FLOW_STAGES = {
+    'protocol': PROTOCOL_INSTALL_STAGES,
+    'smartroute': SMARTROUTE_INSTALL_STAGES,
+    'rknblock': RKNBLOCK_INSTALL_STAGES,
+}
+FLOW_TOTALS = {
+    'protocol': PROTOCOL_INSTALL_TOTAL,
+    'smartroute': SMARTROUTE_INSTALL_TOTAL,
+    'rknblock': RKNBLOCK_INSTALL_TOTAL,
+}
+
+INSTALL_OP_TTL = 60 * 60
+INSTALL_OP_KEEP = 20
 _INSTALL_OPS = {}
-_INSTALL_TOTAL_STEPS = 10
+_INSTALL_ACTIVE = {}
+_INSTALL_OPS_LOADED = {'done': False}
+_INSTALL_OPS_IO_LOCK = threading.Lock()
 
 
-def _install_prune():
+def _install_stage_step(flow, stage):
+    """(step, total) for a stage of this flow, or None for unknown stages."""
+    steps = FLOW_STAGES.get(flow) or {}
+    step = steps.get(stage)
+    if step is None:
+        return None
+    return step, FLOW_TOTALS.get(flow) or max(steps.values())
+
+
+def _install_ops_store_path():
+    """Journal next to data.json; an install outlives a panel restart."""
+    return os.path.join(os.path.dirname(DATA_FILE), 'install_ops.json')
+
+
+def _install_ops_save():
+    path = _install_ops_store_path()
+    tmp = path + '.tmp'
+    try:
+        with _INSTALL_OPS_IO_LOCK:
+            with open(tmp, 'w', encoding='utf-8') as handle:
+                json.dump(list(_INSTALL_OPS.values()), handle, ensure_ascii=False)
+            os.replace(tmp, path)
+    except Exception:
+        # Persistence is a convenience: never fail an install because the
+        # journal file cannot be written.
+        logger.warning("Cannot persist install operations", exc_info=True)
+
+
+def _install_ops_load():
+    """Load the journal once, after the process that owned the SSH is gone.
+
+    A stored 'running' operation is reported as failed/interrupted: the panel
+    never claims an install finished when it did not.
+    """
+    if _INSTALL_OPS_LOADED['done']:
+        return
+    _INSTALL_OPS_LOADED['done'] = True
+    path = _install_ops_store_path()
+    try:
+        with open(path, encoding='utf-8') as handle:
+            stored = json.load(handle)
+    except Exception:
+        return
+    if not isinstance(stored, list):
+        return
+    for op in stored:
+        if not isinstance(op, dict) or not op.get('id'):
+            continue
+        if op.get('state') == 'running':
+            op['state'] = 'failed'
+            op['error'] = {
+                'code': 'interrupted',
+                'message': 'the panel restarted during the installation; '
+                           'check the server state',
+            }
+            op.setdefault('lines', []).append({
+                'ts': datetime.now().isoformat(timespec='seconds'),
+                'stage': 'error',
+                'text': 'panel restarted before the installation finished',
+            })
+            op['stage'] = 'error'
+            op['finished_at'] = datetime.now().isoformat(timespec='seconds')
+            op['finished_ts'] = datetime.now().timestamp()
+        _INSTALL_OPS[op['id']] = op
+    _install_ops_prune()
+
+
+def _install_ops_prune():
     now = datetime.now().timestamp()
-    for key, op in list(_INSTALL_OPS.items()):
-        if op.get('finished_ts') and now - op['finished_ts'] > 3600:
-            _INSTALL_OPS.pop(key, None)
+    for op_id, op in list(_INSTALL_OPS.items()):
+        if op.get('finished_ts') and now - op['finished_ts'] > INSTALL_OP_TTL:
+            _INSTALL_OPS.pop(op_id, None)
+    if len(_INSTALL_OPS) > INSTALL_OP_KEEP:
+        finished = sorted(
+            (op for op in _INSTALL_OPS.values() if op.get('finished_ts')),
+            key=lambda op: op['finished_ts'],
+        )
+        for op in finished[:max(0, len(_INSTALL_OPS) - INSTALL_OP_KEEP)]:
+            _INSTALL_OPS.pop(op['id'], None)
 
 
-def _install_op_start(server_id, protocol):
-    _install_prune()
+def op_create(server_id, flow, total=None):
+    """Register a running install and persist it before any work starts."""
+    _install_ops_load()
+    _install_ops_prune()
     op = {
+        'id': uuid.uuid4().hex,
         'server_id': server_id,
-        'protocol': protocol,
+        'flow': flow,
         'state': 'running',
         'stage': 'start',
-        'step': 0,
-        'total': _INSTALL_TOTAL_STEPS,
-        'percent': 0,
         'lines': [],
         'result': None,
         'error': None,
+        'step': 0,
+        'total': total or FLOW_TOTALS.get(flow) or 10,
+        'percent': 0,
         'started_at': datetime.now().isoformat(timespec='seconds'),
     }
-    _INSTALL_OPS[(server_id, protocol)] = op
+    _INSTALL_OPS[op['id']] = op
+    _INSTALL_ACTIVE[(server_id, flow)] = op['id']
+    _install_ops_save()
     return op
 
 
-def _install_note(op, stage, message, percent=None):
-    if percent is None or int(percent) >= op.get('percent', 0):
-        op['stage'] = stage
-    op['lines'].append({
+def op_log(op, stage, message):
+    """Append a detail line, advance the stage and mirror it to the panel log."""
+    text = str(message)[-2000:]
+    op.setdefault('lines', []).append({
         'ts': datetime.now().isoformat(timespec='seconds'),
         'stage': stage,
-        'text': str(message)[-2000:],
+        'text': text,
     })
-    if percent is not None:
-        op['percent'] = max(op.get('percent', 0), min(99, int(percent)))
-        op['step'] = min(op['total'], op['percent'] // 10)
+    mapped = _install_stage_step(op.get('flow'), stage)
+    if mapped:
+        step, total = mapped
+        op['stage'] = stage
+        if step > op.get('step', 0):
+            op['step'] = step
+            op['total'] = total
+            op['percent'] = int(round(step * 100.0 / total))
+    logger.info("install %s server %s stage %s: %s",
+                op.get('flow'), op.get('server_id'), stage, text[:300])
+    _install_ops_save()
 
 
-def _install_finish(op, state, result=None, error=None):
+def op_finish(op, state, result=None, error=None):
     op['state'] = state
     op['result'] = result
     op['error'] = error
@@ -5751,10 +6008,50 @@ def _install_finish(op, state, result=None, error=None):
     op['finished_ts'] = datetime.now().timestamp()
     if state == 'success':
         op['percent'] = 100
-        op['step'] = op['total']
+        op['step'] = op.get('total', 0)
         op['stage'] = 'done'
     else:
         op['stage'] = 'error'
+    active_key = (op.get('server_id'), op.get('flow'))
+    if _INSTALL_ACTIVE.get(active_key) == op.get('id'):
+        _INSTALL_ACTIVE.pop(active_key, None)
+    _install_ops_save()
+
+
+def _install_op_for_protocol(server_id, protocol):
+    """Newest operation of one protocol instance on one server."""
+    for op in reversed(list(_INSTALL_OPS.values())):
+        if op.get('server_id') == server_id and op.get('protocol') == protocol:
+            return op
+    return None
+
+
+def _install_op_payload(op, offset=0):
+    """Poll payload shared by every install flow."""
+    lines = op.get('lines') or []
+    offset = max(0, offset)
+    return {
+        'operation_id': op['id'],
+        'flow': op.get('flow'),
+        'state': op.get('state'),
+        'step': op.get('step', 0),
+        'total': op.get('total', 0),
+        'percent': op.get('percent', 0),
+        'result': op.get('result'),
+        'error': op.get('error'),
+        'started_at': op.get('started_at'),
+        'finished_at': op.get('finished_at'),
+        'lines': lines[offset:],
+        'next_offset': len(lines),
+    }
+
+
+def _install_op_of_server(op_id, server_id):
+    """Operation by id, only when it belongs to this server."""
+    op = _INSTALL_OPS.get(op_id)
+    if not op or op.get('server_id') != server_id:
+        return None
+    return op
 
 
 def _install_running(server_id):
@@ -5763,8 +6060,13 @@ def _install_running(server_id):
     Registries are process-local: this guard stops the common case, not a
     host whose install was started by another panel process.
     """
-    for (op_server, _protocol), op in list(_INSTALL_OPS.items()):
-        if op_server == server_id and op.get('state') in ('running', 'starting'):
+    _install_ops_load()
+    for op in list(_INSTALL_OPS.values()):
+        if (op.get('server_id') == server_id
+                and op.get('state') in ('running', 'starting')):
+            return True
+    for (active_server, _flow) in list(_INSTALL_ACTIVE):
+        if active_server == server_id:
             return True
     for key in list(_awg_plugin_active):
         if key[0] == server_id:
@@ -5774,28 +6076,18 @@ def _install_running(server_id):
 
 @app.get('/api/servers/{server_id}/install/progress', tags=["Protocols"])
 def api_install_progress(request: Request, server_id: int, protocol: str, offset: int = 0):
+    """Poll the current (running or last finished) operation of one protocol."""
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
-    op = _INSTALL_OPS.get((server_id, protocol))
+    _install_ops_load()
+    op = _install_op_for_protocol(server_id, protocol)
     if not op:
         return JSONResponse({'error': 'Installation not found', 'code': 'install_not_found'},
                             status_code=404)
-    offset = max(0, offset)
-    lines = op['lines']
-    return {
-        'protocol': op['protocol'],
-        'state': op['state'],
-        'stage': op['stage'],
-        'step': op['step'],
-        'total': op['total'],
-        'percent': op['percent'],
-        'result': op['result'],
-        'error': op['error'],
-        'started_at': op['started_at'],
-        'finished_at': op.get('finished_at'),
-        'lines': lines[offset:],
-        'next_offset': len(lines),
-    }
+    payload = _install_op_payload(op, offset)
+    payload['protocol'] = protocol
+    payload['stage'] = op.get('stage')
+    return payload
 
 
 @app.post('/api/servers/{server_id}/install', tags=["Protocols"])
@@ -5810,6 +6102,12 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         if not is_valid_protocol(req.protocol):
             return JSONResponse({'error': 'Invalid protocol type'}, status_code=400)
+        _install_ops_load()
+        if (server_id, 'protocol') in _INSTALL_ACTIVE:
+            return JSONResponse(
+                {'error': 'A protocol installation is already running on this server',
+                 'code': 'install_in_progress'},
+                status_code=409)
 
         server = data['servers'][server_id]
         if 'protocols' not in server:
@@ -5867,11 +6165,17 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
                               f'Choose another port.'},
                     status_code=400)
 
-        op = _install_op_start(server_id, install_protocol)
-        _install_note(op, 'docker', 'Checking Docker...', 8)
+        op = op_create(server_id, 'protocol', PROTOCOL_INSTALL_TOTAL)
+        op['protocol'] = install_protocol
+        op_log(op, 'start', f"installing {protocol_display_name(install_protocol)} "
+                            f"on {server.get('name') or server.get('host') or server_id}")
+        op_log(op, 'docker', 'checking Docker on the server')
         docker_install_log = await asyncio.to_thread(ensure_docker_installed, ssh)
         if docker_install_log:
-            _install_note(op, 'docker', docker_install_log, 12)
+            for line in str(docker_install_log).splitlines():
+                op_log(op, 'docker', line)
+        else:
+            op_log(op, 'docker', 'Docker is already installed')
         manager = get_protocol_manager(ssh, install_protocol)
 
         # IPv6 for the new instance: AWG_IPV6 overrides the server preference,
@@ -5901,8 +6205,9 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
                 ssh.disconnect()
                 message = ('Docker IPv6 is not enabled on this host. '
                            'Apply the Docker IPv6 settings first.')
-                _install_finish(op, 'failed', error={'code': 'docker_pending',
-                                                    'message': message})
+                op_log(op, 'docker', message)
+                op_finish(op, 'failed', error={'code': 'docker_pending',
+                                               'message': message})
                 return JSONResponse({'error': message, 'code': 'docker_pending'},
                                     status_code=409)
 
@@ -5976,10 +6281,10 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
         else:
             install_args = (install_protocol,)
             install_kwargs = dict(port=req.port)
-        _install_note(op, 'host', 'Preparing host and building the container...', 20)
+        op_log(op, 'host', 'preparing the host and building the container')
         if install_base in AWG_PROTOCOLS:
             install_kwargs['progress'] = (
-                lambda stage, message, percent=None: _install_note(op, stage, message, percent))
+                lambda stage, message, percent=None: op_log(op, stage, message))
         result = await asyncio.to_thread(manager.install_protocol, *install_args, **install_kwargs)
 
         if not isinstance(result, dict):
@@ -5993,10 +6298,11 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
         if result.get('status') == 'error' or result.get('error'):
             ssh.disconnect()
             message = result.get('message') or result.get('error') or 'Installation failed'
-            _install_finish(op, 'failed', error={'code': 'install_failed', 'message': message})
+            op_log(op, 'build', f"installation failed: {message}")
+            op_finish(op, 'failed', error={'code': 'install_failed', 'message': message})
             return JSONResponse({'error': message}, status_code=400)
 
-        _install_note(op, 'run', 'Container is running', 80)
+        op_log(op, 'run', 'the container is running')
         proto_record = {
             'installed': True,
             'port': req.port,
@@ -6033,7 +6339,7 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
         result['base_protocol'] = install_base
         result['display_name'] = proto_record['display_name']
         result['container_name'] = proto_record['container_name']
-        _install_note(op, 'config', 'Saving panel record...', 88)
+        op_log(op, 'config', 'saving the panel record')
         save_data(data)
         _invalidate_ip_status(server.get('uid'))
         ssh.disconnect()
@@ -6042,8 +6348,8 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
             for line in (result.get('log') or []):
                 if docker_install_log and line == docker_install_log:
                     continue
-                _install_note(op, 'config', line, 90)
-        _install_note(op, 'firewall', 'Finalizing exit-node links...', 92)
+                op_log(op, 'config', line)
+        op_log(op, 'firewall', 'finalizing exit-node links')
         link_log_len = len(result.get('log') or [])
 
         # A new AWG instance joins the default exit node, when one is set.
@@ -6077,17 +6383,18 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
                 result.setdefault('log', []).append(
                     f"! Could not re-link to exit node {previous_link.get('exit_name')}: {e}")
         for line in (result.get('log') or [])[link_log_len:]:
-            _install_note(op, 'firewall', line, 95)
-        _install_note(op, 'done', 'Installation complete', 99)
-        _install_finish(op, 'success', {'protocol': install_protocol,
-                                        'display_name': proto_record['display_name']})
+            op_log(op, 'firewall', line)
+        op_log(op, 'done', 'installation complete')
+        op_finish(op, 'success', {'protocol': install_protocol,
+                                  'display_name': proto_record['display_name']})
         return result
     except SrvWarpError:
         raise
     except Exception as e:
         logger.exception("Error installing protocol")
         if op is not None:
-            _install_finish(op, 'failed', error={'code': 'internal_error', 'message': str(e)})
+            op_log(op, 'error', f"internal error: {e}")
+            op_finish(op, 'failed', error={'code': 'internal_error', 'message': str(e)})
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
@@ -6415,16 +6722,74 @@ async def api_exit_link_failover_check(request: Request, server_id: int, req: Pr
 
 @app.post('/api/servers/{server_id}/smartroute/install', tags=["Protocols"])
 async def api_smartroute_install(request: Request, server_id: int):
-    """Install the host-side Smart Route updater (lists + systemd timer)."""
+    """Install the host-side Smart Route updater (lists + systemd timer).
+
+    The install is phased and long, so it runs in the background and the page
+    polls ``/smartroute/install/{operation_id}``.
+    """
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
-        return await smartroute_svc.install(server_id)
+        data = load_data()
+        servers = data.get('servers') or []
+        if not isinstance(server_id, int) or not 0 <= server_id < len(servers):
+            return _smartroute_error(SmartRouteError('server_not_found',
+                                                     'Server not found', 404))
+        if (servers[server_id].get('smartroute') or {}).get('installed'):
+            return JSONResponse(
+                {'error': 'App is already installed; refresh its status',
+                 'code': 'already_installed'},
+                status_code=409)
+        if (server_id, 'smartroute') in _INSTALL_ACTIVE:
+            return JSONResponse(
+                {'error': 'Smart Route installation is already running',
+                 'code': 'install_in_progress'},
+                status_code=409)
+        op = op_create(server_id, 'smartroute', SMARTROUTE_INSTALL_TOTAL)
+        asyncio.create_task(_run_smartroute_install(op['id'], server_id))
+        return {'operation_id': op['id']}
     except SmartRouteError as e:
         return _smartroute_error(e)
     except Exception as e:
         logger.exception("Error installing Smart Route")
         return JSONResponse({'error': str(e)}, status_code=500)
+
+
+async def _run_smartroute_install(op_id, server_id):
+    """Background worker: every phase line becomes a progress line + log line."""
+    op = _INSTALL_OPS.get(op_id)
+    if not op:
+        return
+    try:
+        op_log(op, 'start', 'Smart Route installation started')
+        await smartroute_svc.install(
+            server_id,
+            progress=lambda stage, line: op_log(op, stage, line),
+        )
+        op_finish(op, 'success', result={'status': 'success'})
+    except SmartRouteError as e:
+        logger.warning("Smart Route install failed: %s (%s)", e, e.code)
+        op_finish(op, 'failed', error={'code': e.code, 'message': str(e)})
+    except Exception as e:
+        logger.exception("Smart Route install failed")
+        op_finish(op, 'failed',
+                  error={'code': 'internal_error', 'message': str(e)})
+
+
+@app.get('/api/servers/{server_id}/smartroute/install/{op_id}', tags=["Protocols"])
+def api_smartroute_install_status(request: Request, server_id: int, op_id: str):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    _install_ops_load()
+    op = _install_op_of_server(op_id, server_id)
+    if not op:
+        return JSONResponse({'error': 'Operation not found', 'code': 'not_found'},
+                            status_code=404)
+    try:
+        offset = max(0, int(request.query_params.get('offset', 0)))
+    except (TypeError, ValueError):
+        offset = 0
+    return _install_op_payload(op, offset)
 
 
 @app.post('/api/servers/{server_id}/smartroute/uninstall', tags=["Protocols"])

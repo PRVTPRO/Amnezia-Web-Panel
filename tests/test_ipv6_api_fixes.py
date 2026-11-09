@@ -380,8 +380,9 @@ class DockerInstallGateTests(Ipv6FixesBase):
 
     def test_running_install_is_operation_busy(self):
         client = self.admin()
-        panel._INSTALL_OPS[(0, 'awg3')] = {'state': 'running'}
-        self.addCleanup(panel._INSTALL_OPS.pop, (0, 'awg3'), None)
+        op = panel.op_create(0, 'protocol', panel.PROTOCOL_INSTALL_TOTAL)
+        self.addCleanup(panel._INSTALL_OPS.pop, op['id'], None)
+        self.addCleanup(panel._INSTALL_ACTIVE.pop, (0, 'protocol'), None)
         with mock.patch.object(panel, '_op_store') as store:
             res = client.post('/api/servers/0/docker/ipv6/apply',
                               json={'confirm': 'yes'})
@@ -391,8 +392,10 @@ class DockerInstallGateTests(Ipv6FixesBase):
 
     def test_starting_install_is_operation_busy(self):
         client = self.admin()
-        panel._INSTALL_OPS[(0, 'awg2')] = {'state': 'starting'}
-        self.addCleanup(panel._INSTALL_OPS.pop, (0, 'awg2'), None)
+        op = panel.op_create(0, 'protocol', panel.PROTOCOL_INSTALL_TOTAL)
+        op['state'] = 'starting'
+        self.addCleanup(panel._INSTALL_OPS.pop, op['id'], None)
+        self.addCleanup(panel._INSTALL_ACTIVE.pop, (0, 'protocol'), None)
         res = client.post('/api/servers/0/docker/ipv6/apply',
                           json={'confirm': 'yes'})
         self.assertEqual(res.status_code, 409, res.text)

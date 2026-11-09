@@ -31,8 +31,8 @@ NEW_KEYS = {
     "server_ipv6_apply_or_revert_hint",
 }
 
-# +27 srv_warp_* keys (issue #277) on top of the previous 1096.
-BASE_KEY_COUNT = 1123
+# +13 install stage keys (staged marketplace installs) on top of 1123.
+BASE_KEY_COUNT = 1136
 
 
 def read_text(path):

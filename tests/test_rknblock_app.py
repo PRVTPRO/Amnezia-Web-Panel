@@ -11,6 +11,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import tempfile
 import threading
 from contextlib import ExitStack
 from pathlib import Path
@@ -23,7 +24,7 @@ from managers.ssh_manager import SSHManager
 
 FUNCTIONS = {'_rkn_ssh_run', '_rkn_run_cmd', '_rkn_record',
              '_rkn_server_index', '_rkn_store_record', '_rkn_drop_record',
-             'api_rknblock_install', 'api_rknblock_uninstall',
+             'api_rknblock_uninstall',
              'api_rknblock_enable', 'api_rknblock_update'}
 
 
@@ -193,112 +194,285 @@ class SudoExecutionTests(SshCase):
                 # install doubles: no remote script or system path is touched.
                 tree = ast.parse((Path(__file__).resolve().parents[1] / 'app.py').read_text(encoding='utf-8'))
                 constants = [n for n in tree.body if isinstance(n, ast.Assign)
-                             and any(isinstance(t, ast.Name) and t.id in ('RKN_RAW_BASE', 'RKN_INSTALL_CMD') for t in n.targets)]
+                             and any(isinstance(t, ast.Name) and t.id == 'RKN_RAW_BASE' for t in n.targets)]
                 namespace = {}
                 exec(compile(ast.Module(body=constants, type_ignores=[]), '<rkn-constants>', 'exec'), namespace)
-                scripts = [namespace['RKN_INSTALL_CMD']] + [self.panel['_rkn_run_cmd'](sub)
+                scripts = [self.panel['_rkn_run_cmd'](sub)
                     for sub in ('uninstall', 'on', 'off', 'update', 'set block_in=on block_out=off log_in=on log_out=off')]
                 for script in scripts:
                     self.assertEqual(ssh.run_sudo_script(script, timeout=5), ('script-root', '', 0))
+                # The install payload is the bundled phased installer, embedded
+                # as base64: it must never be executed locally by this test.
+                import app as panel_app
+                install_cmd = panel_app._rkn_install_script('preflight')
+                self.assertIn("bash \"$tmp_dir/install-rkn-extra.sh\" preflight", install_cmd)
+                self.assertIn("printf '%s' '", install_cmd)
+                self.assertEqual(panel_app.RKN_INSTALL_CMD,
+                                 str(Path(__file__).resolve().parents[1] / 'scripts' / 'rknblock' / 'install-rkn-extra.sh'))
 
 
-class InstallTests(SshCase):
-    def call(self):
-        return self.panel['asyncio'].run(
-            self.panel['api_rknblock_install'](self.request, 0))
+class InstallOperationTests(unittest.IsolatedAsyncioTestCase):
+    """POST /rknblock/install starts a phased background operation.
 
-    def test_install_marks_record_and_clears_cache(self):
-        result = self.call()
-        self.assertEqual(result, {'status': 'success', 'installed': True, 'enabled': True})
-        self.assertEqual(self.server['rknblock'],
+    The endpoint returns an operation_id immediately; the worker runs the
+    bundled installer phase by phase over one SSH session and the page polls
+    /rknblock/install/{op_id}.
+    """
+
+    async def asyncSetUp(self):
+        import app
+        self.app = app
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self._data_file = app.DATA_FILE
+        app.DATA_FILE = os.path.join(self.tmp, 'data.json')
+        self.addCleanup(setattr, app, 'DATA_FILE', self._data_file)
+        self._ops = dict(app._INSTALL_OPS)
+        self._active = dict(app._INSTALL_ACTIVE)
+        self._loaded = dict(app._INSTALL_OPS_LOADED)
+        app._INSTALL_OPS.clear()
+        app._INSTALL_ACTIVE.clear()
+        app._INSTALL_OPS_LOADED['done'] = False
+        self.addCleanup(self.engine_state, app)
+
+        self.data = {'servers': [{'name': 'A', 'uid': 'node-a',
+                                  'host': '192.0.2.1', 'protocols': {}}],
+                     'users': [], 'user_connections': []}
+        self.ran = []
+        self.fail_phase = None
+        self.ssh = Mock()
+        self.ssh.run_sudo_script.side_effect = self.run_phase
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.stack.enter_context(patch.object(app, '_check_admin', return_value=True))
+        self.stack.enter_context(patch.object(
+            app, 'load_data', side_effect=lambda: copy.deepcopy(self.data)))
+        self.stack.enter_context(patch.object(app, 'save_data', side_effect=self.save))
+        self.stack.enter_context(patch.object(app, 'get_ssh', return_value=self.ssh))
+        app.RKN_FLAG_CACHE.clear()
+        app.RKN_FLAG_CACHE[0] = {'ts': 1, 'data': {'events24': 5}}
+        self.request = SimpleNamespace(session={'user_id': 'admin'}, headers={},
+                                       query_params={})
+
+    def engine_state(self, app):
+        app._INSTALL_OPS.clear()
+        app._INSTALL_OPS.update(self._ops)
+        app._INSTALL_ACTIVE.clear()
+        app._INSTALL_ACTIVE.update(self._active)
+        app._INSTALL_OPS_LOADED.clear()
+        app._INSTALL_OPS_LOADED.update(self._loaded)
+
+    def save(self, data):
+        self.data = copy.deepcopy(data)
+
+    def phase_of(self, cmd):
+        for phase in self.app.RKN_INSTALL_PHASES:
+            if cmd.rstrip().endswith(' ' + phase):
+                return phase
+        return '?'
+
+    def run_phase(self, cmd, timeout=60):
+        self.ran.append((cmd, timeout))
+        phase = self.phase_of(cmd)
+        if self.fail_phase == phase:
+            return '', 'boom', 1
+        return f'rknblock: {phase}: ok\n', '', 0
+
+    async def install(self, server_uid=None, await_worker=True):
+        tasks = []
+        real = asyncio.create_task
+
+        def capture(coro):
+            task = real(coro)
+            tasks.append(task)
+            return task
+
+        with patch.object(self.app.asyncio, 'create_task', side_effect=capture):
+            response = await self.app.api_rknblock_install(
+                self.request, 0, server_uid)
+        if await_worker:
+            for task in list(tasks):
+                await task
+        return response, tasks
+
+    def op_of(self, response):
+        return self.app._INSTALL_OPS[response['operation_id']]
+
+    async def test_install_runs_every_phase_and_marks_record(self):
+        response, _ = await self.install()
+        self.assertEqual(set(response), {'operation_id'})
+        op = self.op_of(response)
+        self.assertEqual(op['state'], 'success')
+        self.assertEqual(op['percent'], 100)
+        self.assertEqual(op['result'],
+                         {'status': 'success', 'installed': True, 'enabled': True})
+        self.assertEqual(self.data['servers'][0]['rknblock'],
                          {'installed': True, 'enabled': True, 'last_error': None})
+        self.assertNotIn(0, self.app.RKN_FLAG_CACHE)
+        self.assertEqual([self.phase_of(cmd) for cmd, _ in self.ran],
+                         list(self.app.RKN_INSTALL_PHASES))
         self.assertEqual(self.ran[0][1], 420)  # install timeout
-        self.assertNotIn(0, self.panel['RKN_FLAG_CACHE'])
+        self.ssh.connect.assert_called_once()  # one SSH session for all phases
+        self.ssh.disconnect.assert_called_once()
+        stages = [line['stage'] for line in op['lines']]
+        for phase in self.app.RKN_INSTALL_PHASES:
+            self.assertIn(phase, stages)
+        self.assertIn('done', stages)
 
-    def test_install_failure_returns_500_and_no_record(self):
-        self.fail_next = True
-        resp = self.call()
-        self.assertIsInstance(resp, JSONResponse)
-        self.assertEqual(resp.status_code, 500)
-        self.assertNotIn('rknblock', self.server)
+    async def test_install_failure_stops_and_writes_no_record(self):
+        self.fail_phase = 'packages'
+        response, _ = await self.install()
+        op = self.op_of(response)
+        self.assertEqual(op['state'], 'failed')
+        self.assertEqual(op['error']['code'], 'install_failed')
+        self.assertIn('boom', op['error']['message'])
+        self.assertNotIn('rknblock', self.data['servers'][0])
+        self.assertEqual([self.phase_of(cmd) for cmd, _ in self.ran],
+                         ['preflight', 'packages'])  # fail-stop
+        self.assertIn(0, self.app.RKN_FLAG_CACHE)
 
-    def test_install_updates_reloaded_server_by_uid(self):
+    async def test_install_updates_reloaded_server_by_uid(self):
         # A long SSH call may be followed by a fresh data.json snapshot and a
         # reorder. The record must land on the same uid, not a stale object.
-        self.server['uid'] = 'u1'
-        initial = {'servers': [self.server], 'users': [], 'user_connections': []}
-        fresh = {'servers': [{'name': 'B', 'uid': 'u2'},
-                             dict(self.server)],
+        self.data['servers'][0]['uid'] = 'u1'
+        original = copy.deepcopy(self.data['servers'][0])
+        fresh = {'servers': [{'name': 'B', 'uid': 'u2'}, dict(original)],
                  'users': [], 'user_connections': []}
-        self.panel['load_data'] = Mock(return_value=initial)
-        original_run = self.panel['get_ssh'].return_value.run_sudo_script
-        def run(*args):
-            self.panel['load_data'].return_value = fresh
-            return original_run(*args)
-        self.panel['get_ssh'].return_value.run_sudo_script = run
-        result = self.call()
-        self.assertEqual(result, {'status': 'success', 'installed': True, 'enabled': True})
-        self.assertNotIn('rknblock', self.server)
-        self.assertEqual(fresh['servers'][1]['rknblock'],
+        original_run = self.run_phase
+
+        def run(cmd, timeout=60):
+            self.data = copy.deepcopy(fresh)
+            return original_run(cmd, timeout)
+
+        self.ssh.run_sudo_script.side_effect = run
+        response, _ = await self.install()
+        self.assertEqual(self.op_of(response)['state'], 'success')
+        self.assertNotIn('rknblock', self.data['servers'][0])
+        self.assertEqual(self.data['servers'][1]['rknblock'],
                          {'installed': True, 'enabled': True, 'last_error': None})
 
-    def test_forbidden(self):
-        self.panel['_check_admin'] = Mock(return_value=False)
-        resp = self.call()
-        self.assertEqual(resp.status_code, 403)
-        self.assertEqual(self.ran, [])
+    async def test_forbidden(self):
+        with patch.object(self.app, '_check_admin', return_value=False):
+            response, tasks = await self.install()
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse([op for op in self.app._INSTALL_OPS.values()
+                          if op.get('flow') == 'rknblock'])
+        self.ssh.run_sudo_script.assert_not_called()
 
-    def test_missing_uid_never_falls_back_to_reused_index(self):
-        self.server['uid'] = 'removed'
-        fresh = {'servers': [{'uid': 'other', 'rknblock': {'installed': False}}]}
-        self.panel['get_ssh'].return_value.connect = lambda: setattr(self.panel['load_data'], 'return_value', fresh)
-        response = self.call()
-        self.assertEqual(fresh['servers'][0]['rknblock'], {'installed': False})
-        self.assertEqual(response.status_code, 409)
-        self.panel['save_data'].assert_not_called()
+    async def test_missing_uid_never_falls_back_to_reused_index(self):
+        def connect():
+            self.data = {'servers': [{'uid': 'other',
+                                      'rknblock': {'installed': False}}]}
 
-    def test_legacy_missing_uid_and_explicit_empty_uid_never_start_ssh(self):
+        self.ssh.connect.side_effect = connect
+        response, _ = await self.install()
+        op = self.op_of(response)
+        self.assertEqual(op['state'], 'failed')
+        self.assertEqual(op['error']['code'], 'server_changed')
+        self.assertEqual(self.data['servers'][0]['rknblock'],
+                         {'installed': False})
+        self.ssh.run_sudo_script.assert_not_called()
+
+    async def test_legacy_missing_uid_and_explicit_empty_uid_never_start_ssh(self):
         for value in ('', 'missing'):
-            response = self.panel['asyncio'].run(self.panel['api_rknblock_install'](self.request, 0, value))
+            response, _ = await self.install(value)
             self.assertEqual(response.status_code, 404)
-        self.server.pop('uid')
-        self.assertEqual(self.call().status_code, 404)
-        self.panel['get_ssh'].assert_not_called()
-        self.panel['save_data'].assert_not_called()
+        self.data['servers'][0].pop('uid')
+        response, _ = await self.install()
+        self.assertEqual(response.status_code, 404)
+        self.ssh.run_sudo_script.assert_not_called()
 
-    def test_duplicate_uid_is_ambiguous_even_for_legacy_index_request(self):
-        self.panel['load_data'].return_value['servers'].append(dict(self.server, name='B'))
-        self.assertEqual(self.call().status_code, 404)
-        self.panel['get_ssh'].assert_not_called()
+    async def test_duplicate_uid_is_ambiguous_even_for_legacy_index_request(self):
+        self.data['servers'].append(dict(self.data['servers'][0], name='B'))
+        response, _ = await self.install()
+        self.assertEqual(response.status_code, 404)
+        self.ssh.run_sudo_script.assert_not_called()
 
-    def test_endpoint_changed_during_connect_does_not_run_remote_command(self):
-        self.panel['get_ssh'].return_value.connect = lambda: self.server.update(host='192.0.2.2')
-        self.assertEqual(self.call().status_code, 409)
+    async def test_endpoint_changed_during_connect_does_not_run_remote_command(self):
+        def connect():
+            self.data['servers'][0]['host'] = '192.0.2.2'
+
+        self.ssh.connect.side_effect = connect
+        response, _ = await self.install()
+        op = self.op_of(response)
+        self.assertEqual(op['state'], 'failed')
+        self.assertEqual(op['error']['code'], 'server_changed')
         self.assertEqual(self.ran, [])
-        self.panel['save_data'].assert_not_called()
+        self.assertNotIn('rknblock', self.data['servers'][0])
 
-    def test_deleted_during_command_cannot_commit_to_reused_index(self):
-        def run(*args):
-            self.panel['load_data'].return_value = {'servers': [{'uid': 'replacement', 'rknblock': {'installed': False}}]}
-            return ('ok', '', 0)
-        self.panel['get_ssh'].return_value.run_sudo_script = run
-        self.assertEqual(self.call().status_code, 409)
-        self.assertFalse(self.panel['load_data'].return_value['servers'][0]['rknblock']['installed'])
-        self.panel['save_data'].assert_not_called()
+    async def test_deleted_during_command_cannot_commit_to_reused_index(self):
+        original_run = self.run_phase
 
-    def test_connection_failure_always_disconnects(self):
-        ssh = self.panel['get_ssh'].return_value
-        ssh.disconnect = Mock()
-        ssh.connect = Mock(side_effect=OSError('synthetic failure'))
-        with self.assertRaises(OSError):
-            self.call()
-        ssh.disconnect.assert_called_once()
+        def run(cmd, timeout=60):
+            self.data = {'servers': [{'uid': 'replacement',
+                                      'rknblock': {'installed': False}}]}
+            return original_run(cmd, timeout)
 
-    def test_request_uid_is_checked_before_ssh(self):
-        self.server['uid'] = 'other'
-        response = self.panel['asyncio'].run(self.panel['api_rknblock_install'](self.request, 0, 'missing'))
+        self.ssh.run_sudo_script.side_effect = run
+        response, _ = await self.install()
+        op = self.op_of(response)
+        self.assertEqual(op['state'], 'failed')
+        self.assertEqual(op['error']['code'], 'server_changed')
+        self.assertFalse(self.data['servers'][0]['rknblock']['installed'])
+
+    async def test_connection_failure_always_disconnects(self):
+        self.ssh.connect.side_effect = OSError('synthetic failure')
+        response, _ = await self.install()
+        op = self.op_of(response)
+        self.assertEqual(op['state'], 'failed')
+        self.assertEqual(op['error']['code'], 'internal_error')
+        self.ssh.disconnect.assert_called_once()
+
+    async def test_request_uid_is_checked_before_ssh(self):
+        self.data['servers'][0]['uid'] = 'other'
+        response, _ = await self.install('missing')
         self.assertEqual(response.status_code, 404)
         self.assertEqual(self.ran, [])
+
+    async def test_second_install_of_the_same_flow_is_rejected(self):
+        entered = threading.Event()
+        release = threading.Event()
+        original_run = self.run_phase
+
+        def run(cmd, timeout=60):
+            entered.set()
+            if not release.wait(5):
+                raise TimeoutError('synthetic barrier')
+            return original_run(cmd, timeout)
+
+        self.ssh.run_sudo_script.side_effect = run
+        response, tasks = await self.install(await_worker=False)
+        self.assertTrue(await asyncio.to_thread(entered.wait, 3))
+        try:
+            second, _ = await self.install()
+        finally:
+            release.set()
+            for task in tasks:
+                await task
+        self.assertEqual(second.status_code, 409)
+        self.assertEqual(json.loads(second.body)['code'], 'install_in_progress')
+        rkn_ops = [op for op in self.app._INSTALL_OPS.values()
+                   if op.get('flow') == 'rknblock']
+        self.assertEqual(len(rkn_ops), 1)
+        self.assertTrue(self.data['servers'][0]['rknblock']['installed'])
+
+    async def test_progress_endpoint_reports_real_stages(self):
+        response, _ = await self.install()
+        op = self.op_of(response)
+        payload = self.app.api_rknblock_install_status(
+            self.request, 0, op['id'])
+        for key in ('operation_id', 'flow', 'state', 'step', 'total',
+                    'percent', 'result', 'error', 'started_at',
+                    'finished_at', 'lines', 'next_offset'):
+            self.assertIn(key, payload)
+        self.assertEqual(payload['flow'], 'rknblock')
+        self.assertEqual(payload['percent'], 100)
+        self.assertEqual({line['stage'] for line in payload['lines']},
+                         set(self.app.RKN_INSTALL_PHASES) | {'start', 'done'})
+        missing = self.app.api_rknblock_install_status(
+            self.request, 1, op['id'])
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(json.loads(missing.body)['code'], 'not_found')
 
 
 class UninstallTests(SshCase):
@@ -450,7 +624,20 @@ class RknRequestRaces(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         import app
         self.app = app
-        self.data = {'servers': [{'uid': 'fixture-node', 'host': '192.0.2.1'}],
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self._data_file = app.DATA_FILE
+        app.DATA_FILE = os.path.join(self.tmp, 'data.json')
+        self.addCleanup(setattr, app, 'DATA_FILE', self._data_file)
+        self._ops = dict(app._INSTALL_OPS)
+        self._active = dict(app._INSTALL_ACTIVE)
+        self._loaded = dict(app._INSTALL_OPS_LOADED)
+        app._INSTALL_OPS.clear()
+        app._INSTALL_ACTIVE.clear()
+        app._INSTALL_OPS_LOADED['done'] = False
+        self.addCleanup(self.engine_state, app)
+        self.data = {'servers': [{'uid': 'fixture-node', 'host': '192.0.2.1',
+                                  'protocols': {}}],
                      'users': [{'id': 'u', 'traffic_used': 450, 'traffic_total': 700}],
                      'user_connections': [{'id': 'link', 'last_bytes': 60}]}
         self.before = copy.deepcopy(self.data)
@@ -462,7 +649,30 @@ class RknRequestRaces(unittest.IsolatedAsyncioTestCase):
         self.ssh = Mock()
         self.ssh.run_sudo_script.return_value = ('ok', '', 0)
         self.stack.enter_context(patch.object(app, 'get_ssh', return_value=self.ssh))
+        self.app.RKN_FLAG_CACHE.clear()
         self.request = SimpleNamespace()
+
+    def engine_state(self, app):
+        app._INSTALL_OPS.clear()
+        app._INSTALL_OPS.update(self._ops)
+        app._INSTALL_ACTIVE.clear()
+        app._INSTALL_ACTIVE.update(self._active)
+        app._INSTALL_OPS_LOADED.clear()
+        app._INSTALL_OPS_LOADED.update(self._loaded)
+
+    async def start_install(self):
+        tasks = []
+        real = asyncio.create_task
+
+        def capture(coro):
+            task = real(coro)
+            tasks.append(task)
+            return task
+
+        with patch.object(self.app.asyncio, 'create_task', side_effect=capture):
+            response = await self.app.api_rknblock_install(
+                self.request, 0, 'fixture-node')
+        return response, tasks
 
     def save(self, data):
         self.data = copy.deepcopy(data)
@@ -483,26 +693,31 @@ class RknRequestRaces(unittest.IsolatedAsyncioTestCase):
             self.app.RknBlockOptionsRequest(block_in='on; id')
         self.accounting_preserved()
 
-    async def test_cancelled_install_retains_interlock_and_duplicate_never_runs(self):
+    async def test_running_install_rejects_a_second_install_and_runs_once(self):
+        # The interlock is now the operation registry: the first install owns
+        # the flow until its worker finishes, a duplicate gets 409 and never
+        # starts a second SSH session.
         entered, release = threading.Event(), threading.Event()
+
         def run(*args):
             entered.set()
             if not release.wait(5):
                 raise TimeoutError('synthetic barrier')
             return ('ok', '', 0)
+
         self.ssh.run_sudo_script.side_effect = run
-        first = asyncio.create_task(self.app.api_rknblock_install(self.request, 0, 'fixture-node'))
+        first, tasks = await self.start_install()
         try:
             self.assertTrue(await asyncio.to_thread(entered.wait, 3))
-            first.cancel()
-            with self.assertRaises(asyncio.CancelledError):
-                await first
-            second = asyncio.create_task(self.app.api_rknblock_install(self.request, 0, 'fixture-node'))
+            second = await self.app.api_rknblock_install(self.request, 0, 'fixture-node')
         finally:
             release.set()
-        self.assertEqual((await second).status_code, 409)
-        self.ssh.run_sudo_script.assert_called_once()
-        self.ssh.disconnect.assert_called_once()
+            for task in tasks:
+                await task
+        self.assertEqual(second.status_code, 409)
+        self.assertEqual(json.loads(second.body)['code'], 'install_in_progress')
+        self.assertIn(first['operation_id'], self.app._INSTALL_OPS)
+        self.assertEqual(self.app._INSTALL_OPS[first['operation_id']]['state'], 'success')
         self.assertTrue(self.data['servers'][0]['rknblock']['installed'])
         self.accounting_preserved()
 
@@ -515,7 +730,11 @@ class RknRequestRaces(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.app, '_fetch_rkn_scan_output', side_effect=probe):
             status = asyncio.create_task(self.app.api_rkn_scans(self.request, 0, 'fixture-node'))
             await entered.wait()
-            self.assertEqual((await self.app.api_rknblock_install(self.request, 0, 'fixture-node'))['status'], 'success')
+            response, tasks = await self.start_install()
+            for task in tasks:
+                await task
+            self.assertEqual(
+                self.app._INSTALL_OPS[response['operation_id']]['state'], 'success')
             release.set()
             result = await status
         self.assertTrue(result['installed'])

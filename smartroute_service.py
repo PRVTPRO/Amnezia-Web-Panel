@@ -11,6 +11,7 @@ and uninstalling the app safely rolls every split instance back to
 
 import asyncio
 import logging
+import threading
 from collections import defaultdict
 
 from managers.awg_manager import AWG_DEFAULTS
@@ -215,19 +216,58 @@ class SmartRouteService:
 
     # ----- app lifecycle -----
 
-    async def install(self, server_id):
+    # Each phase is its own short SSH call so the progress bar advances live.
+    INSTALL_PHASES = ('prepare', 'script', 'units', 'activate', 'download',
+                      'verify')
+
+    async def install(self, server_id, progress=None):
+        """Install the host side phase by phase.
+
+        ``progress(stage, line)`` is called from the event loop for every
+        output line of every phase (after the phase's SSH thread finished, so
+        no file or asyncio IO ever runs on that thread).
+        """
         data = self.load_data()
         server = self._server(data, server_id)
         identity = self._identity(server)
+        label = server.get('uid') or server_id
         smartr = await self._smartr(server)
-        log = await asyncio.to_thread(smartr.install)
+        logs = []
+        for phase in self.INSTALL_PHASES:
+            lines = []
+            lock = threading.Lock()
+
+            def collect(text, _lines=lines, _lock=lock):
+                with _lock:
+                    _lines.append(text)
+
+            logger.info("smartroute install %s: phase %s started", label, phase)
+            try:
+                out = await asyncio.to_thread(smartr.install, phase, collect)
+            except SmartRouteError as err:
+                logger.warning("smartroute install %s: phase %s failed: %s",
+                               label, phase, err)
+                if progress is not None:
+                    for line in list(lines):
+                        progress(phase, line)
+                    progress(phase, f"ERROR: {err}")
+                raise
+            with lock:
+                drained = list(lines)
+                del lines[:]
+            if progress is not None:
+                for line in drained:
+                    progress(phase, line)
+            logs.append(out or '')
+            logger.info("smartroute install %s: phase %s finished", label, phase)
+
         async with self.data_lock:
             data = self.load_data()
             server = self._resolve_identity(data, identity)
             self._settings(server)['installed'] = True
             self._settings(server)['enabled'] = True
             self.save_data(data)
-        return {'status': 'success', 'log': log}
+        return {'status': 'success', 'log': '\n'.join(logs)}
 
     async def uninstall(self, server_id):
         data = self.load_data()
