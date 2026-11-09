@@ -1,6 +1,9 @@
 import asyncio
+import collections
 import copy
 import json
+from pathlib import Path
+import re
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -10,20 +13,30 @@ import telegram_bot as tg_bot
 class TestTelegramCommandMenu(unittest.IsolatedAsyncioTestCase):
     """Test Telegram slash-command suggestions."""
 
-    async def test_default_command_menu_contains_user_commands_only(self):
+    async def test_command_menu_is_registered_for_every_panel_language(self):
         api = AsyncMock()
         api.call = AsyncMock(return_value={'ok': True})
 
         await tg_bot._set_default_commands(api)
 
-        api.call.assert_awaited_once_with(
-            'setMyCommands',
-            commands=[
-                {'command': 'start', 'description': 'Open bot menu'},
-                {'command': 'connections', 'description': 'Show my connections'},
-                {'command': 'connect', 'description': 'Create a new connection'},
-                {'command': 'disconnect', 'description': 'Delete a connection'},
-            ],
+        calls = api.call.await_args_list
+        self.assertEqual(len(calls), 5)
+        self.assertEqual(calls[0].args, ('setMyCommands',))
+        self.assertNotIn('language_code', calls[0].kwargs)
+        self.assertEqual(
+            [call.kwargs.get('language_code') for call in calls[1:]],
+            ['fa', 'fr', 'ru', 'zh'],
+        )
+        for call in calls:
+            commands = call.kwargs['commands']
+            self.assertEqual([item['command'] for item in commands], [
+                'start', 'connections', 'connect', 'disconnect',
+            ])
+            self.assertTrue(all(item['description'].strip() for item in commands))
+        self.assertEqual(calls[0].kwargs['commands'][0]['description'], 'Open bot menu')
+        self.assertNotEqual(
+            calls[-1].kwargs['commands'][0]['description'],
+            calls[0].kwargs['commands'][0]['description'],
         )
 
 
@@ -568,6 +581,55 @@ class TestTelegramLocalization(unittest.IsolatedAsyncioTestCase):
         self.load_data = lambda: self.data
         self.api = AsyncMock()
         self.api.send_message = AsyncMock()
+
+    def test_telegram_catalog_matches_panel_locales_and_placeholders(self):
+        root = Path(__file__).resolve().parents[1] / 'translations'
+        panel_locales = {path.stem for path in root.glob('*.json')}
+        self.assertEqual(set(tg_bot.TG_TRANSLATIONS), panel_locales)
+        reference = tg_bot.TG_TRANSLATIONS['en']
+        for lang, catalog in tg_bot.TG_TRANSLATIONS.items():
+            with self.subTest(lang=lang):
+                self.assertEqual(set(catalog), set(reference))
+                for key, value in catalog.items():
+                    self.assertIsInstance(value, str)
+                    self.assertTrue(value.strip())
+                    self.assertEqual(
+                        collections.Counter(re.findall(r'\{[^{}]*\}', value)),
+                        collections.Counter(re.findall(r'\{[^{}]*\}', reference[key])),
+                    )
+
+    def test_language_codes_are_normalized_to_panel_locales(self):
+        samples = {'en-US': 'en', 'fa-IR': 'fa', 'fr-FR': 'fr', 'RU_ru': 'ru',
+                   'zh-Hans': 'zh', 'de-DE': 'en', '': 'en'}
+        for code, expected in samples.items():
+            with self.subTest(code=code):
+                self.assertEqual(tg_bot._tg_lang({'language_code': code}), expected)
+
+    async def test_start_uses_every_supported_telegram_language(self):
+        expected_phrases = {
+            'en': 'Your Telegram account is not linked',
+            'fa': 'حساب تلگرام',
+            'fr': 'Votre compte Telegram',
+            'ru': 'Ваш аккаунт Telegram',
+            'zh': 'Telegram',
+        }
+        for lang, phrase in expected_phrases.items():
+            with self.subTest(lang=lang):
+                self.api.reset_mock()
+                msg = _text_message(chat_id=999, from_id=999, text='/start', language_code=lang)
+                await _dispatch_message(self.api, msg, self.load_data)
+                text = self.api.send_message.call_args[0][1]
+                self.assertIn(phrase, text)
+                if lang != 'en':
+                    self.assertNotIn('Your Telegram account is not linked', text)
+
+    async def test_private_chat_rejection_is_localized(self):
+        msg = _text_message(chat_id=-100, from_id=111, text='/connect',
+                            language_code='fr-FR', chat_type='group')
+        await _dispatch_message(self.api, msg, self.load_data)
+        text = self.api.send_message.call_args[0][1]
+        self.assertIn('discussion privée', text)
+        self.assertNotIn('private chat', text)
 
     async def test_start_uses_russian_when_telegram_language_is_ru(self):
         msg = _text_message(chat_id=999, from_id=999, text='/start', language_code='ru')
