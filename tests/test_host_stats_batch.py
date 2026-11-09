@@ -14,7 +14,7 @@ from managers.ssh_manager import SSHManager
 
 
 VALUES = {'cpu': '7.26', 'ram': '250 1000', 'disk': '600 1000',
-          'network': '123456 987654', 'uptime': 'up 2 days, 3 hours',
+          'swap': '100 500', 'network': '123456 987654', 'uptime': 'up 2 days, 3 hours',
           'ipv6': '2001:db8::1\n2001:db8:1::2'}
 
 
@@ -36,9 +36,22 @@ class HostStatsBatchTests(unittest.TestCase):
         self.assertEqual(server_stats.collect_host_stats(ssh), {
             'cpu': 7.3, 'ram_used': 250, 'ram_total': 1000, 'ram_percent': 25.0,
             'disk_used': 600, 'disk_total': 1000, 'disk_percent': 60.0,
+            'swap_used': 100, 'swap_total': 500, 'swap_percent': 20.0,
             'net_rx': 123456, 'net_tx': 987654, 'uptime': 'up 2 days, 3 hours',
             'ipv6': ['2001:db8::1', '2001:db8:1::2']})
         self.assertEqual(ssh.run_command.call_count, 1)
+
+    def test_awk_probes_avoid_mawk_32bit_printf(self):
+        # Debian's mawk clamps "%d" to 2^31-1, so a 5 GiB disk was reported as
+        # 2147483647 bytes. Every numeric probe must use the float form.
+        for name in ('ram', 'disk', 'swap', 'network'):
+            self.assertNotIn('%d', server_stats.HOST_STATS_COMMANDS[name], name)
+            self.assertIn('%.0f', server_stats.HOST_STATS_COMMANDS[name], name)
+        # The disk probe sums physical filesystems, once per device.
+        disk = server_stats.HOST_STATS_COMMANDS['disk']
+        self.assertIn('/^\\/dev\\//', disk)
+        self.assertIn('!seen[$1]++', disk)
+        self.assertIn('-x overlay', disk)
 
     def test_empty_fields_keep_existing_defaults_without_bleeding_into_next_field(self):
         result = server_stats.collect_host_stats(self.ssh({}))
@@ -48,10 +61,12 @@ class HostStatsBatchTests(unittest.TestCase):
         self.assertEqual(result['ipv6'], [])
 
     def test_zero_total_and_invalid_numbers(self):
-        values = dict(VALUES, cpu='not-a-number', ram='50 0', disk='broken', network='broken')
+        values = dict(VALUES, cpu='not-a-number', ram='50 0', disk='broken',
+                      swap='50 0', network='broken')
         result = server_stats.collect_host_stats(self.ssh(values))
         self.assertEqual(result['ram_percent'], 0)
         self.assertEqual(result['disk_used'], 0)
+        self.assertEqual(result['swap_percent'], 0)
         self.assertEqual(result['net_tx'], 0)
 
     def test_nonfinite_cpu_does_not_break_json_response(self):

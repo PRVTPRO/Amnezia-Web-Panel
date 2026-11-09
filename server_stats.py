@@ -10,11 +10,26 @@ HOST_STATS_COMMANDS = {
         "awk '{u=$2+$4; t=$2+$4+$5; if(NR==1){pu=u;pt=t} else printf \"%.1f\", (u-pu)/(t-pt)*100}' "
         "<(grep 'cpu ' /proc/stat) <(sleep 0.5 && grep 'cpu ' /proc/stat) 2>/dev/null"
     ),
-    'ram': "free -b | awk 'NR==2{printf \"%d %d\", $3, $2}'",
-    'disk': "df -B1 / | awk 'NR==2{printf \"%d %d\", $3, $2}'",
+    'ram': "free -b | awk 'NR==2{printf \"%.0f %.0f\", $3, $2}'",
+    # Sum the physical filesystems, not just "/": a small root partition next
+    # to a large data mount must not hide the real volume. Devices are counted
+    # once (bind mounts, btrfs subvolumes and docker overlays repeat the same
+    # device). "%.0f" instead of "%d": mawk on Debian clamps %d to 2^31-1, so
+    # every disk larger than 2 GiB was reported as 2147483647 bytes.
+    'disk': (
+        "df -B1 -P -x tmpfs -x devtmpfs -x overlay -x squashfs -x devfs -x procfs -x sysfs "
+        "2>/dev/null | awk 'NR>1 && $2>0 && $1 ~ /^\\/dev\\// && !seen[$1]++ "
+        "{used+=$3; total+=$2} "
+        "END {if(total>0) printf \"%.0f %.0f\", used, total; else print \"0 0\"}'"
+    ),
+    # Swap is reported only when the host has some; the UI hides the row for 0.
+    'swap': (
+        "awk '/^SwapTotal:/{t=$2} /^SwapFree:/{f=$2} "
+        "END {if(f==\"\") f=0; printf \"%.0f %.0f\", (t-f)*1024, t*1024}' /proc/meminfo"
+    ),
     'network': (
         "DEV=$(ip route | awk '/default/ {print $5}' | head -1); "
-        "cat /proc/net/dev | awk -v dev=\"$DEV:\" '$1==dev{printf \"%d %d\", $2, $10}'"
+        "cat /proc/net/dev | awk -v dev=\"$DEV:\" '$1==dev{printf \"%.0f %.0f\", $2, $10}'"
     ),
     'uptime': 'uptime -p 2>/dev/null || uptime',
     'ipv6': (
@@ -88,7 +103,7 @@ def collect_host_stats(ssh):
     except (ValueError, IndexError):
         stats['cpu'] = 0
         errors.setdefault('cpu', 'invalid_value')
-    for field in ('ram', 'disk'):
+    for field in ('ram', 'disk', 'swap'):
         try:
             used, total = map(int, sections[field].split())
             percent = round(used / total * 100, 1) if total > 0 else 0
