@@ -3298,10 +3298,20 @@ body,
 /* ===== IPv4/IPv6 controls (server header + configure-IP modal) ===== */
 .ip-chips {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
+    flex-direction: column;
     gap: 6px;
     margin-top: 6px;
-    flex-wrap: wrap;
+}
+
+.server-header__identity,
+.server-header__details {
+    min-width: 0;
+}
+
+.page-header--card .page-header__actions {
+    flex: 0 0 auto;
+    align-self: flex-start;
 }
 
 .ip-chip {

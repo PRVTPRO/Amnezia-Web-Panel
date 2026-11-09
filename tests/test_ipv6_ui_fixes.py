@@ -166,6 +166,15 @@ class TestC5Styles(unittest.TestCase):
         self.assertIn(".ip-modal-table tr {", self.css)
         self.assertIn("attr(data-label)", self.css)
 
+    def test_server_ip_chips_stack_without_resizing_header_actions(self):
+        template = read_text(TEMPLATE_FILE)
+        self.assertIn('class="server-header__identity flex items-center gap-md"', template)
+        self.assertIn('class="server-header__details"', template)
+        chips = self.css[self.css.index('.ip-chips {'):]
+        self.assertIn('flex-direction: column', chips[:240])
+        self.assertIn('.page-header--card .page-header__actions {', self.css)
+        self.assertIn('flex: 0 0 auto', self.css)
+
 
 class TestC6Translations(unittest.TestCase):
     def test_key_sets_are_equal_and_keep_existing_keys(self):

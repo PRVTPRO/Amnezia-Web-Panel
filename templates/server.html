@@ -1055,9 +1055,9 @@
 <!-- Server Info Header -->
 <div class="card page-header-card">
     <div class="page-header page-header--card">
-        <div class="flex items-center gap-md">
+        <div class="server-header__identity flex items-center gap-md">
             <div class="server-icon" style="width:56px; height:56px; font-size:1.6rem;">🖥</div>
-            <div>
+            <div class="server-header__details">
                 <h1 style="font-size:1.4rem; font-weight:700;">{{ server.name }}</h1>
                 <div class="font-mono text-muted text-sm">{{ server.host }}:{{ server.ssh_port }} • {{ server.username
                     }}</div>
@@ -1101,10 +1101,6 @@
             {% endif %}
             <button class="btn btn-secondary btn-sm" onclick="openIpSettings()" id="ipSettingsBtn">
                 <span>🌐</span> {{ _('server_ipv6_configure_ip') }}
-            </button>
-            <button class="btn btn-secondary btn-sm" onclick="checkServer(true)" id="checkBtn">
-                <span id="checkBtnText">{{ _('server_check') }}</span>
-                <div class="spinner hidden" id="checkSpinner"></div>
             </button>
         </div>
     </div>
@@ -2863,7 +2859,7 @@
             serverUid: document.body.dataset.serverUid || '',
             sshCooldown: SSH_COOLDOWN_BASE,
             peerPollInterval: PEER_POLL_INTERVAL,
-            onCheck: checkServer,
+            onCheck: () => checkServer(true),
             onCooldownChange(value) { SSH_COOLDOWN_BASE = value; },
             onPollChange(value) {
                 PEER_POLL_INTERVAL = value;
@@ -3742,12 +3738,6 @@
         loadRknBlock();
         if (typeof loadWarpStatus === 'function') loadWarpStatus(true);
         setInstalledAppsLoading(true);
-        const btn = document.getElementById('checkBtn');
-        const text = document.getElementById('checkBtnText');
-        const spinner = document.getElementById('checkSpinner');
-        btn.disabled = true;
-        text.textContent = _('server_checking');
-        spinner.classList.remove('hidden');
         // Manual check bypasses the 12 h plugin cache.
         if (forcePlugins) loadAwgPluginStatus(true);
         // Smart Route is host-level: its status is a separate probe, not part
@@ -3821,9 +3811,6 @@
             // the spinner and the retry button blocked.
             setInstalledAppsLoading(false);
             applyInstalledAppsVisibility();
-            btn.disabled = false;
-            text.textContent = _('server_check');
-            spinner.classList.add('hidden');
         }
     }
 
