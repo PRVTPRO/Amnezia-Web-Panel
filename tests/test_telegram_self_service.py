@@ -40,6 +40,59 @@ class TestTelegramCommandMenu(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class TestTelegramLanguagePreference(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        tg_bot._callback_refs.clear()
+        tg_bot._pending_inputs.clear()
+        self.data = base_data()
+        self.load_data = lambda: self.data
+        self.save_data = lambda data: self.data.update(copy.deepcopy(data))
+        self.api = AsyncMock()
+        self.api.send_message = AsyncMock()
+        self.api.edit_message = AsyncMock()
+        self.api.answer_callback = AsyncMock()
+
+    async def test_first_start_shows_language_picker_before_greeting(self):
+        msg = _text_message(chat_id=111, from_id=111, text='/start', language_code='ru')
+        await tg_bot._dispatch(self.api, msg, self.load_data, lambda *args: 'vpn://x', self.save_data)
+        text = self.api.send_message.call_args[0][1]
+        markup = self.api.send_message.call_args.kwargs['reply_markup']
+        buttons = [button for row in markup['inline_keyboard'] for button in row]
+        self.assertIn('Choose language', text)
+        self.assertNotIn('Привет', text)
+        self.assertEqual({button['callback_data'] for button in buttons},
+                         {'lang:en', 'lang:fa', 'lang:fr', 'lang:ru', 'lang:zh'})
+
+    async def test_selected_language_is_saved_and_overrides_telegram_language(self):
+        update = _callback_update(chat_id=111, from_id=111, data_str='lang:fr', language_code='ru')
+        await tg_bot._dispatch(self.api, update, self.load_data, lambda *args: 'vpn://x', self.save_data)
+        self.assertEqual(self.data['telegram_preferences']['111']['language'], 'fr')
+        greeting = self.api.send_message.call_args[0][1]
+        self.assertIn('Vous êtes enregistré', greeting)
+        self.assertNotIn('Вы зарегистрированы', greeting)
+
+        self.api.reset_mock()
+        msg = _text_message(chat_id=111, from_id=111, text='/start', language_code='ru')
+        await tg_bot._dispatch(self.api, msg, self.load_data, lambda *args: 'vpn://x', self.save_data)
+        self.assertIn('Vous êtes enregistré', self.api.send_message.call_args[0][1])
+
+    async def test_language_can_be_changed_from_personal_bot_menu(self):
+        self.data['telegram_preferences'] = {'111': {'language': 'fr'}}
+        msg = _text_message(chat_id=111, from_id=111, text='/start', language_code='ru')
+        await tg_bot._dispatch(self.api, msg, self.load_data, lambda *args: 'vpn://x', self.save_data)
+        markup = self.api.send_message.call_args.kwargs['reply_markup']
+        buttons = [button for row in markup['inline_keyboard'] for button in row]
+        language_button = next(button for button in buttons if button['callback_data'] == 'language_menu')
+        self.assertIn('Langue', language_button['text'])
+
+        self.api.reset_mock()
+        update = _callback_update(chat_id=111, from_id=111, data_str='language_menu', language_code='ru')
+        await tg_bot._dispatch(self.api, update, self.load_data, lambda *args: 'vpn://x', self.save_data)
+        picker = self.api.edit_message.call_args.kwargs['reply_markup']
+        self.assertEqual({button['callback_data'] for row in picker['inline_keyboard'] for button in row},
+                         {'lang:en', 'lang:fa', 'lang:fr', 'lang:ru', 'lang:zh'})
+
+
 class TestUserSlashCommands(unittest.IsolatedAsyncioTestCase):
     """Test user slash commands shown in Telegram suggestions."""
 
@@ -615,6 +668,7 @@ class TestTelegramLocalization(unittest.IsolatedAsyncioTestCase):
         }
         for lang, phrase in expected_phrases.items():
             with self.subTest(lang=lang):
+                self.data['telegram_preferences'] = {'999': {'language': lang}}
                 self.api.reset_mock()
                 msg = _text_message(chat_id=999, from_id=999, text='/start', language_code=lang)
                 await _dispatch_message(self.api, msg, self.load_data)
@@ -632,6 +686,7 @@ class TestTelegramLocalization(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('private chat', text)
 
     async def test_start_uses_russian_when_telegram_language_is_ru(self):
+        self.data['telegram_preferences'] = {'999': {'language': 'ru'}}
         msg = _text_message(chat_id=999, from_id=999, text='/start', language_code='ru')
         await _dispatch_message(self.api, msg, self.load_data)
         text = self.api.send_message.call_args[0][1]
@@ -639,6 +694,7 @@ class TestTelegramLocalization(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Ваш Telegram ID', text)
 
     async def test_user_connection_buttons_use_russian_when_telegram_language_is_ru(self):
+        self.data['telegram_preferences'] = {'111': {'language': 'ru'}}
         msg = _text_message(chat_id=111, from_id=111, text='/start', language_code='ru')
         await _dispatch_message(self.api, msg, self.load_data)
         reply_markup = self.api.send_message.call_args[1].get('reply_markup', {})
@@ -649,6 +705,7 @@ class TestTelegramLocalization(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('Refresh list', keyboard_text)
 
     async def test_admin_menu_buttons_use_russian_when_telegram_language_is_ru(self):
+        self.data['telegram_preferences'] = {'222': {'language': 'ru'}}
         msg = _text_message(chat_id=222, from_id=222, text='/start', language_code='ru')
         await _dispatch_message(self.api, msg, self.load_data)
         reply_markup = self.api.send_message.call_args[1].get('reply_markup', {})

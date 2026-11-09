@@ -186,7 +186,10 @@ TG_TRANSLATIONS = {
         "status_error_label": "Status error",
         "container_name_unknown": "Container name is unknown",
         "container_not_found": "Container not found",
-        "protocol_action_failed": "Failed to {action} the protocol container."
+        "protocol_action_failed": "Failed to {action} the protocol container.",
+        "language_prompt": "Choose language",
+        "btn_language": "Language",
+        "language_saved": "Language saved."
     },
     "fa": {
         "hi": "سلام",
@@ -329,7 +332,10 @@ TG_TRANSLATIONS = {
         "status_error_label": "خطای وضعیت",
         "container_name_unknown": "نام کانتینر نامشخص است",
         "container_not_found": "کانتینر پیدا نشد",
-        "protocol_action_failed": "{action} کانتینر پروتکل ناموفق بود."
+        "protocol_action_failed": "{action} کانتینر پروتکل ناموفق بود.",
+        "language_prompt": "زبان را انتخاب کنید",
+        "btn_language": "زبان",
+        "language_saved": "زبان ذخیره شد."
     },
     "fr": {
         "hi": "Bonjour",
@@ -472,7 +478,10 @@ TG_TRANSLATIONS = {
         "status_error_label": "Erreur d’état",
         "container_name_unknown": "Le nom du conteneur est inconnu",
         "container_not_found": "Conteneur introuvable",
-        "protocol_action_failed": "Impossible de {action} le conteneur du protocole."
+        "protocol_action_failed": "Impossible de {action} le conteneur du protocole.",
+        "language_prompt": "Choisissez la langue",
+        "btn_language": "Langue",
+        "language_saved": "Langue enregistrée."
     },
     "ru": {
         "hi": "Привет",
@@ -615,7 +624,10 @@ TG_TRANSLATIONS = {
         "status_error_label": "Ошибка статуса",
         "container_name_unknown": "Имя контейнера неизвестно",
         "container_not_found": "Контейнер не найден",
-        "protocol_action_failed": "Не удалось выполнить действие «{action}» для контейнера протокола."
+        "protocol_action_failed": "Не удалось выполнить действие «{action}» для контейнера протокола.",
+        "language_prompt": "Выберите язык",
+        "btn_language": "Язык",
+        "language_saved": "Язык сохранён."
     },
     "zh": {
         "hi": "你好",
@@ -758,7 +770,10 @@ TG_TRANSLATIONS = {
         "status_error_label": "状态错误",
         "container_name_unknown": "容器名称未知",
         "container_not_found": "未找到容器",
-        "protocol_action_failed": "无法对协议容器执行{action}操作。"
+        "protocol_action_failed": "无法对协议容器执行{action}操作。",
+        "language_prompt": "选择语言",
+        "btn_language": "语言",
+        "language_saved": "语言已保存。"
     }
 }
 
@@ -871,6 +886,49 @@ def _tg_lang(from_user: Optional[dict]) -> str:
 def _tt(lang: str, key: str, **kwargs) -> str:
     text = TG_TRANSLATIONS.get(lang, TG_TRANSLATIONS["en"]).get(key, TG_TRANSLATIONS["en"].get(key, key))
     return text.format(**kwargs) if kwargs else text
+
+
+_LANGUAGE_LABELS = {
+    "en": "🇬🇧 English",
+    "fa": "🇮🇷 فارسی",
+    "fr": "🇫🇷 Français",
+    "ru": "🇷🇺 Русский",
+    "zh": "🇨🇳 中文",
+}
+
+
+def _language_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": label, "callback_data": f"lang:{lang}"}]
+            for lang, label in _LANGUAGE_LABELS.items()
+        ]
+    }
+
+
+def _language_button(lang: str) -> dict:
+    return {"text": f"🌐 {_tt(lang, 'btn_language')}", "callback_data": "language_menu"}
+
+
+def _telegram_language(data: dict, tg_id: str) -> Optional[str]:
+    lang = ((data.get("telegram_preferences") or {}).get(str(tg_id)) or {}).get("language")
+    return lang if lang in TG_TRANSLATIONS else None
+
+
+def _selected_lang(load_data_fn: Callable, tg_id: str, from_user: Optional[dict] = None) -> str:
+    return _telegram_language(load_data_fn(), tg_id) or _tg_lang(from_user)
+
+
+def _save_telegram_language(load_data_fn: Callable, save_data_fn: Optional[Callable],
+                            tg_id: str, lang: str) -> bool:
+    if not save_data_fn or lang not in TG_TRANSLATIONS:
+        return False
+    data = load_data_fn()
+    preferences = data.setdefault("telegram_preferences", {})
+    current = preferences.setdefault(str(tg_id), {})
+    current["language"] = lang
+    save_data_fn(data)
+    return True
 
 
 def _format_bytes(value) -> str:
@@ -989,7 +1047,8 @@ def _user_create_server_keyboard(eligible, lang: str = "en") -> dict:
     return {"inline_keyboard": rows}
 
 
-def _build_connections_keyboard(conns: list, data: dict, lang: str = "en") -> dict:
+def _build_connections_keyboard(conns: list, data: dict, lang: str = "en",
+                                include_language: bool = False) -> dict:
     """Build inline keyboard where each button = one connection.
     When self-service is enabled, adds delete buttons for self-service connections
     and a 'Create connection' button."""
@@ -1012,6 +1071,8 @@ def _build_connections_keyboard(conns: list, data: dict, lang: str = "en") -> di
     if ss_enabled:
         rows.append([{"text": f"➕ {_tt(lang, 'btn_create_connection')}", "callback_data": "user_create"}])
     rows.append([{"text": f"🔄 {_tt(lang, 'btn_refresh_list')}", "callback_data": "refresh"}])
+    if include_language:
+        rows.append([_language_button(lang)])
     return {"inline_keyboard": rows}
 
 
@@ -1063,15 +1124,16 @@ def _assign_user_keyboard(data: dict, server_id: int, proto: str, name: str, lan
     return {"inline_keyboard": rows}
 
 
-def _admin_main_keyboard(lang: str = "en") -> dict:
-    return {
-        "inline_keyboard": [
-            [{"text": f"🖥 {_tt(lang, 'btn_servers')}", "callback_data": "adm:servers"}],
-            [{"text": f"👤 {_tt(lang, 'btn_users')}", "callback_data": "adm:users"}],
-            [{"text": f"🔐 {_tt(lang, 'btn_my_connections')}", "callback_data": "adm:myconns"}],
-            [{"text": f"➕ {_tt(lang, 'btn_how_add_server')}", "callback_data": "adm:addserver_help"}],
-        ]
-    }
+def _admin_main_keyboard(lang: str = "en", include_language: bool = False) -> dict:
+    rows = [
+        [{"text": f"🖥 {_tt(lang, 'btn_servers')}", "callback_data": "adm:servers"}],
+        [{"text": f"👤 {_tt(lang, 'btn_users')}", "callback_data": "adm:users"}],
+        [{"text": f"🔐 {_tt(lang, 'btn_my_connections')}", "callback_data": "adm:myconns"}],
+        [{"text": f"➕ {_tt(lang, 'btn_how_add_server')}", "callback_data": "adm:addserver_help"}],
+    ]
+    if include_language:
+        rows.append([_language_button(lang)])
+    return {"inline_keyboard": rows}
 
 
 def _server_keyboard(data: dict, lang: str = "en") -> dict:
@@ -1247,12 +1309,18 @@ async def _refresh_server_protocol_statuses_async(server: dict) -> dict:
 # ----------------------------------------------------------------------- #
 #  /start and user connection handlers
 # ----------------------------------------------------------------------- #
-async def _handle_start(api: TelegramAPI, msg: dict, load_data_fn: Callable):
+async def _handle_start(api: TelegramAPI, msg: dict, load_data_fn: Callable,
+                        save_data_fn: Optional[Callable] = None):
     chat_id = msg["chat"]["id"]
     tg_id = str(msg["from"]["id"])
     tg_username = msg["from"].get("username")
     first_name = msg["from"].get("first_name", "")
-    lang = _tg_lang(msg["from"])
+    data = load_data_fn()
+    lang = _telegram_language(data, tg_id)
+    if not lang:
+        await api.send_message(chat_id, _tt("en", "language_prompt"),
+                               reply_markup=_language_keyboard())
+        return
 
     panel_user = _find_user(load_data_fn, tg_id, tg_username)
 
@@ -1272,21 +1340,24 @@ async def _handle_start(api: TelegramAPI, msg: dict, load_data_fn: Callable):
             f"👋 {_tt(lang, 'hi')}, <b>{_e(first_name)}</b>!\n\n"
             f"{_tt(lang, 'registered_admin', username=_e(panel_user.get('username')))}\n"
             f"{_tt(lang, 'choose_action')}",
-            reply_markup=_admin_main_keyboard(lang),
+            reply_markup=_admin_main_keyboard(lang, include_language=True),
         )
         return
 
-    await _send_user_connections(api, chat_id, panel_user, load_data_fn, first_name=first_name, lang=lang)
+    await _send_user_connections(api, chat_id, panel_user, load_data_fn, first_name=first_name,
+                                 lang=lang, include_language=True)
 
 
-async def _send_user_connections(api: TelegramAPI, chat_id: int, panel_user: dict, load_data_fn: Callable, first_name: str = "", lang: str = "en"):
+async def _send_user_connections(api: TelegramAPI, chat_id: int, panel_user: dict,
+                                 load_data_fn: Callable, first_name: str = "",
+                                 lang: str = "en", include_language: bool = False):
     data = load_data_fn()
     conns = [c for c in data.get("user_connections", []) if c.get("user_id") == panel_user.get("id")]
 
     if not conns:
         greeting = f"👋 {_tt(lang, 'hi')}, <b>{_e(first_name)}</b>!\n\n" if first_name else ""
         if _self_service_telegram_enabled(data):
-            kb = _build_connections_keyboard(conns, data, lang)
+            kb = _build_connections_keyboard(conns, data, lang, include_language)
             await api.send_message(
                 chat_id,
                 greeting + f"{_tt(lang, 'registered_as', username=_e(panel_user.get('username')))}.\n\n"
@@ -1301,7 +1372,7 @@ async def _send_user_connections(api: TelegramAPI, chat_id: int, panel_user: dic
             )
         return
 
-    kb = _build_connections_keyboard(conns, data, lang)
+    kb = _build_connections_keyboard(conns, data, lang, include_language)
     greeting = f"👋 {_tt(lang, 'hi')}, <b>{_e(first_name)}</b>!\n\n" if first_name else ""
     await api.send_message(
         chat_id,
@@ -1812,7 +1883,7 @@ async def _admin_remove_client(api: TelegramAPI, chat_id: int, message_id: int, 
 async def _handle_pending_input(api: TelegramAPI, msg: dict, load_data_fn: Callable, save_data_fn: Optional[Callable], generate_vpn_link_fn: Callable, self_service_svc=None) -> bool:
     chat_id = msg["chat"]["id"]
     from_id = msg["from"]["id"]
-    lang = _tg_lang(msg.get("from"))
+    lang = _selected_lang(load_data_fn, str(from_id), msg.get("from"))
     key = _pending_key(chat_id, from_id)
     state = _pending_inputs.get(key)
     if not state:
@@ -2186,7 +2257,7 @@ async def _dispatch(api: TelegramAPI, update: dict, load_data_fn: Callable, gene
         msg = update["message"]
         text = msg.get("text", "")
         tg_username = msg["from"].get("username")
-        lang = _tg_lang(msg["from"])
+        lang = _selected_lang(load_data_fn, str(msg["from"]["id"]), msg["from"])
         chat_id = msg["chat"]["id"]
         if text.startswith(("/connections", "/connect", "/disconnect")) and not _is_private_chat(msg.get("chat")):
             await _reject_non_private(api, chat_id, lang)
@@ -2194,7 +2265,7 @@ async def _dispatch(api: TelegramAPI, update: dict, load_data_fn: Callable, gene
         if await _handle_pending_input(api, msg, load_data_fn, save_data_fn, generate_vpn_link_fn, self_service_svc):
             return
         if text.startswith("/start") or text.startswith("/admin"):
-            await _handle_start(api, msg, load_data_fn)
+            await _handle_start(api, msg, load_data_fn, save_data_fn)
         elif text.startswith("/connections"):
             panel_user = _find_user(load_data_fn, str(msg["from"]["id"]), tg_username)
             if not panel_user:
@@ -2226,8 +2297,38 @@ async def _dispatch(api: TelegramAPI, update: dict, load_data_fn: Callable, gene
         message_id = cq["message"]["message_id"]
         tg_id = str(cq["from"]["id"])
         tg_username = cq["from"].get("username")
-        lang = _tg_lang(cq["from"])
+        lang = _selected_lang(load_data_fn, tg_id, cq["from"])
 
+        if data_str == "language_menu":
+            await api.answer_callback(callback_id)
+            await api.edit_message(chat_id, message_id, _tt(lang, "language_prompt"),
+                                   reply_markup=_language_keyboard())
+            return
+        if data_str.startswith("lang:"):
+            selected = data_str.split(":", 1)[1]
+            if not _save_telegram_language(load_data_fn, save_data_fn, tg_id, selected):
+                await api.answer_callback(callback_id, _tt(lang, "saving_not_available"))
+                return
+            lang = selected
+            await api.answer_callback(callback_id, _tt(lang, "language_saved"))
+            panel_user = _find_user(load_data_fn, tg_id, tg_username)
+            if not panel_user:
+                await api.edit_message(chat_id, message_id,
+                                       f"{_tt(lang, 'account_not_linked')}\n"
+                                       f"{_tt(lang, 'contact_admin_to_link')}\n\n"
+                                       f"{_tt(lang, 'your_telegram_id')}: <code>{_e(tg_id)}</code>",
+                                       reply_markup={"inline_keyboard": [[_language_button(lang)]]})
+            elif _is_admin(panel_user):
+                await api.send_message(
+                    chat_id,
+                    f"{_tt(lang, 'registered_admin', username=_e(panel_user.get('username')))}\n"
+                    f"{_tt(lang, 'choose_action')}",
+                    reply_markup=_admin_main_keyboard(lang, include_language=True),
+                )
+            else:
+                await _send_user_connections(api, chat_id, panel_user, load_data_fn,
+                                             lang=lang, include_language=True)
+            return
         if data_str == "noop":
             await api.answer_callback(callback_id)
             return
