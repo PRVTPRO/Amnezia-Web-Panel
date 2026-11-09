@@ -72,6 +72,17 @@ class ApiAuthStatusTests(unittest.TestCase):
                 'Authorization': 'Bearer ' + token})
         self.assertEqual(response.status_code, 200)
 
+    def test_authenticated_cross_origin_write_does_not_run_ssh_operation(self):
+        self.data['servers'] = [{'uid': 'fixture-node', 'host': 'node.example.test', 'ssh_port': 22}]
+        self.login()
+        with patch.object(panel.ssh_trust, 'inspect', return_value={'status': 'unknown'}) as probe:
+            self.assertEqual(self.client.post('/api/servers/0/ssh-trust/inspect').status_code, 200)
+            probe.reset_mock()
+            response = self.client.post('/api/servers/0/ssh-trust/inspect', headers={
+                'Origin': 'https://attacker.invalid', 'Sec-Fetch-Site': 'cross-site'})
+        self.assertEqual(response.status_code, 403)
+        probe.assert_not_called()
+
     def test_public_disabled_login_keeps_403(self):
         self.user['enabled'] = False
         with patch.object(panel, 'verify_password', return_value=True):

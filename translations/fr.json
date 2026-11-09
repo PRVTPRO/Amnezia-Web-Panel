@@ -86,7 +86,7 @@
   "awg_special_junk_syntax": "Balises : <b 0xHEX> octets fixes, <r N> octets aléatoires, <rc N> lettres, <rd N> chiffres, <c> compteur de paquets, <t> heure unix.",
   "awg_special_junk_reset": "Par défaut",
   "awg_legacy_desc": "Version AWG originale. Compatible avec les anciens clients.",
-  "xray_desc": "Masque le trafic en trafic web normal (XTLS-Reality). Résiste au DPI.",
+  "xray_desc": "Masque le trafic en trafic web normal (XTLS-Reality). Résiste au DPI. ⚠️ Hiddify 5.1.0+ requis pour Xray ≥ 26.9.8 (versions plus anciennes ne se connecteront pas).",
   "not_checked": "Non vérifié",
   "connections": "Connexions",
   "add": "Ajouter",

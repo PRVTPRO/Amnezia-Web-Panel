@@ -86,7 +86,7 @@
   "awg_special_junk_syntax": "标签：<b 0xHEX> 固定字节，<r N> 随机字节，<rc N> 字母，<rd N> 数字，<c> 包计数器，<t> unix 时间。",
   "awg_special_junk_reset": "默认值",
   "awg_legacy_desc": "原始 AWG 版本。兼容旧版客户端。",
-  "xray_desc": "将流量伪装成普通网页流量 (XTLS-Reality)，抗封锁能力强。",
+  "xray_desc": "将流量伪装成普通网页流量 (XTLS-Reality)，抗封锁能力强。⚠️ Xray ≥ 26.9.8 需 Hiddify 5.1.0+（旧版无法连接）。",
   "not_checked": "未检查",
   "connections": "连接",
   "add": "添加",

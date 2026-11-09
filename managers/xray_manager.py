@@ -9,6 +9,8 @@ import urllib.parse
 
 logger = logging.getLogger(__name__)
 
+XRAY_CORE_VERSION = "v26.10.31"
+
 class XrayManager:
     """Manages Xray (VLESS-Reality) protocol installation and client management."""
     
@@ -163,27 +165,14 @@ class XrayManager:
             'port': meta.get('port')
         }
 
-    def install_protocol(self, port=443, site_name='yahoo.com'):
-        """Full installation of Xray."""
-        results = []
-
-        if not self.check_docker_installed():
-            results.append("Installing Docker...")
-            # Using same install method as AWGManager or assume it's installed
-            pass
-
-        results.append("Removing old container if exists...")
-        if self.check_protocol_installed():
-            self.remove_container()
-
-        results.append("Building Docker image...")
+    def _dockerfile_content(self):
         config_dir = self._config_dir()
-        dockerfile_folder = f"/opt/amnezia/{self.container_name}"
-        dockerfile_content = f"""FROM alpine:3.15
+        return f"""FROM alpine:3.15
 RUN apk add --no-cache curl unzip bash openssl netcat-openbsd dumb-init rng-tools xz iptables ip6tables
 RUN apk --update upgrade --no-cache
 RUN mkdir -p {config_dir}
-RUN curl -L -H "Cache-Control: no-cache" -o /root/xray.zip "https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip" && \\
+ARG XRAY_RELEASE="{XRAY_CORE_VERSION}"
+RUN curl -L -H "Cache-Control: no-cache" -o /root/xray.zip "https://github.com/XTLS/Xray-core/releases/download/${{XRAY_RELEASE}}/Xray-linux-64.zip" && \\
     unzip /root/xray.zip -d /usr/bin/ && \\
     chmod a+x /usr/bin/xray && \\
     rm /root/xray.zip
@@ -220,6 +209,24 @@ RUN echo '#!/bin/bash' > /opt/amnezia/start.sh && \\
 
 ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
 """
+
+    def install_protocol(self, port=443, site_name='yahoo.com'):
+        """Full installation of Xray."""
+        results = []
+
+        if not self.check_docker_installed():
+            results.append("Installing Docker...")
+            # Using same install method as AWGManager or assume it's installed
+            pass
+
+        results.append("Removing old container if exists...")
+        if self.check_protocol_installed():
+            self.remove_container()
+
+        results.append("Building Docker image...")
+        config_dir = self._config_dir()
+        dockerfile_folder = f"/opt/amnezia/{self.container_name}"
+        dockerfile_content = self._dockerfile_content()
         self.ssh.run_sudo_command(f"mkdir -p {dockerfile_folder}")
         self.ssh.upload_file_sudo(dockerfile_content, f"{dockerfile_folder}/Dockerfile")
         

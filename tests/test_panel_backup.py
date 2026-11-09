@@ -446,13 +446,20 @@ class HTTPTests(StateFixture, unittest.TestCase):
             self.client.cookies.set('session', value, domain='testserver.local', path='/')
 
     def test_anonymous_support_user_and_csrf_denied_without_leak(self):
-        for role in [None, 'support', 'owner']:
+        job = patch.object(panel, 'ArchiveJob')
+        archive = job.start()
+        self.addCleanup(job.stop)
+        # The owner fixture is disabled: even its signed cookie is not a session.
+        for role, expected in [(None, 401), ('support', 403), ('owner', 401)]:
             self.identity(role)
             result = self.client.post('/api/settings/backup/archive', headers=self.headers, json={})
-            # Anonymous gets the middleware's 401, signed-in non-admins the
-            # handler's 403; both must stay denials without any leak.
-            self.assertIn(result.status_code, (401, 403))
-            self.assertIn('no-store', result.headers['cache-control'])
+            self.assertEqual(result.status_code, expected)
+            if expected == 401:
+                # Middleware emits a generic auth error, not an archive response.
+                self.assertEqual(result.json(), {'error': 'Session expired'})
+                self.assertNotIn('content-disposition', result.headers)
+            else:
+                self.assertIn('no-store', result.headers['cache-control'])
             self.assertNotIn('synthetic-sensitive-password', result.text)
             self.assertNotIn(str(self.root), result.text)
         self.identity('admin')
@@ -461,6 +468,7 @@ class HTTPTests(StateFixture, unittest.TestCase):
                       {'Origin': 'https://attacker.invalid', 'Sec-Fetch-Site': 'cross-site'}]:
             result = self.client.post('/api/settings/backup/archive', headers={**self.headers, **extra}, json={})
             self.assertEqual(result.status_code, 403)
+        archive.assert_not_called()
 
     def test_real_http_archive_contains_all_sources_and_is_private(self):
         self.identity('admin')

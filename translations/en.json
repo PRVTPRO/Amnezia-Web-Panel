@@ -86,7 +86,7 @@
   "awg_special_junk_syntax": "Tags: <b 0xHEX> fixed bytes, <r N> random bytes, <rc N> letters, <rd N> digits, <c> packet counter, <t> unix time.",
   "awg_special_junk_reset": "Default",
   "awg_legacy_desc": "Original AWG version based on WireGuard kernel. Compatible with older client versions.",
-  "xray_desc": "Modern protocol that masks traffic as regular web traffic (XTLS-Reality). Resistant to deep packet analysis.",
+  "xray_desc": "Modern protocol that masks traffic as regular web traffic (XTLS-Reality). Resistant to deep packet analysis. ⚠️ Hiddify 5.1.0+ required for Xray ≥ 26.9.8 (older versions will not connect).",
   "wireguard_desc": "Standard and fastest VPN protocol. Supported natively on all modern OS, but easily detected by DPI.",
   "not_checked": "Not checked",
   "connections": "Connections",
