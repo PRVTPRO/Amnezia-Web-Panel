@@ -129,15 +129,21 @@ class DockerIpv6InfoTests(unittest.TestCase):
         self.assertTrue(info['bridge_ipv6'])
 
     def test_restart_required_when_daemon_wants_ipv6_and_bridge_is_off(self):
-        info = self._info(bridge='false', daemon_ipv6='yes')
+        info = self._info(bridge='false', daemon_ipv6='"ipv6": true')
         self.assertTrue(info['restart_required'])
 
     def test_no_restart_when_bridge_already_has_ipv6(self):
-        info = self._info(bridge='true', daemon_ipv6='yes')
+        info = self._info(bridge='true', daemon_ipv6='"ipv6": true')
         self.assertFalse(info['restart_required'])
 
     def test_no_restart_when_daemon_json_is_silent(self):
         info = self._info(bridge='false', daemon_ipv6='')
+        self.assertFalse(info['restart_required'])
+
+    def test_no_restart_when_daemon_json_explicitly_disables_ipv6(self):
+        # "ipv6": false is a deliberate IPv4-only setup the daemon already
+        # runs; the card must not keep asking for a restart in that state.
+        info = self._info(bridge='false', daemon_ipv6='"ipv6": false')
         self.assertFalse(info['restart_required'])
 
     def test_flags_conflict_comes_from_the_unit_file(self):

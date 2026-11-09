@@ -846,10 +846,15 @@ class AWGManager:
             "docker network inspect bridge -f '{{.EnableIPv6}}' 2>/dev/null")
         info['bridge_ipv6'] = (out or '').strip().lower() == 'true'
         info['ipv6_enabled'] = info['bridge_ipv6']
+        # Restart is pending only when daemon.json asks for IPv6 and the
+        # running daemon does not have it yet. Matching the key alone raised
+        # the chip for an explicit "ipv6": false too: Docker had already
+        # applied that state, yet the card kept saying a restart was needed.
         out, _, _ = self.ssh.run_sudo_command(
-            "grep -q '\"ipv6\"' /etc/docker/daemon.json 2>/dev/null && echo yes")
-        info['restart_required'] = ((out or '').strip() == 'yes'
-                                    and not info['bridge_ipv6'])
+            "grep -o '\"ipv6\"[[:space:]]*:[[:space:]]*[a-z]*' "
+            "/etc/docker/daemon.json 2>/dev/null")
+        wants_ipv6 = 'true' in (out or '').lower()
+        info['restart_required'] = wants_ipv6 and not info['bridge_ipv6']
         out, _, _ = self.ssh.run_sudo_command(
             "ip6tables -t nat -L -n >/dev/null 2>&1 && echo yes")
         info['ip6tables_ok'] = (out or '').strip() == 'yes'
