@@ -111,16 +111,21 @@ class MarketplaceBrowserTests(unittest.TestCase):
 const SERVER_ID=0, calls=[], pending=[];
 let rknBlockStatus={installed:true,available:false,agent_state:'unknown',running:false,healthy:false}, rknBlockLoadId=0, rknBlockBusy=false;
 let smartRouteStatus=null, currentProtocolStatus={}, installedAppsLoading=false;
+let warpStatus=null;
+function warpIsInstalled() { return false; }
 const MARKETPLACE_APPS=[{proto:'rknblock',category:'security',title:'RKN Block',descKey:'description',icon:''}];
 const MARKETPLACE_CATEGORIES=[{id:'security',titleKey:'security',icon:''}];
 document.body.dataset.serverUid='fixture-node';
 const _=key=>key, escapeHtml=value=>String(value), protoDomKey=value=>value, protoBase=value=>value.split('__')[0], protoInstance=()=>1;
 const isMultiInstanceBase=()=>false, isAppInstalled=()=>false, orderedProtocolEntries=()=>[], baseInstalled=()=>false;
 const applyCustomTitles=()=>{},renderSmartRouteCard=()=>{},showToast=()=>{},openModal=()=>{},closeModal=()=>{},hideConnectionsSection=()=>{};
+// The store flow hands installs to the shared progress modal; in this harness
+// it simply refreshes the card from the (stubbed) API.
+function renderInstallOpProgress(opId, flow) { calls.push(['op', flow, opId]); rknBlockBusy = false; loadRknBlock(); }
 const setInstalledAppsLoading=()=>{},updateStatusCounts=()=>{},loadSmartRouteStatus=async()=>null;
 window.confirm=()=>true;
 const apiCall=(url,method='GET')=>{calls.push({url,method});
- if(method==='POST')return Promise.resolve({connection:'ok',protocols:{}});
+ if(method==='POST')return Promise.resolve({operation_id:'op-test', connection:'ok',protocols:{}});
  return new Promise((resolve,reject)=>pending.push({resolve,reject}));};
 '''
         healthy = dict(installed=True, available=True, server_uid='fixture-node', running=True, healthy=True,
@@ -169,7 +174,7 @@ const apiCall=(url,method='GET')=>{calls.push({url,method});
                         page.wait_for_function('rknBlockStatus.installed === true && rknBlockStatus.available === true')
                         self.assertTrue(page.locator('#proto-rknblock').is_visible())
                         self.assertTrue(page.locator('#marketplaceContent button').is_disabled())
-                        self.assertEqual(page.evaluate("calls.filter(c=>c.url.includes('/rknblock/install')).length"), 1)
+                        self.assertEqual(page.evaluate("calls.filter(c=>typeof c.url === 'string' && c.url.includes('/rknblock/install')).length"), 1)
                         page.close()
             finally:
                 browser.close()
