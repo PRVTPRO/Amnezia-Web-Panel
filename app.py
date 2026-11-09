@@ -8434,8 +8434,11 @@ RESTORE_FORWARD_DELAY = 10
 # Seconds between periodic re-applies of the public-port forwards. A VPS can
 # reboot on its own while the panel keeps running, and hand-made iptables
 # rules do not come back - the panel owns putting them back, again and again.
-# Idempotency makes every round safe: -C-guarded additions never duplicate.
-RESTORE_FORWARD_INTERVAL = 6 * 3600
+# Every round is cheap and idempotent: the -C probe runs first and a write
+# happens only when the live rule is missing or still points at a container
+# address Docker has replaced. The interval is short enough to repair a
+# recreated container before clients notice.
+RESTORE_FORWARD_INTERVAL = 60
 
 
 async def restore_public_port_forwards():
@@ -8637,9 +8640,11 @@ def public_port_forward_commands(protocol, public_port, listen_port, old_public_
     drop the packet. A listen port Docker does not publish keeps the old
     REDIRECT-to-local behaviour as a fallback.
 
-    Removal drops both forms, but it can only name the DNAT rule when the
-    container destination is known: if discovery failed, the DNAT rule of an
-    earlier apply stays behind and the REDIRECT fallback is used for the add.
+    Rules are reconciled by (address, port), never by the exact rule text:
+    the container address is baked in when the rule is applied and changes
+    when Docker recreates the container. Additions therefore probe the live
+    rule with -C and rebuild it (scrub + insert) when it no longer matches,
+    and removal scrubs every form published for the port.
 
     Every returned command is one `sh -c` chain: run_sudo_command prefixes
     sudo to the whole string, so a bare `a || b` would run `b` unprivileged.
@@ -8656,22 +8661,27 @@ def public_port_forward_commands(protocol, public_port, listen_port, old_public_
     dests = container_dests or {}
     commands = []
 
+    def scrub(ipt, addr, port):
+        """Shell snippet deleting every PREROUTING forward of this port.
+
+        Matched by (address, port) instead of the exact rule text: the
+        container address is baked into the rule when it is applied and
+        changes whenever Docker recreates the container, so an exact-match
+        delete leaves the previous rule behind pointing at a dead address.
+        """
+        scope = f' | grep -F -- "-d {addr}"' if addr else ''
+        return (f'{ipt} -t nat -S PREROUTING | grep -F -- "--dport {port} "'
+                f'{scope} | sed "s/^-A PREROUTING //" > /tmp/.awp_pf_drop; '
+                f'while read -r spec; do {ipt} -t nat -D PREROUTING $spec '
+                f'2>/dev/null; done < /tmp/.awp_pf_drop')
+
     def drop(port):
         for ipt, fkey in (('iptables', 4), ('ip6tables', 6)):
             addrs = fam[fkey]
             if addrs == []:
                 continue  # nothing was ever published in this family
-            container_dest = dests.get(fkey)
             for addr in (addrs if addrs is not None else ['']):
-                legacy = _forward_match(l4, addr, port, listen_port)
-                commands.append(_forward_shell(
-                    f'for i in 1 2 3; do {ipt} -t nat -D PREROUTING '
-                    f'{legacy} 2>/dev/null || break; done'))
-                if container_dest:
-                    dnat = _forward_match(l4, addr, port, listen_port, container_dest)
-                    commands.append(_forward_shell(
-                        f'for i in 1 2 3; do {ipt} -t nat -D PREROUTING '
-                        f'{dnat} 2>/dev/null || break; done'))
+                commands.append(_forward_shell(scrub(ipt, addr, port)))
 
     for stale in {p for p in (old_public_port,) if p and p != public_port}:
         drop(stale)
@@ -8683,9 +8693,14 @@ def public_port_forward_commands(protocol, public_port, listen_port, old_public_
             container_dest = dests.get(fkey)
             for addr in (addrs if addrs is not None else ['']):
                 match = _forward_match(l4, addr, public_port, listen_port, container_dest)
+                # -C first keeps the periodic restore cheap: on a healthy box
+                # nothing is written. When the live rule is missing or still
+                # points at the address of a previous container generation,
+                # the stale forms are scrubbed and the current one inserted.
                 commands.append(_forward_shell(
                     f'{ipt} -t nat -C PREROUTING {match} 2>/dev/null '
-                    f'|| {ipt} -t nat -I PREROUTING 1 {match}'))
+                    f'|| {{ {scrub(ipt, addr, public_port)}; '
+                    f'{ipt} -t nat -I PREROUTING 1 {match}; }}'))
     return (commands or None), warning
 
 
