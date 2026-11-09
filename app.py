@@ -468,8 +468,9 @@ def load_data():
     bypass = settings.setdefault('split_tunnel', split_tunnel_defaults())
     for key, value in split_tunnel_defaults().items():
         bypass.setdefault(key, value)
-    settings.setdefault('ssl', {
+    ssl_settings = settings.setdefault('ssl', {
         'enabled': False,
+        'bind_all_interfaces': False,
         'domain': '',
         'cert_path': '',
         'key_path': '',
@@ -477,6 +478,9 @@ def load_data():
         'key_text': '',
         'panel_port': 5000
     })
+    if not isinstance(ssl_settings, dict):
+        ssl_settings = settings['ssl'] = {}
+    ssl_settings.setdefault('bind_all_interfaces', False)
     settings.setdefault('auto_backup', {
         'enabled': False,
         'interval_hours': 24,
@@ -2787,6 +2791,7 @@ class CaptchaSettings(BaseModel):
 
 class SSLSettings(BaseModel):
     enabled: bool = False
+    bind_all_interfaces: bool = False
     domain: str = ''
     cert_path: str = ''
     key_path: str = ''
@@ -11218,6 +11223,11 @@ async def api_orphan_recovery(request: Request, req: OrphanRecoveryRequest):
                              'code': 'recovery_not_completed'}, status_code=503)
 
 
+def panel_bind_host(ssl_conf: dict) -> str:
+    # Bind locally by default; public exposure requires explicit opt-in.
+    return '0.0.0.0' if ssl_conf.get('bind_all_interfaces') is True else '127.0.0.1'
+
+
 def pathlib_read_data_bytes():
     # Kept separate so failure injection can prove there is no destructive write.
     with open(DATA_FILE, 'rb') as source:
@@ -11250,7 +11260,7 @@ if __name__ == '__main__':
 
     uvicorn_kwargs = {
         "app": app,
-        "host": "0.0.0.0",
+        "host": panel_bind_host(ssl_conf),
         "port": ssl_conf.get('panel_port', 5000)
     }
     

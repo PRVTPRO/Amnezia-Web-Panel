@@ -655,6 +655,7 @@
   "duckdns_ip_update_failed": "به‌روزرسانی IP در duckdns ناموفق بود",
   "duckdns_cert_failed": "صدور گواهی ناموفق بود",
   "enable_https": "فعال‌سازی HTTPS",
+  "enable_all_interfaces": "فعال‌سازی 0.0.0.0",
   "panel_port_label": "پورت پنل",
   "domain_label": "نام دامنه",
   "cert_path_label": "مسیر گواهی SSL (.pem)",

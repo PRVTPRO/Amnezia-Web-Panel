@@ -655,6 +655,7 @@
   "duckdns_ip_update_failed": "Échec de la mise à jour de l'IP duckdns",
   "duckdns_cert_failed": "Échec de l'émission du certificat",
   "enable_https": "Activer HTTPS",
+  "enable_all_interfaces": "Activer 0.0.0.0",
   "panel_port_label": "Port du panneau",
   "domain_label": "Nom de domaine",
   "cert_path_label": "Chemin du certificat SSL (.pem)",

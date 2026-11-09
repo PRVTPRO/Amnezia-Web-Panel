@@ -655,6 +655,7 @@
   "duckdns_ip_update_failed": "更新 duckdns IP 失败",
   "duckdns_cert_failed": "证书签发失败",
   "enable_https": "启用 HTTPS",
+  "enable_all_interfaces": "启用 0.0.0.0",
   "panel_port_label": "面板端口",
   "domain_label": "域名",
   "cert_path_label": "SSL 证书路径 (.pem)",

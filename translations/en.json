@@ -414,6 +414,7 @@
   "duckdns_ip_update_failed": "Failed to update the duckdns IP",
   "duckdns_cert_failed": "Failed to issue the certificate",
   "enable_https": "Enable HTTPS",
+  "enable_all_interfaces": "Enable 0.0.0.0",
   "panel_port_label": "Panel Port",
   "domain_label": "Domain name",
   "cert_path_label": "SSL Certificate path (.pem)",

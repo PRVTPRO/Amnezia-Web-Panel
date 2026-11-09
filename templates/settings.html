@@ -334,10 +334,14 @@
         <div class="card" id="settings-ssl">
             <h3 class="card-title" style="margin-bottom: var(--space-lg);"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="margin-right: 6px; vertical-align: -2px;"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>{{ _('ssl_title') }}</h3>
             <form id="sslForm">
-                <div class="form-group">
+                <div class="form-group" style="display: flex; flex-wrap: wrap; gap: var(--space-lg);">
                     <label class="form-label">
                         <input type="checkbox" id="ssl_enabled" {% if settings.get('ssl', {}).get('enabled') %}checked{% endif %}>
                         {{ _('enable_https') }}
+                    </label>
+                    <label class="form-label">
+                        <input type="checkbox" id="ssl_bind_all_interfaces" {% if settings.get('ssl', {}).get('bind_all_interfaces', False) %}checked{% endif %}>
+                        {{ _('enable_all_interfaces') }}
                     </label>
                 </div>
                 <div class="form-group" style="margin-top: var(--space-md);">
@@ -1090,6 +1094,7 @@
 
         const ssl = {
             enabled: document.getElementById('ssl_enabled').checked,
+            bind_all_interfaces: document.getElementById('ssl_bind_all_interfaces').checked,
             domain: document.getElementById('ssl_domain').value.trim(),
             cert_path: document.getElementById('ssl_cert_path').value.trim(),
             key_path: document.getElementById('ssl_key_path').value.trim(),
