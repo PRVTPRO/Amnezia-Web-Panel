@@ -52,6 +52,21 @@ SRV_WARP_KEYS = {
     'srv_warp_err_tos',
     'srv_warp_err_job_busy',
     'srv_warp_err_generic',
+    'srv_warp_stage_start',
+    'srv_warp_stage_download',
+    'srv_warp_stage_register',
+    'srv_warp_stage_profile',
+    'srv_warp_stage_startsh',
+    'srv_warp_stage_done',
+}
+
+WARP_STAGE_KEYS = {
+    'srv_warp_stage_start',
+    'srv_warp_stage_download',
+    'srv_warp_stage_register',
+    'srv_warp_stage_profile',
+    'srv_warp_stage_startsh',
+    'srv_warp_stage_done',
 }
 
 INLINE_SCRIPT_RE = re.compile(r'<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>', re.S)
@@ -133,6 +148,36 @@ class WarpTemplateRenderTests(unittest.TestCase):
         self.assertNotIn("openInstallModal('warp'", page)
 
 
+class WarpStoreInstallTemplateTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.page = (ROOT / 'templates' / 'server.html').read_text(encoding='utf-8')
+
+    def test_warp_card_is_not_forced_visible(self):
+        self.assertNotIn("warpCard.classList.remove('installed-app-hidden')",
+                         self.page)
+        self.assertNotIn("warpCard.classList.add('installed-app-visible')",
+                         self.page)
+        self.assertIn('const warpInstalled = warpIsInstalled();', self.page)
+        self.assertIn("warpCard.classList.toggle('installed-app-hidden', "
+                      "!warpInstalled);", self.page)
+        self.assertIn("warpCard.classList.toggle('installed-app-visible', "
+                      "warpInstalled);", self.page)
+
+    def test_warp_install_uses_the_shared_staged_progress(self):
+        self.assertIn('const INSTALL_STAGE_TRANSLATIONS = {', self.page)
+        self.assertIn("warp: {\n            start: 'srv_warp_stage_start'",
+                      self.page)
+        self.assertIn('renderInstallOpProgress(res.operation_id, \'warp\')',
+                      self.page)
+        self.assertIn("installOp.flow === 'warp'", self.page)
+        self.assertIn("install/progress?operation_id=", self.page)
+
+    def test_only_installed_warp_is_counted(self):
+        self.assertIn('if (warpInstalled) installedCount++;', self.page)
+        self.assertNotIn('It stays on screen even when', self.page)
+
+
 class WarpTranslationsTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -153,6 +198,11 @@ class WarpTranslationsTests(unittest.TestCase):
                           if key.startswith('warp_') and not key.startswith('srv_warp_')}
             with self.subTest(lang=lang):
                 self.assertEqual(panel_warp & SRV_WARP_KEYS, set())
+
+    def test_warp_stage_keys_are_present_in_every_locale(self):
+        for lang, table in self.locales.items():
+            with self.subTest(lang=lang):
+                self.assertEqual(WARP_STAGE_KEYS - set(table), set())
 
 
 class ProjectCompileTests(unittest.TestCase):

@@ -5300,11 +5300,61 @@ async def api_srv_warp_status(request: Request, server_id: int,
 
 @app.post('/api/servers/{server_id}/warp/install', tags=["Servers"])
 async def api_srv_warp_install(request: Request, server_id: int, req: SrvWarpRequest):
-    return await _warp_post(
-        _request_user(request), request, server_id, req, 'install',
-        lambda sid, uid, protocol, job_id: warp_runtime.install(
-            sid, uid, protocol=protocol, job_id=job_id),
-        tos=True, install_guard=True)
+    """Queue a WARP install as a store operation with staged progress."""
+    actor = _request_user(request)
+    if not actor or actor.get('role') not in ('admin', 'support'):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        idx = _rkn_server_index(data, server_id, req.server_uid)
+        if idx is None:
+            raise SrvWarpError('srv_warp_identity_mismatch', 409)
+        server = data['servers'][idx]
+        uid = server.get('uid') or ''
+        if not uid:
+            raise SrvWarpError('srv_warp_identity_mismatch', 409)
+        if _warp_job_active(uid):
+            raise SrvWarpError('srv_warp_job_busy', 409)
+        protocol = _warp_named_protocol(req, server=server, required=False)
+        await _warp_require_tos(server, bool(req.accept_tos))
+        _warp_install_guard(server, uid, protocol)
+        _install_ops_load()
+        if (idx, 'warp') in _INSTALL_ACTIVE:
+            return JSONResponse(
+                {'error': 'Cloudflare WARP installation is already running',
+                 'code': 'install_in_progress'},
+                status_code=409)
+        op = op_create(idx, 'warp', WARP_INSTALL_TOTAL)
+        asyncio.create_task(_run_warp_install(op['id'], idx, uid, protocol))
+        return {'operation_id': op['id']}
+    except SrvWarpError as exc:
+        return JSONResponse({'error': exc.code, 'code': exc.code},
+                            status_code=exc.http_status)
+
+
+async def _run_warp_install(op_id, server_id, uid, protocol):
+    """Background worker: one WARP install with store-style staged lines."""
+    op = _INSTALL_OPS.get(op_id)
+    if not op:
+        return
+    try:
+        job_id = _warp_job_begin(uid, 'install')
+        op_log(op, 'start', 'Cloudflare WARP installation started')
+        await warp_runtime.install(
+            server_id, uid, protocol=protocol, job_id=job_id,
+            progress=lambda stage, msg: op_log(op, stage, msg))
+        op_log(op, 'done', 'Cloudflare WARP installed')
+        op_finish(op, 'success',
+                  result={'status': 'success', 'installed': True})
+    except SrvWarpError as exc:
+        op_finish(op, 'error',
+                  error={'code': exc.code,
+                         'message': str(exc) or exc.code})
+    except Exception as exc:
+        logger.exception("Cloudflare WARP install failed")
+        op_finish(op, 'error',
+                  error={'code': 'install_failed',
+                         'message': str(exc)[:500]})
 
 
 @app.post('/api/servers/{server_id}/warp/uninstall', tags=["Servers"])
@@ -5855,15 +5905,21 @@ RKNBLOCK_INSTALL_STAGES = {'start': 1, 'preflight': 2, 'packages': 3,
                            'blocking': 7, 'verify': 8, 'done': 9}
 RKNBLOCK_INSTALL_TOTAL = 9
 
+WARP_INSTALL_STAGES = {'start': 1, 'arch': 2, 'download': 3, 'register': 4,
+                       'profile': 5, 'startsh': 6, 'done': 7}
+WARP_INSTALL_TOTAL = 7
+
 FLOW_STAGES = {
     'protocol': PROTOCOL_INSTALL_STAGES,
     'smartroute': SMARTROUTE_INSTALL_STAGES,
     'rknblock': RKNBLOCK_INSTALL_STAGES,
+    'warp': WARP_INSTALL_STAGES,
 }
 FLOW_TOTALS = {
     'protocol': PROTOCOL_INSTALL_TOTAL,
     'smartroute': SMARTROUTE_INSTALL_TOTAL,
     'rknblock': RKNBLOCK_INSTALL_TOTAL,
+    'warp': WARP_INSTALL_TOTAL,
 }
 
 INSTALL_OP_TTL = 60 * 60
@@ -6075,11 +6131,27 @@ def _install_running(server_id):
 
 
 @app.get('/api/servers/{server_id}/install/progress', tags=["Protocols"])
-def api_install_progress(request: Request, server_id: int, protocol: str, offset: int = 0):
-    """Poll the current (running or last finished) operation of one protocol."""
+def api_install_progress(request: Request, server_id: int,
+                         protocol: str | None = None,
+                         operation_id: str | None = None, offset: int = 0):
+    """Poll one install operation by id, or the last one of a protocol."""
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     _install_ops_load()
+    if operation_id:
+        op = _install_op_of_server(operation_id, server_id)
+        if not op:
+            return JSONResponse({'error': 'Installation not found',
+                                 'code': 'install_not_found'},
+                                status_code=404)
+        payload = _install_op_payload(op, offset)
+        payload['stage'] = op.get('stage')
+        if op.get('protocol'):
+            payload['protocol'] = op.get('protocol')
+        return payload
+    if not protocol:
+        return JSONResponse({'error': 'protocol or operation_id is required'},
+                            status_code=400)
     op = _install_op_for_protocol(server_id, protocol)
     if not op:
         return JSONResponse({'error': 'Installation not found', 'code': 'install_not_found'},

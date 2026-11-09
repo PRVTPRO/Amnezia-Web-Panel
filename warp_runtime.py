@@ -369,8 +369,18 @@ class WarpRuntime:
 
     # ----- jobs -------------------------------------------------------------
 
-    async def install(self, server_id, uid, protocol=None, job_id=None):
+    async def install(self, server_id, uid, protocol=None, job_id=None,
+                      progress=None):
+        def report(stage, message):
+            if progress is not None:
+                try:
+                    progress(stage, message)
+                except Exception:
+                    logger.warning("warp install progress callback failed",
+                                   exc_info=True)
+
         try:
+            report('start', 'starting Cloudflare WARP installation')
             data = self.load_data()
             idx, server = self._server(data, server_id, uid)
             if idx is None:
@@ -384,12 +394,16 @@ class WarpRuntime:
                     logger.info("warp install: %s/%s container is not running",
                                 uid, proto)
                     continue
+                report('download', 'downloading the wgcf client')
                 await asyncio.to_thread(self._ensure_wgcf, manager, proto)
+                report('register', 'registering with Cloudflare')
                 await asyncio.to_thread(
                     self._register_and_write_conf, manager, proto, uid)
+                report('profile', 'preparing the sanitized WARP profile')
                 # No restart on install: the running container keeps its
                 # current dataplane until the operator links WARP.
                 config_path = self._config_path(manager, proto)
+                report('startsh', 'updating the container start script')
                 await asyncio.to_thread(
                     manager._write_start_script, proto, config_path, None)
                 done.append(proto)
@@ -397,10 +411,13 @@ class WarpRuntime:
             await self._mutate_data(
                 lambda current: self._server_warp_installed(
                     current, uid, bool(done)))
+            report('done', 'Cloudflare WARP is installed')
         except ws.SrvWarpError as exc:
             logger.warning("warp install rejected for %s: %s", uid, exc.code)
+            raise
         except Exception:
             logger.exception("warp install failed for %s", uid)
+            raise
         finally:
             self._finish(uid, job_id)
 

@@ -98,6 +98,14 @@ class WarpApiTests(unittest.TestCase):
             time.sleep(0.02)
         self.fail('warp link job did not finish')
 
+    def wait_for_install(self, op_id):
+        for _ in range(200):
+            op = panel._INSTALL_OPS.get(op_id) or {}
+            if op.get('state') != 'running':
+                return op
+            time.sleep(0.01)
+        self.fail('warp install operation did not finish')
+
     def seed_link(self, dns_via_warp=False):
         def mutate(state):
             rec = panel.proto_record(state, 'srv-uid', 'awg')
@@ -144,6 +152,83 @@ class WarpApiTests(unittest.TestCase):
         response = self.post('install', {'server_uid': 'srv-uid'})
         self.assertEqual(response.status_code, 409, response.text)
         self.assertEqual(response.json()['code'], 'srv_warp_tos_required')
+
+    def test_install_creates_a_store_operation_with_progress(self):
+        self.write_data(warp={'tos_ack': {'version': panel.WARP_TOS_VERSION,
+                                          'ts': 1}})
+        seen = []
+
+        async def fake_install(server_id, uid, protocol=None, job_id=None,
+                               progress=None):
+            seen.append((server_id, uid, protocol, job_id))
+            for stage in ('start', 'download', 'register', 'profile',
+                          'startsh', 'done'):
+                if progress:
+                    progress(stage, 'stage %s' % stage)
+
+        with mock.patch.object(panel.warp_runtime, 'install', fake_install):
+            response = self.post('install', {'server_uid': 'srv-uid',
+                                             'accept_tos': True})
+            self.assertIn(response.status_code, (200, 202), response.text)
+            op_id = response.json()['operation_id']
+            self.wait_for_install(op_id)
+
+        op = panel._INSTALL_OPS[op_id]
+        self.assertEqual(op['flow'], 'warp')
+        self.assertEqual(op['state'], 'success')
+        self.assertEqual(op['total'], panel.WARP_INSTALL_TOTAL)
+        self.assertEqual(seen[0][1], 'srv-uid')
+        self.assertTrue(seen[0][2])
+        self.assertTrue(seen[0][3])
+
+        progress = self.client.get(
+            '/api/servers/0/install/progress',
+            params={'operation_id': op_id})
+        self.assertEqual(progress.status_code, 200, progress.text)
+        payload = progress.json()
+        self.assertEqual(payload['flow'], 'warp')
+        self.assertEqual(payload['state'], 'success')
+        self.assertEqual(payload['percent'], 100)
+        self.assertEqual(payload['total'], panel.WARP_INSTALL_TOTAL)
+        stages = [line['stage'] for line in payload['lines']]
+        self.assertIn('start', stages)
+        self.assertIn('download', stages)
+        self.assertIn('register', stages)
+        self.assertIn('profile', stages)
+        self.assertIn('startsh', stages)
+        self.assertIn('done', stages)
+
+    def test_install_is_409_when_an_install_is_already_active(self):
+        self.write_data(warp={'tos_ack': {'version': panel.WARP_TOS_VERSION,
+                                          'ts': 1}})
+        panel._INSTALL_ACTIVE[(0, 'warp')] = 'already-running'
+        try:
+            response = self.post('install', {'server_uid': 'srv-uid',
+                                             'accept_tos': True})
+        finally:
+            panel._INSTALL_ACTIVE.pop((0, 'warp'), None)
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()['code'], 'install_in_progress')
+
+    def test_install_failure_is_reported_on_the_operation(self):
+        self.write_data(warp={'tos_ack': {'version': panel.WARP_TOS_VERSION,
+                                          'ts': 1}})
+
+        async def failing_install(server_id, uid, protocol=None, job_id=None,
+                                  progress=None):
+            raise panel.SrvWarpError('srv_warp_arch_unsupported', 409)
+
+        with mock.patch.object(panel.warp_runtime, 'install',
+                               failing_install):
+            response = self.post('install', {'server_uid': 'srv-uid',
+                                             'accept_tos': True})
+            self.assertIn(response.status_code, (200, 202), response.text)
+            op_id = response.json()['operation_id']
+            self.wait_for_install(op_id)
+
+        op = panel._INSTALL_OPS[op_id]
+        self.assertEqual(op['state'], 'error')
+        self.assertEqual(op['error']['code'], 'srv_warp_arch_unsupported')
 
     def test_link_with_active_exit_link_is_xor_conflict(self):
         self.write_data(

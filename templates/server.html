@@ -699,6 +699,12 @@
             files: 'rknblock_stage_files', services: 'rknblock_stage_services',
             blocking: 'rknblock_stage_blocking', verify: 'rknblock_stage_verify',
             done: 'rknblock_stage_done', error: 'error'
+        },
+        warp: {
+            start: 'srv_warp_stage_start', arch: 'srv_warp_stage_download',
+            download: 'srv_warp_stage_download', register: 'srv_warp_stage_register',
+            profile: 'srv_warp_stage_profile', startsh: 'srv_warp_stage_startsh',
+            done: 'srv_warp_stage_done', error: 'error'
         }
     };
 
@@ -726,7 +732,8 @@
         const initialStageMap = {
             protocol: 'install_starting',
             smartroute: 'smartroute_stage_start',
-            rknblock: 'rknblock_stage_start'
+            rknblock: 'rknblock_stage_start',
+            warp: 'srv_warp_stage_start'
         };
         if (stageEl) stageEl.textContent = _(initialStageMap[flow] || 'install_starting');
         // Set modal title based on flow
@@ -734,6 +741,7 @@
         if (titleEl) {
             if (flow === 'smartroute') titleEl.textContent = _('smartroute_install');
             else if (flow === 'rknblock') titleEl.textContent = _('rkn_block_title');
+            else if (flow === 'warp') titleEl.textContent = 'Cloudflare WARP';
             else titleEl.textContent = _('install_protocol');
         }
         openModal('installModal');
@@ -796,7 +804,9 @@
         if (!installOp) return;
         const logEl = document.getElementById('installLog');
         try {
-            const url = `/api/servers/${SERVER_ID}/${installOp.flow}/install/${encodeURIComponent(installOp.opId)}?offset=${installOp.offset}`;
+            const url = installOp.flow === 'warp'
+                ? `/api/servers/${SERVER_ID}/install/progress?operation_id=${encodeURIComponent(installOp.opId)}&offset=${installOp.offset}`
+                : `/api/servers/${SERVER_ID}/${installOp.flow}/install/${encodeURIComponent(installOp.opId)}?offset=${installOp.offset}`;
             const data = await apiCall(url, 'GET');
             installOp.offset = data.next_offset || installOp.offset;
             setInstallOpProgress(data.step, data.total, data.percent, data.state === 'running', data.stage);
@@ -836,13 +846,19 @@
                     await loadRknBlock();
                     applyInstalledAppsVisibility();
                     renderMarketplace();
+                } else if (flow === 'warp') {
+                    warpBusy = false;
+                    await loadWarpStatus(true);
+                    applyInstalledAppsVisibility();
+                    renderMarketplace();
                 } else {
                     // Protocol install
                     setTimeout(() => checkServer(), 800);
                 }
-            } else if (data.state === 'failed') {
+            } else if (data.state === 'failed' || data.state === 'error') {
                 if (flow === 'smartroute') smartRouteBusy = false;
                 else if (flow === 'rknblock') rknBlockBusy = false;
+                else if (flow === 'warp') warpBusy = false;
                 if (stageEl) {
                     stageEl.textContent = _('error') + ': ' + (data.error?.message || _('install_error'));
                     stageEl.style.color = 'var(--danger)';
@@ -857,6 +873,11 @@
                 logEl.appendChild(errDiv);
                 logEl.scrollTop = logEl.scrollHeight;
                 showToast(_('install_error') + ': ' + (data.error?.message || _('install_error')), 'error');
+                if (flow === 'warp') {
+                    await loadWarpStatus(true);
+                    applyInstalledAppsVisibility();
+                    renderMarketplace();
+                }
                 document.getElementById('installDone').style.display = '';
             } else if (data.state === 'cancelled') {
                 if (flow === 'smartroute') smartRouteBusy = false;
@@ -2883,7 +2904,8 @@
             // RKN Block is host-level (no container status): its card is
             // driven by rknBlockStatus further below.
             if (app.proto === 'rknblock') return;
-            // Cloudflare WARP is host-level too and stays visible.
+            // Cloudflare WARP is host-level too: its card is driven by
+            // warpIsInstalled() further below, not by container status.
             if (app.proto === 'warp') return;
             const installed = isAppInstalled((currentProtocolStatus || {})[app.proto]);
             if (card) {
@@ -2914,15 +2936,15 @@
         if (rknInstalled) installedCount++;
         renderRknBlockCard();
 
-        // Cloudflare WARP card: host-level app. It stays on screen even when
-        // nothing is installed so the host-level install button is reachable;
-        // only the action set changes once WARP is present.
+        // Cloudflare WARP card: host-level app. It is shown only once WARP is
+        // installed; before that the marketplace is the entry point.
+        const warpInstalled = warpIsInstalled();
         const warpCard = document.getElementById('proto-warp');
         if (warpCard) {
-            warpCard.classList.remove('installed-app-hidden');
-            warpCard.classList.add('installed-app-visible');
+            warpCard.classList.toggle('installed-app-hidden', !warpInstalled);
+            warpCard.classList.toggle('installed-app-visible', warpInstalled);
         }
-        installedCount++;
+        if (warpInstalled) installedCount++;
         if (typeof renderWarpCard === 'function') renderWarpCard();
 
         orderedProtocolEntries(currentProtocolStatus || {}).forEach(([proto, info]) => {
@@ -6920,6 +6942,8 @@
 
         if (actions) actions.style.display = installed || busy ? 'none' : '';
         if (installedActions) installedActions.style.display = installed ? '' : 'none';
+        const installBtn = document.getElementById('warp-install-btn');
+        if (installBtn) installBtn.disabled = busy;
 
         let badge = warpAggregateBadge();
         if (jobs.length) {
@@ -7050,25 +7074,38 @@
 
     async function installWarp(protocol) {
         if (warpBusy) return;
+        closeModal('marketplaceModal');
         warpBusy = true;
-        const btn = document.getElementById('warp-install-btn');
-        if (btn) btn.disabled = true;
         renderWarpCard();
+        let started = false;
         try {
             // Host-level install: no protocol means every registered AWG
             // instance; Update passes one explicitly.
             const body = protocol ? {protocol} : {};
             const res = await warpPostWithTos('install', body);
-            if (!res) return;
+            if (!res) {
+                warpBusy = false;
+                renderWarpCard();
+                return;
+            }
+            if (res.operation_id) {
+                // Store install flow: the shared poller renders stages and
+                // refreshes the WARP card when the operation finishes.
+                started = true;
+                renderInstallOpProgress(res.operation_id, 'warp');
+                return;
+            }
+            // Legacy job response from an older panel.
             await pollWarpJob(res.job_id);
             await loadWarpStatus(true);
             showToast(_('installed'), 'success');
         } catch (err) {
             showToast(_('error') + ': ' + warpErrorMessage(err), 'error');
         } finally {
-            warpBusy = false;
-            if (btn) btn.disabled = false;
-            renderWarpCard();
+            if (!started) {
+                warpBusy = false;
+                renderWarpCard();
+            }
         }
     }
 
