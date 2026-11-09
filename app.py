@@ -277,7 +277,7 @@ DATA_FILE = os.path.abspath(os.path.expanduser(
 ssh_trust.configure(DATA_FILE)
 # Client configs read the bypass list from whatever DATA_FILE is at call time.
 split_tunnel.configure(lambda: DATA_FILE)
-CURRENT_VERSION = "v1.8.7"
+CURRENT_VERSION = "v1.8.8"
 
 # Authoritative operational state for WARP lives outside data.json: dozens of
 # panel writers save their own snapshots and would overwrite it.
