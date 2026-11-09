@@ -61,7 +61,7 @@ class TestServerTemplateIntegrity(unittest.TestCase):
         after the reveal makes the card pop in a round-trip after every other
         badge (the owner-reported flicker)."""
         source = SERVER_TEMPLATE.read_text(encoding="utf-8")
-        start = source.index("async function checkServer()")
+        start = source.index("async function checkServer(")
         end = source.index("function updateStatusCounts", start)
         body = source[start:end]
 
