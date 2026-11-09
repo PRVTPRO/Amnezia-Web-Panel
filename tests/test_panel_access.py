@@ -142,10 +142,69 @@ class AccessMiddlewareTests(unittest.TestCase):
         self.assertIn('198.51.100.5', panel._PANEL_ACCESS['fleet_ips'])
 
 
+def _client_hello(name):
+    """Minimal TLS ClientHello carrying one server_name extension."""
+    name_bytes = name.encode()
+    server_name = (b'\x00' + len(name_bytes).to_bytes(2, 'big') + name_bytes)
+    sni_data = len(server_name).to_bytes(2, 'big') + server_name
+    ext = b'\x00\x00' + len(sni_data).to_bytes(2, 'big') + sni_data
+    exts = len(ext).to_bytes(2, 'big') + ext
+    hello = b''.join([
+        b'\x03\x03',
+        b'\x00' * 32,
+        b'\x00',
+        b'\x00\x02\x13\x01',
+        b'\x01\x00',
+        exts,
+    ])
+    handshake = b'\x01' + len(hello).to_bytes(3, 'big') + hello
+    return b'\x16\x03\x01' + len(handshake).to_bytes(2, 'big') + handshake
+
+
 class FrontResponseTests(unittest.TestCase):
     def test_front_body_matches_the_app_denial_body(self):
         import panel_front
         self.assertEqual(panel_front.NOT_FOUND_BODY, panel._PANEL_NOT_FOUND_BODY)
+
+    def test_sni_from_a_client_hello(self):
+        import panel_front
+        hello = _client_hello('Panel.Example.com')
+        self.assertEqual(panel_front.parse_sni(hello), 'panel.example.com')
+        self.assertIsNone(panel_front.parse_sni(b'GET / HTTP/1.1\r\n'))
+
+    def test_http_host_parsing(self):
+        import panel_front
+        self.assertEqual(
+            panel_front.parse_http_host(
+                b'GET / HTTP/1.1\r\nHost: Panel.Example.com:5000\r\n\r\n'),
+            'panel.example.com')
+        self.assertEqual(panel_front.parse_http_host(b'GET / HTTP/1.1\r\n'), '')
+
+    def test_host_matching(self):
+        import panel_front
+        self.assertTrue(panel_front._host_matches('panel.example.com', 'panel.example.com'))
+        self.assertTrue(panel_front._host_matches('a.panel.example.com', 'panel.example.com'))
+        self.assertFalse(panel_front._host_matches('evil-panel.example.com', 'panel.example.com'))
+        self.assertFalse(panel_front._host_matches('', 'panel.example.com'))
+
+    def test_access_decisions(self):
+        import panel_front
+        allow = {'allowlist_enabled': True, 'allowlist': ['203.0.113.0/24'],
+                 'fleet': [], 'domain_only': False, 'domain': '', 'backend_tls': True}
+        http = b'GET / HTTP/1.1\r\nHost: x\r\n\r\n'
+        self.assertTrue(panel_front._allowed(http, '203.0.113.7', False, allow))
+        self.assertFalse(panel_front._allowed(http, '198.51.100.5', False, allow))
+        self.assertTrue(panel_front._allowed(http, '127.0.0.1', True, allow))
+        domain = {'allowlist_enabled': False, 'allowlist': [], 'fleet': [],
+                  'domain_only': True, 'domain': 'panel.example.com', 'backend_tls': True}
+        self.assertTrue(panel_front._allowed(
+            b'GET / HTTP/1.1\r\nHost: panel.example.com\r\n\r\n',
+            '203.0.113.7', False, domain))
+        self.assertFalse(panel_front._allowed(
+            b'GET / HTTP/1.1\r\nHost: 203.0.113.7\r\n\r\n',
+            '203.0.113.7', False, domain))
+        self.assertFalse(panel_front._allowed(
+            _client_hello('other.example.com'), '203.0.113.7', False, domain))
 
     def test_stock_response_shape(self):
         import panel_front
