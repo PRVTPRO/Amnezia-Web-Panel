@@ -56,15 +56,37 @@ class UiHealthTests(unittest.TestCase):
         self.assertIn('rkn_block_not_ready', SERVER_PAGE)
         self.assertIn('rkn_block_sets_empty', SERVER_PAGE)
 
-    def test_install_progress_does_not_invent_stages(self):
-        # The install is a single SSH call; per-stage messages were fabricated.
-        self.assertNotIn('rknblock_step_download', SERVER_PAGE)
-        self.assertIn('rknblock_install_wait', SERVER_PAGE)
+    def test_install_progress_reports_real_stages(self):
+        # The install is phased now: every stage is a real boundary reported by
+        # the installer, not a fabricated client-side timer. Assert the engine
+        # maps and the polling endpoints exist, and the labels ship everywhere.
         import json
+        import app
+        for name in ('PROTOCOL_INSTALL_STAGES', 'SMARTROUTE_INSTALL_STAGES',
+                     'RKNBLOCK_INSTALL_STAGES'):
+            stages = getattr(app, name)
+            steps = list(stages.values())
+            self.assertEqual(steps, sorted(steps), name)
+            self.assertEqual(len(steps), len(set(steps)), name)
+            self.assertIn('start', stages, name)
+            self.assertIn('done', stages, name)
+        self.assertEqual(set(app.FLOW_STAGES),
+                         {'protocol', 'smartroute', 'rknblock', 'warp'})
+        source = (ROOT / 'app.py').read_text(encoding='utf-8')
+        self.assertIn('/api/servers/{server_id}/smartroute/install/{op_id}', source)
+        self.assertIn('/api/servers/{server_id}/rknblock/install/{op_id}', source)
+        self.assertIn('install_ops.json', source)
+        self.assertIn('rknblock_install_wait', SERVER_PAGE)
+        stage_keys = [f'smartroute_stage_{name}' for name in
+                      ('prepare', 'script', 'units', 'activate', 'download', 'verify')]
+        stage_keys += [f'rknblock_stage_{name}' for name in
+                       ('preflight', 'packages', 'download', 'files',
+                        'services', 'blocking', 'verify')]
         for lang in ('en', 'ru', 'fr', 'fa', 'zh'):
             data = json.loads((ROOT / 'translations' / f'{lang}.json').read_text(encoding='utf-8'))
             self.assertIn('rknblock_install_wait', data, lang)
-            self.assertNotIn('rknblock_step_download', data, lang)
+            for key in stage_keys:
+                self.assertIn(key, data, (lang, key))
 
     def test_all_locales_have_not_ready_key(self):
         import json

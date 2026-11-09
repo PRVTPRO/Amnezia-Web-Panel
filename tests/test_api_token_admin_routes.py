@@ -255,7 +255,10 @@ class ApiTokenAdminRouteTests(unittest.TestCase):
 class TokenAwareGateGuardTests(unittest.TestCase):
     """Every admin JSON route must authorize through a token-aware helper."""
 
-    TOKEN_AWARE = {'_check_admin', '_backup_admin', '_ssh_trust_admin', '_request_user'}
+    # _require_admin_strict narrows _check_admin to the admin role; it is
+    # token-aware in the same way, so a Bearer admin token still passes.
+    TOKEN_AWARE = {'_check_admin', '_backup_admin', '_ssh_trust_admin', '_request_user',
+                   '_require_admin_strict'}
     # Session-only by design: login/captcha, a user's own data, password-shared links.
     SESSION_ONLY_PREFIXES = ('/api/auth/', '/api/my/', '/api/share/')
     # These read the session only to tell Bearer callers apart; both handle None.

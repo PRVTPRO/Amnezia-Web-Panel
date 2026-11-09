@@ -30,6 +30,8 @@ coverage.xml
 
 # User data
 data.json
+# Per-write recovery snapshots next to data.json (runtime state, regenerated)
+data.json.recovery/
 *.runtime.lock
 .DS_Store
 
@@ -37,4 +39,3 @@ data.json
 .vscode/
 .idea/
 .worktrees/
-docs/

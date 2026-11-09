@@ -17,7 +17,7 @@ _uncertain = contextvars.ContextVar('peer_lifecycle_uncertain', default=None)
 logger = logging.getLogger(__name__)
 # Admission and HTTP response budgets, NOT cancellation deadlines for SSH.
 QUEUE_WAIT_SECONDS = 10.0
-RESPONSE_WAIT_SECONDS = 120.0
+RESPONSE_WAIT_SECONDS = 300.0
 _fence_path = None
 _fenced = False
 _running = weakref.WeakKeyDictionary()

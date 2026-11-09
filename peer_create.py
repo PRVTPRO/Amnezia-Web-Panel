@@ -91,10 +91,11 @@ def eligible(user):
 
 class PeerCreateService:
     def __init__(self, *, path, load_data, save_data, data_lock, get_ssh,
-                 get_manager, public_endpoint):
+                 get_manager, public_endpoint, warp_ctx=None):
         self.journal = CreateJournal(path)
         self.load_data, self.save_data, self.data_lock = load_data, save_data, data_lock
         self.get_ssh, self.get_manager, self.public_endpoint = get_ssh, get_manager, public_endpoint
+        self.warp_ctx = warp_ctx
         self.tasks = {}
         self.recovery_offset = 0
         self.recovery_task = None
@@ -229,6 +230,8 @@ class PeerCreateService:
             manager = self.get_manager(ssh, protocol)
             host, public_port = self.public_endpoint(server, protocol)
             port = server['protocols'][protocol].get('port', '' if protocol.split('__', 1)[0] == 'telemt' else '55424')
+            warp_options = ({'warp_ctx': self.warp_ctx(server, protocol)}
+                            if self.warp_ctx and protocol.split('__', 1)[0] != 'telemt' else {})
             if operation['phase'] in ('complete', 'blocked'):
                 was_blocked = operation['phase'] == 'blocked'
                 # Replaying success must not re-create or re-enable a peer
@@ -254,14 +257,15 @@ class PeerCreateService:
                     raise PeerCreateError('Operation is blocked; no automatic activation', 409, op_id)
                 verify_secret = {'expected_secret': operation['private']} if protocol.split('__', 1)[0] == 'telemt' else {}
                 config = await asyncio.to_thread(manager.get_client_config, protocol,
-                    operation['public'], host, port, public_port=public_port, **verify_secret)
+                    operation['public'], host, port, public_port=public_port, **warp_options, **verify_secret)
                 if was_blocked:
                     self.journal.put(operation)
                 return {'status': 'success', 'operation_id': op_id,
                         'client_id': operation['public'], 'config': config}
             # Safe even if a previous call timed out after the remote rename:
             # same operation/keypair, and preparation never activates a peer.
-            prepare_options = {'options': operation.get('options', {})} if protocol.split('__', 1)[0] == 'telemt' else {}
+            prepare_options = ({'options': operation.get('options', {})}
+                               if protocol.split('__', 1)[0] == 'telemt' else warp_options)
             result = await asyncio.to_thread(manager.prepare_client, protocol, op_id, name,
                 operation['private'], operation['public'], host, port, public_port=public_port, **prepare_options)
             if result.get('client_id') != operation['public']:

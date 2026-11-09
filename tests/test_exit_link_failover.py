@@ -282,7 +282,7 @@ class FailoverHttpTests(unittest.TestCase):
             for path in ('/api/servers/0/exit-link/failover',
                          '/api/servers/0/exit-link/failover/check'):
                 response = client.post(path, json={'protocol': 'awg2'})
-                self.assertEqual(response.status_code, 403, path)
+                self.assertEqual(response.status_code, 401, path)
 
     def test_failover_save_roundtrip_when_logged_in(self):
         with TestClient(panel.app) as client:

@@ -112,6 +112,24 @@ class AdminCreateLifecycle(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.remote.peers, {})
         self.assertEqual(result.status_code, 409)
 
+    async def test_awg_warp_context_preserved_on_create_and_replay(self):
+        context = {'active': True, 'client_mtu': 1280}
+        self.service.warp_ctx = Mock(return_value=context)
+        prepare = self.remote.prepare_client
+        observed = []
+        def prepared(*args, **kwargs):
+            observed.append(kwargs.pop('warp_ctx'))
+            return prepare(*args, **kwargs)
+        self.remote.prepare_client = prepared
+        self.remote.get_client_config = Mock(return_value='synthetic config')
+        self.assertEqual((await self.create())['status'], 'success')
+        self.assertEqual((await self.create())['status'], 'success')
+        self.assertEqual(observed, [context])
+        self.remote.get_client_config.assert_called_once()
+        self.assertEqual(self.remote.get_client_config.call_args.kwargs['warp_ctx'], context)
+        self.assertEqual(self.service.warp_ctx.call_args.args[1], 'awg3')
+        self.assertEqual((len(self.remote.peers), len(self.data['user_connections'])), (1, 1))
+
     async def test_journal_is_durable_before_any_remote_action(self):
         self.remote.release.clear()
         task = asyncio.create_task(self.create())
@@ -487,6 +505,15 @@ class TelemtCreateLifecycle(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((self.native.creates, self.native.enables), (1, 1))
         self.assertEqual(len(self.data['user_connections']), 1)
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+
+    async def test_telemt_create_and_replay_do_not_request_awg_warp_context(self):
+        self.service.warp_ctx = Mock(side_effect=AssertionError('AWG context requested for Telemt'))
+        first = await self.create()
+        self.assertEqual(first['status'], 'success')
+        self.assertEqual(await self.create(), first)
+        self.service.warp_ctx.assert_not_called()
+        self.assertEqual((self.native.creates, self.native.enables), (1, 1))
+        self.assertEqual(len(self.data['user_connections']), 1)
 
     async def test_first_credential_without_seed_or_capability_fails_before_mutation(self):
         self.native.users.clear()

@@ -19,6 +19,7 @@
     <a href="#settings-mail">{{ _('mail_title') }}</a>
     <a href="#settings-split-tunnel">{{ _('split_title') }}</a>
     <a href="#settings-tunnels">{{ _('tunnels_title') }}</a>
+    <a href="#settings-ssh-jump">{{ _('ssh_jump_title') }}</a>
     <a href="#settings-ssl">{{ _('ssl_title') }}</a>
     <a href="#settings-duckdns">{{ _('duckdns_title') }}</a>
     <a href="#settings-import">{{ _('import_users_title') }}</a>
@@ -334,10 +335,14 @@
         <div class="card" id="settings-ssl">
             <h3 class="card-title" style="margin-bottom: var(--space-lg);"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="margin-right: 6px; vertical-align: -2px;"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>{{ _('ssl_title') }}</h3>
             <form id="sslForm">
-                <div class="form-group">
+                <div class="form-group" style="display: flex; flex-wrap: wrap; gap: var(--space-lg);">
                     <label class="form-label">
                         <input type="checkbox" id="ssl_enabled" {% if settings.get('ssl', {}).get('enabled') %}checked{% endif %}>
                         {{ _('enable_https') }}
+                    </label>
+                    <label class="form-label">
+                        <input type="checkbox" id="ssl_bind_all_interfaces" {% if settings.get('ssl', {}).get('bind_all_interfaces', False) %}checked{% endif %}>
+                        {{ _('enable_all_interfaces') }}
                     </label>
                 </div>
                 <div class="form-group" style="margin-top: var(--space-md);">
@@ -375,6 +380,35 @@
                     <p class="form-hint">{{ _('ssl_hint') }}</p>
                 </div>
             </form>
+        </div>
+
+        <!-- BLOCK 2c: panel access control -->
+        <div class="card" id="settings-access">
+            <h3 class="card-title" style="margin-bottom: var(--space-lg);">{{ _('panel_access_title') }}</h3>
+            <p class="form-hint" style="margin-bottom: var(--space-md);">{{ _('panel_access_intro') }}</p>
+            <div class="form-group">
+                <label class="form-label">
+                    <input type="checkbox" id="pa_ip_enabled" onchange="togglePanelAccessFields()" {% if settings.get('panel_access', {}).get('ip_allowlist_enabled') %}checked{% endif %}>
+                    {{ _('panel_access_ip_enable') }}
+                </label>
+                <p class="form-hint">{{ _('panel_access_ip_hint') }}</p>
+            </div>
+            <div class="form-group" id="paIpFields" style="{% if not settings.get('panel_access', {}).get('ip_allowlist_enabled') %}display:none;{% endif %}">
+                <label class="form-label">{{ _('panel_access_ip_list_label') }}</label>
+                <textarea class="form-input" id="pa_ip_list" rows="6" placeholder="203.0.113.10&#10;198.51.100.0/24">{{ (settings.get('panel_access', {}).get('ip_allowlist') or []) | join('\n') }}</textarea>
+            </div>
+            <hr style="margin: var(--space-lg) 0;">
+            <div class="form-group">
+                <label class="form-label">
+                    <input type="checkbox" id="pa_domain_only" onchange="togglePanelAccessFields()" {% if settings.get('panel_access', {}).get('domain_only') %}checked{% endif %}>
+                    {{ _('panel_access_domain_only') }}
+                </label>
+                <p class="form-hint">{{ _('panel_access_domain_hint') }}</p>
+            </div>
+            <div class="form-group" id="paDomainFields" style="{% if not settings.get('panel_access', {}).get('domain_only') %}display:none;{% endif %}">
+                <label class="form-label">{{ _('panel_access_domain_label') }}</label>
+                <input type="text" class="form-input" id="pa_domain" value="{{ settings.get('panel_access', {}).get('allowed_domain', '') or settings.get('ssl', {}).get('domain', '') }}" placeholder="panel.example.com">
+            </div>
         </div>
 
         <!-- BLOCK 2b: DuckDNS domain -->
@@ -527,6 +561,23 @@
                     </div>
                 </div>
             </form>
+        </div>
+
+        <!-- BLOCK: SSH jump host -->
+        <div class="card" id="settings-ssh-jump">
+            <h3 class="card-title" style="margin-bottom: var(--space-lg);">{{ _('ssh_jump_title') }}</h3>
+            <div class="form-group">
+                <label class="form-label" for="ssh_jump_host_uid">{{ _('ssh_jump_server_label') }}</label>
+                <select class="form-select" id="ssh_jump_host_uid">
+                    <option value="">{{ _('ssh_jump_off') }}</option>
+                    {% for s in servers %}
+                    <option value="{{ s.uid }}" {% if settings.get('ssh_jump', {}).get('jump_host_uid', '') == s.uid %}selected{% endif %}>
+                        {{ s.name or s.host }} ({{ s.host }}:{{ s.ssh_port or 22 }})
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+            <p class="form-hint">{{ _('ssh_jump_hint') }}</p>
         </div>
 
         <!-- BLOCK: Simple Backup -->
@@ -1053,6 +1104,13 @@
         }
     }
 
+    function togglePanelAccessFields() {
+        const ipOn = document.getElementById('pa_ip_enabled').checked;
+        const domOn = document.getElementById('pa_domain_only').checked;
+        document.getElementById('paIpFields').style.display = ipOn ? '' : 'none';
+        document.getElementById('paDomainFields').style.display = domOn ? '' : 'none';
+    }
+
     async function saveSettings() {
         const btn = document.getElementById('saveBtn');
         const spinner = document.getElementById('saveSpinner');
@@ -1090,6 +1148,7 @@
 
         const ssl = {
             enabled: document.getElementById('ssl_enabled').checked,
+            bind_all_interfaces: document.getElementById('ssl_bind_all_interfaces').checked,
             domain: document.getElementById('ssl_domain').value.trim(),
             cert_path: document.getElementById('ssl_cert_path').value.trim(),
             key_path: document.getElementById('ssl_key_path').value.trim(),
@@ -1115,6 +1174,9 @@
         };
 
         const exit_nodes = { default_exit_uid: document.getElementById('exitDefaultNode').value || '' };
+        const ssh_jump = {
+            jump_host_uid: document.getElementById('ssh_jump_host_uid').value
+        };
 
         // The password field is intentionally never pre-filled; an empty value
         // tells the server to keep the stored one.
@@ -1131,11 +1193,18 @@
             timeout_seconds: parseInt(document.getElementById('mail_timeout').value || '30')
         };
 
+        const panel_access = {
+            ip_allowlist_enabled: document.getElementById('pa_ip_enabled').checked,
+            ip_allowlist: document.getElementById('pa_ip_list').value,
+            domain_only: document.getElementById('pa_domain_only').checked,
+            allowed_domain: document.getElementById('pa_domain').value.trim()
+        };
+
         try {
             const res = await fetch('/api/settings/save', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ appearance, sync, captcha, telegram, ssl, mail, auto_backup, self_service, exit_nodes })
+                body: JSON.stringify({ appearance, sync, captcha, telegram, ssl, mail, auto_backup, self_service, ssh_jump, exit_nodes, panel_access })
             });
             if (!res.ok) throw new Error(_('error'));
             const saved = await res.json();

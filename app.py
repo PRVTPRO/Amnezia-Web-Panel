@@ -4,6 +4,7 @@ import json
 import logging
 import base64
 import hashlib
+import ipaddress
 import secrets
 import uuid
 import asyncio
@@ -33,9 +34,11 @@ from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi import FastAPI, Request, Query, UploadFile, File, Form
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
 from starlette.middleware.sessions import SessionMiddleware
 from pydantic import BaseModel, Field, StrictBool, constr, conint
-from typing import Optional, List, Dict
+from typing import Optional, List
 import uvicorn
 import httpx
 
@@ -44,15 +47,13 @@ try:
 except ImportError:
     CaptchaGenerator = None
 
-from managers.ssh_manager import SSHManager
+from managers.ssh_manager import SSHManager, configure_jump_resolver
 from managers import ssh_trust
 from managers import split_tunnel
 from managers.awg_manager import AWGManager, normalize_special_junk
 from server_stats import collect_host_stats
 from managers.awg_plugin_updater import (
     COMPONENTS as AWG_PLUGIN_COMPONENTS,
-    KERNEL_MODULE as AWG_PLUGIN_KERNEL,
-    USERSPACE as AWG_PLUGIN_USERSPACE,
     TOTAL_STEPS as AWG_PLUGIN_TOTAL_STEPS,
     AwgPluginUpdater,
     PluginUpdateError,
@@ -64,7 +65,22 @@ from managers.backup_manager import BackupManager
 import telegram_bot as tg_bot
 
 from exit_link_service import ExitLinkError, ExitLinkService
-from smartroute_service import SmartRouteError, SmartRouteService
+from smartroute_service import SmartRouteError, SmartRouteService, split_instances
+from warp_service import (
+    INSTANCE_STATES,
+    SrvWarpError,
+    WarpStateStore,
+    WARP_CLIENT_MTU_CAP,
+    WARP_REGISTER_LIMIT,
+    aggregate_state,
+    classify_instance_state,
+    proto_record,
+    quota_exhausted,
+    register_timestamps,
+    warp_ctx_for,
+    warp_link,
+)
+from warp_runtime import WarpRuntime
 from mail_service import (
     DEFAULT_MAIL_SETTINGS,
     MailError,
@@ -128,6 +144,21 @@ async def api_json_error_handler(request: Request, exc: Exception):
     if request.url.path.startswith('/api/'):
         return JSONResponse({'error': 'Internal server error'}, status_code=500)
     return PlainTextResponse('Internal Server Error', status_code=500)
+
+
+# IPv6 mutation endpoints document a 400 bad_request for a malformed body,
+# while every other endpoint keeps FastAPI's stock 422 detail array. Only
+# these paths are remapped; the body model lives in the handlers below.
+_IPV6_BAD_BODY_PATH = re.compile(
+    r'^/api/servers/[^/]+/(?:ipv6|docker/ipv6/apply|protocol/[^/]+/ipv6)$')
+
+
+@app.exception_handler(RequestValidationError)
+async def ipv6_validation_error_handler(request: Request, exc: RequestValidationError):
+    if _IPV6_BAD_BODY_PATH.match(request.url.path):
+        return JSONResponse({'error': 'bad_request', 'code': 'bad_request'},
+                            status_code=400)
+    return await request_validation_exception_handler(request, exc)
 
 
 @app.get("/redoc", include_in_schema=False)
@@ -197,8 +228,133 @@ async def api_auth_status_middleware(request, call_next):
             and not path.startswith(('/api/auth/', '/api/share/'))
             and not request.headers.get('authorization', '').lower().startswith('bearer ')
             and get_current_user(request) is None):
-        return JSONResponse({'error': 'Session expired'}, status_code=401)
+        normalized = JSONResponse({'error': 'Session expired'}, status_code=401)
+        # Carry the denied response's headers over. The panel marks sensitive
+        # denials 'Cache-Control: no-store'; a bare 401 drops that and lets a
+        # shared cache keep the denial body. content-length/content-type are
+        # skipped because the body itself is replaced.
+        for key, value in response.headers.items():
+            if key.lower() not in ('content-length', 'content-type'):
+                normalized.headers[key] = value
+        return normalized
     return response
+
+
+# ---- Panel access control: IP allowlist + domain-only mode ----------------
+# Cached copy of settings.panel_access: the middleware runs on every request,
+# and re-reading data.json (hundreds of KB) per hit would be wasteful. The
+# cache is rebuilt on startup and right after the settings are saved.
+_PANEL_ACCESS = {
+    'ip_allowlist_enabled': False, 'ip_allowlist': [],
+    'domain_only': False, 'allowed_domain': '', 'fleet_ips': [],
+}
+
+
+def _refresh_panel_access(data=None):
+    global _PANEL_ACCESS
+    try:
+        doc = data if data is not None else load_data()
+    except Exception as exc:
+        logger.warning("Panel access cache refresh failed: %s", exc)
+        return
+    sec = ((doc.get('settings') or {}).get('panel_access') or {})
+    _PANEL_ACCESS = {
+        'ip_allowlist_enabled': bool(sec.get('ip_allowlist_enabled')),
+        'ip_allowlist': [str(e).strip() for e in (sec.get('ip_allowlist') or [])
+                         if str(e).strip()],
+        'domain_only': bool(sec.get('domain_only')),
+        'allowed_domain': str(sec.get('allowed_domain') or '').strip().lower(),
+        'fleet_ips': [str(s.get('host') or '').strip()
+                      for s in (doc.get('servers') or [])
+                      if str(s.get('host') or '').strip()],
+    }
+
+
+def _is_loopback_ip(value):
+    try:
+        return ipaddress.ip_address(str(value or '').strip()).is_loopback
+    except ValueError:
+        return False
+
+
+def _request_client_ip(request):
+    """Caller address. X-Forwarded-For is honoured only when the immediate
+    peer is loopback (a local reverse proxy); a public peer could forge it."""
+    peer = request.client.host if request.client else ''
+    forwarded = (request.headers.get('x-forwarded-for') or '').split(',')[0].strip()
+    if forwarded and _is_loopback_ip(peer):
+        return forwarded
+    return str(peer or '')
+
+
+def _host_header_name(value):
+    """Host header hostname without the port; IPv6 literals arrive bracketed."""
+    host = str(value or '').strip()
+    if host.startswith('['):
+        close = host.find(']')
+        return (host[1:close] if close != -1 else host[1:]).lower()
+    if ':' in host:
+        return host.rsplit(':', 1)[0].lower()
+    return host.lower()
+
+
+def _ip_allowed(client_ip, entries):
+    try:
+        addr = ipaddress.ip_address(str(client_ip).strip())
+    except ValueError:
+        return False
+    for entry in entries or []:
+        try:
+            net = ipaddress.ip_network(str(entry).strip(), strict=False)
+        except ValueError:
+            continue
+        if addr.version == net.version and addr in net:
+            return True
+    return False
+
+
+_PANEL_NOT_FOUND_BODY = (
+    b'<html>\r\n<head><title>404 Not Found</title></head>\r\n'
+    b'<body>\r\n<center><h1>404 Not Found</h1></center>\r\n'
+    b'<hr><center>nginx</center>\r\n</body>\r\n</html>\r\n')
+
+
+def _panel_access_denied(kind):
+    """A stock 404 of a generic web server, for denied callers.
+
+    Nothing here may hint that a panel lives behind the address: body, status
+    and headers are what an empty nginx returns. Loopback and the allowed
+    hosts are the only callers that ever reach the real handlers.
+    """
+    response = HTMLResponse(content=_PANEL_NOT_FOUND_BODY, status_code=404)
+    response.headers['Server'] = 'nginx'
+    return response
+
+
+@app.middleware("http")
+async def panel_access_middleware(request, call_next):
+    """IP allowlist and domain-only mode from the global settings.
+
+    Registered after the other middlewares, so it runs first: a denied caller
+    never reaches auth, templates or static files. Loopback stays allowed so
+    the admin can always recover through an SSH tunnel; the managed fleet
+    hosts are allowed implicitly (data.json servers[].host).
+    """
+    access = _PANEL_ACCESS
+    if not access.get('ip_allowlist_enabled') and not access.get('domain_only'):
+        return await call_next(request)
+    client_ip = _request_client_ip(request)
+    loopback = _is_loopback_ip(client_ip)
+    if access.get('domain_only') and not loopback:
+        allowed = access.get('allowed_domain') or ''
+        host = _host_header_name(request.headers.get('host', ''))
+        if not allowed or (host != allowed and not host.endswith('.' + allowed)):
+            return _panel_access_denied('domain')
+    if access.get('ip_allowlist_enabled') and not loopback:
+        entries = list(access.get('ip_allowlist') or []) + list(access.get('fleet_ips') or [])
+        if not _ip_allowed(client_ip, entries):
+            return _panel_access_denied('ip')
+    return await call_next(request)
 
 
 # Sessions must wrap every other middleware: the auth middleware above
@@ -239,7 +395,12 @@ DATA_FILE = os.path.abspath(os.path.expanduser(
 ssh_trust.configure(DATA_FILE)
 # Client configs read the bypass list from whatever DATA_FILE is at call time.
 split_tunnel.configure(lambda: DATA_FILE)
-CURRENT_VERSION = "v1.8.7"
+CURRENT_VERSION = "v1.8.9"
+
+# Authoritative operational state for WARP lives outside data.json: dozens of
+# panel writers save their own snapshots and would overwrite it.
+WARP_STATE_PATH = DATA_FILE + '.srv_warp_state.json'
+warp_state_store = WarpStateStore(WARP_STATE_PATH)
 
 # Custom protocol instance names: the rename modal caps input at 64 chars.
 CUSTOM_PROTOCOL_NAME_MAX = 64
@@ -295,6 +456,7 @@ load_translations()
 
 # Global lock for data.json access to prevent race conditions during async operations
 from peer_lifecycle_lock import serialize_peer_lifecycle
+from ipv6_operations import OperationStore
 import peer_lifecycle_lock
 from peer_accounting import guard_user_deletions, ownership_rows
 from peer_recovery import (RecoveryStore, RecoveryError, PanelLease, STATE_FILE_LOCK,
@@ -340,6 +502,54 @@ async def lifecycle_uncertain_response(request, error):
                          'code': error.code}, status_code=503)
 
 
+# --- WARP: error mapping, in-memory job registry, sync state reads ----------
+
+WARP_TOS_VERSION = 1
+_WARP_JOBS = {}
+_WARP_JOBS_LOCK = threading.Lock()
+_WARP_TASKS = set()
+
+
+@app.exception_handler(SrvWarpError)
+async def warp_error_response(request, error):
+    """User-facing warp failure: stable code for the UI/i18n, not a generic 500."""
+    return JSONResponse({'error': error.code, 'code': error.code},
+                        status_code=error.http_status)
+
+
+def _warp_job_active(uid):
+    with _WARP_JOBS_LOCK:
+        return bool(_WARP_JOBS.get(str(uid)))
+
+
+def _warp_job_begin(uid, kind):
+    uid = str(uid)
+    with _WARP_JOBS_LOCK:
+        if _WARP_JOBS.get(uid):
+            raise SrvWarpError('srv_warp_job_busy', 409)
+        job_id = uuid.uuid4().hex
+        _WARP_JOBS[uid] = {'id': job_id, 'kind': kind, 'started': time.time()}
+    return job_id
+
+
+def _warp_job_end(uid, job_id):
+    uid = str(uid)
+    with _WARP_JOBS_LOCK:
+        record = _WARP_JOBS.get(uid)
+        if record and record.get('id') == job_id:
+            _WARP_JOBS.pop(uid, None)
+
+
+def srv_warp_ctx(server, protocol):
+    """Synchronous state read for handlers that cannot await."""
+    return warp_ctx_for(warp_state_store.load(), server.get('uid'), protocol)
+
+
+# ``proto_record`` is also a local variable name in some handlers, so the
+# helper is aliased for module-level calls from those scopes.
+warp_proto_record = proto_record
+
+
 def load_data():
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, 'r', encoding='utf-8') as f:
@@ -367,6 +577,7 @@ def load_data():
     })
     settings.setdefault('captcha', {'enabled': False})
     settings.setdefault('exit_nodes', {'default_exit_uid': ''})
+    settings.setdefault('ssh_jump', {'jump_host_uid': ''})
     settings.setdefault('telegram', {'token': '', 'enabled': False})
     mail = settings.setdefault('mail', dict(DEFAULT_MAIL_SETTINGS))
     for key, value in DEFAULT_MAIL_SETTINGS.items():
@@ -376,8 +587,9 @@ def load_data():
     bypass = settings.setdefault('split_tunnel', split_tunnel_defaults())
     for key, value in split_tunnel_defaults().items():
         bypass.setdefault(key, value)
-    settings.setdefault('ssl', {
+    ssl_settings = settings.setdefault('ssl', {
         'enabled': False,
+        'bind_all_interfaces': False,
         'domain': '',
         'cert_path': '',
         'key_path': '',
@@ -385,6 +597,9 @@ def load_data():
         'key_text': '',
         'panel_port': 5000
     })
+    if not isinstance(ssl_settings, dict):
+        ssl_settings = settings['ssl'] = {}
+    ssl_settings.setdefault('bind_all_interfaces', False)
     settings.setdefault('auto_backup', {
         'enabled': False,
         'interval_hours': 24,
@@ -431,20 +646,73 @@ _SSH_POOL = {}
 _SSH_POOL_LOCK = threading.Lock()
 
 
+def _ssh_jump_server(data, target):
+    jump_uid = str(((data.get('settings', {}).get('ssh_jump') or {})
+                    .get('jump_host_uid') or '')).strip()
+    if not jump_uid or jump_uid == target.get('uid'):
+        return None
+    return next((server for server in data.get('servers', [])
+                 if server.get('uid') == jump_uid), None)
+
+
+def _ssh_manager_for(server, data, *, allow_jump=True):
+    jump = _ssh_jump_server(data, server) if allow_jump else None
+    jump_manager = (_ssh_manager_for(jump, data, allow_jump=False) if jump else None)
+    return SSHManager(
+        host=server['host'], port=server.get('ssh_port', 22),
+        username=server['username'], password=server.get('password'),
+        private_key=server.get('private_key'),
+        connect_cooldown_base=float(server.get('ssh_cooldown_base') or 30),
+        jump_manager=jump_manager,
+    )
+
+
+def _server_for_ssh_endpoint(data, host, port, username=''):
+    matches = [server for server in data.get('servers', [])
+               if server.get('host') == host
+               and int(server.get('ssh_port', 22)) == int(port)
+               and (not username or server.get('username') == username)]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _resolve_ssh_jump_manager(host, port, username):
+    data = load_data()
+    target = _server_for_ssh_endpoint(data, host, port, username)
+    if target is None:
+        return None
+    jump = _ssh_jump_server(data, target)
+    return _ssh_manager_for(jump, data, allow_jump=False) if jump else None
+
+
+def _resolve_ssh_trust_jump(server):
+    data = load_data()
+    target = (next((item for item in data.get('servers', [])
+                    if server.get('uid') and item.get('uid') == server.get('uid')), None)
+              or _server_for_ssh_endpoint(
+                  data, server.get('host'), server.get('ssh_port', 22),
+                  server.get('username', '')))
+    if target is None:
+        return None
+    jump = _ssh_jump_server(data, target)
+    return _ssh_manager_for(jump, data, allow_jump=False) if jump else None
+
+
+configure_jump_resolver(_resolve_ssh_jump_manager)
+ssh_trust.configure_jump_resolver(_resolve_ssh_trust_jump)
+
+
 def get_ssh(server):
-    key = (server['host'], int(server.get('ssh_port', 22)), server['username'])
+    data = load_data()
+    jump = _ssh_jump_server(data, server)
+    jump_identity = ((jump.get('uid'), jump['host'], int(jump.get('ssh_port', 22)),
+                      jump['username']) if jump else None)
+    key = (server['host'], int(server.get('ssh_port', 22)), server['username'],
+           jump_identity)
     cooldown_base = float(server.get('ssh_cooldown_base') or 30)
     with _SSH_POOL_LOCK:
         ssh = _SSH_POOL.get(key)
         if ssh is None:
-            ssh = SSHManager(
-                host=server['host'],
-                port=server.get('ssh_port', 22),
-                username=server['username'],
-                password=server.get('password'),
-                private_key=server.get('private_key'),
-                connect_cooldown_base=cooldown_base,
-            )
+            ssh = _ssh_manager_for(server, data)
             _SSH_POOL[key] = ssh
         # Apply edits without dropping the pooled connection.
         ssh._connect_cooldown_base = cooldown_base
@@ -455,10 +723,15 @@ def get_ssh(server):
 
 def drop_ssh(server):
     """Remove a server's pooled connection (on edit/delete) and close it."""
-    key = (server['host'], int(server.get('ssh_port', 22)), server['username'])
     with _SSH_POOL_LOCK:
-        ssh = _SSH_POOL.pop(key, None)
-    if ssh is not None:
+        removed = [ssh for key, ssh in list(_SSH_POOL.items())
+                   if key[:3] == (server['host'], int(server.get('ssh_port', 22)),
+                                  server['username'])]
+        for key in [key for key in list(_SSH_POOL)
+                    if key[:3] == (server['host'], int(server.get('ssh_port', 22)),
+                                   server['username'])]:
+            _SSH_POOL.pop(key, None)
+    for ssh in removed:
         try:
             ssh.force_disconnect()
         except Exception:
@@ -1730,6 +2003,7 @@ peer_creates = PeerCreateService(
     data_lock=DATA_LOCK, get_ssh=lambda server: get_ssh(server),
     get_manager=lambda ssh, protocol: get_protocol_manager(ssh, protocol),
     public_endpoint=lambda server, protocol: protocol_public_endpoint(server, protocol),
+    warp_ctx=lambda server, protocol: srv_warp_ctx(server, protocol),
 )
 
 
@@ -1791,6 +2065,16 @@ smartroute_svc = SmartRouteService(
     protocol_base=protocol_base,
     awg_protocols=AWG_PROTOCOLS,
     apply_dns_via_exit=lambda sid, proto, en: exit_link_svc.set_dns_via_exit(sid, proto, en),
+)
+
+warp_runtime = WarpRuntime(
+    load_data=load_data,
+    save_data=save_data,
+    data_lock=DATA_LOCK,
+    get_ssh=lambda server: get_ssh(server),
+    awg_manager_factory=lambda ssh: AWGManager(ssh),
+    state_store=warp_state_store,
+    job_end=_warp_job_end,
 )
 
 
@@ -2086,6 +2370,11 @@ async def perform_mass_operations(delete_uids: List[str] = None, toggle_uids: Li
                 
                 if c_req['protocol'] == 'wireguard':
                     res = await asyncio.to_thread(manager.add_client, c_req['name'], pub_host, public_port=pub_port)
+                elif protocol_base(c_req['protocol']) in AWG_PROTOCOLS:
+                    res = await asyncio.to_thread(
+                        _manager_call, manager, 'add_client', c_req['protocol'],
+                        c_req['name'], pub_host, port, public_port=pub_port,
+                        warp_ctx=srv_warp_ctx(srv, c_req['protocol']))
                 else:
                     res = await asyncio.to_thread(_manager_call, manager, 'add_client', c_req['protocol'], c_req['name'], pub_host, port, public_port=pub_port)
                 
@@ -2468,6 +2757,19 @@ class ExitFailoverRequest(BaseModel):
     probe_egress: Optional[bool] = None
 
 
+class SrvWarpRequest(BaseModel):
+    """Body shared by every /warp POST (query-equivalent server_uid)."""
+    server_uid: Optional[str] = None
+    protocol: Optional[str] = None
+    confirm_regen: Optional[bool] = False
+    accept_tos: Optional[bool] = False
+    force_register: Optional[bool] = False
+    primary_uid: Optional[str] = None
+    backup_uids: Optional[List[str]] = None
+    dns_on: Optional[bool] = None
+    enable: Optional[bool] = None
+
+
 class SmartRouteOwnSubnetsRequest(BaseModel):
     cidrs: list = []
 
@@ -2500,6 +2802,26 @@ class Socks5SettingsRequest(BaseModel):
 
 class ProtocolRequest(BaseModel):
     protocol: str = 'awg'
+
+
+class Ipv6PreferenceRequest(BaseModel):
+    """None = auto (legacy behaviour), True/False = explicit choice.
+
+    `object` instead of Optional[bool]: Pydantic would coerce "yes" to True
+    and answer 422 for junk. The endpoint validates the type and returns
+    400 bad_request itself.
+    """
+    enabled: object = None
+
+
+class InstanceIpv6Request(BaseModel):
+    enabled: bool
+    # Repair path: drop IPv6 on a broken exit link even when peers exist.
+    repair: bool = False
+
+
+class DockerIpv6ApplyRequest(BaseModel):
+    confirm: str = ''
 
 
 class ContainerToggleRequest(ProtocolRequest):
@@ -2644,8 +2966,13 @@ class CaptchaSettings(BaseModel):
     enabled: bool = False
 
 
+class SSHJumpSettings(BaseModel):
+    jump_host_uid: str = ''
+
+
 class SSLSettings(BaseModel):
     enabled: bool = False
+    bind_all_interfaces: bool = False
     domain: str = ''
     cert_path: str = ''
     key_path: str = ''
@@ -2717,16 +3044,25 @@ class ExitNodesSettings(BaseModel):
     default_exit_uid: str = ''
 
 
+class PanelAccessSettings(BaseModel):
+    ip_allowlist_enabled: bool = False
+    ip_allowlist: str = ''
+    domain_only: bool = False
+    allowed_domain: str = ''
+
+
 class SaveSettingsRequest(BaseModel):
     appearance: AppearanceSettings
     sync: SyncSettings
     captcha: CaptchaSettings
+    ssh_jump: SSHJumpSettings = SSHJumpSettings()
     telegram: TelegramSettings
     ssl: SSLSettings
     auto_backup: AutoBackupSettings = AutoBackupSettings()
     self_service: SelfServiceSettings = SelfServiceSettings()
     exit_nodes: ExitNodesSettings = ExitNodesSettings()
     mail: MailSettings = MailSettings()
+    panel_access: PanelAccessSettings = PanelAccessSettings()
 
 
 class ToggleUserRequest(BaseModel):
@@ -2848,6 +3184,7 @@ async def startup():
     _panel_lease = PanelLease(DATA_FILE, runtime=True)
     _panel_lease.acquire()
     data = load_data()
+    _refresh_panel_access(data)
     if data.get(DISASTER_HOLD):
         raise RuntimeError('Disaster recovery requires independent node reconciliation before startup')
     _start_conn_monitor()
@@ -2930,6 +3267,13 @@ async def startup():
 
     if changed:
         save_data(data)
+
+    # A Docker restart or a rebuild that was running when the panel died
+    # cannot be finished or verified: report it as interrupted.
+    try:
+        _op_store().mark_interrupted()
+    except Exception:
+        logger.warning("Could not mark stale IPv6 operations", exc_info=True)
 
     # Start periodic background tasks
     asyncio.create_task(periodic_background_tasks())
@@ -3392,6 +3736,73 @@ def _check_admin(request):
                 logger.warning(f"Failed to touch API token last_used_at: {e}")
             return token_user
 
+    return None
+
+
+def _panel_host_allowlist(request):
+    """Return a set of hostnames that are allowed for this panel.
+
+    Includes the panel's base URL host, the client IP, PANEL_HOST env var,
+    and loopback names. Hostnames are lowercased, ports are ignored.
+    """
+    allowed = set()
+    # Host from the panel's own base URL
+    try:
+        base_host = urllib.parse.urlparse(str(request.base_url)).hostname
+        if base_host:
+            allowed.add(base_host.lower())
+    except Exception:
+        pass
+    # Client IP as a hostname (for direct IP access)
+    if request.client and request.client.host:
+        allowed.add(request.client.host.lower())
+    # PANEL_HOST env var (comma-separated, whitespace stripped)
+    panel_host_env = os.environ.get('PANEL_HOST', '')
+    for h in panel_host_env.split(','):
+        h = h.strip().lower()
+        if h:
+            allowed.add(h)
+    # Loopback names are always safe
+    allowed.update({'localhost', '127.0.0.1', '::1', '0.0.0.0'})
+    return allowed
+
+
+def _require_admin_strict(request):
+    """Admin only, same-origin only. Support may read but may not write.
+
+    Mirrors _ssh_trust_admin: session/Bearer authorization stays, but a
+    cross-origin browser write is refused.
+    Host header must match the panel allowlist (DNS rebinding protection).
+    PANEL_STRICT_HOST=0 disables the Host allowlist check only.
+    """
+    # Host header check (DNS rebinding protection)
+    strict_host = os.environ.get('PANEL_STRICT_HOST', '1') not in ('0', 'false', 'no', 'off', '')
+    if strict_host:
+        host_header = request.headers.get('host')
+        if not host_header:
+            return None
+        # Extract hostname, ignore port. An IPv6 literal arrives bracketed,
+        # e.g. [2001:db8::1]:5000, so a plain split(':')[0] would read '['.
+        if host_header.startswith('['):
+            close = host_header.find(']')
+            host_hostname = (host_header[1:close] if close != -1
+                             else host_header[1:]).lower()
+        else:
+            host_hostname = host_header.split(':')[0].lower()
+        allowlist = _panel_host_allowlist(request)
+        if host_hostname not in allowlist:
+            return None
+
+    origin = request.headers.get('origin')
+    fetch_site = request.headers.get('sec-fetch-site')
+    if origin and fetch_site != 'same-origin' and \
+            origin.rstrip('/') != str(request.base_url).rstrip('/'):
+        return None
+    if fetch_site in ('cross-site', 'same-site'):
+        return None
+    user = _check_admin(request)
+    if user and user['role'] == 'admin':
+        return user
     return None
 
 
@@ -3951,8 +4362,11 @@ async def api_reorder_servers(request: Request, req: ReorderServersRequest):
 @app.post('/api/servers/{server_id}/delete', tags=["Servers"])
 @serialize_peer_lifecycle
 async def api_delete_server(request: Request, server_id: int, server_uid: Optional[str] = None,
-                            archive_blocking: bool = False):
+                            archive_blocking: bool = False, panel_only: bool = False):
     """Remove a server from the panel inventory.
+
+    ``panel_only`` removes only local panel state and never contacts the remote
+    server. Leftover connection rows are archived with unverified final counters.
 
     A leftover ``user_connections`` row is accounting ownership and normally
     blocks deletion (possibly forever, when its peer no longer exists). With
@@ -3969,7 +4383,7 @@ async def api_delete_server(request: Request, server_id: int, server_uid: Option
     uid = selected['uid']
     data = load_data()
     guard = _traffic_removal_guard(data, server_id=server_id)
-    if guard is not None and not archive_blocking:
+    if guard is not None and not archive_blocking and not panel_only:
         return guard
 
     async def delete():
@@ -3981,6 +4395,60 @@ async def api_delete_server(request: Request, server_id: int, server_uid: Option
                     index, server = find_server_by_uid(load_data(), uid)
                     if server is None:
                         return {'status': 'success', 'already_deleted': True}
+                if panel_only:
+                    async with DATA_LOCK:
+                        before = pathlib_read_data_bytes() if os.path.exists(DATA_FILE) else b''
+                        data = load_data()
+                        index, current = find_server_by_uid(data, uid)
+                        if current is None:
+                            return {'status': 'success', 'already_deleted': True}
+                        blocked = ownership_rows(data, server_id=index)
+                        operation_id = uuid.uuid4().hex
+                        actor = _actor_id(request, authorized)
+                        for conn in list(blocked):
+                            finalize_connection_record(
+                                data, conn, current, None, time.time(),
+                                'server_panel_remove_unverified', operation_id, False)
+
+                        # Links on other inventory entries cannot be cleaned on
+                        # the removed exit node. Retain their metadata as stale
+                        # so the panel can show and repair the orphaned route.
+                        for other in data.get('servers', []):
+                            if other.get('uid') == uid:
+                                continue
+                            for record in (other.get('protocols') or {}).values():
+                                link = record.get('exit_link') or {}
+                                if link.get('exit_uid') == uid:
+                                    link['stale'] = 'exit_server_removed_from_panel'
+
+                        data['servers'].pop(index)
+                        for conn in data.get('user_connections', []):
+                            if isinstance(conn.get('server_id'), int) and conn['server_id'] > index:
+                                conn['server_id'] -= 1
+
+                        settings = data.setdefault('settings', {})
+                        exit_settings = settings.setdefault('exit_nodes', {})
+                        if exit_settings.get('default_exit_uid') == uid:
+                            exit_settings['default_exit_uid'] = ''
+                        sync = settings.setdefault('sync', {})
+                        sync_server_id = sync.get('remnawave_server_id')
+                        if sync_server_id == index:
+                            sync['remnawave_server_id'] = 0
+                            sync['remnawave_create_conns'] = False
+                        elif isinstance(sync_server_id, int) and sync_server_id > index:
+                            sync['remnawave_server_id'] = sync_server_id - 1
+
+                        result = await asyncio.to_thread(
+                            commit_finalize, DATA_FILE, operation_id, actor,
+                            'server_panel_remove',
+                            recovery_digest({'server_uid': uid, 'mode': 'panel_only'}),
+                            before, data)
+                    deletion_committed = True
+                    await _finish_locked_worker(lambda: drop_ssh(server))
+                    return {
+                        'status': 'success', 'panel_only': True,
+                        'archived': len(blocked),
+                    }
                 results = []
                 if (server.get('protocols') or {}).get('exit'):
                     results.extend(await exit_link_svc.detach_entries_for_exit(uid, 'exit_server_deleted'))
@@ -4030,7 +4498,9 @@ async def api_delete_server(request: Request, server_id: int, server_uid: Option
                     if current_blocked:
                         before = pathlib_read_data_bytes()
                         operation_id = uuid.uuid4().hex
-                        actor = _actor_id(request, authorized)
+                        # Bearer callers have no session; _actor_id resolves the
+                        # token owner and falls back to 'admin'.
+                        actor = _actor_id(request, True)
                         for conn in current_blocked:
                             finalize_connection_record(
                                 data, conn, current, archive_states.get(conn.get('id')),
@@ -4216,12 +4686,10 @@ def api_server_stats(request: Request, server_id: int):
 RKN_RAW_BASE = ('https://raw.githubusercontent.com/PRVTPRO/Amnezia-Web-Panel/'
                 'main/scripts/rknblock')
 
-RKN_INSTALL_CMD = (
-    'tmp_dir=$(mktemp -d /tmp/amnezia-rkn.XXXXXXXXXX) || exit $?; '
-    'trap \'rm -rf -- "$tmp_dir"\' EXIT; '
-    f'curl -fsSL {RKN_RAW_BASE}/install-rkn-extra.sh '
-    '-o "$tmp_dir/rkn-install.sh" && bash "$tmp_dir/rkn-install.sh"'
-)
+# The installer ships with this panel checkout, not from GitHub main: the
+# phased install must work immediately without waiting for an upstream merge.
+RKN_INSTALL_CMD = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               'scripts', 'rknblock', 'install-rkn-extra.sh')
 
 RKN_SCRIPT_URL = f'{RKN_RAW_BASE}/rkn-extra-block.sh'
 
@@ -4265,6 +4733,21 @@ systemctl enable --now rkn-extra-block.timer
 systemctl enable rkn-extra-block.service
 /usr/local/sbin/rkn-extra-block repair
 """
+
+
+def _rkn_install_script(phase='all'):
+    """Remote command that runs one phase of the bundled installer.
+
+    The installer is embedded as base64 for the same reason as the repair
+    script: it works over both root and sudo SSH without SFTP access to /etc.
+    """
+    with open(RKN_INSTALL_CMD, 'r', encoding='utf-8') as fh:
+        content = fh.read().replace('\r\n', '\n')
+    encoded = base64.b64encode(content.encode('utf-8')).decode('ascii')
+    return ('tmp_dir=$(mktemp -d /tmp/amnezia-rkn.XXXXXXXXXX) || exit $?; '
+            'trap \'rm -rf -- "$tmp_dir"\' EXIT; '
+            f'printf \'%s\' \'{encoded}\' | base64 -d > "$tmp_dir/install-rkn-extra.sh" '
+            f'&& bash "$tmp_dir/install-rkn-extra.sh" {phase}')
 
 
 def _rkn_run_cmd(subcommand):
@@ -4362,7 +4845,11 @@ async def _rkn_ssh_run(server, cmd, timeout):
 @app.post('/api/servers/{server_id}/rknblock/install', tags=["Servers"])
 @serialize_peer_lifecycle
 async def api_rknblock_install(request: Request, server_id: int, server_uid: str | None = None):
-    """Install the RKN/VK network blocking app (rkn-extra-block contour)."""
+    """Install the RKN/VK network blocking app (rkn-extra-block contour).
+
+    The installer runs phase by phase over one SSH session in the background;
+    the page polls ``/rknblock/install/{operation_id}`` for staged progress.
+    """
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     data = load_data()
@@ -4372,21 +4859,132 @@ async def api_rknblock_install(request: Request, server_id: int, server_uid: str
     server = dict(data['servers'][server_id])
     if _rkn_record(server).get('installed'):
         return JSONResponse({'error': 'App is already installed; refresh its status'}, status_code=409)
+    if (server_id, 'rknblock') in _INSTALL_ACTIVE:
+        return JSONResponse(
+            {'error': 'RKN Block installation is already running',
+             'code': 'install_in_progress'},
+            status_code=409)
     server_uid = server.get('uid')
-    err = await _rkn_ssh_run(server, RKN_INSTALL_CMD, 420)
-    if err is not None:
-        return err
+    op = op_create(server_id, 'rknblock', RKNBLOCK_INSTALL_TOTAL)
+    asyncio.create_task(_run_rknblock_install(op['id'], server_id, server_uid))
+    return {'operation_id': op['id']}
 
-    def mark(rec):
-        rec['installed'] = True
-        rec['enabled'] = True
-        rec['last_error'] = None
 
-    rec = await _rkn_store_record(server_id, server_uid, mark, server)
-    if rec is None:
-        return JSONResponse({'error': 'Server not found'}, status_code=404)
-    RKN_FLAG_CACHE.clear()
-    return {'status': 'success', 'installed': True, 'enabled': True}
+async def _rkn_install_phases(server, phases, timeout, on_phase=None, on_start=None):
+    """Run installer phases one by one over a single SSH session.
+
+    Auth/sudo behaviour is exactly what the other RKN endpoints use (the same
+    get_ssh + run_sudo_script pair). Returns None on success or a JSONResponse
+    describing the failure, like _rkn_ssh_run.
+    """
+    ssh = await asyncio.to_thread(get_ssh, server)
+    try:
+        await asyncio.to_thread(ssh.connect)
+        if _rkn_server_index(load_data(), None, server.get('uid'), server) is None:
+            return JSONResponse({'error': 'Server identity changed; refresh the inventory',
+                                 'code': 'server_changed'},
+                                status_code=409)
+        for phase in phases:
+            if on_start is not None:
+                on_start(phase)
+            out, err, code = await asyncio.to_thread(
+                ssh.run_sudo_script, _rkn_install_script(phase), timeout)
+            if on_phase is not None:
+                on_phase(phase, out, err, code)
+            if code != 0:
+                detail = (err or out or '').strip()
+                hint = ''
+                if ('dpkg is in an inconsistent state' in detail
+                        or 'dpkg returned an error code' in detail):
+                    hint = " Run 'sudo dpkg --configure -a' on the server, then retry."
+                return JSONResponse(
+                    {'error': f'command failed: {detail[-1500:]}{hint}'},
+                    status_code=500)
+    finally:
+        try:
+            ssh.disconnect()
+        except Exception:
+            pass
+    if _rkn_server_index(load_data(), None, server.get('uid'), server) is None:
+        return JSONResponse({'error': 'Server identity changed; refresh the inventory',
+                             'code': 'server_changed'},
+                            status_code=409)
+    return None
+
+
+async def _run_rknblock_install(op_id, server_id, server_uid):
+    """Background worker: phases -> staged lines -> record only on success."""
+    op = _INSTALL_OPS.get(op_id)
+    if not op:
+        return
+    data = load_data()
+    idx = _rkn_server_index(data, server_id, server_uid)
+    if idx is None:
+        op_finish(op, 'failed', error={'code': 'server_changed',
+                                       'message': 'Server not found; refresh the inventory'})
+        return
+    server = dict(data['servers'][idx])
+    server_id = idx
+
+    def report(phase, out, err, code):
+        for line in (out or '').splitlines():
+            if line.strip():
+                op_log(op, phase, line)
+        if code != 0:
+            for line in (err or '').splitlines():
+                if line.strip():
+                    op_log(op, phase, line)
+
+    try:
+        op_log(op, 'start', 'RKN Block installation started')
+        failure = await _rkn_install_phases(
+            server, RKN_INSTALL_PHASES, 420, report,
+            on_start=lambda phase: op_log(op, phase, f'phase start: {phase}'))
+        if failure is not None:
+            try:
+                body = json.loads(failure.body)
+            except Exception:
+                body = {}
+            detail = body.get('error') or 'install failed'
+            code = body.get('code') or 'install_failed'
+            op_log(op, 'error', f"installation stopped: {detail}")
+            op_finish(op, 'failed',
+                      error={'code': code, 'message': detail[:1500]})
+            return
+
+        def mark(rec):
+            rec['installed'] = True
+            rec['enabled'] = True
+            rec['last_error'] = None
+
+        rec = await _rkn_store_record(server_id, server_uid, mark, server)
+        if rec is None:
+            op_finish(op, 'failed', error={'code': 'server_changed',
+                                           'message': 'Server not found; refresh the inventory'})
+            return
+        RKN_FLAG_CACHE.clear()
+        op_log(op, 'done', 'RKN Block installed and enabled')
+        op_finish(op, 'success',
+                  result={'status': 'success', 'installed': True, 'enabled': True})
+    except Exception as e:
+        logger.exception("RKN Block install failed")
+        op_finish(op, 'failed', error={'code': 'internal_error', 'message': str(e)})
+
+
+@app.get('/api/servers/{server_id}/rknblock/install/{op_id}', tags=["Servers"])
+def api_rknblock_install_status(request: Request, server_id: int, op_id: str):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    _install_ops_load()
+    op = _install_op_of_server(op_id, server_id)
+    if not op:
+        return JSONResponse({'error': 'Operation not found', 'code': 'not_found'},
+                            status_code=404)
+    try:
+        offset = max(0, int(request.query_params.get('offset', 0)))
+    except (TypeError, ValueError):
+        offset = 0
+    return _install_op_payload(op, offset)
 
 
 @app.post('/api/servers/{server_id}/rknblock/uninstall', tags=["Servers"])
@@ -4775,6 +5373,359 @@ async def api_rkn_scans_clear(request: Request, server_id: int, server_uid: str 
         return error
     RKN_FLAG_CACHE.pop(server_id, None)
     return {'status': 'cleared'}
+
+
+# ===== WARP: server app + per-instance egress (issue #277, S3a MVP) =====
+#
+# HTTP contract only: identity/XOR/ToS guards run synchronously, the SSH work
+# is queued as one in-memory job per server uid. State lives in the dedicated
+# .srv_warp_state.json store, never in a data.json snapshot.
+
+def _warp_awg_protocols(server):
+    return [proto for proto in (server.get('protocols') or {})
+            if protocol_base(proto) in ('awg', 'awg2', 'awg3')]
+
+
+def _warp_named_protocol(req, server=None, required=False):
+    protocol = (req.protocol or '').strip()
+    if not protocol and server is not None:
+        candidates = _warp_awg_protocols(server)
+        protocol = candidates[0] if candidates else ''
+    if not protocol:
+        if required:
+            protocol = 'awg'
+        else:
+            return None
+    if protocol_base(protocol) not in ('awg', 'awg2', 'awg3'):
+        raise SrvWarpError('srv_warp_protocol_unsupported', 409)
+    return protocol
+
+
+def _warp_registers(server, state, uid):
+    warp = server.get('warp') or {}
+    registers = warp.get('registers_ts')
+    if registers is None:
+        registers = warp.get('registers')
+    if registers is None:
+        record = (state.get('servers') or {}).get(str(uid)) or {}
+        registers = record.get('registers_ts') or record.get('registers') or []
+    return registers or []
+
+
+def _warp_status_payload(server, state):
+    uid = server.get('uid') or ''
+    protocols = list(_warp_awg_protocols(server))
+    server_state = (state.get('servers') or {}).get(str(uid)) or {}
+    for proto in (server_state.get('protocols') or {}):
+        if proto not in protocols and protocol_base(proto) in ('awg', 'awg2', 'awg3'):
+            protocols.append(proto)
+
+    registers = _warp_registers(server, state, uid)
+    rate_limited = quota_exhausted(registers)
+    instances = []
+    budgets = []
+    for proto in protocols:
+        record = proto_record(state, uid, proto)
+        warp_record = record.get('warp') or {}
+        link = warp_link(record)
+        # No live SSH probes in the status endpoint: the projection is the
+        # authoritative signal until the supervisor supplies handshake data.
+        installed = bool(warp_record.get('registered'))
+        instance_state = classify_instance_state(
+            installed=installed, link_active=bool(link),
+            rate_limited=rate_limited)
+        client_mtu = record.get('client_mtu_warp')
+        if client_mtu:
+            budgets.append(int(client_mtu))
+        instances.append({
+            'protocol': proto,
+            'state': instance_state,
+            'installed': installed,
+            'registered': bool(warp_record.get('registered')),
+            'link_active': bool(link),
+            'client_mtu': client_mtu,
+            'dns_via_warp': bool((link or {}).get('dns_via_warp')),
+            'quarantine': bool(warp_record.get('quarantine')),
+            'state_stale': bool((link or {}).get('stale')),
+        })
+
+    active_job = _WARP_JOBS.get(str(uid))
+    return {
+        'aggregate': aggregate_state([item['state'] for item in instances]),
+        'instances': instances,
+        'budget': min(budgets) if budgets else WARP_CLIENT_MTU_CAP,
+        'orphans': [],
+        'quota': {
+            'used': len(register_timestamps(registers, now=time.time())),
+            'limit': WARP_REGISTER_LIMIT,
+        },
+        'jobs': [dict(active_job)] if active_job else [],
+    }
+
+
+async def _warp_store_tos(uid):
+    async with DATA_LOCK:
+        data = load_data()
+        idx = _rkn_server_index(data, None, uid)
+        if idx is None:
+            return
+        warp = data['servers'][idx].setdefault('warp', {})
+        warp['tos_ack'] = {'version': WARP_TOS_VERSION, 'ts': int(time.time())}
+        save_data(data)
+
+
+async def _warp_require_tos(server, accept):
+    ack = (server.get('warp') or {}).get('tos_ack') or {}
+    if isinstance(ack, dict) and ack.get('version') == WARP_TOS_VERSION:
+        return
+    if not accept:
+        raise SrvWarpError('srv_warp_tos_required', 409)
+    await _warp_store_tos(server.get('uid'))
+
+
+def _warp_install_guard(server, uid, protocol):
+    state = warp_state_store.load()
+    protocols = [protocol] if protocol else _warp_awg_protocols(server)
+    for proto in protocols:
+        record = proto_record(state, uid, proto)
+        if (record.get('warp') or {}).get('registered') or warp_link(record):
+            raise SrvWarpError('srv_warp_registered_unlink_first', 409)
+
+
+def _warp_link_preflight(data, server_id, server, uid, protocol):
+    record = (server.get('protocols') or {}).get(protocol) or {}
+    if record.get('exit_link'):
+        raise SrvWarpError('srv_warp_xor_conflict', 409)
+    if split_instances(data, server_id):
+        raise SrvWarpError('srv_warp_xor_conflict', 409)
+    if warp_link(proto_record(warp_state_store.load(), uid, protocol)):
+        raise SrvWarpError('srv_warp_xor_conflict', 409)
+
+
+async def _warp_post(actor, request, server_id, req, kind, runner, *, tos=False,
+                     install_guard=False, link_preflight=False):
+    """Shared POST pre-flight: auth -> identity -> registry -> ToS -> XOR -> 202."""
+    if not actor or actor.get('role') not in ('admin', 'support'):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        idx = _rkn_server_index(data, server_id, req.server_uid)
+        if idx is None:
+            raise SrvWarpError('srv_warp_identity_mismatch', 409)
+        server = data['servers'][idx]
+        uid = server.get('uid') or ''
+        if not uid:
+            raise SrvWarpError('srv_warp_identity_mismatch', 409)
+        if _warp_job_active(uid):
+            raise SrvWarpError('srv_warp_job_busy', 409)
+
+        if kind in ('install', 'uninstall', 'repair'):
+            protocol = _warp_named_protocol(req, server=server, required=False)
+        elif kind == 'exit-egress':
+            protocol = None
+        else:
+            protocol = _warp_named_protocol(req, server=server, required=True)
+
+        if tos:
+            await _warp_require_tos(server, bool(req.accept_tos))
+        if install_guard:
+            _warp_install_guard(server, uid, protocol)
+        if link_preflight:
+            _warp_link_preflight(data, idx, server, uid, protocol)
+
+        job_id = _warp_job_begin(uid, kind)
+        task = asyncio.create_task(runner(server_id, uid, protocol, job_id))
+        _WARP_TASKS.add(task)
+        task.add_done_callback(_WARP_TASKS.discard)
+        return JSONResponse({'job_id': job_id, 'status': 'queued'},
+                            status_code=202)
+    except SrvWarpError as exc:
+        return JSONResponse({'error': exc.code, 'code': exc.code},
+                            status_code=exc.http_status)
+
+
+@app.get('/api/servers/{server_id}/warp/status', tags=["Servers"])
+async def api_srv_warp_status(request: Request, server_id: int,
+                              server_uid: str | None = None):
+    """Aggregate + per-instance warp state, quota and active jobs."""
+    actor = _request_user(request)
+    if not actor or actor.get('role') not in ('admin', 'support'):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    data = load_data()
+    idx = _rkn_server_index(data, server_id, server_uid)
+    if idx is None:
+        return JSONResponse(
+            {'error': 'Server not found', 'code': 'srv_warp_identity_mismatch'},
+            status_code=404)
+    return _warp_status_payload(data['servers'][idx], warp_state_store.load())
+
+
+@app.post('/api/servers/{server_id}/warp/install', tags=["Servers"])
+async def api_srv_warp_install(request: Request, server_id: int, req: SrvWarpRequest):
+    """Queue a WARP install as a store operation with staged progress."""
+    actor = _request_user(request)
+    if not actor or actor.get('role') not in ('admin', 'support'):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        idx = _rkn_server_index(data, server_id, req.server_uid)
+        if idx is None:
+            raise SrvWarpError('srv_warp_identity_mismatch', 409)
+        server = data['servers'][idx]
+        uid = server.get('uid') or ''
+        if not uid:
+            raise SrvWarpError('srv_warp_identity_mismatch', 409)
+        if _warp_job_active(uid):
+            raise SrvWarpError('srv_warp_job_busy', 409)
+        protocol = _warp_named_protocol(req, server=server, required=False)
+        await _warp_require_tos(server, bool(req.accept_tos))
+        _warp_install_guard(server, uid, protocol)
+        _install_ops_load()
+        if (idx, 'warp') in _INSTALL_ACTIVE:
+            return JSONResponse(
+                {'error': 'Cloudflare WARP installation is already running',
+                 'code': 'install_in_progress'},
+                status_code=409)
+        op = op_create(idx, 'warp', WARP_INSTALL_TOTAL)
+        asyncio.create_task(_run_warp_install(op['id'], idx, uid, protocol))
+        return {'operation_id': op['id']}
+    except SrvWarpError as exc:
+        return JSONResponse({'error': exc.code, 'code': exc.code},
+                            status_code=exc.http_status)
+
+
+async def _run_warp_install(op_id, server_id, uid, protocol):
+    """Background worker: one WARP install with store-style staged lines."""
+    op = _INSTALL_OPS.get(op_id)
+    if not op:
+        return
+    try:
+        job_id = _warp_job_begin(uid, 'install')
+        op_log(op, 'start', 'Cloudflare WARP installation started')
+        await warp_runtime.install(
+            server_id, uid, protocol=protocol, job_id=job_id,
+            progress=lambda stage, msg: op_log(op, stage, msg))
+        op_log(op, 'done', 'Cloudflare WARP installed')
+        op_finish(op, 'success',
+                  result={'status': 'success', 'installed': True})
+    except SrvWarpError as exc:
+        op_finish(op, 'error',
+                  error={'code': exc.code,
+                         'message': str(exc) or exc.code})
+    except Exception as exc:
+        logger.exception("Cloudflare WARP install failed")
+        op_finish(op, 'error',
+                  error={'code': 'install_failed',
+                         'message': str(exc)[:500]})
+
+
+@app.post('/api/servers/{server_id}/warp/uninstall', tags=["Servers"])
+async def api_srv_warp_uninstall(request: Request, server_id: int, req: SrvWarpRequest):
+    return await _warp_post(
+        _request_user(request), request, server_id, req, 'uninstall',
+        lambda sid, uid, protocol, job_id: warp_runtime.uninstall(
+            sid, uid, protocol=protocol, job_id=job_id))
+
+
+@app.post('/api/servers/{server_id}/warp/repair', tags=["Servers"])
+async def api_srv_warp_repair(request: Request, server_id: int, req: SrvWarpRequest):
+    return await _warp_post(
+        _request_user(request), request, server_id, req, 'repair',
+        lambda sid, uid, protocol, job_id: warp_runtime.repair(
+            sid, uid, protocol=protocol, job_id=job_id))
+
+
+@app.post('/api/servers/{server_id}/warp/link', tags=["Servers"])
+async def api_srv_warp_link(request: Request, server_id: int, req: SrvWarpRequest):
+    return await _warp_post(
+        _request_user(request), request, server_id, req, 'link',
+        lambda sid, uid, protocol, job_id: warp_runtime.link(
+            sid, uid, protocol, dns_via_warp=bool(req.dns_on), job_id=job_id),
+        tos=True, link_preflight=True)
+
+
+@app.post('/api/servers/{server_id}/warp/unlink', tags=["Servers"])
+async def api_srv_warp_unlink(request: Request, server_id: int, req: SrvWarpRequest):
+    return await _warp_post(
+        _request_user(request), request, server_id, req, 'unlink',
+        lambda sid, uid, protocol, job_id: warp_runtime.unlink(
+            sid, uid, protocol, job_id=job_id))
+
+
+@app.post('/api/servers/{server_id}/warp/force-unlink', tags=["Servers"])
+async def api_srv_warp_force_unlink(request: Request, server_id: int,
+                                    req: SrvWarpRequest):
+    return await _warp_post(
+        _request_user(request), request, server_id, req, 'force-unlink',
+        lambda sid, uid, protocol, job_id: warp_runtime.force_unlink(
+            sid, uid, protocol, job_id=job_id))
+
+
+@app.post('/api/servers/{server_id}/warp/switch', tags=["Servers"])
+async def api_srv_warp_switch(request: Request, server_id: int, req: SrvWarpRequest):
+    return await _warp_post(
+        _request_user(request), request, server_id, req, 'switch',
+        lambda sid, uid, protocol, job_id: warp_runtime.switch_egress(
+            sid, uid, protocol, job_id=job_id))
+
+
+@app.post('/api/servers/{server_id}/warp/dns', tags=["Servers"])
+async def api_srv_warp_dns(request: Request, server_id: int, req: SrvWarpRequest):
+    return await _warp_post(
+        _request_user(request), request, server_id, req, 'dns',
+        lambda sid, uid, protocol, job_id: warp_runtime.set_dns(
+            sid, uid, protocol, dns_on=bool(req.dns_on), job_id=job_id))
+
+
+@app.post('/api/servers/{server_id}/warp/reissue', tags=["Servers"])
+async def api_srv_warp_reissue(request: Request, server_id: int, req: SrvWarpRequest):
+    return await _warp_post(
+        _request_user(request), request, server_id, req, 'reissue',
+        lambda sid, uid, protocol, job_id: warp_runtime.reissue(
+            sid, uid, protocol, job_id=job_id))
+
+
+@app.post('/api/servers/{server_id}/warp/exit-egress', tags=["Servers"])
+async def api_srv_warp_exit_egress(request: Request, server_id: int,
+                                   req: SrvWarpRequest):
+    return await _warp_post(
+        _request_user(request), request, server_id, req, 'exit-egress',
+        lambda sid, uid, protocol, job_id: warp_runtime.exit_egress(
+            sid, uid, enable=bool(req.enable), job_id=job_id),
+        tos=True)
+
+
+@app.post('/api/servers/{server_id}/warp/failover', tags=["Servers"])
+async def api_srv_warp_failover(request: Request, server_id: int,
+                                req: SrvWarpRequest):
+    """Failover policy is configuration, not SSH: applied synchronously."""
+    actor = _request_user(request)
+    if not actor or actor.get('role') not in ('admin', 'support'):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        idx = _rkn_server_index(data, server_id, req.server_uid)
+        if idx is None:
+            raise SrvWarpError('srv_warp_identity_mismatch', 409)
+        uid = data['servers'][idx].get('uid') or ''
+        if _warp_job_active(uid):
+            raise SrvWarpError('srv_warp_job_busy', 409)
+        policy = {
+            'primary_uid': (req.primary_uid or '').strip(),
+            'backup_uids': [str(item) for item in (req.backup_uids or [])],
+        }
+        async with DATA_LOCK:
+            data = load_data()
+            idx = _rkn_server_index(data, server_id, uid)
+            if idx is None:
+                raise SrvWarpError('srv_warp_identity_mismatch', 409)
+            warp = data['servers'][idx].setdefault('warp', {})
+            warp['failover'] = policy
+            save_data(data)
+        return {'status': 'success', 'failover': policy}
+    except SrvWarpError as exc:
+        return JSONResponse({'error': exc.code, 'code': exc.code},
+                            status_code=exc.http_status)
 
 
 RKN_FLAG_CACHE = {}
@@ -5189,17 +6140,308 @@ def api_used_ports(request: Request, server_id: int):
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
+# ===== staged install operations (marketplace apps and protocols) =====
+#
+# Every long install (protocol, Smart Route, RKN Block) runs as a background
+# task and reports the same staged progress the AWG plugin updater reports.
+# There is deliberately no cancel: an interrupted install leaves the server in
+# an unknown state, so it always runs to the end.
+#
+# Explicit step numbers per flow: the UI shows "step N of TOTAL" and the bar
+# only moves when a stage boundary is crossed, never backwards.
+
+PROTOCOL_INSTALL_STAGES = {'start': 1, 'docker': 2, 'host': 3, 'build': 4,
+                           'run': 6, 'config': 8, 'firewall': 9, 'done': 10}
+PROTOCOL_INSTALL_TOTAL = 10
+
+SMARTROUTE_INSTALL_STAGES = {'start': 1, 'prepare': 2, 'script': 3,
+                             'units': 4, 'activate': 5, 'download': 6,
+                             'verify': 7, 'done': 8}
+SMARTROUTE_INSTALL_TOTAL = 8
+
+# The bundled installer runs these phases one by one over the same SSH session.
+RKN_INSTALL_PHASES = ('preflight', 'packages', 'download', 'files',
+                      'services', 'blocking', 'verify')
+RKNBLOCK_INSTALL_STAGES = {'start': 1, 'preflight': 2, 'packages': 3,
+                           'download': 4, 'files': 5, 'services': 6,
+                           'blocking': 7, 'verify': 8, 'done': 9}
+RKNBLOCK_INSTALL_TOTAL = 9
+
+WARP_INSTALL_STAGES = {'start': 1, 'arch': 2, 'download': 3, 'register': 4,
+                       'profile': 5, 'startsh': 6, 'done': 7}
+WARP_INSTALL_TOTAL = 7
+
+FLOW_STAGES = {
+    'protocol': PROTOCOL_INSTALL_STAGES,
+    'smartroute': SMARTROUTE_INSTALL_STAGES,
+    'rknblock': RKNBLOCK_INSTALL_STAGES,
+    'warp': WARP_INSTALL_STAGES,
+}
+FLOW_TOTALS = {
+    'protocol': PROTOCOL_INSTALL_TOTAL,
+    'smartroute': SMARTROUTE_INSTALL_TOTAL,
+    'rknblock': RKNBLOCK_INSTALL_TOTAL,
+    'warp': WARP_INSTALL_TOTAL,
+}
+
+INSTALL_OP_TTL = 60 * 60
+INSTALL_OP_KEEP = 20
+_INSTALL_OPS = {}
+_INSTALL_ACTIVE = {}
+_INSTALL_OPS_LOADED = {'done': False}
+_INSTALL_OPS_IO_LOCK = threading.Lock()
+
+
+def _install_stage_step(flow, stage):
+    """(step, total) for a stage of this flow, or None for unknown stages."""
+    steps = FLOW_STAGES.get(flow) or {}
+    step = steps.get(stage)
+    if step is None:
+        return None
+    return step, FLOW_TOTALS.get(flow) or max(steps.values())
+
+
+def _install_ops_store_path():
+    """Journal next to data.json; an install outlives a panel restart."""
+    return os.path.join(os.path.dirname(DATA_FILE), 'install_ops.json')
+
+
+def _install_ops_save():
+    path = _install_ops_store_path()
+    tmp = path + '.tmp'
+    try:
+        with _INSTALL_OPS_IO_LOCK:
+            with open(tmp, 'w', encoding='utf-8') as handle:
+                json.dump(list(_INSTALL_OPS.values()), handle, ensure_ascii=False)
+            os.replace(tmp, path)
+    except Exception:
+        # Persistence is a convenience: never fail an install because the
+        # journal file cannot be written.
+        logger.warning("Cannot persist install operations", exc_info=True)
+
+
+def _install_ops_load():
+    """Load the journal once, after the process that owned the SSH is gone.
+
+    A stored 'running' operation is reported as failed/interrupted: the panel
+    never claims an install finished when it did not.
+    """
+    if _INSTALL_OPS_LOADED['done']:
+        return
+    _INSTALL_OPS_LOADED['done'] = True
+    path = _install_ops_store_path()
+    try:
+        with open(path, encoding='utf-8') as handle:
+            stored = json.load(handle)
+    except Exception:
+        return
+    if not isinstance(stored, list):
+        return
+    for op in stored:
+        if not isinstance(op, dict) or not op.get('id'):
+            continue
+        if op.get('state') == 'running':
+            op['state'] = 'failed'
+            op['error'] = {
+                'code': 'interrupted',
+                'message': 'the panel restarted during the installation; '
+                           'check the server state',
+            }
+            op.setdefault('lines', []).append({
+                'ts': datetime.now().isoformat(timespec='seconds'),
+                'stage': 'error',
+                'text': 'panel restarted before the installation finished',
+            })
+            op['stage'] = 'error'
+            op['finished_at'] = datetime.now().isoformat(timespec='seconds')
+            op['finished_ts'] = datetime.now().timestamp()
+        _INSTALL_OPS[op['id']] = op
+    _install_ops_prune()
+
+
+def _install_ops_prune():
+    now = datetime.now().timestamp()
+    for op_id, op in list(_INSTALL_OPS.items()):
+        if op.get('finished_ts') and now - op['finished_ts'] > INSTALL_OP_TTL:
+            _INSTALL_OPS.pop(op_id, None)
+    if len(_INSTALL_OPS) > INSTALL_OP_KEEP:
+        finished = sorted(
+            (op for op in _INSTALL_OPS.values() if op.get('finished_ts')),
+            key=lambda op: op['finished_ts'],
+        )
+        for op in finished[:max(0, len(_INSTALL_OPS) - INSTALL_OP_KEEP)]:
+            _INSTALL_OPS.pop(op['id'], None)
+
+
+def op_create(server_id, flow, total=None):
+    """Register a running install and persist it before any work starts."""
+    _install_ops_load()
+    _install_ops_prune()
+    op = {
+        'id': uuid.uuid4().hex,
+        'server_id': server_id,
+        'flow': flow,
+        'state': 'running',
+        'stage': 'start',
+        'lines': [],
+        'result': None,
+        'error': None,
+        'step': 0,
+        'total': total or FLOW_TOTALS.get(flow) or 10,
+        'percent': 0,
+        'started_at': datetime.now().isoformat(timespec='seconds'),
+    }
+    _INSTALL_OPS[op['id']] = op
+    _INSTALL_ACTIVE[(server_id, flow)] = op['id']
+    _install_ops_save()
+    return op
+
+
+def op_log(op, stage, message):
+    """Append a detail line, advance the stage and mirror it to the panel log."""
+    text = str(message)[-2000:]
+    op.setdefault('lines', []).append({
+        'ts': datetime.now().isoformat(timespec='seconds'),
+        'stage': stage,
+        'text': text,
+    })
+    mapped = _install_stage_step(op.get('flow'), stage)
+    if mapped:
+        step, total = mapped
+        op['stage'] = stage
+        if step > op.get('step', 0):
+            op['step'] = step
+            op['total'] = total
+            op['percent'] = int(round(step * 100.0 / total))
+    logger.info("install %s server %s stage %s: %s",
+                op.get('flow'), op.get('server_id'), stage, text[:300])
+    _install_ops_save()
+
+
+def op_finish(op, state, result=None, error=None):
+    op['state'] = state
+    op['result'] = result
+    op['error'] = error
+    op['finished_at'] = datetime.now().isoformat(timespec='seconds')
+    op['finished_ts'] = datetime.now().timestamp()
+    if state == 'success':
+        op['percent'] = 100
+        op['step'] = op.get('total', 0)
+        op['stage'] = 'done'
+    else:
+        op['stage'] = 'error'
+    active_key = (op.get('server_id'), op.get('flow'))
+    if _INSTALL_ACTIVE.get(active_key) == op.get('id'):
+        _INSTALL_ACTIVE.pop(active_key, None)
+    _install_ops_save()
+
+
+def _install_op_for_protocol(server_id, protocol):
+    """Newest operation of one protocol instance on one server."""
+    for op in reversed(list(_INSTALL_OPS.values())):
+        if op.get('server_id') == server_id and op.get('protocol') == protocol:
+            return op
+    return None
+
+
+def _install_op_payload(op, offset=0):
+    """Poll payload shared by every install flow."""
+    lines = op.get('lines') or []
+    offset = max(0, offset)
+    return {
+        'operation_id': op['id'],
+        'flow': op.get('flow'),
+        'state': op.get('state'),
+        'step': op.get('step', 0),
+        'total': op.get('total', 0),
+        'percent': op.get('percent', 0),
+        'result': op.get('result'),
+        'error': op.get('error'),
+        'started_at': op.get('started_at'),
+        'finished_at': op.get('finished_at'),
+        'lines': lines[offset:],
+        'next_offset': len(lines),
+    }
+
+
+def _install_op_of_server(op_id, server_id):
+    """Operation by id, only when it belongs to this server."""
+    op = _INSTALL_OPS.get(op_id)
+    if not op or op.get('server_id') != server_id:
+        return None
+    return op
+
+
+def _install_running(server_id):
+    """True while an install or an AWG plugin update holds this server.
+
+    Registries are process-local: this guard stops the common case, not a
+    host whose install was started by another panel process.
+    """
+    _install_ops_load()
+    for op in list(_INSTALL_OPS.values()):
+        if (op.get('server_id') == server_id
+                and op.get('state') in ('running', 'starting')):
+            return True
+    for (active_server, _flow) in list(_INSTALL_ACTIVE):
+        if active_server == server_id:
+            return True
+    for key in list(_awg_plugin_active):
+        if key[0] == server_id:
+            return True
+    return False
+
+
+@app.get('/api/servers/{server_id}/install/progress', tags=["Protocols"])
+def api_install_progress(request: Request, server_id: int,
+                         protocol: str | None = None,
+                         operation_id: str | None = None, offset: int = 0):
+    """Poll one install operation by id, or the last one of a protocol."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    _install_ops_load()
+    if operation_id:
+        op = _install_op_of_server(operation_id, server_id)
+        if not op:
+            return JSONResponse({'error': 'Installation not found',
+                                 'code': 'install_not_found'},
+                                status_code=404)
+        payload = _install_op_payload(op, offset)
+        payload['stage'] = op.get('stage')
+        if op.get('protocol'):
+            payload['protocol'] = op.get('protocol')
+        return payload
+    if not protocol:
+        return JSONResponse({'error': 'protocol or operation_id is required'},
+                            status_code=400)
+    op = _install_op_for_protocol(server_id, protocol)
+    if not op:
+        return JSONResponse({'error': 'Installation not found', 'code': 'install_not_found'},
+                            status_code=404)
+    payload = _install_op_payload(op, offset)
+    payload['protocol'] = protocol
+    payload['stage'] = op.get('stage')
+    return payload
+
+
 @app.post('/api/servers/{server_id}/install', tags=["Protocols"])
 @serialize_peer_lifecycle
 async def api_install_protocol(request: Request, server_id: int, req: InstallProtocolRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    op = None
     try:
         data = load_data()
         if server_id >= len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         if not is_valid_protocol(req.protocol):
             return JSONResponse({'error': 'Invalid protocol type'}, status_code=400)
+        _install_ops_load()
+        if (server_id, 'protocol') in _INSTALL_ACTIVE:
+            return JSONResponse(
+                {'error': 'A protocol installation is already running on this server',
+                 'code': 'install_in_progress'},
+                status_code=409)
 
         server = data['servers'][server_id]
         if 'protocols' not in server:
@@ -5212,6 +6454,13 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
         else:
             install_protocol = req.protocol
         install_base = protocol_base(install_protocol)
+        warp_record = warp_proto_record(warp_state_store.load(), server.get('uid'),
+                                        install_protocol)
+        if (warp_record.get('warp') or {}).get('registered') \
+                or warp_link(warp_record):
+            # A registered/linked instance must be unlinked before reinstall:
+            # a fresh container would silently lose its WARP state.
+            raise SrvWarpError('srv_warp_registered_unlink_first', 409)
         # A reinstalled entry keeps its exit link and is re-linked below
         previous_link = None
         # Where an instance is published is a property of the network, not
@@ -5250,8 +6499,51 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
                               f'Choose another port.'},
                     status_code=400)
 
+        op = op_create(server_id, 'protocol', PROTOCOL_INSTALL_TOTAL)
+        op['protocol'] = install_protocol
+        op_log(op, 'start', f"installing {protocol_display_name(install_protocol)} "
+                            f"on {server.get('name') or server.get('host') or server_id}")
+        op_log(op, 'docker', 'checking Docker on the server')
         docker_install_log = await asyncio.to_thread(ensure_docker_installed, ssh)
+        if docker_install_log:
+            for line in str(docker_install_log).splitlines():
+                op_log(op, 'docker', line)
+        else:
+            op_log(op, 'docker', 'Docker is already installed')
         manager = get_protocol_manager(ssh, install_protocol)
+
+        # IPv6 for the new instance: AWG_IPV6 overrides the server preference,
+        # otherwise the preference and auto-detection keep the legacy
+        # behaviour. An instance that is about to be linked to the default
+        # exit node must stay IPv4-only.
+        default_uid = ((data.get('settings', {}).get('exit_nodes') or {}).get('default_exit_uid') or '').strip()
+        will_link_default = install_base in AWG_PROTOCOLS and should_link_default_exit(
+            default_uid, server.get('uid'), True, reinstall, previous_link)
+        ipv6_pref = server.get('ipv6_new_instances')
+        env_pref = (os.environ.get('AWG_IPV6') or 'auto').strip().lower()
+        if env_pref == 'off':
+            ipv6_pref = False
+        elif env_pref == 'on':
+            ipv6_pref = True
+        # An exit link cannot carry IPv6: exit0.conf allows only 0.0.0.0/0 and
+        # its kill-switch blackholes ::/0. A reinstall that inherits a link
+        # must therefore inherit IPv4-only too, even with AWG_IPV6=on.
+        carries_exit_link = bool(previous_link) and install_base in AWG_PROTOCOLS
+        forced_ipv6_off = False
+        if (will_link_default or carries_exit_link) and ipv6_pref is not False:
+            ipv6_pref = False
+            forced_ipv6_off = True
+        if ipv6_pref is True and env_pref != 'off':
+            docker_info = await asyncio.to_thread(manager._docker_ipv6_info)
+            if not docker_info.get('ipv6_enabled'):
+                ssh.disconnect()
+                message = ('Docker IPv6 is not enabled on this host. '
+                           'Apply the Docker IPv6 settings first.')
+                op_log(op, 'docker', message)
+                op_finish(op, 'failed', error={'code': 'docker_pending',
+                                               'message': message})
+                return JSONResponse({'error': message, 'code': 'docker_pending'},
+                                    status_code=409)
 
         # Pass parameters to installer
         install_kwargs = None
@@ -5318,21 +6610,33 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
                 dns=join_dns(req.awg_dns1, req.awg_dns2),
                 special_junk=awg_special_junk,
                 dns6=req.awg_dns6,
+                ipv6_preference=ipv6_pref,
             )
         else:
             install_args = (install_protocol,)
             install_kwargs = dict(port=req.port)
+        op_log(op, 'host', 'preparing the host and building the container')
+        if install_base in AWG_PROTOCOLS:
+            install_kwargs['progress'] = (
+                lambda stage, message, percent=None: op_log(op, stage, message))
         result = await asyncio.to_thread(manager.install_protocol, *install_args, **install_kwargs)
 
         if not isinstance(result, dict):
             result = {'status': 'success', 'message': str(result)}
+        if forced_ipv6_off and server.get('ipv6_new_instances') is not False:
+            result.setdefault('log', []).append(
+                "! IPv6 is off for this instance: it will be linked to the default exit node.")
         if docker_install_log:
             result.setdefault('log', [])
             result['log'].insert(0, docker_install_log)
         if result.get('status') == 'error' or result.get('error'):
             ssh.disconnect()
-            return JSONResponse({'error': result.get('message') or result.get('error') or 'Installation failed'}, status_code=400)
+            message = result.get('message') or result.get('error') or 'Installation failed'
+            op_log(op, 'build', f"installation failed: {message}")
+            op_finish(op, 'failed', error={'code': 'install_failed', 'message': message})
+            return JSONResponse({'error': message}, status_code=400)
 
+        op_log(op, 'run', 'the container is running')
         proto_record = {
             'installed': True,
             'port': req.port,
@@ -5369,13 +6673,21 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
         result['base_protocol'] = install_base
         result['display_name'] = proto_record['display_name']
         result['container_name'] = proto_record['container_name']
+        op_log(op, 'config', 'saving the panel record')
         save_data(data)
+        _invalidate_ip_status(server.get('uid'))
         ssh.disconnect()
+        if install_base not in AWG_PROTOCOLS:
+            # Other installers do not stream; publish their collected log now.
+            for line in (result.get('log') or []):
+                if docker_install_log and line == docker_install_log:
+                    continue
+                op_log(op, 'config', line)
+        op_log(op, 'firewall', 'finalizing exit-node links')
+        link_log_len = len(result.get('log') or [])
 
         # A new AWG instance joins the default exit node, when one is set.
-        default_uid = ((data.get('settings', {}).get('exit_nodes') or {}).get('default_exit_uid') or '').strip()
-        if should_link_default_exit(default_uid, server.get('uid'), install_base in AWG_PROTOCOLS,
-                                    reinstall, previous_link):
+        if will_link_default:
             try:
                 linked = await exit_link_svc.link(server_id, install_protocol, default_uid)
                 result.setdefault('log', []).append(
@@ -5404,9 +6716,19 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
                     save_data(fresh)
                 result.setdefault('log', []).append(
                     f"! Could not re-link to exit node {previous_link.get('exit_name')}: {e}")
+        for line in (result.get('log') or [])[link_log_len:]:
+            op_log(op, 'firewall', line)
+        op_log(op, 'done', 'installation complete')
+        op_finish(op, 'success', {'protocol': install_protocol,
+                                  'display_name': proto_record['display_name']})
         return result
+    except SrvWarpError:
+        raise
     except Exception as e:
         logger.exception("Error installing protocol")
+        if op is not None:
+            op_log(op, 'error', f"internal error: {e}")
+            op_finish(op, 'failed', error={'code': 'internal_error', 'message': str(e)})
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
@@ -5569,6 +6891,7 @@ def api_exit_nodes(request: Request):
 
 
 @app.post('/api/servers/{server_id}/exit-link', tags=["Protocols"])
+@serialize_peer_lifecycle
 async def api_exit_link(request: Request, server_id: int, req: ExitLinkRequest):
     """Route all clients of an AWG instance through an exit node (by its
     server uid). Rolled back unless the exit answers within 15 s; `force`
@@ -5576,7 +6899,15 @@ async def api_exit_link(request: Request, server_id: int, req: ExitLinkRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
-        return await exit_link_svc.link(server_id, req.protocol, req.exit_uid.strip(), force=bool(req.force))
+        data = load_data()
+        server = data['servers'][server_id] if 0 <= server_id < len(data['servers']) else None
+        if server is not None and srv_warp_ctx(server, req.protocol).get('active'):
+            raise SrvWarpError('srv_warp_xor_conflict', 409)
+        result = await exit_link_svc.link(server_id, req.protocol, req.exit_uid.strip(), force=bool(req.force))
+        _invalidate_ip_status_for_server(server_id)
+        return result
+    except SrvWarpError:
+        raise
     except ExitLinkError as e:
         return _exit_link_error(e)
     except Exception as e:
@@ -5585,12 +6916,15 @@ async def api_exit_link(request: Request, server_id: int, req: ExitLinkRequest):
 
 
 @app.post('/api/servers/{server_id}/exit-link/remove', tags=["Protocols"])
+@serialize_peer_lifecycle
 async def api_exit_unlink(request: Request, server_id: int, req: ProtocolRequest):
     """Restore direct egress for an AWG instance and drop its peer on the exit."""
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
-        return await exit_link_svc.unlink(server_id, req.protocol)
+        result = await exit_link_svc.unlink(server_id, req.protocol)
+        _invalidate_ip_status_for_server(server_id)
+        return result
     except ExitLinkError as e:
         return _exit_link_error(e)
     except Exception as e:
@@ -5599,12 +6933,15 @@ async def api_exit_unlink(request: Request, server_id: int, req: ProtocolRequest
 
 
 @app.post('/api/servers/{server_id}/exit-link/relink', tags=["Protocols"])
+@serialize_peer_lifecycle
 async def api_exit_relink(request: Request, server_id: int, req: ProtocolRequest):
     """Re-establish an existing link (after a reinstall or a stale state)."""
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
-        return await exit_link_svc.relink_entry(server_id, req.protocol)
+        result = await exit_link_svc.relink_entry(server_id, req.protocol)
+        _invalidate_ip_status_for_server(server_id)
+        return result
     except ExitLinkError as e:
         return _exit_link_error(e)
     except Exception as e:
@@ -5619,7 +6956,13 @@ async def api_exit_link_dns(request: Request, server_id: int, req: ExitDnsReques
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
+        data = load_data()
+        server = data['servers'][server_id] if 0 <= server_id < len(data['servers']) else None
+        if server is not None and srv_warp_ctx(server, req.protocol).get('active'):
+            raise SrvWarpError('srv_warp_xor_conflict', 409)
         return await exit_link_svc.set_dns_via_exit(server_id, req.protocol, req.enabled)
+    except SrvWarpError:
+        raise
     except ExitLinkError as e:
         return _exit_link_error(e)
     except Exception as e:
@@ -5666,6 +7009,7 @@ async def api_exit_link_check_egress(request: Request, server_id: int, req: Prot
 
 
 @app.post('/api/servers/{server_id}/exit-link/failover', tags=["Protocols"])
+@serialize_peer_lifecycle
 async def api_exit_link_failover(request: Request, server_id: int, req: ExitFailoverRequest):
     """Opt-in automatic failover for an AWG instance already linked to an
     exit node. Disabled by default; backups are addressed by server uid."""
@@ -5676,7 +7020,9 @@ async def api_exit_link_failover(request: Request, server_id: int, req: ExitFail
         protocol = payload.pop('protocol')
         fields = {key: value for key, value in payload.items()
                   if value is not None or key == 'enabled'}
-        return await exit_link_svc.configure_failover(server_id, protocol, **fields)
+        result = await exit_link_svc.configure_failover(server_id, protocol, **fields)
+        _invalidate_ip_status_for_server(server_id)
+        return result
     except ExitLinkError as e:
         return _exit_link_error(e)
     except Exception as e:
@@ -5710,16 +7056,74 @@ async def api_exit_link_failover_check(request: Request, server_id: int, req: Pr
 
 @app.post('/api/servers/{server_id}/smartroute/install', tags=["Protocols"])
 async def api_smartroute_install(request: Request, server_id: int):
-    """Install the host-side Smart Route updater (lists + systemd timer)."""
+    """Install the host-side Smart Route updater (lists + systemd timer).
+
+    The install is phased and long, so it runs in the background and the page
+    polls ``/smartroute/install/{operation_id}``.
+    """
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
-        return await smartroute_svc.install(server_id)
+        data = load_data()
+        servers = data.get('servers') or []
+        if not isinstance(server_id, int) or not 0 <= server_id < len(servers):
+            return _smartroute_error(SmartRouteError('server_not_found',
+                                                     'Server not found', 404))
+        if (servers[server_id].get('smartroute') or {}).get('installed'):
+            return JSONResponse(
+                {'error': 'App is already installed; refresh its status',
+                 'code': 'already_installed'},
+                status_code=409)
+        if (server_id, 'smartroute') in _INSTALL_ACTIVE:
+            return JSONResponse(
+                {'error': 'Smart Route installation is already running',
+                 'code': 'install_in_progress'},
+                status_code=409)
+        op = op_create(server_id, 'smartroute', SMARTROUTE_INSTALL_TOTAL)
+        asyncio.create_task(_run_smartroute_install(op['id'], server_id))
+        return {'operation_id': op['id']}
     except SmartRouteError as e:
         return _smartroute_error(e)
     except Exception as e:
         logger.exception("Error installing Smart Route")
         return JSONResponse({'error': str(e)}, status_code=500)
+
+
+async def _run_smartroute_install(op_id, server_id):
+    """Background worker: every phase line becomes a progress line + log line."""
+    op = _INSTALL_OPS.get(op_id)
+    if not op:
+        return
+    try:
+        op_log(op, 'start', 'Smart Route installation started')
+        await smartroute_svc.install(
+            server_id,
+            progress=lambda stage, line: op_log(op, stage, line),
+        )
+        op_finish(op, 'success', result={'status': 'success'})
+    except SmartRouteError as e:
+        logger.warning("Smart Route install failed: %s (%s)", e, e.code)
+        op_finish(op, 'failed', error={'code': e.code, 'message': str(e)})
+    except Exception as e:
+        logger.exception("Smart Route install failed")
+        op_finish(op, 'failed',
+                  error={'code': 'internal_error', 'message': str(e)})
+
+
+@app.get('/api/servers/{server_id}/smartroute/install/{op_id}', tags=["Protocols"])
+def api_smartroute_install_status(request: Request, server_id: int, op_id: str):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    _install_ops_load()
+    op = _install_op_of_server(op_id, server_id)
+    if not op:
+        return JSONResponse({'error': 'Operation not found', 'code': 'not_found'},
+                            status_code=404)
+    try:
+        offset = max(0, int(request.query_params.get('offset', 0)))
+    except (TypeError, ValueError):
+        offset = 0
+    return _install_op_payload(op, offset)
 
 
 @app.post('/api/servers/{server_id}/smartroute/uninstall', tags=["Protocols"])
@@ -6160,6 +7564,9 @@ def api_awg_settings_save(request: Request, server_id: int, req: AwgSettingsRequ
         if server_id >= len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
+        if srv_warp_ctx(server, req.protocol).get('active'):
+            # The warp client budget/link owns MTU and DNS while linked.
+            raise SrvWarpError('srv_warp_settings_locked', 409)
         special_junk = {key: getattr(req, key) for key in ('i1', 'i2', 'i3', 'i4', 'i5')}
         if all(value is None for value in special_junk.values()):
             special_junk = None
@@ -6193,11 +7600,395 @@ def api_awg_settings_save(request: Request, server_id: int, req: AwgSettingsRequ
         settings['dns1'], settings['dns2'] = split_dns(settings.get('dns'))
         settings['status'] = 'success'
         return settings
+    except SrvWarpError:
+        raise
     except ValueError as e:
         return JSONResponse({'error': str(e)}, status_code=400)
     except Exception as e:
         logger.exception("Error saving AWG settings")
         return JSONResponse({'error': str(e)}, status_code=500)
+
+
+IPV6_CONFLICT_CODES = frozenset({
+    'peers', 'peers_appeared', 'exit_link', 'server_off', 'docker_off',
+    'needs_recreate', 'state_unreadable', 'env_off', 'env_on',
+    'docker_pending', 'docker_flags_conflict', 'docker_bridge_ipv6_missing',
+    'daemon_json_invalid', 'ip6tables_unsupported', 'ipv6_pool_exhausted',
+    'ipv6_disabled_by_sysctl', 'docker_recovery_failed', 'operation_busy',
+    'peer_lifecycle_busy', 'peer_lifecycle_still_running', 'bad_request',
+})
+# A transient server-side condition: retry later, not a client mistake.
+IPV6_RETRY_CODES = frozenset({'peer_lifecycle_uncertain'})
+IPV6_BAD_REQUEST_CODES = frozenset({'not_awg', 'bad_request'})
+
+_IP_STATUS_TTL = 20.0
+# A degraded or unknown payload is re-probed sooner: the next poll should not
+# keep showing a stale error for the full healthy TTL.
+_IP_STATUS_TTL_DEGRADED = 3.0
+_IP_STATUS_CACHE = {}
+_OP_STORES = {}
+_OP_LOCKS = {}
+
+
+def _awg_protocols(server):
+    """AWG protocols that exist on this server, in stable order."""
+    return [proto for proto in (server.get('protocols') or {})
+            if protocol_base(proto) in AWG_PROTOCOLS]
+
+
+def _ip_status_cache_ttl(payload):
+    """20 s for a healthy payload, 3 s for a degraded or failed one."""
+    if isinstance(payload, dict) and payload.get('state') == 'ok' \
+            and not payload.get('error'):
+        return _IP_STATUS_TTL
+    return _IP_STATUS_TTL_DEGRADED
+
+
+def _ip_status_cache_get(server_uid):
+    entry = _IP_STATUS_CACHE.get(server_uid)
+    if not entry:
+        return None
+    stamp, payload, ttl = entry
+    if time.time() - stamp > ttl:
+        _IP_STATUS_CACHE.pop(server_uid, None)
+        return None
+    return payload
+
+
+def _ip_status_cache_put(server_uid, payload):
+    _IP_STATUS_CACHE[server_uid] = (time.time(), payload,
+                                    _ip_status_cache_ttl(payload))
+
+
+def _invalidate_ip_status(server_uid=None):
+    """Drop one cached status, or all of them after a global change."""
+    if server_uid is None:
+        _IP_STATUS_CACHE.clear()
+    else:
+        _IP_STATUS_CACHE.pop(server_uid, None)
+
+
+def _invalidate_ip_status_for_server(server_id):
+    """Drop the cache entry of an endpoint that only knows the server index."""
+    try:
+        data = load_data()
+        servers = data.get('servers') or []
+        if 0 <= server_id < len(servers):
+            server = servers[server_id]
+            _invalidate_ip_status(server.get('uid') or f'#{server_id}')
+    except Exception:
+        logger.debug("Cannot resolve server %s for IP status invalidation",
+                     server_id, exc_info=True)
+
+
+def _op_store():
+    path = panel_data_file() + '.operations.json'
+    store = _OP_STORES.get(path)
+    if store is None:
+        store = OperationStore(path)
+        _OP_STORES[path] = store
+    return store
+
+
+def panel_data_file():
+    """Current data path. Tests swap it, so never capture it at import."""
+    return DATA_FILE
+
+
+def _op_lock(server_uid):
+    lock = _OP_LOCKS.get(server_uid)
+    if lock is None:
+        lock = threading.Lock()
+        _OP_LOCKS[server_uid] = lock
+    return lock
+
+
+def _ipv6_error(exc, default='state_unreadable'):
+    """Turn an IPv6 RuntimeError into a JSON error response.
+
+    Only known codes reach the client. An unexpected RuntimeError is an
+    internal fault: answer 500 and keep the raw text in the log, not in the
+    response, because it can carry shell output.
+    """
+    code = str(exc).strip() or default
+    if code in IPV6_RETRY_CODES:
+        return JSONResponse({'error': code, 'code': code}, status_code=503)
+    if code not in IPV6_CONFLICT_CODES and code not in IPV6_BAD_REQUEST_CODES:
+        logger.warning("Unexpected IPv6 failure: %s", code)
+        return JSONResponse({'error': 'internal_error',
+                             'code': 'internal_error'}, status_code=500)
+    status = 400 if code in IPV6_BAD_REQUEST_CODES else 409
+    return JSONResponse({'error': code, 'code': code}, status_code=status)
+
+
+@app.get('/api/servers/{server_id}/ip-status', tags=["Protocols"])
+def api_ip_status(request: Request, server_id: int):
+    """IPv4/IPv6 state of the host, Docker and every AWG instance.
+
+    Cached for 20 s per server: the page polls it and every miss costs several
+    SSH round-trips. Mutations drop the entry themselves.
+    """
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    data = load_data()
+    if server_id < 0 or server_id >= len(data['servers']):
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    server = data['servers'][server_id]
+    uid = server.get('uid') or f'#{server_id}'
+    status = _ip_status_cache_get(uid)
+    if status is None:
+        try:
+            ssh = get_ssh(server)
+            ssh.connect()
+            try:
+                status = AWGManager(ssh).get_ip_status(_awg_protocols(server))
+            finally:
+                ssh.disconnect()
+            _ip_status_cache_put(uid, status)
+        except Exception:
+            # A dead host is a state, not a server error: the page shows grey.
+            logger.warning("IP status unavailable for server %s", uid,
+                           exc_info=True)
+            status = {'state': 'unknown', 'error': 'ssh_failed',
+                      'host': {}, 'docker': {}, 'instances': []}
+    status = dict(status)
+    status['preference'] = {
+        'new_instances': server.get('ipv6_new_instances'),
+        'env_override': (os.environ.get('AWG_IPV6') or 'auto').strip().lower(),
+    }
+    status['can_write'] = bool(_require_admin_strict(request))
+    return status
+
+
+@app.post('/api/servers/{server_id}/ipv6', tags=["Protocols"])
+def api_server_ipv6_preference(request: Request, server_id: int,
+                               req: Ipv6PreferenceRequest):
+    """Set whether new instances on this server get IPv6. None = auto.
+
+    A repeated request is a no-op: `changed` is false and data.json is not
+    written again.
+    """
+    if not _require_admin_strict(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if req.enabled is not None and not isinstance(req.enabled, bool):
+        return JSONResponse({'error': 'bad_request', 'code': 'bad_request'},
+                            status_code=400)
+    try:
+        data = load_data()
+        if server_id < 0 or server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        uid = server.get('uid') or f'#{server_id}'
+        current = server.get('ipv6_new_instances')
+        changed = current is not req.enabled
+        if changed:
+            if req.enabled is None:
+                server.pop('ipv6_new_instances', None)
+            else:
+                server['ipv6_new_instances'] = req.enabled
+            save_data(data)
+            _invalidate_ip_status(uid)
+        return {'status': 'success', 'changed': changed,
+                'preference': {
+                    'new_instances': server.get('ipv6_new_instances'),
+                    'env_override': (os.environ.get('AWG_IPV6') or 'auto').strip().lower(),
+                }}
+    except Exception:
+        logger.exception("Error saving IPv6 preference")
+        return JSONResponse({'error': 'internal_error', 'code': 'internal_error'},
+                            status_code=500)
+
+
+@app.post('/api/servers/{server_id}/docker/ipv6/apply', tags=["Protocols"])
+def api_docker_ipv6_apply(request: Request, server_id: int,
+                          req: DockerIpv6ApplyRequest):
+    """Write Docker IPv6 settings and restart Docker in the background.
+
+    Returns 202 with an operation id: the restart drops every VPN session and
+    can take 10-30 s, so the request must not wait for it. The op lock is
+    host-level and separate from the peer lifecycle lock.
+    """
+    if not _require_admin_strict(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    confirm = (req.confirm or '').strip().lower()
+    if confirm not in ('yes', 'true', '1', 'restart-docker'):
+        return JSONResponse({'error': 'confirm_required',
+                             'code': 'confirm_required'}, status_code=400)
+    data = load_data()
+    if server_id < 0 or server_id >= len(data['servers']):
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    server = data['servers'][server_id]
+    uid = server.get('uid') or f'#{server_id}'
+    if _install_running(server_id):
+        return JSONResponse({'error': 'operation_busy',
+                             'code': 'operation_busy'}, status_code=409)
+    lock = _op_lock(uid)
+    if not lock.acquire(blocking=False):
+        return JSONResponse({'error': 'operation_busy',
+                             'code': 'operation_busy'}, status_code=409)
+    store = _op_store()
+    try:
+        operation = store.create(uid, 'docker_ipv6')
+    except Exception:
+        # Without this the lock stays taken and every later IPv6 mutation
+        # answers operation_busy until the panel restarts.
+        logger.exception("Failed to create Docker IPv6 operation")
+        lock.release()
+        return JSONResponse({'error': 'internal_error', 'code': 'internal_error'},
+                            status_code=500)
+
+    def work():
+        try:
+            store.update(operation['id'], step='restarting_docker')
+            ssh = get_ssh(server)
+            ssh.connect()
+            try:
+                AWGManager(ssh).enable_docker_ipv6(restart=True)
+            finally:
+                ssh.disconnect()
+            store.update(operation['id'], state='done', step='done')
+        except RuntimeError as exc:
+            code = str(exc).strip() or 'docker_bridge_ipv6_missing'
+            if code not in IPV6_CONFLICT_CODES:
+                code = 'internal_error'
+            store.update(operation['id'], state='failed', reason=code)
+        except Exception:
+            logger.exception("Docker IPv6 operation failed")
+            store.update(operation['id'], state='failed', reason='internal_error')
+        finally:
+            _invalidate_ip_status(uid)
+            lock.release()
+
+    try:
+        threading.Thread(target=work, name=f'ipv6-docker-{operation["id"][:8]}',
+                         daemon=True).start()
+    except Exception:
+        # The worker never ran, so its finally cannot release the op lock.
+        logger.exception("Failed to start Docker IPv6 worker")
+        store.update(operation['id'], state='failed', reason='internal_error')
+        lock.release()
+        return JSONResponse({'error': 'internal_error',
+                             'code': 'internal_error'}, status_code=500)
+    return JSONResponse({'op_id': operation['id'], 'state': 'running'},
+                        status_code=202)
+
+
+AWG_SWITCHABLE_BASES = frozenset({'awg', 'awg2', 'awg3'})
+
+
+def _is_switchable_awg(proto):
+    return is_valid_protocol(proto) and protocol_base(proto) in AWG_SWITCHABLE_BASES
+
+
+@app.post('/api/servers/{server_id}/protocol/{proto}/ipv6', tags=["Protocols"])
+@serialize_peer_lifecycle
+def api_instance_ipv6(request: Request, server_id: int, proto: str,
+                      req: InstanceIpv6Request):
+    """Enable or disable IPv6 on one instance.
+
+    A plain switch is synchronous (200). When the container predates Docker
+    IPv6 it must be rebuilt: that path returns 202 with an operation id.
+    """
+    if not _require_admin_strict(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if not _is_switchable_awg(proto):
+        return JSONResponse({'error': 'Not an AmneziaWG protocol',
+                             'code': 'not_awg'}, status_code=400)
+    data = load_data()
+    if server_id < 0 or server_id >= len(data['servers']):
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    server = data['servers'][server_id]
+    if proto not in (server.get('protocols') or {}):
+        return JSONResponse({'error': 'Protocol not found',
+                             'code': 'not_awg'}, status_code=404)
+    uid = server.get('uid') or f'#{server_id}'
+    lock = _op_lock(uid)
+    if not lock.acquire(blocking=False):
+        return JSONResponse({'error': 'operation_busy',
+                             'code': 'operation_busy'}, status_code=409)
+    handed_off = False
+    try:
+        ssh = get_ssh(server)
+        ssh.connect()
+        try:
+            manager = AWGManager(ssh)
+            before = manager.get_instance_ipv6_state(proto)
+        finally:
+            ssh.disconnect()
+        blocked = before.get('blocked_reason') or 'none'
+        # Preconditions are checked before any operation exists. The rebuild
+        # path is the only 202; a peer block, an exit link or a dead Docker
+        # must answer 409 now, not fail later inside the operation.
+        if req.enabled and blocked not in ('needs_recreate', 'none'):
+            return _ipv6_error(RuntimeError(blocked))
+        if req.enabled and blocked == 'needs_recreate':
+            store = _op_store()
+            operation = store.create(uid, 'instance_ipv6', proto)
+            handed_off = True
+
+            def work():
+                try:
+                    store.update(operation['id'], step='rebuilding_container')
+                    worker_ssh = get_ssh(server)
+                    worker_ssh.connect()
+                    try:
+                        AWGManager(worker_ssh).set_instance_ipv6(proto, True)
+                    finally:
+                        worker_ssh.disconnect()
+                    store.update(operation['id'], state='done', step='done')
+                except RuntimeError as exc:
+                    code = str(exc).strip() or 'env_off'
+                    if code not in IPV6_CONFLICT_CODES:
+                        code = 'internal_error'
+                    store.update(operation['id'], state='failed', reason=code)
+                except Exception:
+                    logger.exception("IPv6 rebuild failed for %s", proto)
+                    store.update(operation['id'], state='failed',
+                                 reason='internal_error')
+                finally:
+                    _invalidate_ip_status(uid)
+                    lock.release()
+
+            try:
+                threading.Thread(
+                    target=work, name=f'ipv6-rebuild-{operation["id"][:8]}',
+                    daemon=True).start()
+            except Exception:
+                logger.exception("Failed to start IPv6 rebuild thread")
+                store.update(operation['id'], state='failed', reason='internal_error')
+                lock.release()
+                return JSONResponse({'error': 'internal_error', 'code': 'internal_error'}, status_code=500)
+            return JSONResponse({'op_id': operation['id'], 'state': 'running'},
+                                status_code=202)
+        state = manager.set_instance_ipv6(proto, bool(req.enabled),
+                                          allow_repair=bool(req.repair))
+        _invalidate_ip_status(uid)
+        return {'status': 'success', 'instance': state}
+    except RuntimeError as e:
+        return _ipv6_error(e)
+    except Exception:
+        logger.exception("Error switching instance IPv6")
+        return JSONResponse({'error': 'internal_error', 'code': 'internal_error'},
+                            status_code=500)
+    finally:
+        if not handed_off:
+            lock.release()
+
+
+@app.get('/api/servers/{server_id}/operations/{op_id}', tags=["Protocols"])
+def api_ipv6_operation(request: Request, server_id: int, op_id: str):
+    """Poll a long IPv6 operation started by this panel."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    data = load_data()
+    if server_id < 0 or server_id >= len(data['servers']):
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    server = data['servers'][server_id]
+    uid = server.get('uid') or f'#{server_id}'
+    operation = _op_store().get(op_id)
+    if not operation or operation.get('server_uid') != uid:
+        return JSONResponse({'error': 'Operation not found'}, status_code=404)
+    return operation
 
 
 @app.post('/api/servers/{server_id}/uninstall', tags=["Protocols"])
@@ -6213,6 +8004,10 @@ async def api_uninstall_protocol(request: Request, server_id: int, req: Protocol
         if guard is not None:
             return guard
         server = data['servers'][server_id]
+        if srv_warp_ctx(server, req.protocol).get('active'):
+            # Drop the warp link from the WARP card first: uninstall must not
+            # tear down a container whose egress rules are still applied.
+            raise SrvWarpError('srv_warp_xor_conflict', 409)
         base = protocol_base(req.protocol)
         if base in AWG_PROTOCOLS and ((server.get('protocols') or {}).get(req.protocol) or {}).get('exit_link'):
             # Drop our peer on the exit while the container still exists
@@ -6232,6 +8027,7 @@ async def api_uninstall_protocol(request: Request, server_id: int, req: Protocol
         if req.protocol in server.get('protocols', {}):
             del server['protocols'][req.protocol]
             save_data(data)
+            _invalidate_ip_status(server.get('uid'))
         # The instance is gone: its peers are gone with it, so connections
         # pointing at this (server, protocol) would dangle forever — the
         # modal would list a phantom that errors with 'Client not found'
@@ -6252,6 +8048,8 @@ async def api_uninstall_protocol(request: Request, server_id: int, req: Protocol
             if restored:
                 return {'status': 'success', 'dns_restored': restored}
         return {'status': 'success'}
+    except SrvWarpError:
+        raise
     except Exception as e:
         logger.exception("Error uninstalling protocol")
         return JSONResponse({'error': str(e)}, status_code=500)
@@ -6483,6 +8281,7 @@ async def api_protocol_backup_restore(request: Request, server_id: int, req: Bac
             result.update(await exit_link_svc.reconcile_after_restore(server_id, req.protocol))
         except Exception as e:
             logger.warning(f"exit-link reconcile after restore failed: {e}")
+        _invalidate_ip_status(server.get('uid'))
         return result
     except Exception as e:
         logger.exception("Error restoring protocol backup")
@@ -6558,6 +8357,7 @@ def api_container_toggle(request: Request, server_id: int, req: ContainerToggleR
         if hasattr(ssh, 'docker_ps_invalidate'):
             ssh.docker_ps_invalidate()
         ssh.disconnect()
+        _invalidate_ip_status(server.get('uid') or f'#{server_id}')
         return {'status': 'success', 'action': action, 'container': container}
     except Exception as e:
         logger.exception("Error toggling container")
@@ -6770,8 +8570,9 @@ async def api_set_protocol_public_endpoint(request: Request, server_id: int, req
     Both fields are optional and empty means "as before": the server's own
     address, the instance's listen port. Useful when an instance answers on a
     second IP of the same box, behind a port forward, or under a domain name.
-    A custom public port on this same box is published automatically: REDIRECT
-    rules in iptables/ip6tables send it to the instance's listen port.
+    A custom public port on this same box is published automatically: a DNAT
+    rule in iptables/ip6tables sends it straight to the container, the same
+    path Docker uses (a host-local listener falls back to REDIRECT).
     """
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -6801,13 +8602,15 @@ async def api_set_protocol_public_endpoint(request: Request, server_id: int, req
 
         # The override reaches the server in two ways: telemt composes its own
         # tg:// links from config.toml, and a custom public port on this same
-        # box needs an iptables REDIRECT to the listen port. The record is
+        # box is published with an iptables DNAT straight to the container (a
+        # host-local listener keeps REDIRECT). The record is
         # saved either way: a box that is down right now must not lose the
         # setting, and the next save re-applies it.
         warning = ''
         ssh = None
         try:
             base = protocol_base(proto)
+            l4 = next((k for k, v in PUBLIC_FORWARD_L4.items() if base in v), None)
             if base == 'telemt':
                 pub_host, pub_port = protocol_public_endpoint(server, proto)
                 ssh = await asyncio.to_thread(get_ssh, server)
@@ -6816,14 +8619,23 @@ async def api_set_protocol_public_endpoint(request: Request, server_id: int, req
                 await asyncio.to_thread(
                     manager.set_public_endpoint, pub_host, pub_port or record.get('port', '443'))
             fwd_host, _ = protocol_public_endpoint(server, proto)
+            will_forward = bool(port and str(port) != str(listen_port))
+            will_drop = bool(old_public_port and str(old_public_port) != str(port))
+            if ssh is None and (will_forward or will_drop):
+                ssh = await asyncio.to_thread(get_ssh, server)
+                await asyncio.to_thread(ssh.connect)
+            container_dests = None
+            if ssh is not None and (will_forward or will_drop):
+                container_dests = await asyncio.to_thread(
+                    _docker_dnat_destinations, ssh, listen_port)
             fwd, fwd_warning = public_port_forward_commands(
-                proto, port, listen_port, old_public_port, fwd_host)
+                proto, port, listen_port, old_public_port, fwd_host,
+                container_dests=container_dests)
             if fwd_warning and not warning:
                 warning = fwd_warning
             if fwd is not None:
-                if ssh is None:
-                    ssh = await asyncio.to_thread(get_ssh, server)
-                    await asyncio.to_thread(ssh.connect)
+                # will_forward/will_drop already opened the connection above:
+                # a non-empty command list is impossible without one of them.
                 for cmd in fwd:
                     out, err, code = await asyncio.to_thread(ssh.run_sudo_command, cmd)
                     if code != 0 and not warning:
@@ -6831,22 +8643,23 @@ async def api_set_protocol_public_endpoint(request: Request, server_id: int, req
                         warning = f"forward command failed: {cmd}: {err}"
                 # Verify the rule exists for each address family when adding,
                 # scoped exactly like the rule that was installed.
-                if not warning and port and str(port) != str(listen_port):
-                    l4 = next((k for k, v in PUBLIC_FORWARD_L4.items() if base in v), None)
+                if not warning and will_forward:
                     if l4:
                         fam, _ = _forward_family_dests(fwd_host)
                         for ipt, fkey in (('iptables', 4), ('ip6tables', 6)):
                             addrs = fam[fkey]
                             if addrs == []:
                                 continue
+                            container_dest = (container_dests or {}).get(fkey)
                             for addr in (addrs if addrs is not None else ['']):
-                                dest = f' -d {addr}' if addr else ''
-                                verify = (f'{ipt} -t nat -C PREROUTING -p {l4}{dest} --dport {port} '
-                                          f'-j REDIRECT --to-ports {listen_port}')
+                                match = _forward_match(l4, addr, port, listen_port, container_dest)
+                                verify = f'{ipt} -t nat -C PREROUTING {match}'
                                 vout, verr, vcode = await asyncio.to_thread(ssh.run_sudo_command, verify)
                                 if vcode != 0 and not warning:
                                     logger.warning(f"Public port forward verification failed on {proto}: {ipt}: {verr}")
-                                    warning = f"forward verification failed: {ipt} REDIRECT to :{listen_port} not present"
+                                    target = (f'DNAT to {container_dest}' if container_dest
+                                              else f'REDIRECT to :{listen_port}')
+                                    warning = f"forward verification failed: {ipt} {target} not present"
         except Exception as e:
             logger.warning(f"Could not apply the public endpoint to {proto}: {e}")
             warning = str(e)
@@ -6875,12 +8688,15 @@ RESTORE_FORWARD_DELAY = 10
 # Seconds between periodic re-applies of the public-port forwards. A VPS can
 # reboot on its own while the panel keeps running, and hand-made iptables
 # rules do not come back - the panel owns putting them back, again and again.
-# Idempotency makes every round safe: -C-guarded additions never duplicate.
-RESTORE_FORWARD_INTERVAL = 6 * 3600
+# Every round is cheap and idempotent: the -C probe runs first and a write
+# happens only when the live rule is missing or still points at a container
+# address Docker has replaced. The interval is short enough to repair a
+# recreated container before clients notice.
+RESTORE_FORWARD_INTERVAL = 60
 
 
 async def restore_public_port_forwards():
-    """Re-apply public-port REDIRECT rules on every server at panel startup.
+    """Re-apply public-port DNAT rules on every server at panel startup.
 
     Hosts have no uniform persistence for hand-made iptables rules (netfilter
     -persistent exists on some boxes only, docker restores only its own), so
@@ -6891,7 +8707,7 @@ async def restore_public_port_forwards():
     await asyncio.sleep(RESTORE_FORWARD_DELAY)  # let the panel finish booting
     data = load_data()
     for server in data.get('servers', []):
-        commands = []
+        pending = []
         for proto, record in (server.get('protocols') or {}).items():
             if not isinstance(record, dict):
                 continue
@@ -6899,20 +8715,27 @@ async def restore_public_port_forwards():
             listen_port = str(record.get('port') or '').strip()
             if not public_port or not listen_port:
                 continue
-            pub_host, _ = protocol_public_endpoint(server, proto)
-            cmds, fwd_warning = public_port_forward_commands(
-                proto, public_port, listen_port, public_ip=pub_host)
-            if fwd_warning:
-                logger.warning(f"Public port forward on "
-                               f"{server.get('name') or server.get('host')} {proto}: {fwd_warning}")
-            if cmds:
-                commands.extend(cmds)
-        if not commands:
+            pending.append((proto, public_port, listen_port))
+        if not pending:
             continue
         ssh = None
         try:
             ssh = get_ssh(server)
             await asyncio.to_thread(ssh.connect)
+            dests_by_port = {}
+            commands = []
+            for proto, public_port, listen_port in pending:
+                if listen_port not in dests_by_port:
+                    dests_by_port[listen_port] = _docker_dnat_destinations(ssh, listen_port)
+                pub_host, _ = protocol_public_endpoint(server, proto)
+                cmds, fwd_warning = public_port_forward_commands(
+                    proto, public_port, listen_port, public_ip=pub_host,
+                    container_dests=dests_by_port[listen_port])
+                if fwd_warning:
+                    logger.warning(f"Public port forward on "
+                                   f"{server.get('name') or server.get('host')} {proto}: {fwd_warning}")
+                if cmds:
+                    commands.extend(cmds)
             failed = False
             for cmd in commands:
                 out, err, code = await asyncio.to_thread(ssh.run_sudo_command, cmd)
@@ -6932,7 +8755,7 @@ async def restore_public_port_forwards():
 
 async def restore_public_port_forwards_loop():
     """Re-apply the forwards periodically, not only at panel startup: a VPS
-    rebooted independently leaves its REDIRECT rules gone until someone
+    rebooted independently leaves its DNAT rules gone until someone
     restarts the panel. Never raises - the next round retries."""
     while True:
         await asyncio.sleep(RESTORE_FORWARD_INTERVAL)
@@ -6943,7 +8766,7 @@ async def restore_public_port_forwards_loop():
 
 
 def _forward_family_dests(public_ip):
-    """Per-address-family -d scoping for the REDIRECT rules.
+    """Per-address-family -d scoping for the public-port forward rules.
 
     Returns ({4: addrs|None, 6: addrs|None}, warning): None means the family
     stays unrestricted, [] means the family is skipped entirely (a resolved
@@ -6980,23 +8803,131 @@ def _forward_family_dests(public_ip):
     return {4: v4, 6: v6}, ''
 
 
+def _parse_docker_dnat(output, listen_port):
+    """Extract the container destination from the nat/DOCKER DNAT rule.
+
+    `iptables -t nat -S DOCKER` prints one line per published container port,
+    e.g. `... --dport 55424 -j DNAT --to-destination 172.17.0.2:55424`.
+    Returns the `ip:port` token of the first rule for this listen port, or
+    None when Docker does not publish the port (a host-local listener).
+    """
+    want = str(listen_port).strip()
+    if not output or not want:
+        return None
+    for line in str(output).splitlines():
+        tokens = line.split()
+        for i in range(len(tokens) - 1):
+            if tokens[i] != '--dport' or tokens[i + 1] != want:
+                continue
+            for j in range(len(tokens) - 1):
+                if tokens[j] == '--to-destination':
+                    return tokens[j + 1]
+    return None
+
+
+def _docker_dnat_destinations(ssh, listen_port):
+    """Resolve the in-container destination of a Docker-published port.
+
+    Docker owns the real publish rule in nat/DOCKER, so reusing its
+    `--to-destination` is more reliable than guessing the container IP.
+    Returns {4: 'ip:port'|None, 6: 'ip:port'|None}; None means no rule of
+    that family (or the family is unavailable on this host). Never raises.
+    """
+    result = {4: None, 6: None}
+    for ipt, fkey in (('iptables', 4), ('ip6tables', 6)):
+        try:
+            out, _err, code = ssh.run_sudo_command(f'{ipt} -t nat -S DOCKER')
+        except Exception as e:
+            logger.warning(f"Could not read {ipt} DOCKER rules: {e}")
+            continue
+        if code == 0:
+            result[fkey] = _parse_docker_dnat(out, listen_port)
+        else:
+            logger.warning(f"{ipt} DOCKER rules unavailable (exit {code}); "
+                           f"the {fkey} family falls back to REDIRECT")
+    return result
+
+
+def _forward_match(l4, addr, port, listen_port, container_dest=None):
+    """One iptables match for a public-port forward, without the action.
+
+    The destination is quoted on purpose. Real ip6tables prints an IPv6
+    destination as `[addr]:port`, the command runs through a remote shell,
+    and an unquoted bracket expression is a glob pattern there: a file named
+    e.g. `d:55425` in the working directory would silently replace the
+    container address with garbage. Double quotes, so the match can sit
+    inside the single-quoted `sh -c` wrapper below.
+    """
+    scope = f' -d {addr}' if addr else ''
+    if container_dest:
+        return (f'-p {l4}{scope} --dport {port} '
+                f'-j DNAT --to-destination "{container_dest}"')
+    return (f'-p {l4}{scope} --dport {port} '
+            f'-j REDIRECT --to-ports {listen_port}')
+
+
+def _forward_shell(command):
+    """Run one privileged command chain inside a single shell.
+
+    run_sudo_command prefixes the whole string with sudo, so in `sudo a || b`
+    only `a` is privileged and the insert half runs as the panel's SSH user.
+    That broke every add on a non-root host (`can't open lock file
+    /run/xtables.lock`). Wrapping the chain in `sh -c` gives it to one root
+    shell, the pattern the rest of the panel already uses.
+    """
+    return "sh -c '" + command.replace("'", "'\\''") + "'"
+
+
 def public_port_forward_commands(protocol, public_port, listen_port, old_public_port='',
-                                 public_ip=''):
+                                 public_ip='', container_dests=None):
     """iptables/ip6tables commands publishing a custom public port.
 
     Returns (commands, warning); commands is None when nothing is needed.
     A public port equal to the listen port (or empty) means "no rule"; any
     previous rule for the same instance is removed. Idempotent: additions are
     guarded by -C, removals loop -D until the rule is gone. Rules are scoped
-    to the public address (-d public_ip) so they redirect only the traffic
+    to the public address (-d public_ip) so they forward only the traffic
     actually meant for this instance, not every packet hitting the port.
+
+    A Docker-published listen port is forwarded with DNAT straight to the
+    container (the path Docker itself uses), so ufw's INPUT policy cannot
+    drop the packet. A listen port Docker does not publish keeps the old
+    REDIRECT-to-local behaviour as a fallback.
+
+    Rules are reconciled by (address, port), never by the exact rule text:
+    the container address is baked in when the rule is applied and changes
+    when Docker recreates the container. Additions therefore probe the live
+    rule with -C and rebuild it (scrub + insert) when it no longer matches,
+    and removal scrubs every form published for the port.
+
+    Every returned command is one `sh -c` chain: run_sudo_command prefixes
+    sudo to the whole string, so a bare `a || b` would run `b` unprivileged.
     """
     base = protocol_base(protocol)
     l4 = next((k for k, v in PUBLIC_FORWARD_L4.items() if base in v), None)
     if l4 is None:
         return None, ''
     fam, warning = _forward_family_dests(public_ip)
+    # Both ports are pasted into a remote shell command. Digits only: a stored
+    # value with a metacharacter must not reach the shell.
+    listen_port = ''.join(c for c in str(listen_port).strip() if c.isdigit())
+    public_port = ''.join(c for c in str(public_port).strip() if c.isdigit())
+    dests = container_dests or {}
     commands = []
+
+    def scrub(ipt, addr, port):
+        """Shell snippet deleting every PREROUTING forward of this port.
+
+        Matched by (address, port) instead of the exact rule text: the
+        container address is baked into the rule when it is applied and
+        changes whenever Docker recreates the container, so an exact-match
+        delete leaves the previous rule behind pointing at a dead address.
+        """
+        scope = f' | grep -F -- "-d {addr}"' if addr else ''
+        return (f'{ipt} -t nat -S PREROUTING | grep -F -- "--dport {port} "'
+                f'{scope} | sed "s/^-A PREROUTING //" > /tmp/.awp_pf_drop; '
+                f'while read -r spec; do {ipt} -t nat -D PREROUTING $spec '
+                f'2>/dev/null; done < /tmp/.awp_pf_drop')
 
     def drop(port):
         for ipt, fkey in (('iptables', 4), ('ip6tables', 6)):
@@ -7004,10 +8935,7 @@ def public_port_forward_commands(protocol, public_port, listen_port, old_public_
             if addrs == []:
                 continue  # nothing was ever published in this family
             for addr in (addrs if addrs is not None else ['']):
-                dest = f' -d {addr}' if addr else ''
-                rule = (f'-t nat -D PREROUTING -p {l4}{dest} --dport {port} '
-                        f'-j REDIRECT --to-ports {listen_port}')
-                commands.append(f'for i in 1 2 3; do {ipt} {rule} 2>/dev/null || break; done')
+                commands.append(_forward_shell(scrub(ipt, addr, port)))
 
     for stale in {p for p in (old_public_port,) if p and p != public_port}:
         drop(stale)
@@ -7016,11 +8944,17 @@ def public_port_forward_commands(protocol, public_port, listen_port, old_public_
             addrs = fam[fkey]
             if addrs == []:
                 continue
+            container_dest = dests.get(fkey)
             for addr in (addrs if addrs is not None else ['']):
-                dest = f' -d {addr}' if addr else ''
-                rule = (f'-t nat -A PREROUTING -p {l4}{dest} --dport {public_port} '
-                        f'-j REDIRECT --to-ports {listen_port}')
-                commands.append(f'{ipt} {rule.replace("-A ", "-C ", 1)} 2>/dev/null || {ipt} {rule}')
+                match = _forward_match(l4, addr, public_port, listen_port, container_dest)
+                # -C first keeps the periodic restore cheap: on a healthy box
+                # nothing is written. When the live rule is missing or still
+                # points at the address of a previous container generation,
+                # the stale forms are scrubbed and the current one inserted.
+                commands.append(_forward_shell(
+                    f'{ipt} -t nat -C PREROUTING {match} 2>/dev/null '
+                    f'|| {{ {scrub(ipt, addr, public_port)}; '
+                    f'{ipt} -t nat -I PREROUTING 1 {match}; }}'))
     return (commands or None), warning
 
 
@@ -7075,8 +9009,8 @@ async def api_check_protocol_port(request: Request, server_id: int, port: str = 
             foreign = [l for l in listeners
                        if not re.match(r'^(docker-proxy|dockerd)$', l.get('process', ''))]
             if not foreign:
-                resp['warning'] = (f'Port {port} is held by Docker; the REDIRECT rule may '
-                                   f'conflict unless the container publish is removed.')
+                resp['warning'] = (f'Port {port} is held by Docker; a forward on this port '
+                                   f'conflicts with the container publish unless it is removed.')
         return resp
     except Exception as e:
         logger.warning(f"Port check on server {server_id} failed: {e}")
@@ -7161,6 +9095,9 @@ def api_server_config_save(request: Request, server_id: int, req: ServerConfigSa
         server = data['servers'][server_id]
         if server_uid is not None and server.get('uid') != server_uid:
             return JSONResponse({'error': 'Server identity changed; refresh the inventory'}, status_code=409)
+        if srv_warp_ctx(server, req.protocol).get('active'):
+            # MTU/DNS come from the warp budget while the link is active.
+            raise SrvWarpError('srv_warp_settings_locked', 409)
         base = protocol_base(req.protocol)
         from peer_accounting import _protocol_scope
         scope = _protocol_scope(req.protocol)
@@ -7247,6 +9184,9 @@ def api_server_config_save(request: Request, server_id: int, req: ServerConfigSa
         if not protected and any(info.get('exit_link') for key, info in current['servers'][server_id].get('protocols', {}).items()
                                  if _protocol_scope(key) == scope):
             return JSONResponse({'error': 'Exit link changed; refresh the configuration'}, status_code=409)
+        if srv_warp_ctx(current['servers'][server_id], req.protocol).get('active'):
+            # A warp link created while SSH was connecting owns MTU/DNS too.
+            raise SrvWarpError('srv_warp_settings_locked', 409)
         if protected:
             mgr = get_protocol_manager(ssh, req.protocol)
             if base == 'xray':
@@ -7296,10 +9236,27 @@ def api_server_config_save(request: Request, server_id: int, req: ServerConfigSa
             from managers.nginx_manager import NginxManager
             mgr = NginxManager(ssh, req.protocol)
             mgr.save_server_config(req.protocol, req.config)
+        elif protocol_base(req.protocol) == 'exit':
+            # The exit container has its own path/template; AWGManager would
+            # write into the awg container instead.
+            from managers.exit_manager import ExitManager
+            mgr = ExitManager(ssh, req.protocol)
+            ctx = srv_warp_ctx(server, req.protocol)
+            if ctx.get('active'):
+                mgr.save_server_config(req.protocol, req.config, warp_ctx=ctx)
+            else:
+                mgr.save_server_config(req.protocol, req.config)
         else:
             mgr = AWGManager(ssh)
-            mgr.save_server_config(req.protocol, req.config)
+            ctx = srv_warp_ctx(server, req.protocol)
+            if ctx.get('active'):
+                mgr.save_server_config(req.protocol, req.config, warp_ctx=ctx)
+            else:
+                mgr.save_server_config(req.protocol, req.config)
+        _invalidate_ip_status(server.get('uid'))
         return {'status': 'success'}
+    except SrvWarpError:
+        raise
     except Exception as e:
         logger.exception("Error saving server config")
         return JSONResponse({'error': str(e)}, status_code=500)
@@ -7428,7 +9385,9 @@ def api_add_connection(request: Request, server_id: int, req: AddConnectionReque
         elif protocol_base(req.protocol) == 'wireguard':
             result = manager.add_client(req.name, pub_host, public_port=pub_port)
         else:
-            result = manager.add_client(req.protocol, req.name, pub_host, port, public_port=pub_port)
+            result = manager.add_client(req.protocol, req.name, pub_host, port,
+                                        public_port=pub_port,
+                                        warp_ctx=srv_warp_ctx(server, req.protocol))
         ssh.disconnect()
 
         if result.get('config'):
@@ -7448,6 +9407,7 @@ def api_add_connection(request: Request, server_id: int, req: AddConnectionReque
             data['user_connections'].append(conn)
             save_data(data)
 
+        _invalidate_ip_status(server.get('uid'))
         return result
     except Exception as e:
         logger.exception("Error adding connection")
@@ -7480,6 +9440,7 @@ async def api_remove_connection(request: Request, server_id: int, req: Connectio
             await asyncio.to_thread(_manager_call, manager, 'remove_client',
                                     req.protocol, req.client_id)
             ssh.disconnect()
+            _invalidate_ip_status(server.get('uid'))
             return {'status': 'success', 'finalized': False}
 
         scope = connection_scope(conn, server)
@@ -7535,6 +9496,7 @@ async def api_remove_connection(request: Request, server_id: int, req: Connectio
                 before, data)
             result['accounting'] = accounting
             result['finalized'] = True
+            _invalidate_ip_status(data['servers'][server_id].get('uid'))
             return result
     except Exception as e:
         logger.exception("Error removing connection")
@@ -7790,6 +9752,7 @@ def api_toggle_connection(request: Request, server_id: int, req: ToggleConnectio
         manager = get_protocol_manager(ssh, req.protocol)
         _manager_call(manager, 'toggle_client', req.protocol, req.client_id, req.enable)
         ssh.disconnect()
+        _invalidate_ip_status(server.get('uid') or f'#{server_id}')
         status = 'enabled' if req.enable else 'disabled'
         return {'status': 'success', 'enabled': req.enable, 'message': f'Connection {status}'}
     except Exception as e:
@@ -7925,7 +9888,10 @@ def api_add_user(request: Request, req: AddUserRequest):
                         max_tcp_conns=req.telemt_max_conns
                     )
                 else:
-                    conn_result = manager.add_client(req.protocol, conn_name, pub_host, port, public_port=pub_port)
+                    conn_result = manager.add_client(
+                        req.protocol, conn_name, pub_host, port,
+                        public_port=pub_port,
+                        warp_ctx=srv_warp_ctx(server, req.protocol))
                 ssh.disconnect()
 
                 if conn_result.get('client_id'):
@@ -8914,9 +10880,56 @@ def save_settings(request: Request, payload: SaveSettingsRequest):
     settings['appearance'] = payload.appearance.dict()
     settings['sync'] = payload.sync.dict()
     settings['captcha'] = payload.captcha.dict()
+    jump_host_uid = (payload.ssh_jump.jump_host_uid or '').strip()
+    if jump_host_uid and not any(server.get('uid') == jump_host_uid
+                                 for server in data.get('servers', [])):
+        return JSONResponse({'error': 'Selected SSH jump host is no longer available'},
+                            status_code=400)
+    previous_jump_uid = ((settings.get('ssh_jump') or {}).get('jump_host_uid') or '')
+    settings['ssh_jump'] = {'jump_host_uid': jump_host_uid}
     settings['telegram'] = payload.telegram.dict()
     settings['ssl'] = payload.ssl.dict()
     settings['mail'] = merge_mail_settings(settings.get('mail'), payload.mail.dict())
+
+    # Panel access control: validate the list before storing anything, so a
+    # typo cannot leave the panel half-configured.
+    raw_entries = [ln.strip() for ln in (payload.panel_access.ip_allowlist or '').splitlines()
+                   if ln.strip()]
+    access_entries = []
+    for entry in raw_entries:
+        try:
+            access_entries.append(str(ipaddress.ip_network(entry, strict=False)))
+        except ValueError:
+            return JSONResponse({'error': 'invalid_ip_allowlist_entry', 'entry': entry},
+                                status_code=400)
+    access_domain = (payload.panel_access.allowed_domain or '').strip().lower()
+    if payload.panel_access.domain_only:
+        access_domain = access_domain or str(settings['ssl'].get('domain') or '').strip().lower()
+        if not access_domain:
+            return JSONResponse({'error': 'domain_required_for_domain_only'},
+                                status_code=400)
+    # Never lock the admin out with the very save that enables the list: the
+    # caller's own address is added when the submitted list does not cover it.
+    if payload.panel_access.ip_allowlist_enabled:
+        client_ip = _request_client_ip(request)
+        try:
+            me = ipaddress.ip_address(client_ip)
+            covered = False
+            for entry in access_entries:
+                net = ipaddress.ip_network(entry, strict=False)
+                if me.version == net.version and me in net:
+                    covered = True
+                    break
+            if not covered:
+                access_entries.append(str(me))
+        except ValueError:
+            pass
+    settings['panel_access'] = {
+        'ip_allowlist_enabled': bool(payload.panel_access.ip_allowlist_enabled),
+        'ip_allowlist': access_entries,
+        'domain_only': bool(payload.panel_access.domain_only),
+        'allowed_domain': access_domain,
+    }
 
     old_auto_backup = settings.get('auto_backup', {}) or {}
     interval_hours = max(1, min(24, int(payload.auto_backup.interval_hours or 24)))
@@ -8941,6 +10954,16 @@ def save_settings(request: Request, payload: SaveSettingsRequest):
         warnings.append('exit_default_cleared')
     settings['exit_nodes'] = {'default_exit_uid': default_exit_uid}
     save_data(data)
+    _refresh_panel_access(data)
+    if previous_jump_uid != jump_host_uid:
+        with _SSH_POOL_LOCK:
+            pooled = list(_SSH_POOL.values())
+            _SSH_POOL.clear()
+        for ssh in pooled:
+            try:
+                ssh.force_disconnect()
+            except Exception:
+                pass
     logger.info("Settings saved (including captcha, telegram and auto backup)")
 
     # Handle bot start/stop based on new telegram settings
@@ -9578,6 +11601,11 @@ async def api_orphan_recovery(request: Request, req: OrphanRecoveryRequest):
                              'code': 'recovery_not_completed'}, status_code=503)
 
 
+def panel_bind_host(ssl_conf: dict) -> str:
+    # Bind locally by default; public exposure requires explicit opt-in.
+    return '0.0.0.0' if ssl_conf.get('bind_all_interfaces') is True else '127.0.0.1'
+
+
 def pathlib_read_data_bytes():
     # Kept separate so failure injection can prove there is no destructive write.
     with open(DATA_FILE, 'rb') as source:
@@ -9608,18 +11636,32 @@ if __name__ == '__main__':
                 with open(key_file, 'w') as f:
                     f.write(ssl_conf['key_text'].strip() + '\n')
 
+    public_port = int(ssl_conf.get('panel_port', 5000))
+    front_enabled = os.environ.get('PANEL_FRONT') == '1'
+    internal_port = int(os.environ.get('PANEL_INTERNAL_PORT', '5001')) if front_enabled else public_port
+
     uvicorn_kwargs = {
         "app": app,
-        "host": "0.0.0.0",
-        "port": ssl_conf.get('panel_port', 5000)
+        "host": '127.0.0.1' if front_enabled else panel_bind_host(ssl_conf),
+        "port": internal_port,
+        # uvicorn's own "server: uvicorn" header fingerprints the panel; the
+        # public front answers like an empty nginx instead.
+        "server_header": False,
     }
-    
+
     if ssl_conf.get('enabled') and cert_file and key_file:
         if os.path.exists(cert_file) and os.path.exists(key_file):
-            logger.info(f"Starting panel with HTTPS enabled on domain: {ssl_conf.get('domain')} at port {uvicorn_kwargs['port']}")
+            logger.info(f"Starting panel with HTTPS enabled on domain: {ssl_conf.get('domain')} at port {internal_port}")
             uvicorn_kwargs["ssl_certfile"] = cert_file
             uvicorn_kwargs["ssl_keyfile"] = key_file
         else:
             logger.error("SSL certificates not found at specified paths. Starting with HTTP.")
 
-    uvicorn.run(**uvicorn_kwargs)
+    if front_enabled:
+        import panel_front
+        threading.Thread(target=lambda: uvicorn.run(**uvicorn_kwargs), daemon=True).start()
+        logger.info(f"Panel front on 0.0.0.0:{public_port} -> 127.0.0.1:{internal_port}")
+        panel_front.serve(host='0.0.0.0', port=public_port,
+                          backend=('127.0.0.1', internal_port))
+    else:
+        uvicorn.run(**uvicorn_kwargs)

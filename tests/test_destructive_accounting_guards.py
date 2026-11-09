@@ -4,6 +4,8 @@ import copy
 import io
 import html
 import json
+from pathlib import Path
+import tempfile
 import threading
 import unittest
 from contextlib import ExitStack
@@ -273,6 +275,12 @@ class DestructiveAccountingGuards(unittest.IsolatedAsyncioTestCase):
         self.data = state()
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
+        self._data_file = panel.DATA_FILE
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        panel.DATA_FILE = str(Path(self._tmp.name) / 'data.json')
+        Path(panel.DATA_FILE).write_text(json.dumps(self.data), encoding='utf-8')
+        self.addCleanup(setattr, panel, 'DATA_FILE', self._data_file)
         self.stack.enter_context(patch.object(panel, '_check_admin', return_value=True))
         self.stack.enter_context(patch.object(panel, 'get_current_user', return_value={'id': 'admin', 'role': 'admin'}))
         self.stack.enter_context(patch.object(panel, 'load_data', side_effect=lambda: copy.deepcopy(self.data)))

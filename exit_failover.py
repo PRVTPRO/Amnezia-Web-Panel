@@ -5,7 +5,7 @@ are unit-tested without a panel. ExitLinkService applies the decisions using
 the existing link primitives (stable server uid, restore-on-failure switch).
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 DEFAULT_CHECK_INTERVAL_SECONDS = 45
 DEFAULT_FAILURE_THRESHOLD = 3
@@ -212,6 +212,11 @@ def evaluate_candidate_health(*, installed=True, container_running=False, ssh_er
     return True, REASON_CONTAINER_RUNNING
 
 
+# Local wall clock of the Unix epoch, computed instead of hard-coded so a
+# machine in any timezone interprets naive stamps exactly like POSIX does.
+_EPOCH_LOCAL = datetime.fromtimestamp(0).replace(tzinfo=None)
+
+
 def parse_ts(value):
     """Unix timestamp from an ISO string, a number, or None."""
     if value is None or value == '':
@@ -219,13 +224,21 @@ def parse_ts(value):
     if isinstance(value, (int, float)):
         return float(value)
     try:
-        return datetime.fromisoformat(value).timestamp()
+        parsed = datetime.fromisoformat(value)
     except (TypeError, ValueError):
         return None
+    if parsed.tzinfo is not None:
+        return parsed.timestamp()
+    # Naive stamps are the panel's own output (isoformat(time.time())), so
+    # they mean local time. Substituting the epoch's local wall clock keeps
+    # POSIX semantics without calling the C runtime: datetime.timestamp()
+    # raises OSError(EINVAL) on Windows for pre-epoch local dates, and a panel
+    # running west of UTC stores exactly those for a 100 s old timestamp.
+    return (parsed - _EPOCH_LOCAL).total_seconds()
 
 
 def isoformat(now):
-    return datetime.fromtimestamp(now).isoformat()
+    return datetime.fromtimestamp(now, timezone.utc).isoformat()
 
 
 def due_for_check(state, interval_seconds, now):

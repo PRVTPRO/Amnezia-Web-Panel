@@ -1,7 +1,7 @@
-"""Deleting a server must not be permanently blocked by stale accounting rows.
+"""Server inventory deletion preserves accounting without requiring SSH.
 
-The guard stays fail-stop by default; an admin may explicitly archive leftover
-rows only when the live peer is verified stopped or absent.
+The legacy remote-cleanup path stays fail-stop. The explicit panel-only path
+never contacts the host and archives leftover rows as unverified.
 """
 import copy
 import json
@@ -81,6 +81,69 @@ class ServerDeleteAccountingTests(unittest.IsolatedAsyncioTestCase):
             'protocol': 'awg3', 'client_id': 'peer'}])
         self.assertEqual(self.saved, [])
         self.assertEqual(self.data['servers'][0]['uid'], 'node-a')
+
+    async def test_panel_only_delete_never_contacts_the_server_and_archives_unverified_rows(self):
+        with patch.object(panel, 'get_ssh', side_effect=AssertionError('SSH forbidden')), \
+             patch.object(panel, '_probe_blocking_peer', side_effect=AssertionError('probe forbidden')):
+            result = await self.delete(panel_only=True)
+        self.assertEqual(self.status(result), 200)
+        self.assertEqual(self.body(result), {
+            'status': 'success', 'panel_only': True, 'archived': 1,
+        })
+        self.exit.detach_entries_for_exit.assert_not_called()
+        self.exit.forget_entry_peers.assert_not_called()
+        self.assertEqual(len(self.commits), 1)
+        after = self.commits[0]['after']
+        self.assertEqual(after['servers'], [])
+        self.assertEqual(after['user_connections'], [])
+        tombstone = after['accounting_recoveries'][0]
+        self.assertEqual(tombstone['operation'], 'server_panel_remove_unverified')
+        self.assertIsNone(tombstone['observed_bytes'])
+        self.assertEqual(tombstone['committed_delta'], 0)
+        self.assertFalse(tombstone['quiescent'])
+        self.assertFalse(tombstone['counters_verified_final'])
+        self.assertEqual(self.commits[0]['kind'], 'server_panel_remove')
+
+    async def test_panel_only_delete_repairs_local_references_without_remote_cleanup(self):
+        self.data = {
+            'servers': [
+                dict(uid='node-a', name='a', host='192.0.2.1', protocols={'exit': {}}),
+                dict(uid='node-b', name='b', host='192.0.2.2', protocols={
+                    'awg3': {'exit_link': {'exit_uid': 'node-a', 'exit_name': 'a'}},
+                }),
+                dict(uid='node-c', name='c', host='192.0.2.3', protocols={}),
+            ],
+            'users': [dict(id='u', traffic_total=10)],
+            'user_connections': [
+                dict(id='removed', user_id='u', server_id=0, protocol='awg3', client_id='p1'),
+                dict(id='kept', user_id='u', server_id=2, protocol='awg3', client_id='p2'),
+            ],
+            'settings': {
+                'exit_nodes': {'default_exit_uid': 'node-a'},
+                'sync': {'remnawave_server_id': 2, 'remnawave_create_conns': True},
+            },
+        }
+        result = await self.delete(panel_only=True)
+        self.assertEqual(self.status(result), 200)
+        after = self.commits[0]['after']
+        self.assertEqual([server['uid'] for server in after['servers']], ['node-b', 'node-c'])
+        self.assertEqual(after['user_connections'][0]['server_id'], 1)
+        self.assertEqual(after['settings']['exit_nodes']['default_exit_uid'], '')
+        self.assertEqual(after['settings']['sync']['remnawave_server_id'], 1)
+        link = after['servers'][0]['protocols']['awg3']['exit_link']
+        self.assertEqual(link['stale'], 'exit_server_removed_from_panel')
+        self.exit.detach_entries_for_exit.assert_not_called()
+        self.exit.forget_entry_peers.assert_not_called()
+
+    async def test_panel_only_delete_disables_sync_when_its_server_is_removed(self):
+        self.data['settings'] = {
+            'sync': {'remnawave_server_id': 0, 'remnawave_create_conns': True},
+        }
+        result = await self.delete(panel_only=True)
+        self.assertEqual(self.status(result), 200)
+        sync = self.commits[0]['after']['settings']['sync']
+        self.assertFalse(sync['remnawave_create_conns'])
+        self.assertEqual(sync['remnawave_server_id'], 0)
 
     async def test_archive_rejects_a_peer_that_is_still_active(self):
         with patch.object(panel, '_probe_blocking_peer', return_value=(12, False)):

@@ -18,6 +18,7 @@ from managers.awg_manager import (
     generate_awg_params,
     generate_psk,
 )
+import warp_service as warp_logic
 
 logger = logging.getLogger(__name__)
 
@@ -125,15 +126,39 @@ class ExitManager(AWGManager):
         """Address line of the exit itself: first host of the transit subnet."""
         return f"{net.network_address + 1}/{net.prefixlen}"
 
-    def _render_start_script(self, protocol_type=None, config_path=None):
+    def _render_start_script(self, protocol_type=None, config_path=None,
+                             warp_ctx=None):
         net = ipaddress.ip_network(EXIT_DEFAULTS['subnet'])
+        pre_blocks = ()
+        extra_blocks = (self._mss_clamp_body(self.INTERFACE),)
+        if warp_ctx and warp_ctx.get('active'):
+            functions = self._warp_shell_functions(
+                warp_ctx,
+                'awg-quick',
+                'awg',
+                '$SUBNET',
+                '$IFACE',
+                '$SUBNET6',
+                pref_c2c=warp_logic.WARP_PREF_B_TRANSIT,
+                transit_cidr=warp_ctx.get('transit_cidr') or '',
+                marker='/opt/amnezia/exit/warp-link',
+                include_helpers=True,
+                userspace='amneziawg-go' in self._docker_image(protocol_type),
+            )
+            pre_blocks = (functions + 'x_warp_killswitch_on\n',)
+            extra_blocks = (
+                self._mss_clamp_body(self.INTERFACE),
+                '# ---- WARP egress: bring it up now that the transit link exists ----\n'
+                'x_warp_up || echo "! warp link not applied, transit stays on the kill-switch"\n',
+            )
         return self._start_script_body(
             self.CONFIG_PATH,
             'awg-quick',
             '',
             self._subnet_gateway(net),
             self._bwlimits_path(),
-            extra_blocks=(self._mss_clamp_body(self.INTERFACE),),
+            pre_blocks=pre_blocks,
+            extra_blocks=extra_blocks,
         )
 
     def _transit_config(self, port, net, awg_params):
@@ -190,7 +215,7 @@ fi
             raise RuntimeError(f"Failed to configure the transit endpoint: {err}")
 
     def install_protocol(self, protocol_type='exit', port=None, subnet=None,
-                         obfuscation=False, **_ignored):
+                         obfuscation=False, warp_ctx=None, **_ignored):
         """Install the exit-node container.
 
         `subnet` is the transit subnet shared with the entry nodes (must be an
@@ -270,7 +295,7 @@ fi
             results.append("Transit endpoint configured ("
                            + ("AmneziaWG obfuscation on" if awg_params else "plain WireGuard") + ")")
             results.append("Starting transit service...")
-            self._upload_start_script(self.PROTOCOL)
+            self._upload_start_script(self.PROTOCOL, warp_ctx=warp_ctx)
             self._verify_interface_up(self.PROTOCOL)
             results.append("Transit service started")
         except RuntimeError:

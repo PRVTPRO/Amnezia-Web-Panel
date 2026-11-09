@@ -81,6 +81,7 @@
         text-align: left;
     }
 </style>
+<link rel="stylesheet" href="/static/css/server-load.css?v={{ static_v }}">
 {% endblock %}
 
 {% block content %}
@@ -95,6 +96,15 @@
             <a href="/servers/new" class="btn btn-primary">
                 <span>＋</span> {{ _('add_server') }}
             </a>
+            <button type="button" class="btn btn-secondary" id="serverLoadBtn" onclick="openServerLoad()">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M3 3v18h18" />
+                    <path d="M7 14l4-4 3 3 5-6" />
+                </svg>
+                <span data-i18n="server_load_button">{{ _('server_load_button') }}</span>
+                <i class="server-load-live-dot" aria-hidden="true"></i>
+            </button>
             {% else %}
             <span class="text-muted text-sm">{{ _('add_server_admin_only') }}</span>
             {% endif %}
@@ -108,6 +118,8 @@
             data-name="{{ server.name }}" data-host="{{ server.host }}" data-port="{{ server.ssh_port }}"
             data-username="{{ server.username }}" data-auth="{{ 'key' if server.private_key else 'password' }}"
             data-self-service="{{ 'true' if server.get('self_service_enabled') else 'false' }}"
+            data-ssh-cooldown="{{ server.get('ssh_cooldown_base') or 30 }}"
+            data-peer-poll="{{ server.get('peer_poll_interval') or 0 }}"
             draggable="true">
             <div class="server-meta">
                 <div class="server-icon">🖥</div>
@@ -177,16 +189,13 @@
                         <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z" />
                     </svg>
                 </button>
-                <button class="btn btn-danger btn-sm btn-icon" onclick="deleteServer({{ loop.index0 }})"
-                    title="{{ _('delete') }}">
+                <button class="btn btn-secondary btn-sm btn-icon" onclick="openServerManagement(this)"
+                    title="{{ _('management') }}" aria-label="{{ _('management') }}">
                     <svg class="btn-icon-svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
                         stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
                         aria-hidden="true">
-                        <path d="M3 6h18" />
-                        <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
-                        <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
-                        <line x1="10" y1="11" x2="10" y2="17" />
-                        <line x1="14" y1="11" x2="14" y2="17" />
+                        <circle cx="12" cy="12" r="3" />
+                        <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21h-4v-.09A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3v-4h.09A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3h4v.09A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.12.37.34.7.64.94.3.24.67.38 1.06.4H21v4h-.09a1.7 1.7 0 0 0-1.51.66Z" />
                     </svg>
                 </button>
             </div>
@@ -210,6 +219,8 @@
     </div>
     {% endif %}
 </section>
+
+{% include '_server_management_modal.html' %}
 
 <!-- ===== Edit Server Modal ===== -->
 <div class="modal-backdrop" id="editServerModal">
@@ -389,6 +400,41 @@
     </div>
 </div>
 {% endif %}
+<!-- ===== Server load modal ===== -->
+<div class="modal-backdrop" id="serverLoadModal">
+    <div class="modal server-load-modal" role="dialog" aria-modal="true" aria-label="{{ _('server_load_title') }}">
+        <div class="modal-header server-load-header">
+            <div class="server-load-heading">
+                <h2 class="modal-title" data-i18n="server_load_title">{{ _('server_load_title') }}</h2>
+                <p class="server-load-subtitle" id="serverLoadSubtitle"></p>
+            </div>
+            <div class="server-load-header__actions">
+                <button type="button" class="btn btn-secondary btn-sm btn-icon" onclick="refreshServerLoad()"
+                    aria-label="{{ _('server_load_refresh') }}" title="{{ _('server_load_refresh') }}">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                        stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M21 12a9 9 0 1 1-3-6.7" />
+                        <path d="M21 3v6h-6" />
+                    </svg>
+                </button>
+                <button type="button" class="modal-close" onclick="closeServerLoad()"
+                    aria-label="{{ _('close') }}">×</button>
+            </div>
+        </div>
+        <div class="server-load-grid" id="serverLoadGrid"></div>
+        <div class="modal-footer server-load-footer">
+            <span class="server-load-hint" data-i18n="server_load_auto">{{ _('server_load_auto') }}</span>
+            <button type="button" class="btn btn-secondary" onclick="refreshServerLoad()">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M21 12a9 9 0 1 1-3-6.7" />
+                    <path d="M21 3v6h-6" />
+                </svg>
+                <span data-i18n="server_load_refresh">{{ _('server_load_refresh') }}</span>
+            </button>
+        </div>
+    </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -435,17 +481,17 @@
         }
     }
 
-    async function deleteServer(serverId) {
-        if (!confirm(_('delete_confirm'))) return;
-
-        try {
-            const uid = document.getElementById(`server-${serverId}`)?.dataset.uid || '';
-            await apiCall(`/api/servers/${serverId}/delete?server_uid=${encodeURIComponent(uid)}`, 'POST');
-            showToast(_('server_deleted'), 'success');
-            setTimeout(() => window.location.reload(), 500);
-        } catch (err) {
-            showToast(err.message, 'error');
-        }
+    function openServerManagement(button) {
+        const card = button.closest('.server-card');
+        if (!card) return;
+        ServerManagement.open({
+            serverId: card.dataset.idx,
+            serverUid: card.dataset.uid || '',
+            sshCooldown: Number(card.dataset.sshCooldown || 30),
+            peerPollInterval: Number(card.dataset.peerPoll || 0),
+            onCooldownChange(value) { card.dataset.sshCooldown = value; },
+            onPollChange(value) { card.dataset.peerPoll = value; },
+        });
     }
 
     /* ========== Edit server ========== */
@@ -904,4 +950,15 @@
         }
     }
 </script>
+<script>
+    window.SERVER_LOAD_I18N = {{ {
+        'button': _('server_load_button'), 'title': _('server_load_title'), 'refresh': _('server_load_refresh'),
+        'updated': _('server_load_updated'), 'auto': _('server_load_auto'), 'uptime': _('server_load_uptime'),
+        'offline': _('server_load_offline'), 'loading': _('server_load_loading'), 'critical': _('server_load_critical'),
+        'disk_low': _('server_load_disk_low'), 'ram_high': _('server_load_ram_high'), 'cpu_high': _('server_load_cpu_high'),
+        'error': _('server_load_error'), 'empty': _('server_load_empty'), 'retry': _('server_load_retry'),
+        'cpu': _('server_load_cpu'), 'ram': _('server_load_ram'), 'disk': _('server_load_disk'), 'net': _('server_load_net')
+    } | tojson }};
+</script>
+<script src="/static/js/server-load.js?v={{ static_v }}" defer></script>
 {% endblock %}

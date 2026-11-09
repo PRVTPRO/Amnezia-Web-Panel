@@ -72,9 +72,11 @@ class FakeSRM:
     def __init__(self, ssh):
         FakeSRM.last = self
 
-    def install(self):
-        FakeSRM.calls.append(('install',))
-        return 'installed'
+    def install(self, phase='all', on_line=None):
+        FakeSRM.calls.append(('install', phase))
+        if on_line is not None:
+            on_line(f'smartroute: {phase}: done')
+        return f'{phase} done'
 
     def uninstall(self):
         FakeSRM.calls.append(('uninstall',))
@@ -161,7 +163,40 @@ class SmartRouteServiceTest(unittest.IsolatedAsyncioTestCase):
         out = await self.svc.install(0)
         self.assertEqual(out['status'], 'success')
         self.assertTrue(self.store['data']['servers'][0]['smartroute']['installed'])
-        self.assertIn(('install',), FakeSRM.calls)
+        self.assertEqual(FakeSRM.calls,
+                         [('install', phase)
+                          for phase in SmartRouteService.INSTALL_PHASES])
+
+    async def test_install_reports_every_phase_line(self):
+        self.store['data']['servers'][0]['smartroute']['installed'] = False
+        seen = []
+        out = await self.svc.install(
+            0, progress=lambda stage, line: seen.append((stage, line)))
+        self.assertEqual(out['status'], 'success')
+        self.assertEqual([stage for stage, _ in seen],
+                         list(SmartRouteService.INSTALL_PHASES))
+        self.assertIn(('download', 'smartroute: download: done'), seen)
+        self.assertTrue(out['log'])
+
+    async def test_install_failure_keeps_the_app_uninstalled(self):
+        self.store['data']['servers'][0]['smartroute']['installed'] = False
+        seen = []
+        original = FakeSRM.install
+
+        def flaky(self, phase='all', on_line=None):
+            if phase == 'units':
+                raise SmartRouteError('ssh_failed', 'ssh failed')
+            return original(self, phase, on_line)
+
+        with mock.patch.object(FakeSRM, 'install', flaky):
+            with self.assertRaises(SmartRouteError):
+                await self.svc.install(
+                    0, progress=lambda stage, line: seen.append((stage, line)))
+        self.assertFalse(self.store['data']['servers'][0]['smartroute']['installed'])
+        # The phase that produced output is still reported, plus the error.
+        self.assertIn(('script', 'smartroute: script: done'), seen)
+        self.assertTrue(any(stage == 'units' and 'ERROR' in line
+                            for stage, line in seen))
 
     async def test_install_bad_server(self):
         with self.assertRaises(SmartRouteError) as ctx:

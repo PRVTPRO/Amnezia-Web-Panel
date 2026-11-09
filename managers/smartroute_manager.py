@@ -417,28 +417,75 @@ WantedBy=timers.target
 '''
 
 
-def build_install_script():
-    """One-shot host install: script + systemd units + first update."""
-    return f'''#!/bin/bash
-set -u
-mkdir -p {SMARTR_DIR} {SMARTR_INSTANCES}
+SMARTR_INSTALL_PHASES = ('prepare', 'script', 'units', 'activate',
+                         'download', 'verify')
+
+
+def _install_phase_body(phase):
+    """One install phase. Every action echoes one line the panel logs."""
+    if phase == 'prepare':
+        return f'''mkdir -p {SMARTR_DIR} {SMARTR_INSTANCES}
+echo "smartroute: prepare: directories ready ({SMARTR_DIR}, {SMARTR_INSTANCES})"
 touch {SMARTR_OWN}
-cat > {SMARTR_BIN} <<'SMARPBIN'
+echo "smartroute: prepare: ownership file ready ({SMARTR_OWN})"
+'''
+    if phase == 'script':
+        return f'''cat > {SMARTR_BIN} <<'SMARPBIN'
 {build_update_script()}SMARPBIN
 chmod +x {SMARTR_BIN}
-cat > /etc/systemd/system/smartroute.service <<'SMARPSVC'
+echo "smartroute: script: updater written to {SMARTR_BIN}"
+'''
+    if phase == 'units':
+        return f'''cat > /etc/systemd/system/smartroute.service <<'SMARPSVC'
 {_SMARP_UNIT.format(bin=SMARTR_BIN)}SMARPSVC
+echo "smartroute: units: service unit written"
 cat > /etc/systemd/system/smartroute.timer <<'SMARPTMR'
 {_SMARP_TIMER}SMARPTMR
-systemctl daemon-reload
+echo "smartroute: units: timer unit written"
+'''
+    if phase == 'activate':
+        return '''systemctl daemon-reload
+echo "smartroute: activate: systemd reloaded"
 systemctl enable --now smartroute.timer >/dev/null 2>&1
+echo "smartroute: activate: timer enabled and started"
 systemctl enable smartroute.service >/dev/null 2>&1
-# First list download runs in the background: the source fallback can take
-# up to ~12 min (3 sources x 2 families), far beyond any SSH timeout. The
-# timer (OnBootSec=2min) is the safety net; status.json reports progress.
-nohup {SMARTR_BIN} > /var/log/smartroute-install.log 2>&1 &
+echo "smartroute: activate: service enabled"
+'''
+    if phase == 'download':
+        # First list download runs in the background: the source fallback can
+        # take up to ~12 min (3 sources x 2 families), far beyond any SSH
+        # timeout. The timer (OnBootSec=2min) is the safety net; status.json
+        # reports progress.
+        return f'''nohup {SMARTR_BIN} > /var/log/smartroute-install.log 2>&1 &
+echo "smartroute: download: first list download started in background"
+'''
+    if phase == 'verify':
+        return f'''test -x {SMARTR_BIN}
+echo "smartroute: verify: updater is executable"
+if systemctl is-enabled --quiet smartroute.timer; then
+  echo "smartroute: verify: timer is enabled"
+else
+  echo "ERROR: smartroute.timer is not enabled after install" >&2
+  exit 1
+fi
 echo "smartroute: installed, first list download running in background"
 '''
+    raise SmartRouteError(f'unknown install phase: {phase}')
+
+
+def build_install_script(phase='all'):
+    """Host install split into phases so the panel can show live progress.
+
+    ``all`` keeps the one-shot script (used by tests and manual repair); the
+    manager normally runs each phase over its own short SSH call.
+    """
+    phases = SMARTR_INSTALL_PHASES if phase == 'all' else (phase,)
+    if phase != 'all' and phase not in SMARTR_INSTALL_PHASES:
+        raise SmartRouteError(f'unknown install phase: {phase}')
+    body = ''.join(_install_phase_body(p) for p in phases)
+    return f'''#!/bin/bash
+set -eu
+{body}'''
 
 
 def build_remove_script():
@@ -504,18 +551,25 @@ class SmartRouteManager:
     def __init__(self, ssh):
         self.ssh = ssh
 
-    def _run_script(self, script, timeout=420):
+    def _run_script(self, script, timeout=420, on_line=None):
         self.ssh.upload_file(script, '/tmp/_smartr.sh')
         try:
             out, err, code = self.ssh.run_sudo_command('bash /tmp/_smartr.sh', timeout=timeout)
         finally:
             self.ssh.run_command('rm -f /tmp/_smartr.sh')
+        # The callback runs on the SSH worker thread, so it may only append to
+        # an in-memory buffer owned by the caller - never file or asyncio IO.
+        if on_line is not None:
+            for chunk in (out or '', err or ''):
+                for line in chunk.splitlines():
+                    if line.strip():
+                        on_line(line)
         if code != 0:
             raise SmartRouteError((err or out or f'SSH exit code {code}').strip())
         return out
 
-    def install(self):
-        return self._run_script(build_install_script())
+    def install(self, phase='all', on_line=None):
+        return self._run_script(build_install_script(phase), on_line=on_line)
 
     def uninstall(self):
         return self._run_script(build_remove_script())

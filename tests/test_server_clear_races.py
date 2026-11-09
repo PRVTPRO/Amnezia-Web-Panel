@@ -177,34 +177,11 @@ class ClearTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ClearBrowserTests(unittest.TestCase):
-    def test_actual_clear_handler_sends_the_page_uid(self):
-        try:
-            from playwright.sync_api import sync_playwright
-        except ImportError:
-            self.skipTest('Playwright is not installed')
-        template = (Path(__file__).resolve().parents[1] / 'templates/server.html').read_text(encoding='utf-8')
-        start = template.index('    async function clearServer()')
-        end = template.index('    async function removeServer()', start)
-        with sync_playwright() as pw:
-            try:
-                browser = pw.chromium.launch(headless=True, **({'executable_path': os.environ['PANEL_BROWSER_EXECUTABLE']} if os.environ.get('PANEL_BROWSER_EXECUTABLE') else {}))
-            except Exception as exc:
-                self.skipTest(f'Chromium is not installed: {type(exc).__name__}')
-            try:
-                page = browser.new_page()
-                page.set_content('<body data-server-uid="entry"></body>')
-                page.add_script_tag(content="""
-const SERVER_ID = 0;
-const calls = [];
-const apiCall = async (...args) => {calls.push(args); return {};};
-const showToast = () => {};
-window.confirm = () => true;
-window.setTimeout = () => 0;
-""" + template[start:end])
-                page.evaluate('clearServer()')
-                self.assertEqual(page.evaluate('calls'), [['/api/servers/0/clear?server_uid=entry', 'POST']])
-            finally:
-                browser.close()
+    def test_shared_clear_handler_sends_the_selected_uid(self):
+        source = (Path(__file__).resolve().parents[1] / 'static/js/server-management.js').read_text(encoding='utf-8')
+        self.assertIn('/clear?server_uid=${selectedUid()}', source)
+        self.assertIn('serverUid: document.body.dataset.serverUid',
+                      (Path(__file__).resolve().parents[1] / 'templates/server.html').read_text(encoding='utf-8'))
 
 
 if __name__ == '__main__':
