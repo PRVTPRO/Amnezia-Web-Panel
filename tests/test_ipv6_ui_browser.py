@@ -143,8 +143,9 @@ class Ipv6UiBrowserTests(unittest.TestCase):
 
     @staticmethod
     def _glyphs(page):
+        # The visible glyph is an inline SVG; the semantic key lives in data-glyph.
         return page.eval_on_selector_all(
-            '.ip-chip .glyph', 'els => els.map(el => el.textContent)')
+            '.ip-chip .glyph', 'els => els.map(el => el.dataset.glyph)')
 
     def test_chips_show_ipv4_ipv6_and_docker_states(self):
         page = self._page()
@@ -201,6 +202,17 @@ class Ipv6UiBrowserTests(unittest.TestCase):
             self.assertEqual(self._states(page)[2], 'off')
             self.assertIn(EN['server_ipv6_state_unknown'],
                           page.locator('.ip-chip').nth(2).inner_text())
+        finally:
+            page.close()
+
+    def test_empty_status_hides_the_chips_instead_of_a_false_green_ipv4(self):
+        """Offline /ip-status returns an empty payload; a green 'IPv4 · 0 peers'
+        chip would claim the box is fine. The error badge is the only signal."""
+        page = self._page()
+        try:
+            page.evaluate("() => renderIpChips({host: {}, docker: {}, instances: []})")
+            self.assertTrue(page.eval_on_selector('#serverIpChips', 'el => el.hidden'))
+            self.assertEqual(page.locator('#serverIpChips .ip-chip').count(), 0)
         finally:
             page.close()
 

@@ -4,6 +4,7 @@ FakeSSH mirrors the pattern of tests/test_status_batch.py: record commands,
 serve canned answers.
 """
 
+import shlex
 import unittest
 
 from managers.smartroute_manager import (
@@ -322,8 +323,13 @@ class ManagerFlowTests(unittest.TestCase):
 
     def test_enable_marks_and_configures_container(self):
         self.mgr.enable_instance('amnezia-awg2', '/opt/amnezia/awg/awg0.conf', '10.8.0.0/24')
+        # run_sudo_command prefixes sudo to the command. Both mkdir and the
+        # marker redirection must be arguments to the privileged shell.
+        self.assertEqual(shlex.split(self.ssh.commands[0]), [
+            'bash', '-c',
+            f'mkdir -p {SMARTR_INSTANCES} && echo {SMARTR_TABLE} > {SMARTR_INSTANCES}/amnezia-awg2',
+        ])
         cmds = ' '.join(self.ssh.commands)
-        self.assertIn(f'{SMARTR_INSTANCES}/amnezia-awg2', cmds)
         self.assertIn('docker cp /tmp/_smartr_c.sh amnezia-awg2', cmds)
         self.assertIn('docker exec amnezia-awg2 bash /tmp/_smartr_c.sh', cmds)
         # accounting chain setup inside the container script (egress + ingress)

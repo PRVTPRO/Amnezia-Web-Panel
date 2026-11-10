@@ -86,14 +86,16 @@ class TestServerTemplateIntegrity(unittest.TestCase):
         self.assertIn("btn.textContent = oldText", function)
 
     def test_awg_plugin_button_sits_next_to_the_server_actions(self):
-        """The entry point must live in the existing header action row."""
+        """The plugin entry point lives in the header tools; IP config moved to the meta row."""
         source = SERVER_TEMPLATE.read_text(encoding="utf-8")
-        header = source.index('class="page-header__actions"')
-        plugin_btn = source.index('id="awgPluginBtn"', header)
-        ip_btn = source.index('id="ipSettingsBtn"', header)
-        self.assertLess(plugin_btn, ip_btn)
-        self.assertIn('onclick="openAwgPluginModal()"', source[plugin_btn:ip_btn])
-        self.assertIn('class="awg-plugin-dot"', source[plugin_btn:ip_btn])
+        start = source.index('class="page-header__actions srv-header__tools"')
+        end = source.index('<div class="srv-header__meta">', start)
+        tools = source[start:end]
+        self.assertIn('id="awgPluginBtn"', tools)
+        self.assertIn('onclick="openAwgPluginModal()"', tools)
+        self.assertIn('class="awg-plugin-dot"', tools)
+        meta = source[end:source.index('<div id="serverStatus"', end)]
+        self.assertIn('id="ipSettingsBtn"', meta)
 
     def test_awg_plugin_modal_uses_the_shared_modal_shell(self):
         source = SERVER_TEMPLATE.read_text(encoding="utf-8")
