@@ -223,7 +223,7 @@
   "bot_stopped": "⏹ 已停止",
   "bot_stop_btn": "⏹ 停止",
   "bot_start_btn": "▶️ 启动",
-  "bot_hint": "修改 Token 后请保存，机器人将自动重启。用户需在个人资料中填写 Telegram ID。",,
+  "bot_hint": "修改 Token 后请保存，机器人将自动重启。用户需在个人资料中填写 Telegram ID。",
   "telegram_auto_create_users": "从 Telegram 自动创建面板用户",
   "telegram_auto_create_users_desc": "启用后，用户首次向机器人发送 /start 时会自动创建面板账户。",
   "telegram_create_users_disabled": "将新 Telegram 用户创建为禁用状态",
