@@ -208,6 +208,7 @@
             + '</div>'
             + rowMarkup('ram', 'RAM')
             + rowMarkup('disk', 'Disk')
+            + rowMarkup('swap', 'Swap')
             + '<div class="server-load-io">'
             + '<span class="server-load-io__item"><span class="server-load-io__arrow">&#8595;</span><span data-f="rx">--</span></span>'
             + '<span class="server-load-io__item"><span class="server-load-io__arrow">&#8593;</span><span data-f="tx">--</span></span>'
@@ -367,6 +368,15 @@
 
         setRow(card, 'ram', ramPct, data.ram_used, data.ram_total);
         setRow(card, 'disk', diskPct, data.disk_used, data.disk_total);
+        // Swap exists on most VPS with little RAM; hide the row when absent.
+        var swapTotal = Math.max(0, toNumber(data.swap_total));
+        var swapRow = field(card, 'swapRow');
+        if (swapRow) {
+            swapRow.hidden = !(swapTotal > 0);
+            if (swapTotal > 0) {
+                setRow(card, 'swap', clampPct(data.swap_percent), data.swap_used, swapTotal);
+            }
+        }
 
         setText(card, 'rx', rate ? formatRate(rate.rx) : formatBytes(rx));
         setText(card, 'tx', rate ? formatRate(rate.tx) : formatBytes(tx));
