@@ -93,6 +93,64 @@ class TestTelegramLanguagePreference(unittest.IsolatedAsyncioTestCase):
                          {'lang:en', 'lang:fa', 'lang:fr', 'lang:ru', 'lang:zh'})
 
 
+class TestTelegramAutomaticRegistration(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        tg_bot._callback_refs.clear()
+        tg_bot._pending_inputs.clear()
+        self.data = base_data()
+        self.api = AsyncMock()
+        self.api.send_message = AsyncMock()
+        self.api.edit_message = AsyncMock()
+        self.api.answer_callback = AsyncMock()
+
+    async def test_first_start_creates_user_when_enabled(self):
+        self.data['settings']['telegram'] = {
+            'auto_create_users': True,
+            'create_users_disabled': True,
+        }
+        msg = _text_message(chat_id=333, from_id=333, text='/start')
+        msg['message']['from'].update({'first_name': 'Ivan', 'last_name': 'Petrov'})
+        save = lambda data: self.data.update(copy.deepcopy(data))
+
+        await tg_bot._dispatch(self.api, msg, lambda: self.data,
+                               lambda *args: 'vpn://x', save)
+
+        created = next(u for u in self.data['users'] if u.get('telegramId') == '333')
+        self.assertEqual(created['username'], 'Ivan Petrov')
+        self.assertEqual(created['role'], 'user')
+        self.assertIsNone(created['email'])
+        self.assertIsNone(created['expiration_date'])
+        self.assertFalse(created['enabled'])
+        self.assertIn('manual', created['disable_reasons'])
+        self.assertTrue(created['password_hash'])
+        self.assertNotEqual(created['password_hash'], '')
+        self.assertEqual(self.api.send_message.call_args.kwargs['reply_markup'],
+                         tg_bot._language_keyboard())
+
+    async def test_first_start_does_not_create_user_by_default(self):
+        msg = _text_message(chat_id=333, from_id=333, text='/start')
+        save = lambda data: self.data.update(copy.deepcopy(data))
+
+        await tg_bot._dispatch(self.api, msg, lambda: self.data,
+                               lambda *args: 'vpn://x', save)
+
+        self.assertFalse(any(u.get('telegramId') == '333' for u in self.data['users']))
+
+    async def test_first_start_creates_enabled_user_when_disabled_option_is_off(self):
+        self.data['settings']['telegram'] = {'auto_create_users': True}
+        msg = _text_message(chat_id=444, from_id=444, text='/start')
+        msg['message']['from'].update({'first_name': 'Jane', 'last_name': 'Doe'})
+        save = lambda data: self.data.update(copy.deepcopy(data))
+
+        await tg_bot._dispatch(self.api, msg, lambda: self.data,
+                               lambda *args: 'vpn://x', save)
+
+        created = next(u for u in self.data['users'] if u.get('telegramId') == '444')
+        self.assertEqual(created['username'], 'Jane Doe')
+        self.assertTrue(created['enabled'])
+        self.assertEqual(created['disable_reasons'], [])
+
+
 class TestTelegramPublicEndpoint(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.api = AsyncMock()
