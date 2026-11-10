@@ -30,6 +30,32 @@ NEW_KEYS = {
     "server_ipv6_discard_confirm",
     "server_ipv6_enable_docker_first",
     "server_ipv6_apply_or_revert_hint",
+    "cheburcheck_title",
+    "cheburcheck_loading",
+    "cheburcheck_hint",
+    "cheburcheck_ban_badge",
+    "cheburcheck_unknown_badge",
+    "cheburcheck_no_data",
+    "cheburcheck_error",
+    "cheburcheck_checked_at",
+    "cheburcheck_regions_blocked",
+    "cheburcheck_banned",
+    "cheburcheck_clean",
+    "cheburcheck_unknown",
+    "cheburcheck_run_now",
+    "cheburcheck_checking",
+    "cheburcheck_settings_title",
+    "cheburcheck_settings_intro",
+    "cheburcheck_enable",
+    "cheburcheck_enable_hint",
+    "cheburcheck_interval",
+    "cheburcheck_interval_hint",
+    "cheburcheck_servers_label",
+    "cheburcheck_servers_hint",
+    "cheburcheck_run_all",
+    "cheburcheck_none_enabled",
+    "cheburcheck_running_all",
+    "cheburcheck_banned_count",
 }
 
 # The catalogue had 1218 key names right before panel access (#305). Freeze
@@ -52,6 +78,26 @@ SECURITY_SETUP_KEYS = {
     'setup_title', 'setup_password_confirm', 'setup_submit', 'setup_creating',
     'setup_error', 'setup_username_invalid', 'setup_password_short',
     'setup_password_mismatch', 'setup_already_completed', 'legacy_backup_disabled',
+}
+
+# Cheburcheck (Russia block check) keys. They are registered in NEW_KEYS too, but
+# the frozen catalogue hash still contains the ipv6 additions, so the hash may
+# only subtract the sets that came after it.
+CHEBURCHECK_KEYS = {
+    'cheburcheck_title', 'cheburcheck_loading', 'cheburcheck_hint',
+    'cheburcheck_ban_badge', 'cheburcheck_unknown_badge', 'cheburcheck_no_data',
+    'cheburcheck_error', 'cheburcheck_checked_at', 'cheburcheck_regions_blocked',
+    'cheburcheck_banned', 'cheburcheck_clean', 'cheburcheck_unknown',
+    'cheburcheck_run_now', 'cheburcheck_checking', 'cheburcheck_settings_title',
+    'cheburcheck_settings_intro', 'cheburcheck_enable', 'cheburcheck_enable_hint',
+    'cheburcheck_interval', 'cheburcheck_interval_hint', 'cheburcheck_servers_label',
+    'cheburcheck_servers_hint', 'cheburcheck_run_all', 'cheburcheck_none_enabled',
+    'cheburcheck_running_all', 'cheburcheck_banned_count',
+    'cheburcheck_just_now', 'cheburcheck_min_ago', 'cheburcheck_hours_ago',
+    'cheburcheck_days_ago', 'cheburcheck_stale', 'cheburcheck_master_off',
+    'cheburcheck_still_running',
+    'cheburcheck_button', 'cheburcheck_quiet_enable', 'cheburcheck_quiet_hint',
+    'cheburcheck_quiet_from', 'cheburcheck_quiet_to',
 }
 
 
@@ -199,7 +245,11 @@ class TestC6Translations(unittest.TestCase):
         for locale in LOCALES[1:]:
             self.assertEqual(sets[locale], base, locale)
         self.assertTrue(PANEL_ACCESS_KEYS <= base, 'panel access translations missing')
-        previous = '\n'.join(sorted(base - PANEL_ACCESS_KEYS - SECURITY_SETUP_KEYS))
+        # Panels added after the snapshot must declare their keys here, the way
+        # PANEL_ACCESS_KEYS does. The keys already inside the frozen hash (e.g.
+        # the ipv6 set) must NOT be subtracted again.
+        previous = '\n'.join(sorted(base - PANEL_ACCESS_KEYS - SECURITY_SETUP_KEYS
+                                    - CHEBURCHECK_KEYS))
         self.assertEqual(hashlib.sha256(previous.encode('utf-8')).hexdigest(),
                          PRE_PANEL_ACCESS_KEYS_SHA256,
                          'Existing catalogue changed outside the declared additions')

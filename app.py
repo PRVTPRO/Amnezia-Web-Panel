@@ -41,7 +41,7 @@ from pydantic import BaseModel, Field, StrictBool, constr, conint
 from typing import Optional, List
 import uvicorn
 import httpx
-
+import cheburcheck
 try:
     from multicolorcaptcha import CaptchaGenerator
 except ImportError:
@@ -2600,6 +2600,17 @@ def static_version():
     return str(int(newest))
 
 
+def cheburcheck_enabled(data=None):
+    """Master switch for the Cheburcheck feature.
+
+    Off by default: nothing (badges, header button, popup, background checks)
+    is rendered or started until an administrator turns it on.
+    """
+    if data is None:
+        data = load_data()
+    return bool((data.get('settings') or {}).get('cheburcheck', {}).get('enabled'))
+
+
 def tpl(request, template, **kwargs):
     data = load_data()
     lang = request.cookies.get('lang', 'en')
@@ -2625,7 +2636,8 @@ def tpl(request, template, **kwargs):
             k: _t(k, lang) for k in ('login', 'logging_in', 'login_error',
                                      'setup_submit', 'setup_creating', 'setup_error')
         }),
-        'all_translations_json': json.dumps(TRANSLATIONS)
+        'all_translations_json': json.dumps(TRANSLATIONS),
+        'cheburcheck_enabled': cheburcheck_enabled(data),
     }
     ctx.update(kwargs)
     return templates.TemplateResponse(template, ctx)
@@ -3285,6 +3297,14 @@ async def startup():
 
     if changed:
         save_data(data)
+    # Cheburcheck (block checks from Russia) settings.
+    # Only a real, name-keyed block is migrated here; missing keys are defaulted
+    # on read instead of written at startup, so a fresh install stays untouched
+    # until an administrator actually saves the settings.
+    if _cheburcheck_migrate_settings(data):
+        changed = True
+        logger.info('Cheburcheck: per-server flags moved from names to uids')
+
     if migrate_recovery_snapshots(DATA_FILE):
         logger.info('Encrypted legacy recovery snapshots')
 
@@ -3296,8 +3316,23 @@ async def startup():
         logger.warning("Could not mark stale IPv6 operations", exc_info=True)
 
     # Start periodic background tasks
+    try:
+        _loaded = _cheburcheck_load_cache()
+        # Drop keys that no longer match a server uid: records used to be keyed
+        # by name, and orphans would otherwise accumulate forever.
+        _uids = {s.get('uid') for s in data.get('servers', []) if s.get('uid')}
+        _clean = {k: v for k, v in _loaded.items() if k in _uids}
+        if len(_clean) != len(_loaded):
+            logger.info('Cheburcheck: dropped %d orphaned cache records' %
+                        (len(_loaded) - len(_clean)))
+        CHEBURCHECK_CACHE.update(_clean)
+        if len(_clean) != len(_loaded):
+            _cheburcheck_persist()
+    except Exception:
+        pass
     asyncio.create_task(periodic_background_tasks())
     asyncio.create_task(exit_failover_background_loop())
+    asyncio.create_task(cheburcheck_background_loop())
 
     # Re-apply public-port forwards on the fleet: hand-made iptables rules do
     # not survive reboots on their own, and only some hosts persist them.
@@ -3512,6 +3547,163 @@ async def sync_user_traffic_and_state():
             save_data(current)
         if pending:
             await asyncio.gather(*(perform_toggle_user({}, uid, False) for uid in pending))
+
+
+CHEBURCHECK_CACHE = {}
+CHEBURCHECK_CACHE_LOCK = asyncio.Lock()
+_CHEBURCHECK_TASK = None
+# server uid -> asyncio.Task for one-shot runs started from the UI
+_CHEBURCHECK_RUNNING = {}
+
+
+def _cheburcheck_enabled_servers(cfg=None, require_master=True):
+    """Servers whose cheburcheck checkbox is on.
+
+    Keyed by server uid: renaming a server must not lose its setting.
+    Returns a list of (uid, name, host) tuples.
+    """
+    data = load_data()
+    if cfg is None:
+        cfg = (data.get('settings') or {}).get('cheburcheck') or {}
+    if require_master and not cfg.get('enabled'):
+        return []
+    flags = cfg.get('servers') or {}
+    out = []
+    for srv in data.get('servers', []):
+        uid = srv.get('uid')
+        if uid is None:
+            continue
+        if flags.get(uid) or flags.get(srv.get('name')):
+            out.append((uid, srv.get('name'), srv.get('host')))
+    return out
+
+
+async def _cheburcheck_wait_out_quiet_hours():
+    """Sleep while the quiet window is open.
+
+    Returns True when the loop should restart (settings changed or the window
+    is still open after one sleep chunk) and False when checks may run.
+    """
+    for _ in range(6):                      # 6 x 5 min = one chunk
+        cfg = (load_data().get('settings') or {}).get('cheburcheck') or {}
+        if not cfg.get('enabled'):
+            return True
+        if not cheburcheck.in_quiet_hours(cfg):
+            return False
+        await asyncio.sleep(300)
+    return True
+
+
+async def cheburcheck_background_loop():
+    """Periodically check servers enabled in settings.cheburcheck from Russia."""
+    await asyncio.sleep(120)
+    while True:
+        try:
+            data = load_data()
+            cfg = (data.get('settings') or {}).get('cheburcheck') or {}
+            if not cfg.get('enabled'):
+                await asyncio.sleep(300)
+                continue
+            interval = max(1, int(cfg.get('interval_hours') or 1)) * 3600
+            if await _cheburcheck_wait_out_quiet_hours():
+                continue        # the window just changed; re-read settings
+            by_uid = {s.get('uid'): s for s in data.get('servers', [])}
+            targets = [by_uid[uid] for uid, name, host in _cheburcheck_enabled_servers(cfg)
+                       if uid in by_uid]
+            for srv in targets:
+                uid = srv.get('uid')
+                if uid in _CHEBURCHECK_RUNNING:
+                    continue
+                try:
+                    await _run_cheburcheck_one(srv)
+                except Exception as e:
+                    logger.error(f"Cheburcheck run failed for {srv.get('name')}: {e}")
+                await asyncio.sleep(13)
+            await asyncio.sleep(interval)
+        except Exception as e:
+            logger.error(f"cheburcheck_background_loop error: {e}")
+            await asyncio.sleep(300)
+
+
+async def _run_cheburcheck_one(srv):
+    """Check one server and always store a record, even when the check fails.
+
+    Without this a transient 429 leaves yesterday's verdict on screen and the
+    UI cannot tell "clean" from "check broken".
+    """
+    host = srv.get('host')
+    if not host:
+        return
+    uid = srv.get('uid')
+    task = asyncio.current_task()
+    if uid is not None:
+        _CHEBURCHECK_RUNNING[uid] = task
+    try:
+        error = None
+        static = None
+        try:
+            static = await cheburcheck.fetch_check(host)
+        except Exception as e:
+            error = f"check failed: {e}"
+        probe = None
+        if static and static.get('id'):
+            try:
+                probe = await cheburcheck.fetch_probe(static['id'])
+            except Exception as e:
+                error = f"probe failed: {e}"
+        summary = cheburcheck.build_summary(host, static, probe, error=error)
+        async with CHEBURCHECK_CACHE_LOCK:
+            CHEBURCHECK_CACHE[uid] = summary
+        try:
+            _cheburcheck_persist()
+        except Exception as e:
+            logger.warning(f"Cheburcheck persist failed: {e}")
+    finally:
+        if uid is not None and _CHEBURCHECK_RUNNING.get(uid) is task:
+            _CHEBURCHECK_RUNNING.pop(uid, None)
+
+
+def _cheburcheck_migrate_settings(data):
+    """Move settings.cheburcheck.servers from server names to uids."""
+    cfg = (data.get('settings') or {}).get('cheburcheck')
+    if not cfg:
+        return False
+    flags = cfg.get('servers') or {}
+    if not flags:
+        return False
+    by_name = {s.get('name'): s for s in data.get('servers', [])}
+    if all(k in [s.get('uid') for s in data.get('servers', [])] for k in flags):
+        return False            # already uid-keyed
+    changed = False
+    new_flags = {}
+    for key, value in flags.items():
+        srv = by_name.get(key)
+        if srv is not None:
+            new_flags[srv.get('uid')] = bool(value)
+            changed = True
+        # unknown names are dropped: the server is gone
+    cfg['servers'] = new_flags
+    return changed
+
+
+def _cheburcheck_persist():
+    import json as _j, os as _o
+    path = os.path.join(os.path.dirname(DATA_FILE), 'state', 'cheburcheck.json')
+    _o.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as f:
+        _j.dump(CHEBURCHECK_CACHE, f, ensure_ascii=False, indent=2)
+
+
+def _cheburcheck_load_cache():
+    import json as _j, os as _o
+    path = os.path.join(os.path.dirname(DATA_FILE), 'state', 'cheburcheck.json')
+    if os.path.exists(path):
+        try:
+            with open(path, encoding='utf-8') as f:
+                return _j.load(f)
+        except Exception:
+            return {}
+    return {}
 
 
 async def periodic_background_tasks():
@@ -5862,6 +6054,181 @@ async def api_rkn_scan_flags(request: Request):
     results = await asyncio.gather(
         *[collect(i, s) for i, s in enumerate(data['servers'])])
     return {str(i): s for i, s in results if s}
+
+
+# --- Cheburcheck (block check from Russia) ----------------------------------
+
+def _cheburcheck_server_index(server_id, data):
+    servers = data.get('servers', [])
+    if 0 <= server_id < len(servers):
+        return server_id
+    for i, s in enumerate(servers):
+        if str(s.get('uid')) == str(server_id):
+            return i
+    return None
+
+
+@app.post('/api/servers/cheburcheck/run_all', tags=["Servers"])
+async def api_cheburcheck_run_all(request: Request):
+    global _CHEBURCHECK_TASK
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    data = load_data()
+    cfg = (data.get('settings') or {}).get('cheburcheck') or {}
+    if not cfg.get('enabled'):
+        return {'ok': True, 'started': 0, 'reason': 'disabled'}
+    if _CHEBURCHECK_TASK is not None and not _CHEBURCHECK_TASK.done():
+        return {'ok': True, 'already_running': True}
+    by_uid = {s.get('uid'): s for s in data.get('servers', [])}
+    targets = [by_uid[uid] for uid, name, host in _cheburcheck_enabled_servers(cfg)
+               if uid in by_uid]
+    if not targets:
+        return {'ok': True, 'started': 0, 'reason': 'no_servers'}
+
+    async def runner():
+        for srv in targets:
+            try:
+                await _run_cheburcheck_one(srv)
+            except Exception as e:
+                logger.error(f"Cheburcheck run_all failed for {srv.get('name')}: {e}")
+            await asyncio.sleep(13)
+
+    _CHEBURCHECK_TASK = asyncio.create_task(runner())
+    return {'ok': True, 'started': len(targets)}
+
+
+@app.get('/api/servers/cheburcheck_flags', tags=["Servers"])
+async def api_cheburcheck_flags(request: Request):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    data = load_data()
+    cfg = (data.get('settings') or {}).get('cheburcheck') or {}
+    enabled = bool(cfg.get('enabled'))
+    async with CHEBURCHECK_CACHE_LOCK:
+        cache = dict(CHEBURCHECK_CACHE)
+    out = {}
+    for i, s in enumerate(data.get('servers', [])):
+        c = cache.get(s.get('uid'))
+        on = bool((cfg.get('servers') or {}).get(s.get('uid')))
+        if c is None and not on:
+            continue          # nothing to show, checkbox off
+        flag = dict(c) if c is not None else {}
+        flag['enabled'] = on
+        out[str(i)] = flag
+    return {'enabled': enabled,
+            'running': bool(_CHEBURCHECK_TASK is not None and not _CHEBURCHECK_TASK.done()),
+            'flags': out}
+
+
+@app.get('/api/servers/{server_id}/cheburcheck', tags=["Servers"])
+async def api_cheburcheck_get(request: Request, server_id: int):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    data = load_data()
+    idx = _cheburcheck_server_index(server_id, data)
+    if idx is None:
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    srv = data['servers'][idx]
+    uid = srv.get('uid')
+    async with CHEBURCHECK_CACHE_LOCK:
+        cached = CHEBURCHECK_CACHE.get(uid)
+    cfg = (data.get('settings') or {}).get('cheburcheck') or {}
+    return {
+        'enabled_for_server': bool((cfg.get('servers') or {}).get(uid)),
+        'global_enabled': bool(cfg.get('enabled')),
+        'interval_hours': cfg.get('interval_hours', 1),
+        'running': uid in _CHEBURCHECK_RUNNING,
+        'data': cached,
+    }
+
+
+@app.post('/api/servers/{server_id}/cheburcheck/run', tags=["Servers"])
+async def api_cheburcheck_run(request: Request, server_id: int):
+    """Start a one-shot check in the background.
+
+    A full check takes 15-60s (static + 40 probes). Holding the HTTP request
+    for that long lets a proxy or the browser abort it, which looks like
+    "nothing happened". The caller polls the GET endpoint instead.
+    """
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    data = load_data()
+    idx = _cheburcheck_server_index(server_id, data)
+    if idx is None:
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    srv = data['servers'][idx]
+    uid = srv.get('uid')
+    if uid in _CHEBURCHECK_RUNNING:
+        return {'ok': True, 'already_running': True}
+    cfg = (data.get('settings') or {}).get('cheburcheck') or {}
+    if not cfg.get('enabled'):
+        return {'ok': True, 'started': 0, 'reason': 'disabled'}
+    _CHEBURCHECK_RUNNING[uid] = asyncio.create_task(_run_cheburcheck_one(srv))
+    return {'ok': True, 'started': 1}
+
+
+@app.get('/api/settings/cheburcheck', tags=["Settings"])
+async def api_cheburcheck_settings_get(request: Request):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    data = load_data()
+    cfg = (data.get('settings') or {}).get('cheburcheck') or {}
+    srv_map = dict(cfg.get('servers') or {})
+    for s in data.get('servers', []):
+        if s.get('uid') is not None:
+            srv_map.setdefault(s.get('uid'), False)
+    return {
+        'enabled': bool(cfg.get('enabled')),
+        'interval_hours': int(cfg.get('interval_hours') or 1),
+        'quiet_enabled': bool(cfg.get('quiet_enabled')),
+        'quiet_start': cfg.get('quiet_start', 0),
+        'quiet_end': cfg.get('quiet_end', 0),
+        'servers': srv_map,
+    }
+
+
+class CheburcheckSettingsRequest(BaseModel):
+    enabled: Optional[bool] = None
+    interval_hours: Optional[int] = None
+    quiet_enabled: Optional[bool] = None
+    quiet_start: Optional[int] = None
+    quiet_end: Optional[int] = None
+    servers: Optional[dict] = None
+
+
+@app.post('/api/settings/cheburcheck', tags=["Settings"])
+async def api_cheburcheck_settings_set(request: Request, req: CheburcheckSettingsRequest):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    data = load_data()
+    cfg = data.setdefault('settings', {}).setdefault('cheburcheck', {})
+    if req.enabled is not None:
+        cfg['enabled'] = bool(req.enabled)
+    if req.interval_hours is not None:
+        cfg['interval_hours'] = max(1, min(24, int(req.interval_hours)))
+    if req.quiet_enabled is not None:
+        cfg['quiet_enabled'] = bool(req.quiet_enabled)
+    if req.quiet_start is not None:
+        cfg['quiet_start'] = max(0, min(23, int(req.quiet_start)))
+    if req.quiet_end is not None:
+        cfg['quiet_end'] = max(0, min(23, int(req.quiet_end)))
+    # An empty window (start == end) is not "always quiet"; drop the flag
+    # instead of blocking every check.
+    if cfg.get('quiet_enabled') and cfg.get('quiet_start') == cfg.get('quiet_end'):
+        cfg['quiet_enabled'] = False
+    known = {s.get('uid') for s in data.get('servers', []) if s.get('uid')}
+    if req.servers is not None:
+        cur = cfg.setdefault('servers', {})
+        for k, v in req.servers.items():
+            # Accept only uids of servers that exist: a stale name from an old
+            # tab must not resurrect a flag for a server that was renamed.
+            if k in known:
+                cur[k] = bool(v)
+    # keep the list in sync with the current fleet (new servers unchecked)
+    for uid in known:
+        cfg['servers'].setdefault(uid, False)
+    save_data(data)
+    return {'ok': True}
 
 
 # --- one-shot boot-restore migration ----------------------------------------
