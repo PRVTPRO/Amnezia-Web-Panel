@@ -187,7 +187,7 @@ class TestUserSlashCommands(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Server 1', keyboard_text)
 
     async def test_connect_command_stops_immediately_when_connection_limit_is_reached(self):
-        msg = _text_message(chat_id=111, from_id=111, text='/connect')
+        msg = _text_message(chat_id=111, from_id=111, text='/connect', language_code='ru')
         service = MagicMock()
         service.get_self_service_options = AsyncMock(return_value={
             'remaining_connections': 0,
@@ -305,7 +305,7 @@ class TestUserCreateCallback(unittest.IsolatedAsyncioTestCase):
         self.assertIn('callback_data', keyboard_text)
 
     async def test_user_create_stops_immediately_when_connection_limit_is_reached(self):
-        msg = _callback_update(chat_id=111, from_id=111, data_str='user_create')
+        msg = _callback_update(chat_id=111, from_id=111, data_str='user_create', language_code='ru')
         service = MagicMock()
         service.get_self_service_options = AsyncMock(return_value={
             'remaining_connections': 0,
