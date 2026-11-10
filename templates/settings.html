@@ -1720,22 +1720,25 @@
 </script>
 <script src="/static/js/settings-nav.js?v={{ static_v }}" defer></script>
 <script>
-async function saveCheburcheckSettings() {
-    const enabled = document.getElementById('cb_enabled').checked;
-    document.getElementById('cb_body').style.display = enabled ? '' : 'none';
-    const interval = parseInt(document.getElementById('cb_interval').value || '1', 10);
+function collectCheburcheckSettings() {
     const servers = {};
     document.querySelectorAll('.cb-server').forEach(cb => {
         if (cb.dataset.uid) servers[cb.dataset.uid] = cb.checked;
     });
+    return {
+        enabled: document.getElementById('cb_enabled').checked,
+        interval_hours: parseInt(document.getElementById('cb_interval').value || '1', 10),
+        servers,
+        quiet_enabled: document.getElementById('cb_quiet_enabled').checked,
+        quiet_start: parseInt(document.getElementById('cb_quiet_start').value || '0', 10),
+        quiet_end: parseInt(document.getElementById('cb_quiet_end').value || '0', 10),
+    };
+}
+
+async function saveCheburcheckSettings() {
     const st = document.getElementById('cb_status');
     try {
-        await apiCall('/api/settings/cheburcheck', 'POST', {
-            enabled, interval_hours: interval, servers,
-            quiet_enabled: document.getElementById('cb_quiet_enabled').checked,
-            quiet_start: parseInt(document.getElementById('cb_quiet_start').value || '0', 10),
-            quiet_end: parseInt(document.getElementById('cb_quiet_end').value || '0', 10),
-        });
+        await apiCall('/api/settings/cheburcheck', 'POST', collectCheburcheckSettings());
         if (st) st.textContent = '✓ ' + (window._('saved') || 'saved');
     } catch (e) {
         if (st) st.textContent = '✗ ' + (e.message || e);
@@ -1743,8 +1746,18 @@ async function saveCheburcheckSettings() {
 }
 
 // The master switch gates the whole block: no checks or markup without it.
-document.getElementById('cb_enabled').addEventListener('change', (e) => {
+// It persists on its own - hiding the block must look disabled AND stay disabled
+// after a reload, otherwise F5 brings the checkbox back.
+document.getElementById('cb_enabled').addEventListener('change', async (e) => {
     document.getElementById('cb_body').style.display = e.target.checked ? '' : 'none';
+    const st = document.getElementById('cb_status');
+    if (st) st.textContent = '…';
+    try {
+        await apiCall('/api/settings/cheburcheck', 'POST', collectCheburcheckSettings());
+        if (st) st.textContent = '✓ ' + (window._('saved') || 'saved');
+    } catch (err) {
+        if (st) st.textContent = '✗ ' + (err.message || err);
+    }
 });
 
 // Quiet-hour fields only make sense once the window is enabled.
