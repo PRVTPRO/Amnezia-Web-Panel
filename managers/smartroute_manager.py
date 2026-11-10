@@ -19,6 +19,7 @@ FORWARD position 1 and keep filtering both paths regardless.
 import ipaddress
 import json
 import re
+import shlex
 
 # Host-side layout (all panel-managed, no docker on the host side)
 SMARTR_DIR = '/etc/smartroute'
@@ -667,8 +668,9 @@ class SmartRouteManager:
         panel state. That is safe and self-heals on the next successful
         enable or disable.
         """
-        _, err, code = self.ssh.run_sudo_command(
-            f'mkdir -p {SMARTR_INSTANCES} && echo {SMARTR_TABLE} > {SMARTR_INSTANCES}/{container}')
+        marker = shlex.quote(f'{SMARTR_INSTANCES}/{container}')
+        command = f'mkdir -p {SMARTR_INSTANCES} && echo {SMARTR_TABLE} > {marker}'
+        _, err, code = self.ssh.run_sudo_command(f'bash -c {shlex.quote(command)}')
         if code != 0:
             raise SmartRouteError((err or 'failed to write the instance marker').strip())
         self._push_merged_list(container)
