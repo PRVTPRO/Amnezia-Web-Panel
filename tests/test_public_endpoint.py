@@ -238,7 +238,8 @@ class PublicEndpointApiTests(unittest.TestCase):
     def working_ssh(self):
         """A mock SSH whose sudo commands succeed (returns a 3-tuple)."""
         ssh = mock.Mock()
-        ssh.run_sudo_command.return_value = ('', '', 0)
+        ssh.run_sudo_command.side_effect = lambda command, **kwargs: (
+            ('{"warning":""}', '', 0) if command.startswith('python3 -c ') else ('', '', 0))
         return ssh
 
     def test_install_progress_reports_stages(self):
@@ -280,8 +281,10 @@ class PublicEndpointApiTests(unittest.TestCase):
 
         # empty fields mean "back to the server address and the listen port":
         # the keys go away rather than lingering as empty strings
-        res = self.set_endpoint(client, protocol='awg2', public_host='', public_port='')
+        with mock.patch.object(panel, 'get_ssh', return_value=self.working_ssh()):
+            res = self.set_endpoint(client, protocol='awg2', public_host='', public_port='')
         self.assertEqual(res.status_code, 200, res.text)
+        self.assertEqual(res.json()['warning'], '')
         self.assertNotIn('public_host', self.stored('awg2'))
         self.assertNotIn('public_port', self.stored('awg2'))
         self.assertEqual(self.stored('awg2')['port'], '55424', 'listen port must survive')
