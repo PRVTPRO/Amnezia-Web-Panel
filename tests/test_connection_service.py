@@ -187,7 +187,7 @@ class ConnectionServiceTest(unittest.IsolatedAsyncioTestCase):
             await service.create_user_connection('user-1', 0, 'awg', 'blocked', 'web')
 
         self.assertTrue(ctx.exception.forbidden)
-        self.assertEqual(manager.added, [])
+        self.assertEqual(manager.calls, [])
 
     async def test_create_rejects_when_user_reaches_max_connections(self):
         data = base_data()
