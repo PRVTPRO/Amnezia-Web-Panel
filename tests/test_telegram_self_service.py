@@ -418,7 +418,8 @@ class TestUserCreateCallback(unittest.IsolatedAsyncioTestCase):
         await _dispatch_callback(self.api, msg, self.load_data)
         text = self.api.edit_message.call_args[0][2]
         self.assertIn('Создать подключение', text)
-        self.assertIn('Выберите сервер', text)
+        self.assertIn('Выберите протокол', text)
+        self.assertNotIn('Выберите сервер', text)
         self.assertNotIn('Create connection', text)
         self.assertNotIn('Choose a server', text)
 
