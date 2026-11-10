@@ -130,7 +130,7 @@
   "server_self_service_enabled_desc": "用户可以在此服务器上创建连接",
   "create_connection": "创建连接",
   "delete_connection": "删除",
-  "connections_counter": "连接数：{0} / {1}",
+  "connections_counter": "🔗 已使用 {0} / {1} 个连接",
   "device_name": "设备名称",
   "self_service_disabled": "自助服务未启用。",
   "config_tab": "📄 配置文件",
@@ -1234,5 +1234,7 @@
   "setup_password_short": "密码长度必须为 12–256 个字符",
   "setup_password_mismatch": "两次输入的密码不一致",
   "setup_already_completed": "初始设置已完成，请直接登录。",
-  "legacy_backup_disabled": "旧版 JSON 导出已禁用，因为它可能泄露可重复使用的凭据。请使用仅限管理员的完整归档并妥善保密；为便于迁移，归档包含凭据加密密钥。"
+  "legacy_backup_disabled": "旧版 JSON 导出已禁用，因为它可能泄露可重复使用的凭据。请使用仅限管理员的完整归档并妥善保密；为便于迁移，归档包含凭据加密密钥。",
+  "max_connections_per_user_label": "自助服务最大连接数",
+  "max_connections_per_user_hint": "设为 0 时使用全局自助服务限制。允许范围：0–100。"
 }
