@@ -115,6 +115,12 @@ class TestTelegramAutomaticRegistration(unittest.IsolatedAsyncioTestCase):
         await tg_bot._dispatch(self.api, msg, lambda: self.data,
                                lambda *args: 'vpn://x', save)
 
+        self.assertFalse(any(u.get('telegramId') == '333' for u in self.data['users']))
+        callback = _callback_update(chat_id=333, from_id=333, data_str='lang:ru')
+        callback['callback_query']['from'].update({'first_name': 'Ivan', 'last_name': 'Petrov'})
+        await tg_bot._dispatch(self.api, callback, lambda: self.data,
+                               lambda *args: 'vpn://x', save)
+
         created = next(u for u in self.data['users'] if u.get('telegramId') == '333')
         self.assertEqual(created['username'], 'Ivan Petrov')
         self.assertEqual(created['role'], 'user')
@@ -124,8 +130,12 @@ class TestTelegramAutomaticRegistration(unittest.IsolatedAsyncioTestCase):
         self.assertIn('manual', created['disable_reasons'])
         self.assertTrue(created['password_hash'])
         self.assertNotEqual(created['password_hash'], '')
-        self.assertEqual(self.api.send_message.call_args.kwargs['reply_markup'],
-                         tg_bot._language_keyboard())
+        sent_texts = [call.args[1] for call in self.api.send_message.call_args_list
+                      if len(call.args) > 1]
+        credentials = next(text for text in sent_texts if 'Ваш аккаунт панели создан.' in text)
+        self.assertIn('Логин:', credentials)
+        self.assertIn('Пароль:', credentials)
+        self.assertIn('обратитесь к администратору', credentials)
 
     async def test_first_start_does_not_create_user_by_default(self):
         msg = _text_message(chat_id=333, from_id=333, text='/start')
@@ -143,6 +153,11 @@ class TestTelegramAutomaticRegistration(unittest.IsolatedAsyncioTestCase):
         save = lambda data: self.data.update(copy.deepcopy(data))
 
         await tg_bot._dispatch(self.api, msg, lambda: self.data,
+                               lambda *args: 'vpn://x', save)
+
+        callback = _callback_update(chat_id=444, from_id=444, data_str='lang:en')
+        callback['callback_query']['from'].update({'first_name': 'Jane', 'last_name': 'Doe'})
+        await tg_bot._dispatch(self.api, callback, lambda: self.data,
                                lambda *args: 'vpn://x', save)
 
         created = next(u for u in self.data['users'] if u.get('telegramId') == '444')
