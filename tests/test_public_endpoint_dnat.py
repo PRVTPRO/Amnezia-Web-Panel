@@ -360,6 +360,11 @@ class NamespaceDnatTests(unittest.TestCase):
             self.assertNotEqual(os.stat(f'/proc/{p.pid}/ns/net').st_ino, os.stat('/proc/self/ns/net').st_ino)
             checked(['ip', 'link', 'add', label, 'type', 'veth', 'peer', 'name', label + 'p'])
             checked(['ip', 'link', 'set', label + 'p', 'netns', str(p.pid)])
+            # Fresh veth link-local addresses must be usable before the probe;
+            # do not race the kernel's one-second DAD timer on fast CI hosts.
+            checked(['sysctl', '-q', '-w', 'net.ipv6.conf.' + label + '.accept_dad=0'])
+            checked(inside(p.pid, ['sysctl', '-q', '-w',
+                                   'net.ipv6.conf.' + label + 'p.accept_dad=0']))
             checked(['ip', 'addr', 'add', subnet + '.1/24', 'dev', label])
             checked(['ip', 'link', 'set', label, 'up'])
             checked(inside(p.pid, ['ip', 'link', 'set', 'lo', 'up']))
