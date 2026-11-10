@@ -2008,6 +2008,10 @@ async def _handle_pending_input(api: TelegramAPI, msg: dict, load_data_fn: Calla
             _pending_inputs.pop(key, None)
             await api.send_message(chat_id, f"❌ {_tt(lang, 'access_denied')}")
             return True
+        if not panel_user.get("enabled", True):
+            _pending_inputs.pop(key, None)
+            await api.send_message(chat_id, f"❌ {_tt(lang, 'account_disabled')}")
+            return True
         name = text[:80].strip()
         if not name:
             await api.send_message(chat_id, _tt(lang, "name_empty"))
@@ -2208,6 +2212,10 @@ async def _user_create_server(api: TelegramAPI, chat_id: int, message_id: int, c
     if not panel_user:
         await api.answer_callback(callback_id, text=_tt(lang, "access_denied"))
         await api.edit_message(chat_id, message_id, f"❌ {_tt(lang, 'access_denied')}")
+        return
+    if not panel_user.get("enabled", True):
+        await api.answer_callback(callback_id, text=_tt(lang, "account_disabled"))
+        await api.edit_message(chat_id, message_id, f"❌ {_tt(lang, 'account_disabled')}")
         return
 
     await api.answer_callback(callback_id)
