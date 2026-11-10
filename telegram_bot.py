@@ -6,13 +6,16 @@ Runs as a background asyncio task alongside the FastAPI app.
 from peer_accounting import serialize_peer_lifecycle
 from protocol_names import server_protocol_names
 import asyncio
+import hashlib
 import html
 import logging
 import os
 import shlex
 import sys
+import secrets
 import time
 import uuid
+from datetime import datetime
 from typing import Optional, Callable
 
 import httpx
@@ -974,6 +977,79 @@ def _resolve_public_endpoint(server: dict, protocol: str):
     return host, public_port
 
 
+def _auto_create_telegram_user(data: dict, from_user: dict, save_data_fn: Optional[Callable]):
+    """Create a panel account for a first-time Telegram user when enabled."""
+    telegram_settings = (data.get("settings") or {}).get("telegram") or {}
+    if telegram_settings.get("auto_create_users") is not True or not save_data_fn:
+        return None
+
+    tg_id = str((from_user or {}).get("id") or "").strip()
+    if not tg_id:
+        return None
+    users = data.setdefault("users", [])
+    existing = next((u for u in users
+                     if str(u.get("telegramId") or "").strip() == tg_id), None)
+    if existing:
+        return existing
+
+    parts = [
+        str((from_user or {}).get("first_name") or "").strip(),
+        str((from_user or {}).get("last_name") or "").strip(),
+    ]
+    display_name = " ".join(part for part in parts if part).strip()
+    if not display_name:
+        display_name = str((from_user or {}).get("username") or "").strip()
+    if not display_name:
+        display_name = f"Telegram {tg_id}"
+
+    username = display_name[:80]
+    if any(str(user.get("username") or "").casefold() == username.casefold()
+           for user in users):
+        suffix = f" ({tg_id})"
+        username = username[:max(1, 80 - len(suffix))] + suffix
+
+    now = datetime.now()
+    random_password = secrets.token_urlsafe(48)
+    salt = secrets.token_hex(16)
+    password_digest = hashlib.pbkdf2_hmac(
+        "sha256", random_password.encode(), salt.encode(), 100000
+    )
+    user = {
+        "id": str(uuid.uuid4()),
+        "username": username,
+        "password_hash": f"{salt}${password_digest.hex()}",
+        "role": "user",
+        "telegramId": tg_id,
+        "email": None,
+        "description": "Created automatically from Telegram",
+        "traffic_limit": 0,
+        "max_connections": 0,
+        "traffic_reset_strategy": "never",
+        "traffic_used": 0,
+        "traffic_total": 0,
+        "last_reset_at": now.isoformat(),
+        "expiration_date": None,
+        "enabled": True,
+        "disable_reasons": [],
+        "access_revision": 0,
+        "access_sync_pending": False,
+        "created_at": now.isoformat(),
+        "remnawave_uuid": None,
+        "share_enabled": False,
+        "share_token": secrets.token_urlsafe(16),
+        "share_password_hash": None,
+        "share_auth_revision": 0,
+    }
+    from user_state import reconcile_user_state
+    reconcile_user_state(
+        user, now, manual=not bool(telegram_settings.get("create_users_disabled", False))
+    )
+    users.append(user)
+    save_data_fn(data)
+    logger.info("Created panel user from Telegram account %s", tg_id)
+    return user
+
+
 def _find_user(load_data_fn: Callable, tg_id: str, username: Optional[str] = None):
     data = load_data_fn()
     tg_id_clean = str(tg_id).lstrip("@")
@@ -1337,6 +1413,9 @@ async def _handle_start(api: TelegramAPI, msg: dict, load_data_fn: Callable,
     tg_username = msg["from"].get("username")
     first_name = msg["from"].get("first_name", "")
     data = load_data_fn()
+    panel_user = _find_user(load_data_fn, tg_id, tg_username)
+    if not panel_user and _is_private_chat(msg.get("chat")):
+        panel_user = _auto_create_telegram_user(data, msg.get("from") or {}, save_data_fn)
     lang = _telegram_language(data, tg_id)
     if not lang:
         await api.send_message(chat_id, _tt("en", "language_prompt"),
