@@ -596,7 +596,11 @@ def load_data():
     settings.setdefault('captcha', {'enabled': False})
     settings.setdefault('exit_nodes', {'default_exit_uid': ''})
     settings.setdefault('ssh_jump', {'jump_host_uid': ''})
-    settings.setdefault('telegram', {'token': '', 'enabled': False})
+    telegram_settings = settings.setdefault('telegram', {'token': '', 'enabled': False})
+    if not isinstance(telegram_settings, dict):
+        telegram_settings = settings['telegram'] = {'token': '', 'enabled': False}
+    telegram_settings.setdefault('auto_create_users', False)
+    telegram_settings.setdefault('create_users_disabled', False)
     mail = settings.setdefault('mail', dict(DEFAULT_MAIL_SETTINGS))
     for key, value in DEFAULT_MAIL_SETTINGS.items():
         mail.setdefault(key, value)
@@ -3030,6 +3034,8 @@ class DuckDNSApplyRequest(BaseModel):
 class TelegramSettings(BaseModel):
     token: str = ''
     enabled: bool = False
+    auto_create_users: bool = False
+    create_users_disabled: bool = False
 
 
 class MailSettings(BaseModel):
