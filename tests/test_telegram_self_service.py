@@ -186,6 +186,21 @@ class TestUserSlashCommands(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Choose a server', text)
         self.assertIn('Server 1', keyboard_text)
 
+    async def test_connect_command_stops_immediately_when_connection_limit_is_reached(self):
+        msg = _text_message(chat_id=111, from_id=111, text='/connect')
+        service = MagicMock()
+        service.get_self_service_options = AsyncMock(return_value={
+            'remaining_connections': 0,
+        })
+
+        await _dispatch_message_with_service(self.api, msg, self.load_data, service)
+
+        text = self.api.send_message.call_args[0][1]
+        self.assertIn('Достигнут лимит подключений', text)
+        self.assertNotIn('Выберите сервер', text)
+        self.assertNotIn('Choose a server', text)
+        self.assertNotIn('reply_markup', self.api.send_message.call_args.kwargs)
+
     async def test_connect_command_is_rejected_in_group_chat(self):
         msg = _text_message(chat_id=-100, from_id=111, text='/connect', chat_type='group')
 
@@ -288,6 +303,20 @@ class TestUserCreateCallback(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Server 1', keyboard_text)
         # Verify there are callback buttons (resolved refs)
         self.assertIn('callback_data', keyboard_text)
+
+    async def test_user_create_stops_immediately_when_connection_limit_is_reached(self):
+        msg = _callback_update(chat_id=111, from_id=111, data_str='user_create')
+        service = MagicMock()
+        service.get_self_service_options = AsyncMock(return_value={
+            'remaining_connections': 0,
+        })
+
+        await _dispatch_callback_with_service(self.api, msg, self.load_data, service)
+
+        text = self.api.edit_message.call_args[0][2]
+        self.assertIn('Достигнут лимит подключений', text)
+        self.assertNotIn('Выберите сервер', text)
+        self.assertIsNone(self.api.edit_message.call_args.kwargs.get('reply_markup'))
 
     async def test_user_create_panel_uses_russian_when_telegram_language_is_ru(self):
         msg = _callback_update(chat_id=111, from_id=111, data_str='user_create', language_code='ru')
