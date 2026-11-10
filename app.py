@@ -3061,7 +3061,7 @@ class SelfServiceSettings(BaseModel):
     enabled: bool = False
     web_enabled: bool = True
     telegram_enabled: bool = True
-    max_connections_per_user: int = Field(5, ge=1, le=100)
+    max_connections_per_user: int = Field(5, ge=0, le=100)
     rate_limit_count: int = Field(3, ge=1, le=100)
     rate_limit_window_seconds: int = Field(60, ge=1, le=86400)
     allowed_protocols: List[str] = Field(default_factory=lambda: ['awg', 'awg2'])
