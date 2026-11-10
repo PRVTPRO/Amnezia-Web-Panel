@@ -476,282 +476,139 @@ class PortCheckApiTests(PublicEndpointApiTests):
         self.assertIn('host is down', res.json()['error'])
 
 
-DOCKER_V4 = ('-A DOCKER -d 172.17.0.2/32 ! -i docker0 -o docker0 -p udp '
-             '-m udp --dport 55424 -j DNAT --to-destination 172.17.0.2:55424')
-DOCKER_TCP_V4 = ('-A DOCKER -d 172.17.0.3/32 ! -i docker0 -o docker0 -p tcp '
-                 '-m tcp --dport 443 -j DNAT --to-destination 172.17.0.3:443')
-
-
 class PublicPortForwardTests(PublicEndpointApiTests):
-    """A custom public port is published on the box itself: DNAT rules in
-    iptables/ip6tables per address family, removed when the port is cleared
-    or changed. A listen port Docker does not publish falls back to REDIRECT."""
+    """API compatibility with a fail-closed, single-process reconciler."""
 
-    def ssh_recorder(self, docker4='', docker6=''):
-        """Records forward commands separately from Docker discovery."""
-        ssh = mock.Mock()
-        ssh.commands = []
-        ssh.docker_queries = []
-
-        def run(cmd, *a, **k):
-            if cmd.endswith('-S DOCKER'):
-                ssh.docker_queries.append(cmd)
-                if cmd.startswith('iptables '):
-                    return (docker4, '', 0)
-                return (docker6, '', 0)
-            ssh.commands.append(cmd)
-            return ('', '', 0)
-
-        ssh.run_sudo_command.side_effect = run
+    def ssh_recorder(self):
+        from tests.test_public_endpoint_dnat import FakeForwardSSH, container, dnat
+        ssh = FakeForwardSSH()
+        ssh.nf.container = container('amnezia-awg2', p='55424')
+        ssh.nf.docker[4] = dnat(p='55424')
         return ssh
 
-    def test_command_builder_publishes_udp_for_wireguard_family(self):
-        cmds, warning = panel.public_port_forward_commands('awg3', '8443', '55425')
-        self.assertEqual(warning, '')
-        self.assertEqual(len(cmds), 2)
-        for ipt in ('iptables', 'ip6tables'):
-            self.assertTrue(any(c.startswith(f"sh -c '{ipt} -t nat -C PREROUTING -p udp --dport 8443") for c in cmds), cmds)
+    def test_saving_discovers_verifies_and_is_idempotent(self):
+        client = self.client(); ssh = self.ssh_recorder()
+        with mock.patch.object(panel, 'get_ssh', return_value=ssh):
+            for _ in range(2):
+                res = self.set_endpoint(client, protocol='awg2', public_host='203.0.113.9', public_port='8443')
+                self.assertEqual(res.json()['warning'], '')
+        self.assertEqual(len(ssh.nf.prerouting[4]), 1)
+        self.assertEqual(ssh.requests[0]['container'], 'amnezia-awg2')
+        self.assertEqual(ssh.requests[0]['server_uid'], 'srv-uid')
+        self.assertTrue(ssh.disconnected)
 
-    def test_command_builder_uses_tcp_for_xray_and_skips_services(self):
-        tcp, _ = panel.public_port_forward_commands('xray', '8443', '443')
-        self.assertTrue(all('-p tcp' in c for c in tcp))
+    def test_missing_publication_warns_without_redirect_and_keeps_setting(self):
+        client = self.client(); ssh = self.ssh_recorder(); ssh.nf.docker[4] = ''
+        with mock.patch.object(panel, 'get_ssh', return_value=ssh):
+            res = self.set_endpoint(client, protocol='awg2', public_host='203.0.113.9', public_port='8443')
+        self.assertEqual(res.status_code, 200)
+        self.assertIn('publication missing', res.json()['warning'])
+        self.assertEqual(self.stored('awg2')['public_port'], '8443')
+        self.assertFalse(ssh.nf.mutations)
+
+    def test_clearing_port_cleans_owned_rules_only(self):
+        client = self.client(); ssh = self.ssh_recorder()
+        with mock.patch.object(panel, 'get_ssh', return_value=ssh):
+            self.set_endpoint(client, protocol='awg2', public_host='203.0.113.9', public_port='8443')
+            with mock.patch.object(panel.socket, 'getaddrinfo', side_effect=OSError('unknown host')):
+                res = self.set_endpoint(client, protocol='awg2', public_host='unresolved.invalid', public_port='')
+        self.assertEqual(res.json()['warning'], '')
+        self.assertFalse(ssh.nf.prerouting[4])
+
+    def test_repeated_clear_retries_failed_cleanup_after_setting_is_gone(self):
+        client = self.client(); ssh = self.ssh_recorder()
+        with mock.patch.object(panel, 'get_ssh', return_value=ssh):
+            self.set_endpoint(client, protocol='awg2', public_host='203.0.113.9', public_port='8443')
+            ssh.nf.fail = lambda a: '-D' in a
+            res = self.set_endpoint(client, protocol='awg2', public_host='203.0.113.9', public_port='')
+            self.assertTrue(res.json()['warning'])
+            self.assertNotIn('public_port', self.stored('awg2'))
+            self.assertTrue(ssh.nf.prerouting[4])
+            ssh.nf.fail = None
+            res = self.set_endpoint(client, protocol='awg2', public_host='203.0.113.9', public_port='')
+            self.assertEqual(res.json()['warning'], '')
+            self.assertFalse(ssh.nf.prerouting[4])
+
+    def test_unresolved_domain_warns_without_applying_any_rule(self):
+        client = self.client(); ssh = self.ssh_recorder()
+        with mock.patch.object(panel, 'get_ssh', return_value=ssh), mock.patch.object(
+                panel.socket, 'getaddrinfo', side_effect=OSError('unknown host')):
+            res = self.set_endpoint(client, protocol='awg2', public_host='vpn.example.com', public_port='8443')
+        self.assertIn('does not resolve', res.json()['warning'])
+        self.assertFalse(ssh.requests)
+
+    def test_missing_uid_invalid_ports_and_quoting(self):
+        import shlex
+        self.assertIn('UID', panel.public_port_forward_commands('awg3', '8443', '443')[1])
+        for bad in ('0', '65536', '44;id', '８４４３'):
+            self.assertIsNone(panel.public_port_forward_commands('awg3', bad, '443', server_uid='uid')[0])
+            self.assertIsNone(panel.public_port_forward_commands('awg3', '8443', '443', bad, server_uid='uid')[0])
+        cmds, warning = panel.public_port_forward_commands('awg3__2', '8443', '443',
+                public_ip='[2001:db8::9]', server_uid="uid' ; no-shell")
+        self.assertEqual(warning, '')
+        argv = shlex.split(cmds[0])
+        self.assertEqual(argv[:2], ['python3', '-c'])
+        self.assertEqual(len(argv), 4)
+        req = json.loads(argv[3])
+        self.assertEqual(req['container'], 'amnezia-awg3-2')
+        self.assertEqual(req['scopes'], {'4': [], '6': ['2001:db8::9']})
         self.assertIsNone(panel.public_port_forward_commands('dns', '8443', '53')[0])
 
-    def test_same_or_empty_port_means_no_rule_but_clears_the_stale_one(self):
-        self.assertIsNone(panel.public_port_forward_commands('awg3', '', '55425', '')[0])
-        same, _ = panel.public_port_forward_commands('awg3', '55425', '55425', '55425')
-        self.assertIsNone(same)
-        cleared, _ = panel.public_port_forward_commands('awg3', '', '55425', '8443')
-        self.assertEqual(len(cleared), 2)
-        self.assertTrue(all('-D PREROUTING' in c and '--dport 8443' in c for c in cleared), cleared)
-        changed, _ = panel.public_port_forward_commands('awg3', '9443', '55425', '8443')
-        self.assertTrue(any('-D PREROUTING' in c and '--dport 8443' in c for c in changed), changed)
-        self.assertTrue(any('-I PREROUTING 1' in c and '--dport 9443' in c for c in changed), changed)
-
-    def test_rules_are_scoped_to_a_v4_public_ip(self):
-        cmds, warning = panel.public_port_forward_commands(
-            'awg3', '8443', '55425', public_ip='203.0.113.9')
+    def test_single_process_sudo_preserves_root_passwordless_and_password_paths(self):
+        import shlex
+        from managers.ssh_manager import SSHManager
+        commands, warning = panel.public_port_forward_commands(
+            'awg3', '8443', '443', public_ip='203.0.113.9', server_uid='sudo-fixture')
         self.assertEqual(warning, '')
-        self.assertEqual(len(cmds), 1)  # the v6 family is not this host's
-        self.assertIn('iptables -t nat -C PREROUTING -p udp -d 203.0.113.9 --dport 8443', cmds[0])
-        dropped, _ = panel.public_port_forward_commands(
-            'awg3', '', '55425', '8443', public_ip='203.0.113.9')
-        self.assertEqual(len(dropped), 1)
-        self.assertIn('-t nat -S PREROUTING', dropped[0])
-        self.assertIn('--dport 8443 ', dropped[0])
-        self.assertIn('"-d 203.0.113.9"', dropped[0])
+        command = commands[0]
+        self.assertEqual(shlex.split(command)[:2], ['python3', '-c'])
+        for root, password in ((True, None), (False, None), (False, 'synthetic-stdin-only')):
+            with self.subTest(root=root, has_password=bool(password)):
+                ssh = mock.Mock()
+                ssh._is_root = root
+                ssh.password = password
+                ssh.run_command.return_value = ('result', '', 0)
+                self.assertEqual(SSHManager.run_sudo_command(ssh, command), ('result', '', 0))
+                args, kwargs = ssh.run_command.call_args
+                self.assertTrue(args[0].endswith(command))
+                if root:
+                    self.assertEqual(args[0], command)
+                else:
+                    self.assertTrue(args[0].startswith('sudo '))
+                if password and not root:
+                    self.assertNotIn(password, args[0])
+                    self.assertEqual(kwargs['stdin_input'], password + '\n')
 
-    def test_rules_are_scoped_to_a_v6_public_ip(self):
-        cmds, _ = panel.public_port_forward_commands(
-            'awg3', '8443', '55425', public_ip='[2001:db8::9]')
-        self.assertEqual(len(cmds), 1)
-        self.assertTrue(cmds[0].startswith("sh -c 'ip6tables -t nat -C PREROUTING -p udp "
-                                          '-d 2001:db8::9 --dport 8443'), cmds)
+    def test_server_removed_or_endpoint_changed_after_ssh_connect_is_rejected(self):
+        for change in ('remove', 'endpoint'):
+            client = self.client(); ssh = self.ssh_recorder()
+            def connected():
+                with open(panel.DATA_FILE, encoding='utf-8') as f:
+                    data = json.load(f)
+                if change == 'remove':
+                    data['servers'] = []
+                else:
+                    data['servers'][0]['host'] = '198.51.100.99'
+                with open(panel.DATA_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(data, f)
+            ssh.connect = connected
+            with mock.patch.object(panel, 'get_ssh', return_value=ssh):
+                res = self.set_endpoint(client, protocol='awg2', public_host='203.0.113.9', public_port='8443')
+            self.assertIn('identity', res.json()['warning'])
+            self.assertFalse(ssh.requests)
+            # Restore this test's synthetic fixture for the next subcase.
+            with open(panel.DATA_FILE, 'w', encoding='utf-8') as f:
+                json.dump({'servers':[server_with({'awg2':{'installed':True,'port':'55424'}})],
+                           'users':[], 'user_connections':[]}, f)
 
-    def test_a_domain_resolves_into_per_family_scopes(self):
-        def fake_getaddrinfo(host, port):
-            self.assertEqual(host, 'vpn.example.com')
-            return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('203.0.113.9', 0)),
-                    (socket.AF_INET6, socket.SOCK_STREAM, 6, '', ('2001:db8::9', 0, 0, 0))]
-        with mock.patch.object(panel.socket, 'getaddrinfo', side_effect=fake_getaddrinfo):
-            cmds, warning = panel.public_port_forward_commands(
-                'awg3', '8443', '55425', public_ip='vpn.example.com')
-        self.assertEqual(warning, '')
-        self.assertEqual(len(cmds), 2)
-        self.assertTrue(any('-d 203.0.113.9 --dport 8443' in c and "sh -c 'iptables " in c for c in cmds), cmds)
-        self.assertTrue(any('-d 2001:db8::9 --dport 8443' in c and "sh -c 'ip6tables " in c for c in cmds), cmds)
-
-    def test_an_unresolvable_domain_falls_back_unrestricted_with_warning(self):
-        with mock.patch.object(panel.socket, 'getaddrinfo',
-                               side_effect=OSError('Name or service not known')):
-            cmds, warning = panel.public_port_forward_commands(
-                'awg3', '8443', '55425', public_ip='vpn.example.com')
-        self.assertEqual(len(cmds), 2)  # legacy shape: both families, no -d
-        self.assertTrue(all(' -d ' not in c for c in cmds), cmds)
-        self.assertIn('could not restrict the forward rule to the public IP', warning)
-        self.assertIn('vpn.example.com does not resolve', warning)
-
-    def test_builder_adds_dnat_to_the_container_destination(self):
-        cmds, warning = panel.public_port_forward_commands(
-            'awg3', '8443', '55424',
-            container_dests={4: '172.17.0.2:55424'})
-        self.assertEqual(warning, '')
-        self.assertEqual(len(cmds), 2)  # v4 DNAT + v6 REDIRECT fallback
-        v4 = [c for c in cmds if "sh -c 'iptables " in c]
-        self.assertEqual(len(v4), 1)
-        self.assertTrue(v4[0].startswith(
-            "sh -c 'iptables -t nat -C PREROUTING -p udp --dport 8443 "
-            '-j DNAT --to-destination "172.17.0.2:55424" 2>/dev/null || { '), v4[0])
-        self.assertIn('iptables -t nat -S PREROUTING | grep -F -- "--dport 8443 "', v4[0])
-        self.assertTrue(v4[0].endswith(
-            'iptables -t nat -I PREROUTING 1 -p udp --dport 8443 '
-            '-j DNAT --to-destination "172.17.0.2:55424"; }\''), v4[0])
-        v6 = [c for c in cmds if "sh -c 'ip6tables " in c]
-        self.assertIn('-j REDIRECT --to-ports 55424', v6[0])
-
-    def test_builder_uses_dnat_for_both_families(self):
-        cmds, _ = panel.public_port_forward_commands(
-            'awg3', '8443', '55424',
-            container_dests={4: '172.17.0.2:55424', 6: 'fd00::2:55424'})
-        self.assertEqual(len(cmds), 2)
-        self.assertTrue(any('-j DNAT --to-destination "172.17.0.2:55424"' in c
-                            and "sh -c 'iptables " in c for c in cmds), cmds)
-        self.assertTrue(any('-j DNAT --to-destination "fd00::2:55424"' in c
-                            and "sh -c 'ip6tables " in c for c in cmds), cmds)
-
-    def test_builder_keeps_redirect_when_docker_does_not_publish_the_port(self):
-        cmds, _ = panel.public_port_forward_commands(
-            'awg3', '8443', '55424', container_dests={4: None, 6: None})
-        self.assertEqual(len(cmds), 2)
-        self.assertTrue(all('-j REDIRECT --to-ports 55424' in c for c in cmds), cmds)
-        self.assertFalse(any('DNAT' in c for c in cmds), cmds)
-
-    def test_builder_adds_dnat_over_tcp_for_xray(self):
-        cmds, _ = panel.public_port_forward_commands(
-            'xray', '8443', '443',
-            container_dests={4: '172.17.0.3:443', 6: 'fd00::3:443'})
-        self.assertTrue(all('-p tcp' in c for c in cmds), cmds)
-        self.assertTrue(all('-j DNAT' in c for c in cmds), cmds)
-
-    def test_clearing_scrubs_every_form_for_the_port(self):
-        cmds, _ = panel.public_port_forward_commands(
-            'awg3', '', '55424', '8443',
-            container_dests={4: '172.17.0.2:55424', 6: None})
-        v4 = [c for c in cmds if "sh -c 'iptables " in c]
-        self.assertEqual(len(v4), 1, cmds)  # one scrub covers both forms
-        self.assertIn('-t nat -S PREROUTING', v4[0])
-        self.assertIn('--dport 8443 ', v4[0])
-        self.assertIn('-t nat -D PREROUTING $spec', v4[0])
-        self.assertNotIn('--to-destination', v4[0])
-        v6 = [c for c in cmds if "sh -c 'ip6tables " in c]
-        self.assertEqual(len(v6), 1, cmds)
-        self.assertNotIn('DNAT', v6[0])
-
-    def test_saving_discovers_docker_and_installs_dnat(self):
-        client = self.client()
-        ssh = self.ssh_recorder(docker4=DOCKER_V4)
+    def test_ssh_error_warns_and_disconnects_without_losing_setting(self):
+        client = self.client(); ssh = self.ssh_recorder()
+        ssh.run_sudo_command = mock.Mock(side_effect=RuntimeError('synthetic SSH timeout'))
         with mock.patch.object(panel, 'get_ssh', return_value=ssh):
-            res = self.set_endpoint(client, protocol='awg2', public_host='203.0.113.9',
-                                    public_port='8443')
-        self.assertEqual(res.status_code, 200, res.text)
-        self.assertEqual(res.json()['warning'], '')
-        self.assertIn('iptables -t nat -S DOCKER', ssh.docker_queries)
-        self.assertTrue(any('-j DNAT --to-destination "172.17.0.2:55424"' in c
-                            for c in ssh.commands), ssh.commands)
-        self.assertFalse(any('--to-ports 55424' in c for c in ssh.commands), ssh.commands)
-
-    def test_saving_verifies_the_installed_dnat_rule(self):
-        client = self.client()
-        ssh = self.ssh_recorder(docker4=DOCKER_V4)
-        with mock.patch.object(panel, 'get_ssh', return_value=ssh):
-            self.set_endpoint(client, protocol='awg2', public_host='203.0.113.9',
-                              public_port='8443')
-        verify = [c for c in ssh.commands if c.startswith('iptables -t nat -C PREROUTING')
-                  and ' -d 203.0.113.9 ' in c]
-        self.assertTrue(verify, ssh.commands)
-        self.assertIn('-j DNAT --to-destination "172.17.0.2:55424"', verify[0])
-
-    def test_saving_falls_back_to_redirect_without_a_docker_rule(self):
-        client = self.client()
-        ssh = self.ssh_recorder()
-        with mock.patch.object(panel, 'get_ssh', return_value=ssh):
-            res = self.set_endpoint(client, protocol='awg2', public_host='203.0.113.9',
-                                    public_port='8443')
-        self.assertEqual(res.status_code, 200, res.text)
-        self.assertTrue(any('-j REDIRECT --to-ports 55424' in c
-                            for c in ssh.commands), ssh.commands)
-        self.assertFalse(any('DNAT' in c for c in ssh.commands), ssh.commands)
-
-    def test_saving_a_custom_port_scopes_the_rule_to_the_public_ip(self):
-        client = self.client()
-        ssh = self.ssh_recorder()
-        with mock.patch.object(panel, 'get_ssh', return_value=ssh):
-            res = self.set_endpoint(client, protocol='awg2', public_host='203.0.113.9',
-                                    public_port='8443')
-        self.assertEqual(res.status_code, 200, res.text)
-        self.assertEqual(res.json()['warning'], '')
-        # 1 forward (add) + 1 verification (-C), the v4 family only - the
-        # public IP is an IPv4 literal, ip6tables has no business there
-        self.assertEqual(len(ssh.commands), 2)
-        for cmd in ssh.commands:
-            self.assertIn('iptables -t nat', cmd)
-            self.assertIn('-p udp -d 203.0.113.9 --dport 8443', cmd)
-            self.assertIn('--to-ports 55424', cmd)
-        self.assertFalse(any("sh -c 'ip6tables" in c for c in ssh.commands))
-
-    def test_saving_a_domain_scopes_each_family_to_its_address(self):
-        client = self.client()
-        ssh = self.ssh_recorder()
-
-        def fake_getaddrinfo(host, port):
-            return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('203.0.113.9', 0)),
-                    (socket.AF_INET6, socket.SOCK_STREAM, 6, '', ('2001:db8::9', 0, 0, 0))]
-        with mock.patch.object(panel, 'get_ssh', return_value=ssh), \
-             mock.patch.object(panel.socket, 'getaddrinfo', side_effect=fake_getaddrinfo):
-            res = self.set_endpoint(client, protocol='awg2', public_host='vpn.example.com',
-                                    public_port='8443')
-        self.assertEqual(res.status_code, 200, res.text)
-        self.assertEqual(res.json()['warning'], '')
-        v4 = [c for c in ssh.commands if 'iptables -t nat' in c]
-        v6 = [c for c in ssh.commands if 'ip6tables -t nat' in c]
-        self.assertEqual(len(v4), 2)  # add + verify
-        self.assertEqual(len(v6), 2)
-        self.assertTrue(all('-d 203.0.113.9 --dport 8443' in c for c in v4), v4)
-        self.assertTrue(all('-d 2001:db8::9 --dport 8443' in c for c in v6), v6)
-
-    def test_an_unresolvable_domain_warns_and_leaves_the_rule_unrestricted(self):
-        client = self.client()
-        ssh = self.ssh_recorder()
-        with mock.patch.object(panel, 'get_ssh', return_value=ssh), \
-             mock.patch.object(panel.socket, 'getaddrinfo',
-                               side_effect=OSError('Name or service not known')):
-            res = self.set_endpoint(client, protocol='awg2', public_host='vpn.example.com',
-                                    public_port='8443')
-        self.assertEqual(res.status_code, 200, res.text)
-        self.assertIn('could not restrict the forward rule to the public IP',
-                      res.json()['warning'])
-        self.assertIn('vpn.example.com does not resolve', res.json()['warning'])
-        # fallback shape: both families, no -d restriction; verification is
-        # skipped when a warning already exists
-        self.assertEqual(len(ssh.commands), 2)
-        self.assertTrue(all(' -d ' not in c for c in ssh.commands), ssh.commands)
-
-    def test_iptables_failure_warns_but_keeps_setting(self):
-        client = self.client()
-        ssh = mock.Mock()
-        ssh.run_sudo_command.return_value = ('', 'Permission denied', 1)
-        with mock.patch.object(panel, 'get_ssh', return_value=ssh):
-            res = self.set_endpoint(client, protocol='awg2', public_host='203.0.113.9',
-                                    public_port='8443')
-        self.assertEqual(res.status_code, 200, res.text)
-        body = res.json()
-        self.assertIn('forward command failed', body['warning'])
-        self.assertIn('Permission denied', body['warning'])
+            res = self.set_endpoint(client, protocol='awg2', public_port='8443')
+        self.assertIn('SSH timeout', res.json()['warning'])
         self.assertEqual(self.stored('awg2')['public_port'], '8443')
-
-    def test_clearing_the_port_removes_the_rules(self):
-        client = self.client()
-        ssh = self.ssh_recorder()
-        with mock.patch.object(panel, 'get_ssh', return_value=ssh):
-            self.set_endpoint(client, protocol='awg2', public_host='203.0.113.9',
-                              public_port='8443')
-            ssh.commands.clear()
-            res = self.set_endpoint(client, protocol='awg2', public_host='203.0.113.9',
-                                    public_port='')
-        self.assertEqual(res.status_code, 200, res.text)
-        self.assertEqual(len(ssh.commands), 1)  # v4 scrub only, scoped like the add
-        self.assertIn('-t nat -S PREROUTING', ssh.commands[0])
-        self.assertIn('--dport 8443 ', ssh.commands[0])
-        self.assertIn('"-d 203.0.113.9"', ssh.commands[0])
-
-    def test_a_box_that_is_down_keeps_the_setting_and_warns(self):
-        client = self.client()
-        with mock.patch.object(panel, 'get_ssh', side_effect=RuntimeError('host is down')):
-            res = self.set_endpoint(client, protocol='awg2', public_host='203.0.113.9',
-                                    public_port='8443')
-        self.assertEqual(res.status_code, 200, res.text)
-        self.assertIn('host is down', res.json()['warning'])
-        self.assertEqual(self.stored('awg2')['public_port'], '8443')
+        self.assertTrue(ssh.disconnected)
 
 
 class RestoreForwardTests(unittest.TestCase):
@@ -772,7 +629,7 @@ class RestoreForwardTests(unittest.TestCase):
                     'xray': {'installed': True, 'port': '443', 'public_port': '8443'},
                     'wireguard': {'installed': True, 'port': '51820'},  # no public port
                 }),
-                server_with({}),  # nothing to forward
+                dict(server_with({}), uid='other-server'),  # nothing to forward
             ], 'users': [], 'user_connections': []}, f)
         self._monitor_flag = panel._conn_monitor_started
         panel._conn_monitor_started = True
@@ -785,61 +642,32 @@ class RestoreForwardTests(unittest.TestCase):
         panel._conn_monitor_started = self._monitor_flag
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def run_restore(self, docker4='', docker6=''):
-        seen = []
-
-        def fake_ssh(server):
-            ssh = mock.Mock()
-            ssh.commands = []
-            ssh.docker_queries = []
-
-            def run(cmd, *a, **k):
-                if cmd.endswith('-S DOCKER'):
-                    ssh.docker_queries.append(cmd)
-                    if cmd.startswith('iptables '):
-                        return (docker4, '', 0)
-                    return (docker6, '', 0)
-                ssh.commands.append(cmd)
-                return ('', '', 0)
-
-            ssh.run_sudo_command.side_effect = run
-            seen.append((server, ssh))
-            return ssh
-
-        with mock.patch.object(panel, 'get_ssh', side_effect=fake_ssh):
+    def run_restore(self, fail_first=False):
+        from tests.test_public_endpoint_dnat import FakeForwardSSH
+        ssh = FakeForwardSSH()
+        # API integration/record selection here; kernel reconciliation is
+        # independently exercised by test_public_endpoint_dnat.
+        def run(command, **kwargs):
+            import shlex
+            req = json.loads(shlex.split(command)[3]); ssh.requests.append(req)
+            return (json.dumps({'warning':'synthetic unavailable' if fail_first and len(ssh.requests)==1 else ''}), '', 0)
+        ssh.run_sudo_command = run
+        with mock.patch.object(panel, 'get_ssh', return_value=ssh):
             asyncio.run(panel.restore_public_port_forwards())
-        return seen
+        return ssh
 
-    def test_only_servers_with_public_ports_are_touched(self):
-        seen = self.run_restore()
-        self.assertEqual(len(seen), 1)
-        server, ssh = seen[0]
-        # awg2 udp + xray tcp, the v4 table each. awg2 carries its own
-        # public_host; xray has none, so its rule is scoped to the panel's
-        # own address for that server (protocol_public_endpoint fallback)
-        self.assertEqual(len(ssh.commands), 2)
-        self.assertTrue(any('-p udp -d 203.0.113.9 --dport 8443' in c for c in ssh.commands), ssh.commands)
-        self.assertTrue(any('-p tcp -d 198.51.100.1 --dport 8443' in c for c in ssh.commands), ssh.commands)
-        self.assertFalse(any('--dport 51820' in c for c in ssh.commands))
+    def test_restore_keeps_instances_and_transport_separate(self):
+        ssh = self.run_restore()
+        self.assertEqual([r['container'] for r in ssh.requests], ['amnezia-awg2', 'amnezia-xray'])
+        self.assertEqual([r['l4'] for r in ssh.requests], ['udp', 'tcp'])
+        self.assertEqual([r['scopes']['4'] for r in ssh.requests], [['203.0.113.9'], ['198.51.100.1']])
+        self.assertTrue(ssh.disconnected)
 
-    def test_restore_installs_dnat_from_docker_discovery(self):
-        seen = self.run_restore(docker4=DOCKER_V4 + '\n' + DOCKER_TCP_V4)
-        server, ssh = seen[0]
-        self.assertIn('iptables -t nat -S DOCKER', ssh.docker_queries)
-        # one discovery per distinct listen port (55424 awg2, 443 xray) x 2 families
-        self.assertEqual(len(ssh.docker_queries), 4, ssh.docker_queries)
-        self.assertTrue(any('-p udp -d 203.0.113.9 --dport 8443 '
-                            '-j DNAT --to-destination "172.17.0.2:55424"' in c
-                            for c in ssh.commands), ssh.commands)
-        self.assertTrue(any('-p tcp -d 198.51.100.1 --dport 8443 '
-                            '-j DNAT --to-destination "172.17.0.3:443"' in c
-                            for c in ssh.commands), ssh.commands)
-
-    def test_restore_without_docker_rules_keeps_redirect(self):
-        seen = self.run_restore()
-        server, ssh = seen[0]
-        self.assertTrue(ssh.commands)
-        self.assertTrue(all('-j REDIRECT' in c for c in ssh.commands), ssh.commands)
+    def test_one_failure_does_not_skip_other_instances(self):
+        with mock.patch.object(panel.logger, 'warning') as warn:
+            ssh = self.run_restore(fail_first=True)
+        self.assertEqual(len(ssh.requests), 2)
+        self.assertTrue(warn.called)
 
     def test_periodic_loop_reapplies_forwards(self):
         # a VPS rebooting on its own loses the rules while the panel keeps
@@ -869,36 +697,10 @@ class RestoreForwardTests(unittest.TestCase):
             panel.RESTORE_FORWARD_INTERVAL = real_interval
         self.assertGreaterEqual(len(calls), 2)
 
-    def test_restore_forward_logs_failed_command(self):
-        panel.RESTORE_FORWARD_DELAY = 0
-
-        def fake_ssh(server):
-            ssh = mock.Mock()
-            ssh.commands = []
-
-            def run(cmd, *a, **k):
-                if cmd.endswith('-S DOCKER'):
-                    return ('', '', 0)
-                ssh.commands.append(cmd)
-                if len(ssh.commands) == 2:
-                    return ('', 'Permission denied', 1)
-                return ('', '', 0)
-            ssh.run_sudo_command.side_effect = run
-            return ssh
-
-        with mock.patch.object(panel, 'get_ssh', side_effect=fake_ssh), \
-             mock.patch.object(panel.logger, 'error') as log_err:
+    def test_restore_forward_logs_ssh_failure(self):
+        ssh = mock.Mock()
+        ssh.run_sudo_command.side_effect = RuntimeError('synthetic permission failure')
+        with mock.patch.object(panel, 'get_ssh', return_value=ssh), mock.patch.object(panel.logger, 'warning') as log:
             asyncio.run(panel.restore_public_port_forwards())
-        self.assertTrue(log_err.called)
-        self.assertIn('Permission denied', log_err.call_args[0][0])
-
-    def test_a_down_server_does_not_stop_the_rest(self):
-        def fake_ssh(server):
-            raise RuntimeError('host is down')
-
-        with mock.patch.object(panel, 'get_ssh', side_effect=fake_ssh):
-            asyncio.run(panel.restore_public_port_forwards())  # must not raise
-
-
-if __name__ == '__main__':
-    unittest.main()
+        self.assertTrue(log.called)
+        ssh.disconnect.assert_called_once()
