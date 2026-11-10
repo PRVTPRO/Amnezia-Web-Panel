@@ -57,6 +57,11 @@ TG_TRANSLATIONS = {
         "registered_admin": "You are registered as <b>{username}</b> with <b>Admin</b> role.",
         "choose_action": "Choose an action:",
         "registered_as": "You are registered as <b>{username}</b>.",
+        "credentials_title": "Your panel account has been created.",
+        "credentials_login": "Login",
+        "credentials_password": "Password",
+        "credentials_instructions": "To sign in, open your Amnezia Web Panel address in a browser and enter these credentials on the login page.",
+        "credentials_disabled": "Your account was created disabled. Contact the administrator to enable it before signing in.",
         "no_connections_create": "You have no connections yet. Tap the button below to create one!",
         "no_connections_contact_admin": "You have no connections yet. Please contact your administrator.",
         "your_connections": "<b>Your connections</b> ({count}) — tap to get config:",
@@ -205,6 +210,11 @@ TG_TRANSLATIONS = {
         "registered_admin": "شما با نام <b>{username}</b> و نقش <b>مدیر</b> ثبت شده‌اید.",
         "choose_action": "یک گزینه را انتخاب کنید:",
         "registered_as": "شما با نام <b>{username}</b> ثبت شده‌اید.",
+        "credentials_title": "حساب پنل شما ایجاد شد.",
+        "credentials_login": "نام کاربری",
+        "credentials_password": "گذرواژه",
+        "credentials_instructions": "برای ورود، نشانی پنل وب Amnezia را در مرورگر باز کنید و این اطلاعات را در صفحه ورود وارد کنید.",
+        "credentials_disabled": "حساب شما غیرفعال ایجاد شده است. پیش از ورود، برای فعال‌سازی با مدیر تماس بگیرید.",
         "no_connections_create": "هنوز اتصالی ندارید. برای ساخت اولین اتصال، دکمه زیر را بزنید!",
         "no_connections_contact_admin": "هنوز اتصالی ندارید. لطفاً با مدیر تماس بگیرید.",
         "your_connections": "<b>اتصال‌های شما</b> ({count}) — برای دریافت پیکربندی بزنید:",
@@ -353,6 +363,11 @@ TG_TRANSLATIONS = {
         "registered_admin": "Vous êtes enregistré sous <b>{username}</b> avec le rôle <b>Admin</b>.",
         "choose_action": "Choisissez une action :",
         "registered_as": "Vous êtes enregistré sous <b>{username}</b>.",
+        "credentials_title": "Votre compte du panneau a été créé.",
+        "credentials_login": "Identifiant",
+        "credentials_password": "Mot de passe",
+        "credentials_instructions": "Pour vous connecter, ouvrez l’adresse de votre panneau Web Amnezia dans un navigateur et saisissez ces identifiants sur la page de connexion.",
+        "credentials_disabled": "Votre compte a été créé désactivé. Contactez l’administrateur pour l’activer avant de vous connecter.",
         "no_connections_create": "Vous n’avez pas encore de connexion. Appuyez sur le bouton ci-dessous pour en créer une !",
         "no_connections_contact_admin": "Vous n’avez pas encore de connexion. Contactez votre administrateur.",
         "your_connections": "<b>Vos connexions</b> ({count}) — appuyez pour obtenir la configuration :",
@@ -501,6 +516,11 @@ TG_TRANSLATIONS = {
         "registered_admin": "Вы зарегистрированы как <b>{username}</b> с ролью <b>Admin</b>.",
         "choose_action": "Выберите действие:",
         "registered_as": "Вы зарегистрированы как <b>{username}</b>.",
+        "credentials_title": "Ваш аккаунт панели создан.",
+        "credentials_login": "Логин",
+        "credentials_password": "Пароль",
+        "credentials_instructions": "Для входа откройте адрес веб-панели Amnezia в браузере и введите эти данные на странице авторизации.",
+        "credentials_disabled": "Аккаунт создан отключённым. Перед входом обратитесь к администратору для его активации.",
         "no_connections_create": "У вас пока нет подключений. Нажмите кнопку ниже, чтобы создать первое.",
         "no_connections_contact_admin": "У вас пока нет подключений. Обратитесь к администратору.",
         "your_connections": "<b>Ваши подключения</b> ({count}) — нажмите, чтобы получить конфигурацию:",
@@ -648,6 +668,11 @@ TG_TRANSLATIONS = {
         "registered_admin": "你已注册为 <b>{username}</b>，角色为 <b>Admin</b>。",
         "choose_action": "请选择操作：",
         "registered_as": "你已注册为 <b>{username}</b>。",
+        "credentials_title": "你的面板账户已创建。",
+        "credentials_login": "用户名",
+        "credentials_password": "密码",
+        "credentials_instructions": "登录时，请在浏览器中打开 Amnezia Web Panel 地址，并在登录页面输入这些凭据。",
+        "credentials_disabled": "你的账户已创建但处于禁用状态。请联系管理员启用账户后再登录。",
         "no_connections_create": "你还没有连接。点击下方按钮创建一个吧！",
         "no_connections_contact_admin": "你还没有连接。请联系管理员。",
         "your_connections": "<b>你的连接</b>（{count}）— 点击获取配置：",
@@ -994,7 +1019,7 @@ def _auto_create_telegram_user(data: dict, from_user: dict, save_data_fn: Option
     existing = next((u for u in users
                      if str(u.get("telegramId") or "").strip() == tg_id), None)
     if existing:
-        return existing
+        return existing, None
 
     parts = [
         str((from_user or {}).get("first_name") or "").strip(),
@@ -1048,7 +1073,19 @@ def _auto_create_telegram_user(data: dict, from_user: dict, save_data_fn: Option
     users.append(user)
     save_data_fn(data)
     logger.info("Created panel user from Telegram account %s", tg_id)
-    return user
+    return user, random_password
+
+
+def _telegram_credentials_message(user: dict, password: str, lang: str) -> str:
+    lines = [
+        f"<b>{_tt(lang, 'credentials_title')}</b>",
+        f"{_tt(lang, 'credentials_login')}: <code>{_e(user.get('username'))}</code>",
+        f"{_tt(lang, 'credentials_password')}: <code>{_e(password)}</code>",
+        "",
+        _tt(lang, "credentials_disabled") if not user.get("enabled", True)
+        else _tt(lang, "credentials_instructions"),
+    ]
+    return "\n".join(lines)
 
 
 def _find_user(load_data_fn: Callable, tg_id: str, username: Optional[str] = None):
@@ -1414,9 +1451,6 @@ async def _handle_start(api: TelegramAPI, msg: dict, load_data_fn: Callable,
     tg_username = msg["from"].get("username")
     first_name = msg["from"].get("first_name", "")
     data = load_data_fn()
-    panel_user = _find_user(load_data_fn, tg_id, tg_username)
-    if not panel_user and _is_private_chat(msg.get("chat")):
-        panel_user = _auto_create_telegram_user(data, msg.get("from") or {}, save_data_fn)
     lang = _telegram_language(data, tg_id)
     if not lang:
         await api.send_message(chat_id, _tt("en", "language_prompt"),
@@ -1424,6 +1458,13 @@ async def _handle_start(api: TelegramAPI, msg: dict, load_data_fn: Callable,
         return
 
     panel_user = _find_user(load_data_fn, tg_id, tg_username)
+    created_password = None
+    if not panel_user and _is_private_chat(msg.get("chat")):
+        created = _auto_create_telegram_user(data, msg.get("from") or {}, save_data_fn)
+        if created:
+            panel_user, created_password = created
+    if created_password:
+        await api.send_message(chat_id, _telegram_credentials_message(panel_user, created_password, lang))
 
     if not panel_user:
         await api.send_message(
@@ -2518,6 +2559,13 @@ async def _dispatch(api: TelegramAPI, update: dict, load_data_fn: Callable, gene
             lang = selected
             await api.answer_callback(callback_id, _tt(lang, "language_saved"))
             panel_user = _find_user(load_data_fn, tg_id, tg_username)
+            created_password = None
+            if not panel_user and _is_private_chat(chat):
+                created = _auto_create_telegram_user(load_data_fn(), cq.get("from") or {}, save_data_fn)
+                if created:
+                    panel_user, created_password = created
+            if created_password:
+                await api.send_message(chat_id, _telegram_credentials_message(panel_user, created_password, lang))
             if not panel_user:
                 await api.edit_message(chat_id, message_id,
                                        f"{_tt(lang, 'account_not_linked')}\n"
