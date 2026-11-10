@@ -47,6 +47,7 @@ try:
 except ImportError:
     CaptchaGenerator = None
 
+import public_port_forward
 from managers.ssh_manager import SSHManager, configure_jump_resolver
 from managers import ssh_trust
 from managers import split_tunnel
@@ -8571,7 +8572,7 @@ async def api_set_protocol_public_endpoint(request: Request, server_id: int, req
     second IP of the same box, behind a port forward, or under a domain name.
     A custom public port on this same box is published automatically: a DNAT
     rule in iptables/ip6tables sends it straight to the container, the same
-    path Docker uses (a host-local listener falls back to REDIRECT).
+    path Docker uses. Unverified Docker publications are never redirected.
     """
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -8601,15 +8602,15 @@ async def api_set_protocol_public_endpoint(request: Request, server_id: int, req
 
         # The override reaches the server in two ways: telemt composes its own
         # tg:// links from config.toml, and a custom public port on this same
-        # box is published with an iptables DNAT straight to the container (a
-        # host-local listener keeps REDIRECT). The record is
+        # box is published with owned DNAT straight to the verified container.
+        # The record is
         # saved either way: a box that is down right now must not lose the
         # setting, and the next save re-applies it.
         warning = ''
         ssh = None
         try:
             base = protocol_base(proto)
-            l4 = next((k for k, v in PUBLIC_FORWARD_L4.items() if base in v), None)
+            needs_forward_sync = any(base in protocols for protocols in PUBLIC_FORWARD_L4.values())
             if base == 'telemt':
                 pub_host, pub_port = protocol_public_endpoint(server, proto)
                 ssh = await asyncio.to_thread(get_ssh, server)
@@ -8617,48 +8618,14 @@ async def api_set_protocol_public_endpoint(request: Request, server_id: int, req
                 manager = get_protocol_manager(ssh, proto)
                 await asyncio.to_thread(
                     manager.set_public_endpoint, pub_host, pub_port or record.get('port', '443'))
-            fwd_host, _ = protocol_public_endpoint(server, proto)
-            will_forward = bool(port and str(port) != str(listen_port))
-            will_drop = bool(old_public_port and str(old_public_port) != str(port))
-            if ssh is None and (will_forward or will_drop):
+            # A previous cleanup may have failed after the override was saved.
+            # Repeated clears must still reconcile the stable ownership marker.
+            if ssh is None and needs_forward_sync:
                 ssh = await asyncio.to_thread(get_ssh, server)
                 await asyncio.to_thread(ssh.connect)
-            container_dests = None
-            if ssh is not None and (will_forward or will_drop):
-                container_dests = await asyncio.to_thread(
-                    _docker_dnat_destinations, ssh, listen_port)
-            fwd, fwd_warning = public_port_forward_commands(
-                proto, port, listen_port, old_public_port, fwd_host,
-                container_dests=container_dests)
-            if fwd_warning and not warning:
-                warning = fwd_warning
-            if fwd is not None:
-                # will_forward/will_drop already opened the connection above:
-                # a non-empty command list is impossible without one of them.
-                for cmd in fwd:
-                    out, err, code = await asyncio.to_thread(ssh.run_sudo_command, cmd)
-                    if code != 0 and not warning:
-                        logger.warning(f"Public port forward command failed on {proto}: {cmd}: {err}")
-                        warning = f"forward command failed: {cmd}: {err}"
-                # Verify the rule exists for each address family when adding,
-                # scoped exactly like the rule that was installed.
-                if not warning and will_forward:
-                    if l4:
-                        fam, _ = _forward_family_dests(fwd_host)
-                        for ipt, fkey in (('iptables', 4), ('ip6tables', 6)):
-                            addrs = fam[fkey]
-                            if addrs == []:
-                                continue
-                            container_dest = (container_dests or {}).get(fkey)
-                            for addr in (addrs if addrs is not None else ['']):
-                                match = _forward_match(l4, addr, port, listen_port, container_dest)
-                                verify = f'{ipt} -t nat -C PREROUTING {match}'
-                                vout, verr, vcode = await asyncio.to_thread(ssh.run_sudo_command, verify)
-                                if vcode != 0 and not warning:
-                                    logger.warning(f"Public port forward verification failed on {proto}: {ipt}: {verr}")
-                                    target = (f'DNAT to {container_dest}' if container_dest
-                                              else f'REDIRECT to :{listen_port}')
-                                    warning = f"forward verification failed: {ipt} {target} not present"
+            if ssh is not None and needs_forward_sync:
+                warning = await asyncio.to_thread(
+                    _apply_public_port_forward, ssh, server, proto, port, listen_port, old_public_port)
         except Exception as e:
             logger.warning(f"Could not apply the public endpoint to {proto}: {e}")
             warning = str(e)
@@ -8701,7 +8668,7 @@ async def restore_public_port_forwards():
     -persistent exists on some boxes only, docker restores only its own), so
     after a server or panel restart the panel's own forwards were gone. The
     panel owns these rules -- it puts them back. Idempotent: additions are
-    guarded by -C, so a double run never duplicates anything.
+    serialized on the SSH host; only owned rules are reconciled.
     """
     await asyncio.sleep(RESTORE_FORWARD_DELAY)  # let the panel finish booting
     data = load_data()
@@ -8721,29 +8688,14 @@ async def restore_public_port_forwards():
         try:
             ssh = get_ssh(server)
             await asyncio.to_thread(ssh.connect)
-            dests_by_port = {}
-            commands = []
             for proto, public_port, listen_port in pending:
-                if listen_port not in dests_by_port:
-                    dests_by_port[listen_port] = _docker_dnat_destinations(ssh, listen_port)
-                pub_host, _ = protocol_public_endpoint(server, proto)
-                cmds, fwd_warning = public_port_forward_commands(
-                    proto, public_port, listen_port, public_ip=pub_host,
-                    container_dests=dests_by_port[listen_port])
-                if fwd_warning:
-                    logger.warning(f"Public port forward on "
-                                   f"{server.get('name') or server.get('host')} {proto}: {fwd_warning}")
-                if cmds:
-                    commands.extend(cmds)
-            failed = False
-            for cmd in commands:
-                out, err, code = await asyncio.to_thread(ssh.run_sudo_command, cmd)
-                if code != 0:
-                    logger.error(f"Failed to re-apply public port forward on "
-                                 f"{server.get('name') or server.get('host')}: {cmd}: {err}")
-                    failed = True
-            if not failed:
-                logger.info(f"Public port forwards re-applied on {server.get('name') or server.get('host')}")
+                try:
+                    warning = await asyncio.to_thread(
+                        _apply_public_port_forward, ssh, server, proto, public_port, listen_port)
+                    if warning:
+                        logger.warning("Public port forward on %s: %s", proto, warning)
+                except Exception as e:
+                    logger.warning("Could not re-apply public port forward on %s: %s", proto, e)
         except Exception as e:
             logger.warning(f"Could not re-apply public port forwards on "
                            f"{server.get('name') or server.get('host')}: {e}")
@@ -8772,8 +8724,7 @@ def _forward_family_dests(public_ip):
     host with no addresses of that family publishes nothing there), a list
     scopes every rule of that family to those addresses. An IP literal
     restricts its own family only; a domain resolves on the panel machine.
-    An unresolvable domain falls back to unrestricted rules plus a warning
-    the API surfaces.
+    An unresolvable domain produces no rules and a warning.
     """
     if not public_ip:
         return {4: None, 6: None}, ''
@@ -8797,164 +8748,77 @@ def _forward_family_dests(public_ip):
         pass
     v4, v6 = sorted(set(v4)), sorted(set(v6))
     if not v4 and not v6:
-        return {4: None, 6: None}, (f'could not restrict the forward rule to the public IP: '
+        return {4: [], 6: []}, (f'could not restrict the forward rule to the public IP: '
                                     f'{host} does not resolve')
     return {4: v4, 6: v6}, ''
 
 
-def _parse_docker_dnat(output, listen_port):
-    """Extract the container destination from the nat/DOCKER DNAT rule.
-
-    `iptables -t nat -S DOCKER` prints one line per published container port,
-    e.g. `... --dport 55424 -j DNAT --to-destination 172.17.0.2:55424`.
-    Returns the `ip:port` token of the first rule for this listen port, or
-    None when Docker does not publish the port (a host-local listener).
-    """
-    want = str(listen_port).strip()
-    if not output or not want:
-        return None
-    for line in str(output).splitlines():
-        tokens = line.split()
-        for i in range(len(tokens) - 1):
-            if tokens[i] != '--dport' or tokens[i + 1] != want:
-                continue
-            for j in range(len(tokens) - 1):
-                if tokens[j] == '--to-destination':
-                    return tokens[j + 1]
-    return None
-
-
-def _docker_dnat_destinations(ssh, listen_port):
-    """Resolve the in-container destination of a Docker-published port.
-
-    Docker owns the real publish rule in nat/DOCKER, so reusing its
-    `--to-destination` is more reliable than guessing the container IP.
-    Returns {4: 'ip:port'|None, 6: 'ip:port'|None}; None means no rule of
-    that family (or the family is unavailable on this host). Never raises.
-    """
-    result = {4: None, 6: None}
-    for ipt, fkey in (('iptables', 4), ('ip6tables', 6)):
-        try:
-            out, _err, code = ssh.run_sudo_command(f'{ipt} -t nat -S DOCKER')
-        except Exception as e:
-            logger.warning(f"Could not read {ipt} DOCKER rules: {e}")
-            continue
-        if code == 0:
-            result[fkey] = _parse_docker_dnat(out, listen_port)
-        else:
-            logger.warning(f"{ipt} DOCKER rules unavailable (exit {code}); "
-                           f"the {fkey} family falls back to REDIRECT")
-    return result
-
-
-def _forward_match(l4, addr, port, listen_port, container_dest=None):
-    """One iptables match for a public-port forward, without the action.
-
-    The destination is quoted on purpose. Real ip6tables prints an IPv6
-    destination as `[addr]:port`, the command runs through a remote shell,
-    and an unquoted bracket expression is a glob pattern there: a file named
-    e.g. `d:55425` in the working directory would silently replace the
-    container address with garbage. Double quotes, so the match can sit
-    inside the single-quoted `sh -c` wrapper below.
-    """
-    scope = f' -d {addr}' if addr else ''
-    if container_dest:
-        return (f'-p {l4}{scope} --dport {port} '
-                f'-j DNAT --to-destination "{container_dest}"')
-    return (f'-p {l4}{scope} --dport {port} '
-            f'-j REDIRECT --to-ports {listen_port}')
-
-
-def _forward_shell(command):
-    """Run one privileged command chain inside a single shell.
-
-    run_sudo_command prefixes the whole string with sudo, so in `sudo a || b`
-    only `a` is privileged and the insert half runs as the panel's SSH user.
-    That broke every add on a non-root host (`can't open lock file
-    /run/xtables.lock`). Wrapping the chain in `sh -c` gives it to one root
-    shell, the pattern the rest of the panel already uses.
-    """
-    return "sh -c '" + command.replace("'", "'\\''") + "'"
-
-
 def public_port_forward_commands(protocol, public_port, listen_port, old_public_port='',
-                                 public_ip='', container_dests=None):
-    """iptables/ip6tables commands publishing a custom public port.
+                                 public_ip='', server_uid=''):
+    """One privileged process: inspect, validate, lock, reconcile and verify.
 
-    Returns (commands, warning); commands is None when nothing is needed.
-    A public port equal to the listen port (or empty) means "no rule"; any
-    previous rule for the same instance is removed. Idempotent: additions are
-    guarded by -C, removals loop -D until the rule is gone. Rules are scoped
-    to the public address (-d public_ip) so they forward only the traffic
-    actually meant for this instance, not every packet hitting the port.
-
-    A Docker-published listen port is forwarded with DNAT straight to the
-    container (the path Docker itself uses), so ufw's INPUT policy cannot
-    drop the packet. A listen port Docker does not publish keeps the old
-    REDIRECT-to-local behaviour as a fallback.
-
-    Rules are reconciled by (address, port), never by the exact rule text:
-    the container address is baked in when the rule is applied and changes
-    when Docker recreates the container. Additions therefore probe the live
-    rule with -C and rebuild it (scrub + insert) when it no longer matches,
-    and removal scrubs every form published for the port.
-
-    Every returned command is one `sh -c` chain: run_sudo_command prefixes
-    sudo to the whole string, so a bare `a || b` would run `b` unprivileged.
+    No remote shell interpolation of Docker output, no REDIRECT fallback and
+    no deletion of unmarked legacy/foreign rules. Public Endpoint fields and
+    the API's saved-setting + warning contract stay unchanged.
     """
     base = protocol_base(protocol)
     l4 = next((k for k, v in PUBLIC_FORWARD_L4.items() if base in v), None)
     if l4 is None:
         return None, ''
-    fam, warning = _forward_family_dests(public_ip)
-    # Both ports are pasted into a remote shell command. Digits only: a stored
-    # value with a metacharacter must not reach the shell.
-    listen_port = ''.join(c for c in str(listen_port).strip() if c.isdigit())
-    public_port = ''.join(c for c in str(public_port).strip() if c.isdigit())
-    dests = container_dests or {}
-    commands = []
+    try:
+        listen_port = public_port_forward.port(listen_port)
+        if public_port:
+            public_port = public_port_forward.port(public_port)
+        if old_public_port:
+            public_port_forward.port(old_public_port)
+        if not server_uid:
+            raise ValueError('missing stable server UID; forward unchanged')
+    except ValueError as e:
+        return None, str(e)
+    # Deleting our marker needs neither Docker discovery nor working DNS.
+    fam, warning = (_forward_family_dests(public_ip) if public_port and public_port != listen_port
+                    else ({4: [], 6: []}, ''))
+    if warning:
+        return None, warning
+    request = {'protocol': protocol, 'container': protocol_container_name(protocol),
+               'server_uid': server_uid, 'l4': l4, 'listen_port': listen_port,
+               'public_port': public_port, 'old_public_port': old_public_port,
+               'scopes': {k: (v if v is not None else ['']) for k, v in fam.items()}}
+    with open(public_port_forward.__file__, encoding='utf-8') as f:
+        source = f.read()
+    return ['python3 -c ' + shlex.quote(source) + ' ' + shlex.quote(json.dumps(request))], ''
 
-    def scrub(ipt, addr, port):
-        """Shell snippet deleting every PREROUTING forward of this port.
 
-        Matched by (address, port) instead of the exact rule text: the
-        container address is baked into the rule when it is applied and
-        changes whenever Docker recreates the container, so an exact-match
-        delete leaves the previous rule behind pointing at a dead address.
-        """
-        scope = f' | grep -F -- "-d {addr}"' if addr else ''
-        return (f'{ipt} -t nat -S PREROUTING | grep -F -- "--dport {port} "'
-                f'{scope} | sed "s/^-A PREROUTING //" > /tmp/.awp_pf_drop; '
-                f'while read -r spec; do {ipt} -t nat -D PREROUTING $spec '
-                f'2>/dev/null; done < /tmp/.awp_pf_drop')
 
-    def drop(port):
-        for ipt, fkey in (('iptables', 4), ('ip6tables', 6)):
-            addrs = fam[fkey]
-            if addrs == []:
-                continue  # nothing was ever published in this family
-            for addr in (addrs if addrs is not None else ['']):
-                commands.append(_forward_shell(scrub(ipt, addr, port)))
+def _apply_public_port_forward(ssh, server, proto, public_port, listen_port, old_public_port=''):
+    pub_host, _ = protocol_public_endpoint(server, proto)
+    commands, warning = public_port_forward_commands(
+        proto, public_port, listen_port, old_public_port, pub_host,
+        server_uid=server.get('uid', ''))
+    if warning or not commands:
+        return warning
+    # A catalog reorder must not retarget a queued SSH operation. Check the
+    # stable identity, SSH endpoint and requested record again after connect.
+    def current():
+        matches = [s for s in load_data().get('servers', []) if s.get('uid') == server.get('uid')]
+        return (len(matches) == 1
+                and all(matches[0].get(k) == server.get(k) for k in ('host', 'ssh_port', 'username', 'private_key', 'password'))
+                and matches[0].get('protocols', {}).get(proto) == server.get('protocols', {}).get(proto))
+    if not current():
+        return 'server identity or endpoint changed; forward unchanged'
+    out, _, code = ssh.run_sudo_command(commands[0], timeout=120)
+    try:
+        warning = json.loads(out)['warning']
+        if not isinstance(warning, str):
+            raise ValueError()
+    except (ValueError, KeyError, TypeError):
+        warning = 'forward command failed or returned an invalid result'
+    if code and not warning:
+        warning = 'forward command failed; reconciliation required'
+    if not current():
+        return 'server identity changed during forwarding; reconciliation required'
+    return warning
 
-    for stale in {p for p in (old_public_port,) if p and p != public_port}:
-        drop(stale)
-    if public_port and public_port != listen_port:
-        for ipt, fkey in (('iptables', 4), ('ip6tables', 6)):
-            addrs = fam[fkey]
-            if addrs == []:
-                continue
-            container_dest = dests.get(fkey)
-            for addr in (addrs if addrs is not None else ['']):
-                match = _forward_match(l4, addr, public_port, listen_port, container_dest)
-                # -C first keeps the periodic restore cheap: on a healthy box
-                # nothing is written. When the live rule is missing or still
-                # points at the address of a previous container generation,
-                # the stale forms are scrubbed and the current one inserted.
-                commands.append(_forward_shell(
-                    f'{ipt} -t nat -C PREROUTING {match} 2>/dev/null '
-                    f'|| {{ {scrub(ipt, addr, public_port)}; '
-                    f'{ipt} -t nat -I PREROUTING 1 {match}; }}'))
-    return (commands or None), warning
 
 
 def _parse_ss_listeners(output):
