@@ -225,7 +225,7 @@
   "bot_stopped": "⏹ Stopped",
   "bot_stop_btn": "⏹ Stop",
   "bot_start_btn": "▶️ Start",
-  "bot_hint": "After changing the token, save the settings — the bot will restart automatically. Users must have a Telegram ID in their profile.",,
+  "bot_hint": "After changing the token, save the settings — the bot will restart automatically. Users must have a Telegram ID in their profile.",
   "telegram_auto_create_users": "Automatically create panel users from Telegram",
   "telegram_auto_create_users_desc": "When enabled, a new panel user is created when someone starts the bot for the first time.",
   "telegram_create_users_disabled": "Create new Telegram users as disabled",
