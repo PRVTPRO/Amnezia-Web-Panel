@@ -22,7 +22,6 @@ import httpx
 
 from connection_service import (
     SELF_SERVICE_PROTOCOLS,
-    SelfServiceError,
     protocol_base,
     protocol_instance,
     sanitize_allowed_protocols,
@@ -2054,12 +2053,25 @@ async def _user_create_access(api: TelegramAPI, chat_id: int, panel_user: dict,
             await api.edit_message(chat_id, message_id, message)
 
     data = load_data_fn()
+    if not panel_user.get("enabled", True):
+        await show(f"❌ {_tt(lang, 'account_disabled')}")
+        return None
     if not _self_service_telegram_enabled(data):
         await show(_tt(lang, "self_service_disabled_contact"))
         return None
     if not self_service_svc:
-        await show(_tt(lang, "self_service_unavailable"))
-        return None
+        if not panel_user.get("enabled", True):
+            await show(f"❌ {_tt(lang, 'account_disabled')}")
+            return None
+        user_limit = max(0, int(panel_user.get("max_connections") or 0))
+        if user_limit <= 0:
+            user_limit = max(0, int(_self_service_settings(data).get("max_connections_per_user", 5) or 0))
+        used = sum(1 for conn in data.get("user_connections", [])
+                   if conn.get("user_id") == panel_user.get("id"))
+        if used >= user_limit:
+            await show(f"❌ {_tt(lang, 'max_connections_reached')}")
+            return None
+        return {"remaining_connections": user_limit - used}
 
     try:
         options = await self_service_svc.get_self_service_options(panel_user["id"], "telegram")
