@@ -223,7 +223,7 @@
   "bot_stopped": "⏹ Arrêté",
   "bot_stop_btn": "⏹ Arrêter",
   "bot_start_btn": "▶️ Démarrer",
-  "bot_hint": "Sauvegardez après modification du token. Le bot redémarrera.",,
+  "bot_hint": "Sauvegardez après modification du token. Le bot redémarrera.",
   "telegram_auto_create_users": "Créer automatiquement les utilisateurs depuis Telegram",
   "telegram_auto_create_users_desc": "Lorsqu’elle est activée, cette option crée un utilisateur lors du premier /start du bot.",
   "telegram_create_users_disabled": "Créer les nouveaux utilisateurs désactivés",
