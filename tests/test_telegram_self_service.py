@@ -843,6 +843,26 @@ class TestTelegramLocalization(unittest.IsolatedAsyncioTestCase):
                         collections.Counter(re.findall(r'\{[^{}]*\}', reference[key])),
                     )
 
+    async def test_disabled_account_message_is_localized_for_every_language(self):
+        expected = {
+            'en': 'Account disabled',
+            'fa': 'حساب کاربری غیرفعال است',
+            'fr': 'Compte désactivé',
+            'ru': 'Аккаунт отключён',
+            'zh': '账户已被禁用',
+        }
+        for lang, phrase in expected.items():
+            with self.subTest(lang=lang):
+                self.api.reset_mock()
+                await tg_bot._user_create_access(
+                    self.api, 999, {'id': 'user-1', 'enabled': False},
+                    self.load_data, None, lang,
+                )
+                self.assertEqual(
+                    self.api.send_message.call_args.args[1],
+                    f'❌ {phrase}',
+                )
+
     def test_language_codes_are_normalized_to_panel_locales(self):
         samples = {'en-US': 'en', 'fa-IR': 'fa', 'fr-FR': 'fr', 'RU_ru': 'ru',
                    'zh-Hans': 'zh', 'de-DE': 'en', '': 'en'}
