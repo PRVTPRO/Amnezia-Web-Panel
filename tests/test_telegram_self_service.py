@@ -362,6 +362,43 @@ class TestUserCreateCallback(unittest.IsolatedAsyncioTestCase):
         # Verify there are callback buttons (resolved refs)
         self.assertIn('callback_data', keyboard_text)
 
+    async def test_user_create_reports_disabled_account_before_showing_wizard(self):
+        self.data['users'][0]['enabled'] = False
+        msg = _callback_update(chat_id=111, from_id=111, data_str='user_create')
+
+        await _dispatch_callback(self.api, msg, self.load_data)
+
+        text = self.api.edit_message.call_args[0][2]
+        self.assertIn('Аккаунт отключён', text)
+        self.assertNotIn('Выберите сервер', text)
+        self.assertIsNone(self.api.edit_message.call_args.kwargs.get('reply_markup'))
+
+    async def test_user_create_skips_server_and_protocol_when_only_one_choice(self):
+        self.data['settings']['self_service']['allowed_protocols'] = ['awg']
+        msg = _callback_update(chat_id=111, from_id=111, data_str='user_create')
+
+        await _dispatch_callback(self.api, msg, self.load_data)
+
+        text = self.api.edit_message.call_args[0][2]
+        self.assertIn('Отправьте имя устройства', text)
+        self.assertNotIn('Выберите сервер', text)
+        self.assertNotIn('Выберите протокол', text)
+        self.assertEqual(
+            tg_bot._pending_inputs[tg_bot._pending_key(111, '111')]['sid'], 0)
+        self.assertEqual(
+            tg_bot._pending_inputs[tg_bot._pending_key(111, '111')]['proto'], 'awg')
+
+    async def test_user_create_server_skips_protocol_when_only_one_choice(self):
+        self.data['settings']['self_service']['allowed_protocols'] = ['awg']
+        ref_key = tg_bot._ref('user_create_server', {'sid': 0})
+        msg = _callback_update(chat_id=111, from_id=111, data_str=ref_key)
+
+        await _dispatch_callback(self.api, msg, self.load_data)
+
+        text = self.api.edit_message.call_args[0][2]
+        self.assertIn('Отправьте имя устройства', text)
+        self.assertNotIn('Выберите протокол', text)
+
     async def test_user_create_stops_immediately_when_connection_limit_is_reached(self):
         msg = _callback_update(chat_id=111, from_id=111, data_str='user_create', language_code='ru')
         service = MagicMock()
