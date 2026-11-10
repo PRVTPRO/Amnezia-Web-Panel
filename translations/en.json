@@ -131,7 +131,7 @@
   "server_self_service_enabled_desc": "Users can create connections on this server",
   "create_connection": "Create connection",
   "delete_connection": "Delete",
-  "connections_counter": "Connections: {0} / {1}",
+  "connections_counter": "🔗 {0} of {1} connections",
   "device_name": "Device name",
   "self_service_disabled": "Self-service is not enabled.",
   "config_tab": "📄 Config",
@@ -1234,5 +1234,7 @@
   "setup_password_short": "Password must be 12–256 characters long",
   "setup_password_mismatch": "Passwords do not match",
   "setup_already_completed": "Initial setup is already complete. Sign in instead.",
-  "legacy_backup_disabled": "Legacy JSON export is disabled because it could expose reusable credentials. Use the complete admin-only archive; keep it secret—it includes the credential key for portability."
+  "legacy_backup_disabled": "Legacy JSON export is disabled because it could expose reusable credentials. Use the complete admin-only archive; keep it secret—it includes the credential key for portability.",
+  "max_connections_per_user_label": "Maximum self-service connections",
+  "max_connections_per_user_hint": "Set 0 to use the global self-service limit. Allowed range: 0–100."
 }
