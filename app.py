@@ -568,6 +568,16 @@ def load_data():
     data.setdefault('users', [])
     data.setdefault('user_connections', [])
     data.setdefault('api_tokens', [])
+    users_migrated = False
+    for user in data.get('users', []):
+        raw_limit = user.get('max_connections', 0)
+        try:
+            normalized_limit = max(0, min(100, int(raw_limit or 0)))
+        except (TypeError, ValueError, OverflowError):
+            normalized_limit = 0
+        if user.get('max_connections') != normalized_limit:
+            user['max_connections'] = normalized_limit
+            users_migrated = True
     settings = data.setdefault('settings', {})
     settings.setdefault('appearance', {
         'title': 'Amnezia',
@@ -627,11 +637,13 @@ def load_data():
         server.pop('rkn_block_enabled', None)
     # Transparent upgrade: legacy plaintext SSH fields are sealed atomically on
     # first read, then only the AES-GCM envelope is kept on disk.
+    needs_save = users_migrated
     if any(isinstance(s, dict) and ('password' in s or 'private_key' in s)
            for s in data.get('servers', [])):
         from credential_store import CredentialStore, default_key_path
-        if CredentialStore(default_key_path(DATA_FILE)).seal_document(data):
-            save_data(data)
+        needs_save = CredentialStore(default_key_path(DATA_FILE)).seal_document(data) or needs_save
+    if needs_save:
+        save_data(data)
     return data
 
 
@@ -2957,6 +2969,7 @@ class AddUserRequest(BaseModel):
     telemt_secret: Optional[str] = None
     telemt_ad_tag: Optional[str] = None
     telemt_max_conns: Optional[int] = None
+    max_connections: int = Field(0, ge=0, le=100)
 
 
 
@@ -3057,6 +3070,7 @@ class SelfServiceConnectionRequest(BaseModel):
 
 
 class UpdateUserRequest(BaseModel):
+    max_connections: Optional[int] = Field(None, ge=0, le=100)
     username: Optional[str] = None
     telegramId: Optional[str] = None
     email: Optional[str] = None
@@ -9889,6 +9903,7 @@ def api_list_users(request: Request, search: str = '', page: int = 1, size: int 
             'email': u.get('email'),
             'description': u.get('description'),
             'connections_count': sum(1 for c in conns if c['user_id'] == u['id']),
+            'max_connections': u.get('max_connections', 0),
             'traffic_used': u.get('traffic_used', 0),
             'traffic_total': u.get('traffic_total', 0),
             'traffic_limit': u.get('traffic_limit', 0),
@@ -9938,6 +9953,7 @@ def api_add_user(request: Request, req: AddUserRequest):
             'email': req.email,
             'description': req.description,
             'traffic_limit': int(req.traffic_limit * 1024**3) if req.traffic_limit else 0,
+            'max_connections': req.max_connections,
             'traffic_reset_strategy': req.traffic_reset_strategy or 'never',
             'traffic_used': 0,
             'traffic_total': 0,
@@ -10032,6 +10048,8 @@ async def api_update_user(request: Request, user_id: str, req: UpdateUserRequest
                     return JSONResponse({'error': str(exc)}, status_code=400)
             if req.email is not None: user['email'] = req.email
             if req.description is not None: user['description'] = req.description
+            if req.max_connections is not None:
+                user['max_connections'] = req.max_connections
             if req.traffic_limit is not None:
                 new_limit = int(req.traffic_limit * 1024**3)
                 user['traffic_limit'] = new_limit
