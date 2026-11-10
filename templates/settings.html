@@ -711,7 +711,7 @@
                     </div>
                     <div class="form-group">
                         <label class="form-label">{{ _('self_service_max_conns') }}</label>
-                        <input type="number" class="form-input" id="ss_max_connections" value="{{ settings.self_service.max_connections_per_user | default(5) }}" min="1" max="100">
+                        <input type="number" class="form-input" id="ss_max_connections" value="{{ settings.self_service.max_connections_per_user | default(5) }}" min="0" max="100">
                     </div>
                     <div class="form-group">
                         <label class="form-label">{{ _('self_service_rate_limit') }}</label>
