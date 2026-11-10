@@ -1014,6 +1014,7 @@ def _auto_create_telegram_user(data: dict, from_user: dict, save_data_fn: Option
     password_digest = hashlib.pbkdf2_hmac(
         "sha256", random_password.encode(), salt.encode(), 100000
     )
+    create_disabled = bool(telegram_settings.get("create_users_disabled", False))
     user = {
         "id": str(uuid.uuid4()),
         "username": username,
@@ -1029,8 +1030,8 @@ def _auto_create_telegram_user(data: dict, from_user: dict, save_data_fn: Option
         "traffic_total": 0,
         "last_reset_at": now.isoformat(),
         "expiration_date": None,
-        "enabled": True,
-        "disable_reasons": [],
+        "enabled": not create_disabled,
+        "disable_reasons": ["manual"] if create_disabled else [],
         "access_revision": 0,
         "access_sync_pending": False,
         "created_at": now.isoformat(),
@@ -1040,10 +1041,6 @@ def _auto_create_telegram_user(data: dict, from_user: dict, save_data_fn: Option
         "share_password_hash": None,
         "share_auth_revision": 0,
     }
-    from user_state import reconcile_user_state
-    reconcile_user_state(
-        user, now, manual=not bool(telegram_settings.get("create_users_disabled", False))
-    )
     users.append(user)
     save_data_fn(data)
     logger.info("Created panel user from Telegram account %s", tg_id)
