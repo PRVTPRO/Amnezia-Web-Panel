@@ -174,6 +174,21 @@ class ConnectionServiceTest(unittest.IsolatedAsyncioTestCase):
         result = await service.create_user_connection('user-2', 0, 'awg', 'bob-home', 'telegram')
         self.assertEqual(result['status'], 'success')
 
+    async def test_zero_global_connection_limit_disables_self_service_creation(self):
+        data = base_data()
+        data['settings']['self_service']['max_connections_per_user'] = 0
+        service, _, manager = self.make_service(data)
+
+        options = await service.get_self_service_options('user-1', 'web')
+        self.assertEqual(options['max_connections_per_user'], 0)
+        self.assertEqual(options['remaining_connections'], 0)
+
+        with self.assertRaises(SelfServiceError) as ctx:
+            await service.create_user_connection('user-1', 0, 'awg', 'blocked', 'web')
+
+        self.assertTrue(ctx.exception.forbidden)
+        self.assertEqual(manager.added, [])
+
     async def test_create_rejects_when_user_reaches_max_connections(self):
         data = base_data()
         data['settings']['self_service']['max_connections_per_user'] = 1
