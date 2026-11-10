@@ -130,7 +130,7 @@
   "server_self_service_enabled_desc": "Les utilisateurs peuvent créer des connexions sur ce serveur",
   "create_connection": "Créer une connexion",
   "delete_connection": "Supprimer",
-  "connections_counter": "Connexions : {0} / {1}",
+  "connections_counter": "🔗 {0} sur {1} connexions",
   "device_name": "Nom du périphérique",
   "self_service_disabled": "Le self-service n'est pas activé.",
   "config_tab": "📄 Configuration",
@@ -1234,5 +1234,7 @@
   "setup_password_short": "Le mot de passe doit contenir de 12 à 256 caractères",
   "setup_password_mismatch": "Les mots de passe ne correspondent pas",
   "setup_already_completed": "La configuration initiale est terminée. Connectez-vous.",
-  "legacy_backup_disabled": "L’export JSON est désactivé car il pouvait exposer des identifiants réutilisables. Utilisez l’archive complète réservée aux administrateurs et gardez-la secrète : elle inclut la clé de chiffrement pour la portabilité."
+  "legacy_backup_disabled": "L’export JSON est désactivé car il pouvait exposer des identifiants réutilisables. Utilisez l’archive complète réservée aux administrateurs et gardez-la secrète : elle inclut la clé de chiffrement pour la portabilité.",
+  "max_connections_per_user_label": "Nombre maximal de connexions libre-service",
+  "max_connections_per_user_hint": "0 = utiliser la limite globale du libre-service. Valeurs autorisées : 0 à 100."
 }
