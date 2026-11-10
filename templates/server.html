@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_ui_icons.html" import ui_icon %}
 
 {% block title_extra %} — {{ server.name }}{% endblock %}
 {% block page_class %}page page--server-detail{% endblock %}
@@ -311,6 +312,244 @@
             width: auto;
             max-width: none;
         }
+    }
+
+    /* ===== Компактная шапка сервера =====
+       Смысловые зоны: идентификация → состояние и действия → сеть и сервисы.
+       Все контролы одной высоты, иконки — инлайн-SVG, цвета — из токенов тем. */
+    .srv-header { padding: 18px 20px 14px; }
+    .srv-header__main {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: var(--space-md);
+    }
+    .srv-header__identity { display: flex; align-items: center; gap: 14px; min-width: 0; }
+    .srv-header__avatar {
+        width: 46px;
+        height: 46px;
+        flex: 0 0 46px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 12px;
+        background: var(--accent-gradient);
+        color: #fff;
+        box-shadow: 0 4px 14px var(--accent-glow);
+    }
+    .srv-header__avatar .ui-icon { width: 24px; height: 24px; }
+    .srv-header__ident { min-width: 0; }
+    .srv-header__name {
+        margin: 0;
+        font-size: 1.35rem;
+        font-weight: 750;
+        line-height: 1.15;
+        letter-spacing: -.015em;
+        overflow-wrap: anywhere;
+    }
+    .srv-header__host {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: 3px;
+        color: var(--text-muted);
+        font-family: var(--font-mono, monospace);
+        font-size: .78rem;
+        font-variant-numeric: tabular-nums;
+    }
+    .srv-header__sep { opacity: .55; }
+    .srv-header .ui-icon { display: block; flex: 0 0 auto; }
+    .srv-header__tools {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+    .srv-tools__group { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+    .srv-header .srv-status-btn,
+    .srv-header .srv-tool-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        min-height: 32px;
+        padding: 6px 10px;
+        font-size: .78rem;
+        font-weight: 600;
+        color: var(--text-secondary);
+        background: transparent;
+        border: 1px solid transparent;
+        box-shadow: none;
+    }
+    .srv-header .srv-status-btn:hover,
+    .srv-header .srv-tool-btn:hover {
+        color: var(--text-primary);
+        background: var(--bg-card-hover);
+        border-color: var(--border-color);
+    }
+    .srv-header .srv-status-btn .ssh-trust-dot,
+    .srv-header .srv-status-btn .awg-plugin-dot { width: 7px; height: 7px; }
+    .srv-header .srv-status-btn.is-update {
+        background: var(--success-bg);
+        border-color: var(--success-border);
+        color: var(--success);
+    }
+    .srv-header .srv-status-btn.is-urgent {
+        background: var(--warning-bg);
+        border-color: var(--warning-border);
+        color: var(--warning);
+    }
+    .srv-header .srv-status-btn.is-danger {
+        background: var(--danger-bg);
+        border-color: var(--danger-border);
+        color: var(--danger);
+    }
+    .srv-header .server-stats-btn[aria-expanded="true"] {
+        background: var(--bg-card-hover);
+        border-color: var(--border-focus);
+        color: var(--text-primary);
+    }
+    .srv-header .server-stats-chevron { display: inline-flex; }
+    .srv-tool-btn .spinner {
+        width: 14px;
+        height: 14px;
+        border-color: var(--border-color);
+        border-top-color: var(--accent);
+    }
+    .srv-header__meta {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 8px 12px;
+        margin-top: 10px;
+        padding-left: 60px;
+    }
+    .srv-ip-btn { margin-left: auto; font-weight: 500; }
+    /* Нет связи: /ip-status пуст — не оставляем строку с одиноким «Настроить IP». */
+    .srv-header__meta.is-empty { display: none; }
+    .srv-header .ip-chips {
+        margin-top: 0;
+        gap: 8px;
+        flex-direction: row;
+        align-items: center;
+        flex-wrap: wrap;
+    }
+    .srv-header .ip-chip {
+        gap: 6px;
+        padding: 4px 10px 4px 8px;
+        font-family: var(--font-family);
+        font-size: .75rem;
+        font-weight: 500;
+        color: var(--text-secondary);
+        background: var(--bg-secondary);
+        border-color: var(--border-color);
+    }
+    .srv-header .ip-chip .glyph { display: inline-flex; align-items: center; }
+    .srv-header .ip-chip .glyph .ui-icon { width: 14px; height: 14px; }
+    .srv-header .ip-chip[data-state="on"] {
+        background: var(--success-bg);
+        border-color: var(--success-border);
+        color: var(--text-primary);
+    }
+    .srv-header .ip-chip[data-state="on"] .glyph { color: var(--success); }
+    .srv-header .ip-chip[data-state="warn"] {
+        background: var(--warning-bg);
+        border-color: var(--warning-border);
+        color: var(--warning-ink);
+    }
+    .srv-header .ip-chip[data-state="bad"] {
+        background: var(--danger-bg);
+        border-color: var(--danger-border);
+        color: var(--danger);
+    }
+    .srv-header .ip-chip[data-state="off"],
+    .srv-header .ip-chip[data-state="neutral"] {
+        background: var(--bg-secondary);
+        border-color: var(--border-color);
+        color: var(--text-muted);
+    }
+    .srv-header .ip-chip > span[dir="ltr"] { max-width: 320px; }
+    .srv-header__status {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-top: 14px;
+        padding-top: 12px;
+        border-top: 1px solid var(--border-color);
+    }
+    .srv-header__badges { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+    .srv-header__badges .badge { padding: 5px 10px; font-size: .68rem; }
+    .srv-header__badges .badge .ui-icon { width: 13px; height: 13px; }
+    .srv-header__actions {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-left: auto;
+    }
+    .srv-header .srv-action { min-height: 32px; padding: 6px 11px; font-size: .78rem; }
+    .srv-header .srv-action .ui-icon { width: 15px; height: 15px; }
+
+    @media (max-width: 960px) {
+        .srv-header__main { flex-direction: column; align-items: stretch; gap: 12px; }
+        .srv-header__tools { justify-content: flex-start; }
+    }
+    @media (max-width: 640px) {
+        .srv-header { padding: 16px 14px 12px; }
+        .srv-header__avatar { width: 40px; height: 40px; flex-basis: 40px; border-radius: 10px; }
+        .srv-header__avatar .ui-icon { width: 21px; height: 21px; }
+        .srv-header__name { font-size: 1.2rem; }
+        .srv-header__tools {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 6px;
+            width: 100%;
+        }
+        .srv-tools__group { display: contents; }
+        .srv-header .srv-status-btn,
+        .srv-header .srv-tool-btn {
+            width: 100%;
+            justify-content: flex-start;
+            padding: 7px 9px;
+        }
+        .srv-header #awgPluginBtn { grid-column: 1 / -1; }
+        .srv-header__meta { margin-top: 12px; padding-left: 0; }
+        .srv-header .srv-ip-btn {
+            width: 100%;
+            margin-left: 0;
+            justify-content: flex-start;
+            background: var(--bg-secondary);
+            border-color: var(--border-color);
+        }
+        .srv-header__status { gap: 10px; }
+        .srv-header__actions {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            width: 100%;
+            margin-left: 0;
+        }
+        .srv-header .srv-action {
+            width: 100%;
+            justify-content: flex-start;
+            padding: 6px 9px;
+            font-size: .75rem;
+            line-height: 1.15;
+            white-space: normal;
+            text-align: start;
+        }
+        .srv-header .ip-chip { white-space: normal; }
+        .srv-header .ip-chip > span[dir="ltr"] {
+            max-width: none;
+            overflow: visible;
+            text-overflow: clip;
+            line-height: 1.3;
+        }
+    }
+    @media (max-width: 420px) {
+        .srv-header .srv-status-btn { white-space: normal; line-height: 1.2; text-align: start; }
     }
 </style>
 {% endblock %}
@@ -1053,76 +1292,82 @@
 <a href="/" class="back-link page-back-link">{{ _('back_to_servers') }}</a>
 
 <!-- Server Info Header -->
-<div class="card page-header-card">
-    <div class="page-header page-header--card">
-        <div class="server-header__identity flex items-center gap-md">
-            <div class="server-icon" style="width:56px; height:56px; font-size:1.6rem;">🖥</div>
-            <div class="server-header__details">
-                <h1 style="font-size:1.4rem; font-weight:700;">{{ server.name }}</h1>
-                <div class="font-mono text-muted text-sm">{{ server.host }}:{{ server.ssh_port }} • {{ server.username
-                    }}</div>
-                <div class="ip-chips" id="serverIpChips" hidden></div>
-            </div>
-        </div>
-        <div class="page-header__actions">
-                        <div class="server-stats-wrap" id="serverStatsWrap">
-                <button class="btn btn-secondary btn-sm server-stats-btn" id="serverStatsBtn" type="button"
-                        onclick="toggleServerStats(event)" aria-expanded="false" aria-controls="serverStatsPopover">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                        <path d="M3 3v18h18"></path>
-                        <path d="M7 15l4-5 3 3 5-7"></path>
-                    </svg>
-                    <span>{{ _('server_load_short') }}</span>
-                    <span class="server-stats-chevron" aria-hidden="true">▾</span>
-                </button>
-                <div class="server-stats-popover" id="serverStatsPopover" role="dialog"
-                     aria-label="{{ _('server_load_title') }}" hidden>
-                    <div class="server-stats-head">
-                        <span class="server-stats-title">{{ _('server_load_title') }}</span>
-                        <span class="server-stats-time" id="serverStatsTime"></span>
-                    </div>
-                    <div id="serverStatsBody">
-                        <div class="server-stats-skel"></div>
-                    </div>
-                    <div class="server-stats-foot" id="serverStatsFoot" hidden></div>
+<div class="card page-header-card srv-header">
+    <div class="srv-header__main">
+        <div class="srv-header__identity">
+            <div class="srv-header__avatar" aria-hidden="true">{{ ui_icon('server', 24) }}</div>
+            <div class="srv-header__ident">
+                <h1 class="srv-header__name">{{ server.name }}</h1>
+                <div class="srv-header__host">
+                    <span dir="ltr">{{ server.host }}:{{ server.ssh_port }}</span>
+                    <span class="srv-header__sep" aria-hidden="true">·</span>
+                    <span>{{ server.username }}</span>
                 </div>
             </div>
-            {% if current_user and current_user.role == 'admin' %}
-            <button class="btn btn-sm ssh-trust-btn" type="button" id="sshTrustBtn" onclick="openSSHTrustModal()">
-                <span class="ssh-trust-dot" id="sshTrustDot"></span>
-                <span id="sshTrustBtnText">{{ _('ssh_trust_button') }}</span>
-            </button>
-            <button class="btn btn-sm awg-plugin-btn" type="button" id="awgPluginBtn" onclick="openAwgPluginModal()"
-                    data-state="unknown">
-                <span class="awg-plugin-dot" id="awgPluginDot"></span>
-                <span id="awgPluginBtnText">{{ _('awg_plugin_button') }}</span>
-            </button>
-            {% endif %}
-            <button class="btn btn-secondary btn-sm" onclick="openIpSettings()" id="ipSettingsBtn">
-                <span>🌐</span> {{ _('server_ipv6_configure_ip') }}
-            </button>
+        </div>
+
+        <div class="page-header__actions srv-header__tools">
+            <div class="srv-tools__group srv-tools__group--status">
+                <div class="server-stats-wrap" id="serverStatsWrap">
+                    <button class="btn btn-secondary btn-sm server-stats-btn srv-status-btn" id="serverStatsBtn"
+                            type="button" onclick="toggleServerStats(event)" aria-expanded="false"
+                            aria-controls="serverStatsPopover">
+                        {{ ui_icon('activity', 14) }}
+                        <span>{{ _('server_load_short') }}</span>
+                        <span class="server-stats-chevron" aria-hidden="true">{{ ui_icon('chevron-down', 13) }}</span>
+                    </button>
+                    <div class="server-stats-popover" id="serverStatsPopover" role="dialog"
+                         aria-label="{{ _('server_load_title') }}" hidden>
+                        <div class="server-stats-head">
+                            <span class="server-stats-title">{{ _('server_load_title') }}</span>
+                            <span class="server-stats-time" id="serverStatsTime"></span>
+                        </div>
+                        <div id="serverStatsBody">
+                            <div class="server-stats-skel"></div>
+                        </div>
+                        <div class="server-stats-foot" id="serverStatsFoot" hidden></div>
+                    </div>
+                </div>
+                {% if current_user and current_user.role == 'admin' %}
+                <button class="btn btn-sm ssh-trust-btn srv-status-btn" type="button" id="sshTrustBtn"
+                        onclick="openSSHTrustModal()">
+                    <span class="ssh-trust-dot" id="sshTrustDot"></span>
+                    {{ ui_icon('key', 14) }}
+                    <span id="sshTrustBtnText">{{ _('ssh_trust_button') }}</span>
+                </button>
+                <button class="btn btn-sm awg-plugin-btn srv-status-btn" type="button" id="awgPluginBtn"
+                        onclick="openAwgPluginModal()" data-state="unknown">
+                    <span class="awg-plugin-dot" id="awgPluginDot"></span>
+                    {{ ui_icon('plug', 14) }}
+                    <span id="awgPluginBtnText">{{ _('awg_plugin_button') }}</span>
+                </button>
+                {% endif %}
+            </div>
         </div>
     </div>
 
-    <div id="serverStatus" class="mt-md hidden">
-        <div class="divider"></div>
-        <div class="server-status-row">
-            <div class="flex gap-md" style="flex-wrap:wrap" id="statusBadges"></div>
-            <div class="server-status-actions">
-                <button class="btn btn-primary btn-sm" onclick="openMarketplaceModal()" id="marketplaceBtn">
-                    <span>🛒</span> {{ _('marketplace') }}
-                </button>
-                <button class="btn btn-secondary btn-sm" onclick="openServerManagement()" id="managementBtn">
-                    <span>⚙️</span> {{ _('management') }}
-                </button>
-                <button class="btn btn-secondary btn-sm" onclick="openHostTuning()" id="hostTuningBtn">
-                    <span>📊</span> {{ _('host_tuning') }}
-                </button>
-                <button class="btn btn-secondary btn-sm" onclick="openWgEasyImport()" id="wgeasyImportBtn">
-                    <span>📥</span> {{ _('wgeasy_import') }}
-                </button>
-            </div>
+    <div class="srv-header__meta">
+        <div class="ip-chips" id="serverIpChips" hidden></div>
+        <button class="btn btn-sm srv-tool-btn srv-ip-btn" onclick="openIpSettings()" id="ipSettingsBtn">
+            {{ ui_icon('globe', 14) }} <span>{{ _('server_ipv6_configure_ip') }}</span>
+        </button>
+    </div>
+
+    <div id="serverStatus" class="srv-header__status hidden">
+        <div class="srv-header__badges" id="statusBadges"></div>
+        <div class="srv-header__actions">
+            <button class="btn btn-primary btn-sm srv-action" onclick="openMarketplaceModal()" id="marketplaceBtn">
+                {{ ui_icon('store', 15) }} <span>{{ _('marketplace') }}</span>
+            </button>
+            <button class="btn btn-secondary btn-sm srv-action" onclick="openServerManagement()" id="managementBtn">
+                {{ ui_icon('sliders', 15) }} <span>{{ _('management') }}</span>
+            </button>
+            <button class="btn btn-secondary btn-sm srv-action" onclick="openHostTuning()" id="hostTuningBtn">
+                {{ ui_icon('file-code', 15) }} <span>{{ _('host_tuning') }}</span>
+            </button>
+            <button class="btn btn-secondary btn-sm srv-action" onclick="openWgEasyImport()" id="wgeasyImportBtn">
+                {{ ui_icon('upload', 15) }} <span>{{ _('wgeasy_import') }}</span>
+            </button>
         </div>
     </div>
 </div>
@@ -3299,10 +3544,25 @@
         return key ? _(key) : _('server_ipv6_state_unknown');
     }
 
+    // Those glyphs stay the semantic key; the markup maps them to SVG.
+    const IP_CHIP_ICONS = {
+        '✓': '<polyline points="20 6 9 17 4 12"/>',
+        '!': '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+        '✕': '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+        '?': '<circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/>'
+    };
+
+    function ipChipIcon(glyph) {
+        const body = IP_CHIP_ICONS[glyph] || IP_CHIP_ICONS['?'];
+        return '<svg class="ui-icon" width="14" height="14" viewBox="0 0 24 24" fill="none"'
+            + ' stroke="currentColor" stroke-width="2.4" stroke-linecap="round"'
+            + ' stroke-linejoin="round" aria-hidden="true" focusable="false">' + body + '</svg>';
+    }
+
     function ipChip(state, glyph, text, title) {
         return `<span class="ip-chip" data-state="${state}" role="status"`
             + ` aria-label="${escapeHtml(text)}" title="${escapeHtml(title || text)}">`
-            + `<span class="glyph" aria-hidden="true">${glyph}</span>`
+            + `<span class="glyph" data-glyph="${glyph}" aria-hidden="true">${ipChipIcon(glyph)}</span>`
             + `<span dir="ltr">${escapeHtml(text)}</span></span>`;
     }
 
@@ -3334,9 +3594,20 @@
     function renderIpChips(data) {
         const box = document.getElementById('serverIpChips');
         if (!box) return;
+        const meta = box.closest('.srv-header__meta');
         const host = data.host || {};
         const docker = data.docker || {};
         const instances = data.instances || [];
+        // Нет связи: /ip-status вернул пустой payload. Зелёный «IPv4 ·
+        // Инстансы: 0 · Пиры: 0» здесь был бы ложным — статус связи уже
+        // показывает бейдж ошибки, а строку чипов убираем целиком.
+        if (!host.ipv4 && !host.ipv6 && !instances.length && !docker.installed) {
+            box.innerHTML = '';
+            box.hidden = true;
+            if (meta) meta.classList.add('is-empty');
+            return;
+        }
+        if (meta) meta.classList.remove('is-empty');
         const chips = [];
         // Older payloads omit ipv4_state: keep the previous green default then.
         const v4 = host.ipv4_state || 'in_use';
@@ -3734,6 +4005,25 @@
     }
 
     // ========== Server Check ==========
+    // Статусные бейджи шапки: иконка + текст, цвет — из семантического тона.
+    const HEADER_BADGE_ICONS = {
+        ssh: '<svg class="ui-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+            + ' stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+            + '<polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg>',
+        docker: '<svg class="ui-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+            + ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+            + '<path d="M22 7.7a2.5 2.5 0 0 1 1.3 2.2v8.2a2.5 2.5 0 0 1-1.3 2.2l-7.5 4.2a2.5 2.5 0 0 1-2.5 0'
+            + 'L4.5 20.3A2.5 2.5 0 0 1 3.2 18V9.9a2.5 2.5 0 0 1 1.3-2.2l7.5-4.2a2.5 2.5 0 0 1 2.5 0Z"/>'
+            + '<path d="m3.5 7.5 8.5 4.7 8.5-4.7"/><path d="M12 22V12"/></svg>',
+        error: '<svg class="ui-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+            + ' stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+            + '<path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>'
+    };
+
+    function headerStatusBadge(tone, icon, text) {
+        return `<span class="badge badge-${tone}">${HEADER_BADGE_ICONS[icon] || ''} ${text}</span>`;
+    }
+
     async function checkServer(forcePlugins) {
         loadRknBlock();
         if (typeof loadWarpStatus === 'function') loadWarpStatus(true);
@@ -3752,12 +4042,12 @@
             statusDiv.classList.remove('hidden');
             let html = '';
             if (data.connection === 'ok') {
-                html += `<span class="badge badge-success"><span class="badge-dot"></span> ${_('ssh_ok')}</span>`;
+                html += headerStatusBadge('success', 'ssh', _('ssh_ok'));
             }
             if (data.docker_installed) {
-                html += `<span class="badge badge-success"><span class="badge-dot"></span> ${_('docker_ok')}</span>`;
+                html += headerStatusBadge('success', 'docker', _('docker_ok'));
             } else {
-                html += `<span class="badge badge-warn"><span class="badge-dot"></span> ${_('docker_not_installed')}</span>`;
+                html += headerStatusBadge('warn', 'docker', _('docker_not_installed'));
             }
             badges.innerHTML = html;
             if (data.protocols) {
@@ -3804,7 +4094,7 @@
             const statusDiv = document.getElementById('serverStatus');
             const badges = document.getElementById('statusBadges');
             statusDiv.classList.remove('hidden');
-            badges.innerHTML = `<span class="badge badge-danger"><span class="badge-dot"></span> ${_('server_connection_error')}</span>`;
+            badges.innerHTML = `<span class="badge badge-danger">${HEADER_BADGE_ICONS.error} ${_('server_connection_error')}</span>`;
         } finally {
             // Do not await the probe here: on the error path /check may have
             // thrown before the settle above, and a slow probe must not keep
