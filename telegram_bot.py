@@ -50,6 +50,7 @@ SERVICE_PROTOCOLS = {"dns", "adguard", "socks5", "nginx", "exit"}
 TG_TRANSLATIONS = {
     "en": {
         "hi": "Hi",
+        "account_disabled": "Account disabled",
         "account_not_linked": "Your Telegram account is not linked to any panel user.",
         "contact_admin_to_link": "Please contact your administrator — they need to add your Telegram ID to your profile.",
         "your_telegram_id": "Your Telegram ID",
@@ -197,6 +198,7 @@ TG_TRANSLATIONS = {
     },
     "fa": {
         "hi": "سلام",
+        "account_disabled": "حساب کاربری غیرفعال است",
         "account_not_linked": "حساب تلگرام شما به هیچ‌یک از کاربران پنل پیوند داده نشده است.",
         "contact_admin_to_link": "لطفاً با مدیر تماس بگیرید؛ او باید شناسه تلگرام شما را به پروفایلتان اضافه کند.",
         "your_telegram_id": "شناسه تلگرام شما",
@@ -344,6 +346,7 @@ TG_TRANSLATIONS = {
     },
     "fr": {
         "hi": "Bonjour",
+        "account_disabled": "Compte désactivé",
         "account_not_linked": "Votre compte Telegram n’est associé à aucun utilisateur du panneau.",
         "contact_admin_to_link": "Contactez votre administrateur : il doit ajouter votre identifiant Telegram à votre profil.",
         "your_telegram_id": "Votre identifiant Telegram",
@@ -491,6 +494,7 @@ TG_TRANSLATIONS = {
     },
     "ru": {
         "hi": "Привет",
+        "account_disabled": "Аккаунт отключён",
         "account_not_linked": "Ваш аккаунт Telegram не привязан ни к одному пользователю панели.",
         "contact_admin_to_link": "Обратитесь к администратору — он должен добавить ваш Telegram ID в профиль.",
         "your_telegram_id": "Ваш Telegram ID",
