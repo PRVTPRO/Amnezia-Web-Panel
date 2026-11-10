@@ -22,6 +22,7 @@ import httpx
 
 from connection_service import (
     SELF_SERVICE_PROTOCOLS,
+    SelfServiceError,
     protocol_base,
     protocol_instance,
     sanitize_allowed_protocols,
@@ -2042,86 +2043,152 @@ async def _handle_pending_input(api: TelegramAPI, msg: dict, load_data_fn: Calla
     return False
 
 
-async def _user_connection_limit_reached(self_service_svc, user_id: str) -> bool:
+async def _user_create_access(api: TelegramAPI, chat_id: int, panel_user: dict,
+                               load_data_fn: Callable, self_service_svc, lang: str,
+                               message_id: Optional[int] = None):
+    """Validate all account/channel quotas before asking the user for wizard input."""
+    async def show(message):
+        if message_id is None:
+            await api.send_message(chat_id, message)
+        else:
+            await api.edit_message(chat_id, message_id, message)
+
+    data = load_data_fn()
+    if not _self_service_telegram_enabled(data):
+        await show(_tt(lang, "self_service_disabled_contact"))
+        return None
     if not self_service_svc:
-        return False
+        await show(_tt(lang, "self_service_unavailable"))
+        return None
+
     try:
-        options = await self_service_svc.get_self_service_options(user_id, "telegram")
-        return int(options.get("remaining_connections", 1)) <= 0
-    except Exception:
-        logger.exception("Bot: failed to check self-service connection limit")
-        return False
+        options = await self_service_svc.get_self_service_options(panel_user["id"], "telegram")
+    except Exception as exc:
+        error_text = str(exc)
+        if "User is disabled" in error_text:
+            await show(f"❌ {_tt(lang, 'account_disabled')}")
+        elif "Maximum self-service connections reached" in error_text:
+            await show(f"❌ {_tt(lang, 'max_connections_reached')}")
+        else:
+            logger.warning("Bot: self-service preflight rejected user %s: %s",
+                           panel_user.get("id"), error_text)
+            await show(f"❌ {_tt(lang, 'self_service_unavailable')}")
+        return None
+
+    if int(options.get("remaining_connections", 1)) <= 0:
+        await show(f"❌ {_tt(lang, 'max_connections_reached')}")
+        return None
+    return options
 
 
-# ----------------------------------------------------------------------- #
-#  Self-service user create wizard
-# ----------------------------------------------------------------------- #
-async def _user_create_start(api: TelegramAPI, chat_id: int, message_id: int, callback_id: str, tg_id: str, tg_username: Optional[str], load_data_fn: Callable, self_service_svc, lang: str = "en"):
+async def _user_prompt_connection_name(api: TelegramAPI, chat_id: int,
+                                       message_id: Optional[int], tg_id: str,
+                                       server_id: int, proto: str, server: dict,
+                                       lang: str = "en"):
+    _pending_inputs[_pending_key(chat_id, tg_id)] = {
+        "kind": "user_add_client_name",
+        "sid": server_id,
+        "proto": proto,
+        "ts": time.time(),
+    }
+    message = (
+        f"➕ <b>{_tt(lang, 'btn_create_connection')}</b>\n\n"
+        f"{_tt(lang, 'protocol_label')}: <b>{_e(_protocol_display_name(proto, server))}</b>\n\n"
+        f"{_tt(lang, 'send_device_name')}\n"
+        f"{_tt(lang, 'example_label')}: <code>Ivan iPhone</code>\n\n"
+        f"{_tt(lang, 'cancel_instruction')}"
+    )
+    markup = {"inline_keyboard": [[{
+        "text": f"❌ {_tt(lang, 'btn_cancel')}",
+        "callback_data": "user_create_cancel",
+    }]]}
+    if message_id is None:
+        await api.send_message(chat_id, message, reply_markup=markup)
+    else:
+        await api.edit_message(chat_id, message_id, message, reply_markup=markup)
+
+
+async def _user_show_protocols(api: TelegramAPI, chat_id: int,
+                               message_id: Optional[int], server_id: int,
+                               server: dict, available_protos: list,
+                               lang: str = "en"):
+    server_name = server.get("name") or server.get("host") or _tt(
+        lang, "default_server", number=server_id + 1)
+    rows = [[{
+        "text": _protocol_display_name(proto, server),
+        "callback_data": _ref("user_create_protocol", {"sid": server_id, "proto": proto}),
+    }] for proto in available_protos]
+    rows.append([{
+        "text": f"⬅️ {_tt(lang, 'btn_back')}",
+        "callback_data": "user_create",
+    }])
+    message = (
+        f"🖥 <b>{_e(server_name)}</b>\n\n"
+        f"{_tt(lang, 'choose_protocol')}"
+    )
+    markup = {"inline_keyboard": rows}
+    if message_id is None:
+        await api.send_message(chat_id, message, reply_markup=markup)
+    else:
+        await api.edit_message(chat_id, message_id, message, reply_markup=markup)
+
+
+async def _user_create_wizard(api: TelegramAPI, chat_id: int, tg_id: str,
+                              tg_username: Optional[str], load_data_fn: Callable,
+                              self_service_svc, lang: str = "en",
+                              message_id: Optional[int] = None):
     panel_user = _find_user(load_data_fn, tg_id, tg_username)
+    async def show(message, markup=None):
+        if message_id is None:
+            await api.send_message(chat_id, message, reply_markup=markup)
+        else:
+            await api.edit_message(chat_id, message_id, message, reply_markup=markup)
+
     if not panel_user:
-        await api.answer_callback(callback_id, text=_tt(lang, "access_denied"))
-        await api.edit_message(chat_id, message_id, f"❌ {_tt(lang, 'access_denied')}")
+        await show(f"❌ {_tt(lang, 'access_denied')}")
+        return
+
+    options = await _user_create_access(
+        api, chat_id, panel_user, load_data_fn, self_service_svc, lang, message_id)
+    if options is None:
         return
 
     data = load_data_fn()
-    if not _self_service_telegram_enabled(data):
-        await api.answer_callback(callback_id)
-        await api.edit_message(
-            chat_id,
-            message_id,
-            _tt(lang, "self_service_disabled_contact"),
-        )
-        return
-
-    if await _user_connection_limit_reached(self_service_svc, panel_user["id"]):
-        await api.answer_callback(callback_id)
-        await api.edit_message(chat_id, message_id, f"❌ {_tt(lang, 'max_connections_reached')}")
-        return
-
     eligible = _get_eligible_servers(data)
     if not eligible:
-        await api.answer_callback(callback_id)
-        await api.edit_message(
-            chat_id,
-            message_id,
-            _tt(lang, "self_service_no_servers"),
-        )
+        await show(_tt(lang, "self_service_no_servers"))
         return
 
+    if len(eligible) == 1:
+        server_id, server, protocols = eligible[0]
+        if len(protocols) == 1:
+            await _user_prompt_connection_name(
+                api, chat_id, message_id, tg_id, server_id, protocols[0], server, lang)
+        else:
+            await _user_show_protocols(
+                api, chat_id, message_id, server_id, server, protocols, lang)
+        return
+
+    message = f"➕ <b>{_tt(lang, 'btn_create_connection')}</b>\n\n{_tt(lang, 'choose_server')}"
+    markup = _user_create_server_keyboard(eligible, lang)
+    await show(message, markup)
+
+
+async def _user_create_start(api: TelegramAPI, chat_id: int, message_id: int,
+                              callback_id: str, tg_id: str,
+                              tg_username: Optional[str], load_data_fn: Callable,
+                              self_service_svc, lang: str = "en"):
     await api.answer_callback(callback_id)
-    await api.edit_message(
-        chat_id,
-        message_id,
-        f"➕ <b>{_tt(lang, 'btn_create_connection')}</b>\n\n{_tt(lang, 'choose_server')}",
-        reply_markup=_user_create_server_keyboard(eligible, lang),
-    )
+    await _user_create_wizard(
+        api, chat_id, tg_id, tg_username, load_data_fn, self_service_svc,
+        lang, message_id)
 
 
-async def _user_create_start_message(api: TelegramAPI, chat_id: int, tg_id: str, tg_username: Optional[str], load_data_fn: Callable, self_service_svc, lang: str = "en"):
-    panel_user = _find_user(load_data_fn, tg_id, tg_username)
-    if not panel_user:
-        await api.send_message(chat_id, f"❌ {_tt(lang, 'access_denied')}")
-        return
-
-    data = load_data_fn()
-    if not _self_service_telegram_enabled(data):
-        await api.send_message(chat_id, _tt(lang, "self_service_disabled_contact"))
-        return
-
-    if await _user_connection_limit_reached(self_service_svc, panel_user["id"]):
-        await api.send_message(chat_id, f"❌ {_tt(lang, 'max_connections_reached')}")
-        return
-
-    eligible = _get_eligible_servers(data)
-    if not eligible:
-        await api.send_message(chat_id, _tt(lang, "self_service_no_servers"))
-        return
-
-    await api.send_message(
-        chat_id,
-        f"➕ <b>{_tt(lang, 'btn_create_connection')}</b>\n\n{_tt(lang, 'choose_server')}",
-        reply_markup=_user_create_server_keyboard(eligible, lang),
-    )
+async def _user_create_start_message(api: TelegramAPI, chat_id: int, tg_id: str,
+                                     tg_username: Optional[str], load_data_fn: Callable,
+                                     self_service_svc, lang: str = "en"):
+    await _user_create_wizard(
+        api, chat_id, tg_id, tg_username, load_data_fn, self_service_svc, lang)
 
 
 async def _user_create_server(api: TelegramAPI, chat_id: int, message_id: int, callback_id: str, tg_id: str, tg_username: Optional[str], server_id: int, load_data_fn: Callable, self_service_svc, lang: str = "en"):
@@ -2154,18 +2221,13 @@ async def _user_create_server(api: TelegramAPI, chat_id: int, message_id: int, c
         await api.edit_message(chat_id, message_id, _tt(lang, "no_protocols_available"))
         return
 
-    server_name = server.get("name") or server.get("host") or _tt(lang, "default_server", number=server_id + 1)
-    rows = []
-    for proto in available_protos:
-        rows.append([{"text": _protocol_display_name(proto, server), "callback_data": _ref("user_create_protocol", {"sid": server_id, "proto": proto})}])
-    rows.append([{"text": f" {_tt(lang, 'btn_back')}", "callback_data": "user_create"}])
+    if len(available_protos) == 1:
+        await _user_prompt_connection_name(
+            api, chat_id, message_id, tg_id, server_id, available_protos[0], server, lang)
+        return
 
-    await api.edit_message(
-        chat_id,
-        message_id,
-        f" {_tt(lang, 'servers_title')}: <b>{_e(server_name)}</b>\n\n{_tt(lang, 'choose_protocol')}",
-        reply_markup={"inline_keyboard": rows},
-    )
+    await _user_show_protocols(
+        api, chat_id, message_id, server_id, server, available_protos, lang)
 
 
 async def _user_create_protocol(api: TelegramAPI, chat_id: int, message_id: int, callback_id: str, tg_id: str, tg_username: Optional[str], server_id: int, proto: str, load_data_fn: Callable, lang: str = "en"):
@@ -2179,23 +2241,8 @@ async def _user_create_protocol(api: TelegramAPI, chat_id: int, message_id: int,
 
     await api.answer_callback(callback_id)
 
-    _pending_inputs[_pending_key(chat_id, tg_id)] = {
-        "kind": "user_add_client_name",
-        "sid": server_id,
-        "proto": proto,
-        "ts": time.time(),
-    }
-
-    await api.edit_message(
-        chat_id,
-        message_id,
-        f"➕ <b>{_tt(lang, 'btn_create_connection')}</b>\n\n"
-        f"{_tt(lang, 'protocol_label')}: <b>{_e(_protocol_display_name(proto, server))}</b>\n\n"
-        f"{_tt(lang, 'send_device_name')}\n"
-        f"{_tt(lang, 'example_label')}: <code>Ivan iPhone</code>\n\n"
-        f"{_tt(lang, 'cancel_instruction')}",
-        reply_markup={"inline_keyboard": [[{"text": f"❌ {_tt(lang, 'btn_cancel')}", "callback_data": "user_create_cancel"}]]},
-    )
+    await _user_prompt_connection_name(
+        api, chat_id, message_id, tg_id, server_id, proto, server, lang)
 
 
 async def _user_create_cancel(api: TelegramAPI, chat_id: int, message_id: int, callback_id: str, tg_id: str, tg_username: Optional[str], load_data_fn: Callable, lang: str = "en"):
