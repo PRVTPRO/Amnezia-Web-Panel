@@ -103,6 +103,7 @@ TG_TRANSLATIONS = {
         "self_service_no_servers": "No servers are available for self-service connection creation.\nPlease contact your administrator.",
         "self_service_disabled_contact": "Self-service is disabled. Contact your administrator.",
         "self_service_unavailable": "Self-service is not available.",
+        "max_connections_reached": "You have reached your connection limit. Delete an existing connection or contact your administrator.",
         "server_not_self_service": "This server is not available for self-service.",
         "no_protocols_available": "No protocols available on this server.",
         "name_empty": "Name cannot be empty. Send a connection name or /cancel.",
@@ -249,6 +250,7 @@ TG_TRANSLATIONS = {
         "self_service_no_servers": "هیچ سروری برای ساخت اتصال به‌صورت سلف‌سرویس در دسترس نیست.\nلطفاً با مدیر تماس بگیرید.",
         "self_service_disabled_contact": "سلف‌سرویس غیرفعال است. با مدیر تماس بگیرید.",
         "self_service_unavailable": "سلف‌سرویس در دسترس نیست.",
+        "max_connections_reached": "به سقف تعداد اتصال‌ها رسیده‌اید. برای ادامه یک اتصال قبلی را حذف کنید یا با مدیر تماس بگیرید.",
         "server_not_self_service": "این سرور برای سلف‌سرویس در دسترس نیست.",
         "no_protocols_available": "هیچ پروتکلی روی این سرور در دسترس نیست.",
         "name_empty": "نام نمی‌تواند خالی باشد. نام اتصال یا /cancel را بفرستید.",
@@ -395,6 +397,7 @@ TG_TRANSLATIONS = {
         "self_service_no_servers": "Aucun serveur n’est disponible pour créer une connexion en libre-service.\nContactez votre administrateur.",
         "self_service_disabled_contact": "Le libre-service est désactivé. Contactez votre administrateur.",
         "self_service_unavailable": "Le libre-service n’est pas disponible.",
+        "max_connections_reached": "Vous avez atteint la limite de connexions. Supprimez une connexion existante ou contactez votre administrateur.",
         "server_not_self_service": "Ce serveur n’est pas disponible en libre-service.",
         "no_protocols_available": "Aucun protocole disponible sur ce serveur.",
         "name_empty": "Le nom ne peut pas être vide. Envoyez un nom de connexion ou /cancel.",
@@ -541,6 +544,7 @@ TG_TRANSLATIONS = {
         "self_service_no_servers": "Нет серверов, доступных для создания подключений через self-service.\nОбратитесь к администратору.",
         "self_service_disabled_contact": "Self-service отключён. Обратитесь к администратору.",
         "self_service_unavailable": "Self-service недоступен.",
+        "max_connections_reached": "Достигнут лимит подключений. Удалите одно из существующих подключений или обратитесь к администратору.",
         "server_not_self_service": "Этот сервер недоступен для self-service.",
         "no_protocols_available": "На этом сервере нет доступных протоколов.",
         "name_empty": "Имя не может быть пустым. Отправьте имя подключения или /cancel.",
@@ -687,6 +691,7 @@ TG_TRANSLATIONS = {
         "self_service_no_servers": "目前没有可用于自助创建连接的服务器。\n请联系管理员。",
         "self_service_disabled_contact": "自助服务已禁用。请联系管理员。",
         "self_service_unavailable": "自助服务不可用。",
+        "max_connections_reached": "已达到连接数量上限。请删除一个现有连接，或联系管理员。",
         "server_not_self_service": "此服务器不支持自助服务。",
         "no_protocols_available": "此服务器没有可用协议。",
         "name_empty": "名称不能为空。请发送连接名称或 /cancel。",
@@ -1961,6 +1966,17 @@ async def _handle_pending_input(api: TelegramAPI, msg: dict, load_data_fn: Calla
     return False
 
 
+async def _user_connection_limit_reached(self_service_svc, user_id: str) -> bool:
+    if not self_service_svc:
+        return False
+    try:
+        options = await self_service_svc.get_self_service_options(user_id, "telegram")
+        return int(options.get("remaining_connections", 1)) <= 0
+    except Exception:
+        logger.exception("Bot: failed to check self-service connection limit")
+        return False
+
+
 # ----------------------------------------------------------------------- #
 #  Self-service user create wizard
 # ----------------------------------------------------------------------- #
@@ -1979,6 +1995,11 @@ async def _user_create_start(api: TelegramAPI, chat_id: int, message_id: int, ca
             message_id,
             _tt(lang, "self_service_disabled_contact"),
         )
+        return
+
+    if await _user_connection_limit_reached(self_service_svc, panel_user["id"]):
+        await api.answer_callback(callback_id)
+        await api.edit_message(chat_id, message_id, f"❌ {_tt(lang, 'max_connections_reached')}")
         return
 
     eligible = _get_eligible_servers(data)
@@ -2000,7 +2021,7 @@ async def _user_create_start(api: TelegramAPI, chat_id: int, message_id: int, ca
     )
 
 
-async def _user_create_start_message(api: TelegramAPI, chat_id: int, tg_id: str, tg_username: Optional[str], load_data_fn: Callable, lang: str = "en"):
+async def _user_create_start_message(api: TelegramAPI, chat_id: int, tg_id: str, tg_username: Optional[str], load_data_fn: Callable, self_service_svc, lang: str = "en"):
     panel_user = _find_user(load_data_fn, tg_id, tg_username)
     if not panel_user:
         await api.send_message(chat_id, f"❌ {_tt(lang, 'access_denied')}")
@@ -2009,6 +2030,10 @@ async def _user_create_start_message(api: TelegramAPI, chat_id: int, tg_id: str,
     data = load_data_fn()
     if not _self_service_telegram_enabled(data):
         await api.send_message(chat_id, _tt(lang, "self_service_disabled_contact"))
+        return
+
+    if await _user_connection_limit_reached(self_service_svc, panel_user["id"]):
+        await api.send_message(chat_id, f"❌ {_tt(lang, 'max_connections_reached')}")
         return
 
     eligible = _get_eligible_servers(data)
@@ -2234,7 +2259,10 @@ async def _user_create_connection(api: TelegramAPI, chat_id: int, panel_user: di
                     await api.edit_message(chat_id, loading_msg_id, f"✅ {_tt(lang, 'connection_created_success')}")
     except Exception as e:
         logger.exception("Bot: self-service create failed")
-        await api.send_message(chat_id, f"❌ {_tt(lang, 'error')}: {_tt(lang, 'self_service_unavailable')}")
+        if "Maximum self-service connections reached" in str(e):
+            await api.send_message(chat_id, f"❌ {_tt(lang, 'max_connections_reached')}")
+        else:
+            await api.send_message(chat_id, f"❌ {_tt(lang, 'error')}: {_tt(lang, 'self_service_unavailable')}")
 
 
 # ----------------------------------------------------------------------- #
@@ -2296,7 +2324,7 @@ async def _dispatch(api: TelegramAPI, update: dict, load_data_fn: Callable, gene
             else:
                 await _send_user_connections(api, chat_id, panel_user, load_data_fn, lang=lang)
         elif text.startswith("/connect"):
-            await _user_create_start_message(api, chat_id, str(msg["from"]["id"]), tg_username, load_data_fn, lang)
+            await _user_create_start_message(api, chat_id, str(msg["from"]["id"]), tg_username, load_data_fn, self_service_svc, lang)
         elif text.startswith("/disconnect"):
             panel_user = _find_user(load_data_fn, str(msg["from"]["id"]), tg_username)
             if not panel_user:
