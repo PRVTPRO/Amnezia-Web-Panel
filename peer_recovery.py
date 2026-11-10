@@ -16,6 +16,8 @@ import threading
 import time
 from datetime import datetime
 
+from credential_store import CredentialStore, default_key_path
+
 
 STATE_FILE_LOCK = threading.RLock()
 GENERATION = '_recovery_generation'
@@ -339,10 +341,12 @@ class RecoveryStore:
             return replay
         path = self._path(operation_id)
         after = copy.deepcopy(after)
+        CredentialStore(default_key_path(self.data_file)).seal_document(after)
         after[GENERATION] = operation_id
         output = json.dumps(after, indent=2, ensure_ascii=False, allow_nan=False).encode()
-        record = {'version': 1, 'actor': actor, 'kind': kind, 'intent': intent,
-                  'before_sha256': file_hash(before), 'before_base64': base64.b64encode(before).decode(),
+        record = {'version': 2, 'actor': actor, 'kind': kind, 'intent': intent,
+                  'before_sha256': file_hash(before),
+                  'before_sealed': CredentialStore(default_key_path(self.data_file)).seal_bytes(before, 'recovery-before'),
                   'after_sha256': file_hash(output), 'phase': 'prepared',
                   'counters_verified_final': False,
                   'audit': [{'event': 'prepared', 'at': int(time.time())}]}
@@ -352,7 +356,7 @@ class RecoveryStore:
                 raise RecoveryError('unsafe_recovery_path')
             raw = companion.read_bytes()
             record['peer_creates_snapshot'] = {'sha256': file_hash(raw),
-                                              'base64': base64.b64encode(raw).decode()}
+                                              'sealed': CredentialStore(default_key_path(self.data_file)).seal_bytes(raw, 'peer-creates-snapshot')}
         # Snapshot and its audit are one fsynced atomic object, before data write.
         # Any error here forbids the destructive write.
         atomic_json(path, record)
@@ -365,6 +369,36 @@ class RecoveryStore:
         atomic_json(path, record)  # Failure is NOT success; retry recovers by hash.
         return {'status': 'success', 'operation_id': operation_id, 'replayed': False,
                 'counters_verified_final': False}
+
+
+def migrate_recovery_snapshots(data_file):
+    """Upgrade legacy base64 recovery snapshots to authenticated encryption."""
+    root = Path(str(data_file) + '.recovery')
+    if not root.exists():
+        return False
+    store = CredentialStore(default_key_path(data_file))
+    changed_any = False
+    for path in root.rglob('*.json'):
+        if path.is_symlink():
+            raise RecoveryError('unsafe_recovery_path')
+        record = json.loads(path.read_bytes())
+        if not isinstance(record, dict):
+            continue
+        changed = False
+        if 'before_base64' in record:
+            raw = base64.b64decode(record.pop('before_base64'))
+            record['before_sealed'] = store.seal_bytes(raw, 'recovery-before')
+            record['version'] = 2
+            changed = True
+        snapshot = record.get('peer_creates_snapshot')
+        if isinstance(snapshot, dict) and 'base64' in snapshot:
+            raw = base64.b64decode(snapshot.pop('base64'))
+            snapshot['sealed'] = store.seal_bytes(raw, 'peer-creates-snapshot')
+            changed = True
+        if changed:
+            atomic_json(path, record)
+            changed_any = True
+    return changed_any
 
 
 def orphan_scope(data, connection_id):

@@ -1224,5 +1224,15 @@
   "server_load_cpu": "CPU",
   "server_load_ram": "RAM",
   "server_load_disk": "Disque",
-  "server_load_net": "Réseau"
+  "server_load_net": "Réseau",
+  "setup_title": "Créer le premier administrateur",
+  "setup_password_confirm": "Confirmer le mot de passe",
+  "setup_submit": "Créer l’administrateur",
+  "setup_creating": "Création de l’administrateur...",
+  "setup_error": "Échec de la création de l’administrateur",
+  "setup_username_invalid": "Saisissez un nom d’utilisateur (1–64 caractères)",
+  "setup_password_short": "Le mot de passe doit contenir de 12 à 256 caractères",
+  "setup_password_mismatch": "Les mots de passe ne correspondent pas",
+  "setup_already_completed": "La configuration initiale est terminée. Connectez-vous.",
+  "legacy_backup_disabled": "L’export JSON est désactivé car il pouvait exposer des identifiants réutilisables. Utilisez l’archive complète réservée aux administrateurs et gardez-la secrète : elle inclut la clé de chiffrement pour la portabilité."
 }

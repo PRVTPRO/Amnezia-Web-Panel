@@ -128,14 +128,35 @@
 
             <div class="card">
                 <h2 style="font-size:1.2rem; font-weight:600; margin-bottom:var(--space-lg); text-align:center;">{{
-                    _('login_title') }}</h2>
+                    _('setup_title') if setup_required else _('login_title') }}</h2>
 
                 <div class="login-error" id="loginError"></div>
 
+                {% if setup_required %}
+                <form id="setupForm" onsubmit="return doSetup(event)">
+                    <div class="form-group">
+                        <label class="form-label">{{ _('username') }}</label>
+                        <input class="form-input" type="text" id="setupUsername" maxlength="64" required autofocus>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">{{ _('password') }}</label>
+                        <input class="form-input" type="password" id="setupPassword" minlength="12" maxlength="256" required>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">{{ _('setup_password_confirm') }}</label>
+                        <input class="form-input" type="password" id="setupPasswordConfirm" minlength="12" maxlength="256" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary" id="setupBtn"
+                        style="width:100%; margin-top:var(--space-md);">
+                        <span id="setupBtnText">{{ _('setup_submit') }}</span>
+                        <div class="spinner hidden" id="setupSpinner"></div>
+                    </button>
+                </form>
+                {% else %}
                 <form id="loginForm" onsubmit="return doLogin(event)">
                     <div class="form-group">
                         <label class="form-label">{{ _('username') }}</label>
-                        <input class="form-input" type="text" id="username" placeholder="admin" required autofocus>
+                        <input class="form-input" type="text" id="username" required autofocus>
                     </div>
 
                     <div class="form-group">
@@ -163,6 +184,7 @@
                         <div class="spinner hidden" id="loginSpinner"></div>
                     </button>
                 </form>
+                {% endif %}
             </div>
         </div>
     </div>
@@ -277,6 +299,39 @@
             const img = document.getElementById('captchaImage');
             if (img) {
                 img.src = '/api/auth/captcha?' + new Date().getTime();
+            }
+        }
+
+        async function doSetup(e) {
+            e.preventDefault();
+            const btn = document.getElementById('setupBtn');
+            const text = document.getElementById('setupBtnText');
+            const spinner = document.getElementById('setupSpinner');
+            const errEl = document.getElementById('loginError');
+            btn.disabled = true;
+            text.textContent = _('setup_creating');
+            spinner.classList.remove('hidden');
+            errEl.classList.remove('visible');
+            try {
+                const res = await fetch('/api/auth/setup', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        username: document.getElementById('setupUsername').value,
+                        password: document.getElementById('setupPassword').value,
+                        password_confirm: document.getElementById('setupPasswordConfirm').value,
+                    }),
+                });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.error || _('setup_error'));
+                window.location.href = '/';
+            } catch (err) {
+                errEl.textContent = err.message;
+                errEl.classList.add('visible');
+            } finally {
+                btn.disabled = false;
+                text.textContent = _('setup_submit');
+                spinner.classList.add('hidden');
             }
         }
 

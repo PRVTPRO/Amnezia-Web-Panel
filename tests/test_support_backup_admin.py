@@ -184,21 +184,30 @@ class SupportBackupAdminAccessTests(unittest.TestCase):
         self.assertFalse(Path(panel.DATA_FILE + '.recovery').exists(),
                          'support Bearer restore must not create a recovery journal')
 
-    def test_admin_can_download_data_backup(self):
+    def test_admin_cannot_download_legacy_plaintext_backup(self):
         with TestClient(panel.app) as client:
             self.login(client, 'admin')
             before = self.read_data_bytes()
             response = client.get('/api/settings/backup/download')
 
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertIn('application/json', response.headers.get('content-type', ''))
-        downloaded = response.json()
-        self.assertEqual([user['username'] for user in downloaded['users']],
-                         ['admin', 'support'])
-        self.assertEqual(downloaded['private_marker'],
-                         'support-must-not-receive-this')
+        self.assertEqual(response.status_code, 410, response.text)
+        self.assertEqual(response.json()['code'], 'legacy_backup_disabled')
+        self.assertIn('no-store', response.headers.get('cache-control', ''))
+        self.assertNotIn('support-must-not-receive-this', response.text)
+        self.assertNotIn(self.admin['password_hash'], response.text)
         self.assertEqual(self.read_data_bytes(), before,
-                         'the download endpoint must not rewrite data.json')
+                         'the disabled download endpoint must not rewrite data.json')
+
+    def test_admin_restore_rejects_cross_origin_without_writing(self):
+        backup = self.valid_backup()
+        with TestClient(panel.app) as client:
+            self.login(client, 'admin')
+            before = self.read_data_bytes()
+            response = self.restore(client, backup, headers={
+                'Origin': 'https://evil.example', 'Sec-Fetch-Site': 'cross-site'
+            })
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(self.read_data_bytes(), before)
 
     def test_admin_can_restore_valid_backup(self):
         backup = self.valid_backup()
@@ -230,7 +239,10 @@ class SupportBackupAdminAccessTests(unittest.TestCase):
         self.assertEqual(record['phase'], 'committed')
         self.assertEqual(record['actor'], 'admin-id')
         self.assertEqual(record['kind'], 'ordinary_restore')
-        self.assertEqual(base64.b64decode(record['before_base64']), before)
+        from credential_store import CredentialStore, default_key_path
+        snapshot = CredentialStore(default_key_path(panel.DATA_FILE)).open_bytes(
+            record['before_sealed'], 'recovery-before')
+        self.assertEqual(snapshot, before)
 
 
 if __name__ == '__main__':

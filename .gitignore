@@ -30,6 +30,8 @@ coverage.xml
 
 # User data
 data.json
+data.json.credential.key
+*.credential.key
 # Per-write recovery snapshots next to data.json (runtime state, regenerated)
 data.json.recovery/
 *.runtime.lock

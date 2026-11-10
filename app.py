@@ -91,6 +91,7 @@ from mail_service import (
 from protocol_names import protocol_display_name, server_protocol_names
 from pwa import build_manifest
 from captcha_challenges import captcha_challenges
+from credential_store import CredentialError, CredentialStore, default_key_path
 from user_state import reconcile_user_state, apply_traffic_samples, traffic_server_identity
 from connection_service import (
     ConnectionService,
@@ -395,7 +396,7 @@ DATA_FILE = os.path.abspath(os.path.expanduser(
 ssh_trust.configure(DATA_FILE)
 # Client configs read the bypass list from whatever DATA_FILE is at call time.
 split_tunnel.configure(lambda: DATA_FILE)
-CURRENT_VERSION = "v1.8.9"
+CURRENT_VERSION = "v1.8.10"
 
 # Authoritative operational state for WARP lives outside data.json: dozens of
 # panel writers save their own snapshots and would overwrite it.
@@ -460,7 +461,8 @@ from ipv6_operations import OperationStore
 import peer_lifecycle_lock
 from peer_accounting import guard_user_deletions, ownership_rows
 from peer_recovery import (RecoveryStore, RecoveryError, PanelLease, STATE_FILE_LOCK,
-                           GENERATION, digest as recovery_digest, orphan_scope, validate_backup)
+                           GENERATION, digest as recovery_digest, orphan_scope, validate_backup,
+                           migrate_recovery_snapshots)
 from peer_recovery import verify_awg_peer_absent, check_create_journal, require_repair_target, DISASTER_HOLD
 from peer_finalization import (
     FinalizationError,
@@ -550,6 +552,12 @@ def srv_warp_ctx(server, protocol):
 warp_proto_record = proto_record
 
 
+def _credential_store():
+    # Resolve from the current DATA_FILE so tests and restored trees never use
+    # another installation's key by accident.
+    return CredentialStore(default_key_path(DATA_FILE))
+
+
 def load_data():
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, 'r', encoding='utf-8') as f:
@@ -617,6 +625,13 @@ def load_data():
         # (server['rknblock']). The old flag is dropped so every server shows
         # "not installed" until the app is installed from the store.
         server.pop('rkn_block_enabled', None)
+    # Transparent upgrade: legacy plaintext SSH fields are sealed atomically on
+    # first read, then only the AES-GCM envelope is kept on disk.
+    if any(isinstance(s, dict) and ('password' in s or 'private_key' in s)
+           for s in data.get('servers', [])):
+        from credential_store import CredentialStore, default_key_path
+        if CredentialStore(default_key_path(DATA_FILE)).seal_document(data):
+            save_data(data)
     return data
 
 
@@ -630,6 +645,10 @@ def save_data(data):
             if generation and data.get(GENERATION) != generation:
                 raise RecoveryError('stale_snapshot_after_recovery')
         os.makedirs(os.path.dirname(DATA_FILE) or '.', exist_ok=True)
+        # Last line of defense for every writer (including Telegram/import):
+        # plaintext SSH credentials must never reach the JSON document.
+        from credential_store import CredentialStore, default_key_path
+        CredentialStore(default_key_path(DATA_FILE)).seal_document(data)
         atomic_json(DATA_FILE, data)
 
 
@@ -658,10 +677,12 @@ def _ssh_jump_server(data, target):
 def _ssh_manager_for(server, data, *, allow_jump=True):
     jump = _ssh_jump_server(data, server) if allow_jump else None
     jump_manager = (_ssh_manager_for(jump, data, allow_jump=False) if jump else None)
+    from credential_store import CredentialStore, default_key_path
+    password, private_key = CredentialStore(default_key_path(DATA_FILE)).resolve(server)
     return SSHManager(
         host=server['host'], port=server.get('ssh_port', 22),
-        username=server['username'], password=server.get('password'),
-        private_key=server.get('private_key'),
+        username=server['username'], password=password,
+        private_key=private_key,
         connect_cooldown_base=float(server.get('ssh_cooldown_base') or 30),
         jump_manager=jump_manager,
     )
@@ -2159,7 +2180,7 @@ def verify_password(password: str, password_hash: str) -> bool:
     try:
         salt, h = password_hash.split('$', 1)
         new_h = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 100000)
-        return new_h.hex() == h
+        return secrets.compare_digest(new_h.hex(), h)
     except Exception:
         return False
 
@@ -2601,7 +2622,8 @@ def tpl(request, template, **kwargs):
         # The login page is the only public page; it must not dump the whole
         # UI dictionary (a feature showcase of the panel) into view-source.
         'login_translations_json': json.dumps({
-            k: _t(k, lang) for k in ('login', 'logging_in', 'login_error')
+            k: _t(k, lang) for k in ('login', 'logging_in', 'login_error',
+                                     'setup_submit', 'setup_creating', 'setup_error')
         }),
         'all_translations_json': json.dumps(TRANSLATIONS)
     }
@@ -2641,6 +2663,12 @@ class LoginRequest(BaseModel):
     username: str
     password: str
     captcha: Optional[str] = None
+
+
+class InitialSetupRequest(BaseModel):
+    username: str
+    password: str
+    password_confirm: str
 
 
 class AddServerRequest(BaseModel):
@@ -3189,18 +3217,9 @@ async def startup():
     _start_conn_monitor()
     _start_duckdns_monitor()
     changed = False
-    if not data.get('users'):
-        data['users'] = [{
-            'id': str(uuid.uuid4()),
-            'username': 'admin',
-            'password_hash': hash_password('admin'),
-            'role': 'admin',
-            'enabled': True,
-            'created_at': datetime.now().isoformat(),
-        }]
-        changed = True
-        logger.info("Default admin created (admin / admin)")
-    
+    # No fixed credentials are created. A fresh installation stays at the
+    # first-run setup form until an administrator is explicitly registered.
+
     # Migration for sharing fields and traffic reset strategy
     for u in data['users']:
         migrated = False
@@ -3266,6 +3285,8 @@ async def startup():
 
     if changed:
         save_data(data)
+    if migrate_recovery_snapshots(DATA_FILE):
+        logger.info('Encrypted legacy recovery snapshots')
 
     # A Docker restart or a rebuild that was running when the panel died
     # cannot be finished or verified: report it as interrupted.
@@ -3291,7 +3312,7 @@ async def startup():
     tg_cfg = data.get('settings', {}).get('telegram', {})
     if tg_cfg.get('enabled') and tg_cfg.get('token'):
         logger.info("Starting Telegram bot from saved settings...")
-        tg_bot.launch_bot(tg_cfg['token'], load_data, generate_vpn_link, save_data, self_service_svc=self_service_connections)
+        tg_bot.launch_bot(tg_cfg['token'], load_data, generate_vpn_link, save_data, self_service_svc=self_service_connections, credential_resolver=lambda server: _credential_store().resolve(server))
 
 
 def _auto_backup_due(auto_backup: dict, now: Optional[datetime] = None) -> bool:
@@ -3550,7 +3571,7 @@ async def exit_failover_background_loop():
 def login_page(request: Request):
     if get_current_user(request):
         return RedirectResponse(url='/', status_code=302)
-    return tpl(request, 'login.html')
+    return tpl(request, 'login.html', setup_required=not load_data().get('users'))
 
 
 @app.get("/set_lang/{lang}", tags=["System Templates"])
@@ -3660,6 +3681,68 @@ def my_connections_page(request: Request):
 
 
 # ======================== AUTH API ========================
+
+def _same_origin_request(request):
+    headers = getattr(request, 'headers', {}) or {}
+    origin = headers.get('origin')
+    fetch_site = headers.get('sec-fetch-site')
+    base_url = str(getattr(request, 'base_url', '') or '')
+    if origin and fetch_site != 'same-origin' and \
+            origin.rstrip('/') != base_url.rstrip('/'):
+        return False
+    return fetch_site not in ('cross-site', 'same-site')
+
+
+@app.post('/api/auth/setup', tags=["Authentication"])
+async def api_initial_setup(request: Request, req: InitialSetupRequest):
+    """One-time creation of the first administrator; never a public signup."""
+    if not _same_origin_request(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    lang = request.cookies.get('lang', 'en')
+    username = req.username.strip()
+    if not username or len(username) > 64:
+        return JSONResponse({'error': _t('setup_username_invalid', lang)}, status_code=400)
+    if len(req.password) < 12 or len(req.password) > 256:
+        return JSONResponse({'error': _t('setup_password_short', lang)}, status_code=400)
+    if req.password != req.password_confirm:
+        return JSONResponse({'error': _t('setup_password_mismatch', lang)}, status_code=400)
+
+    password_hash = await asyncio.to_thread(hash_password, req.password)
+    async with DATA_LOCK:
+        data = load_data()
+        # Any existing record (including disabled/external/none) closes setup.
+        if data.get('users'):
+            return JSONResponse({'error': _t('setup_already_completed', lang)},
+                                status_code=409)
+        now = datetime.now().isoformat()
+        user = {
+            'id': str(uuid.uuid4()),
+            'username': username,
+            'password_hash': password_hash,
+            'role': 'admin',
+            'telegramId': None,
+            'email': None,
+            'description': '',
+            'traffic_limit': 0,
+            'traffic_reset_strategy': 'never',
+            'traffic_used': 0,
+            'traffic_total': 0,
+            'last_reset_at': now,
+            'expiration_date': None,
+            'enabled': True,
+            'created_at': now,
+            'remnawave_uuid': None,
+            'share_enabled': False,
+            'share_token': secrets.token_urlsafe(16),
+            'share_password_hash': None,
+        }
+        data['users'].append(user)
+        save_data(data)
+
+    request.session.clear()
+    request.session['user_id'] = user['id']
+    return JSONResponse({'status': 'success', 'role': 'admin'}, status_code=201)
+
 
 @app.get('/api/auth/captcha', tags=["Authentication"])
 def api_captcha(request: Request):
@@ -4221,6 +4304,8 @@ async def api_edit_server(request: Request, server_id: int, req: EditServerReque
     if error is not None:
         return error
     uid = selected['uid']
+    from credential_store import CredentialStore, default_key_path
+    store = CredentialStore(default_key_path(DATA_FILE))
 
     async def edit():
         async with SERVER_MUTATION_LOCK:
@@ -4239,7 +4324,7 @@ async def api_edit_server(request: Request, server_id: int, req: EditServerReque
                 elif req.password:
                     new_pass, new_key = req.password, ''
                 else:
-                    new_pass, new_key = server.get('password', ''), server.get('private_key', '')
+                    new_pass, new_key = store.resolve(server)
                 if not new_pass and not new_key:
                     return JSONResponse({'error': 'Password or SSH key is required'}, status_code=400)
 
@@ -4259,11 +4344,16 @@ async def api_edit_server(request: Request, server_id: int, req: EditServerReque
                     data = load_data()
                     _, current = find_server_by_uid(data, uid)
                     if current is None or any(current.get(k) != server.get(k) for k in
-                                              ('host', 'ssh_port', 'username', 'password', 'private_key')):
+                                              ('host', 'ssh_port', 'username', 'password', 'private_key', 'ssh_credentials')):
                         return JSONResponse({'error': 'Server changed during verification'}, status_code=409)
                     current.update(name=new_name, host=new_host, ssh_port=new_port,
-                                   username=new_user, password=new_pass, private_key=new_key,
-                                   server_info=server_info)
+                                   username=new_user, server_info=server_info)
+                    current.pop('password', None)
+                    current.pop('private_key', None)
+                    # Re-seal under the new endpoint AAD after successful SSH
+                    # verification; ciphertext cannot be replayed to another host.
+                    current['ssh_credentials'] = store.seal(
+                        current, new_pass, new_key)
                     if req.self_service_enabled is not None:
                         current['self_service_enabled'] = bool(req.self_service_enabled)
                     save_data(data)
@@ -4779,7 +4869,7 @@ def _rkn_server_index(data, server_id, server_uid, expected=None):
         return None
     idx = matches[0]
     if expected is not None and any(servers[idx].get(k) != expected.get(k)
-                                   for k in ('uid', 'host', 'ssh_port', 'username', 'password', 'private_key')):
+                                   for k in ('uid', 'host', 'ssh_port', 'username', 'password', 'private_key', 'ssh_credentials')):
         return None
     return idx
 
@@ -10913,7 +11003,7 @@ def save_settings(request: Request, payload: SaveSettingsRequest):
     if tg_cfg.enabled and tg_cfg.token:
         if not tg_bot.is_running():
             logger.info("Starting Telegram bot (settings save)...")
-            tg_bot.launch_bot(tg_cfg.token, load_data, generate_vpn_link, save_data, self_service_svc=self_service_connections)
+            tg_bot.launch_bot(tg_cfg.token, load_data, generate_vpn_link, save_data, self_service_svc=self_service_connections, credential_resolver=lambda server: _credential_store().resolve(server))
     else:
         if tg_bot.is_running():
             logger.info("Stopping Telegram bot (settings save)...")
@@ -11097,7 +11187,7 @@ async def api_telegram_toggle(request: Request):
         save_data(data)
         return {'status': 'stopped', 'bot_running': False}
     else:
-        tg_bot.launch_bot(token, load_data, generate_vpn_link, save_data, self_service_svc=self_service_connections)
+        tg_bot.launch_bot(token, load_data, generate_vpn_link, save_data, self_service_svc=self_service_connections, credential_resolver=lambda server: _credential_store().resolve(server))
         tg_cfg['enabled'] = True
         data['settings']['telegram'] = tg_cfg
         save_data(data)
@@ -11260,10 +11350,14 @@ def _backup_admin(request):
 @app.get('/api/settings/backup/download', tags=["Settings"])
 def api_backup_download(request: Request):
     if not _backup_admin(request):
-        return JSONResponse({'error': 'Forbidden'}, status_code=403)
-    if not os.path.exists(DATA_FILE):
-        return JSONResponse({'error': 'Data file not found'}, status_code=404)
-    return FileResponse(DATA_FILE, media_type='application/json', filename='data.json')
+        return JSONResponse({'error': 'Forbidden'}, status_code=403,
+                            headers=PRIVATE_HEADERS)
+    # The legacy endpoint returned the raw state file (historically including
+    # reusable SSH credentials). Use the complete, access-controlled archive.
+    return JSONResponse({
+        'error': 'Legacy plaintext state export is disabled. Use the complete backup archive.',
+        'code': 'legacy_backup_disabled',
+    }, status_code=410, headers=PRIVATE_HEADERS)
 
 
 class PrivateBackupResponse(StreamingResponse):
@@ -11321,13 +11415,39 @@ async def api_backup_archive(request: Request):
                              'code': 'panel_backup_unavailable'}, status_code=503, headers=PRIVATE_HEADERS)
 
 
+def _prepare_restore_credentials(current, backup):
+    """Seal legacy backup credentials and keep envelopes stable when unchanged.
+
+    Online restore compares server records strictly. Reusing the existing
+    envelope for identical credentials prevents random nonces from looking like
+    a topology change; changed credentials still fail that guard as before.
+    """
+    store = _credential_store()
+    current_servers = current.get('servers', [])
+    for server in backup.get('servers', []):
+        match = next((s for s in current_servers
+                      if s.get('uid') and s.get('uid') == server.get('uid')), None)
+        if match and all(server.get(k) == match.get(k)
+                         for k in ('host', 'ssh_port', 'username')):
+            if store.resolve(server) == store.resolve(match) and match.get('ssh_credentials'):
+                server.pop('password', None)
+                server.pop('private_key', None)
+                server['ssh_credentials'] = dict(match['ssh_credentials'])
+                continue
+        store.seal_document({'servers': [server]})
+
+
 @app.post('/api/settings/backup/restore', tags=["Settings"])
 @serialize_peer_lifecycle
 async def api_backup_restore(request: Request, file: UploadFile = File(...),
                              operation_id: Optional[str] = Form(None)):
     backup_actor = _backup_admin(request)
     if not backup_actor:
-        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+        return JSONResponse({'error': 'Forbidden'}, status_code=403,
+                            headers=PRIVATE_HEADERS)
+    if request is not None and not _same_origin_request(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403,
+                            headers=PRIVATE_HEADERS)
     try:
         # Limit the in-memory JSON read; enforce request-body limits at the
         # reverse proxy too, since multipart parsing happens before this handler.
@@ -11361,6 +11481,10 @@ async def api_backup_restore(request: Request, file: UploadFile = File(...),
         async with DATA_LOCK:
             # Even identical-looking old backups can rewind traffic baselines.
             current = load_data()
+            if not _backup_admin(request):
+                return JSONResponse({'error': 'Forbidden'}, status_code=403,
+                                    headers=PRIVATE_HEADERS)
+            _prepare_restore_credentials(current, backup_data)
             # Bearer-admin restores have no session, so the resolved token
             # owner is the audit actor; session restores keep the same id.
             actor = str(backup_actor.get('id') if isinstance(backup_actor, dict)
@@ -11387,9 +11511,10 @@ async def api_backup_restore(request: Request, file: UploadFile = File(...),
         # Full disaster recovery is deliberately separate and offline; see
         # scripts/panel_recovery.py. Never use a force flag on this endpoint.
         return result if isinstance(operation_id, str) else {'status': 'success'}
-    except Exception as e:
+    except Exception:
         logger.exception("Error during restore")
-        return JSONResponse({'error': str(e)}, status_code=500)
+        return JSONResponse({'error': 'Restore failed'}, status_code=500,
+                            headers=PRIVATE_HEADERS)
 
 
 class OrphanRecoveryRequest(BaseModel):
@@ -11544,6 +11669,13 @@ async def api_orphan_recovery(request: Request, req: OrphanRecoveryRequest):
 
 
 def panel_bind_host(ssl_conf: dict) -> str:
+    # Docker/.env can override the saved choice without rewriting data.json.
+    # Unknown values fail closed to loopback; an unset variable preserves the
+    # administrator's explicit setting from the Settings page.
+    override = os.environ.get('PANEL_BIND_ALL_INTERFACES')
+    if override is not None:
+        enabled = override.strip().lower() in ('1', 'true', 'yes', 'on')
+        return '0.0.0.0' if enabled else '127.0.0.1'
     # Bind locally by default; public exposure requires explicit opt-in.
     return '0.0.0.0' if ssl_conf.get('bind_all_interfaces') is True else '127.0.0.1'
 

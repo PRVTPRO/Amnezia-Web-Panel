@@ -29,8 +29,8 @@ def seed_servers():
 
 
 class ServerPageRenderTests(unittest.TestCase):
-    """Render the real server page through the app (startup creates the
-    default admin, the session comes from a real login) and make sure the
+    """Render the real server page through the app (a synthetic admin is seeded
+    explicitly, the session comes from a real login) and make sure the
     exit-node markup, scripts and translations come out of Jinja intact."""
 
     def setUp(self):
@@ -38,7 +38,7 @@ class ServerPageRenderTests(unittest.TestCase):
         self._data_file = panel.DATA_FILE
         panel.DATA_FILE = os.path.join(self.tmp, 'data.json')
         with open(panel.DATA_FILE, 'w', encoding='utf-8') as f:
-            json.dump({'servers': seed_servers(), 'users': [], 'user_connections': []}, f)
+            json.dump({'servers': seed_servers(), 'users': [{'id': 'admin-id', 'username': 'admin', 'password_hash': panel.hash_password('admin'), 'role': 'admin', 'enabled': True}], 'user_connections': []}, f)
         # keep the background SSH monitor out of the test
         self._monitor_flag = panel._conn_monitor_started
         panel._conn_monitor_started = True

@@ -211,7 +211,7 @@ class PublicEndpointApiTests(unittest.TestCase):
             json.dump({'servers': [server_with({
                 'awg2': {'installed': True, 'port': '55424', 'base_protocol': 'awg2'},
                 'telemt': {'installed': True, 'port': '8443', 'base_protocol': 'telemt'},
-            })], 'users': [], 'user_connections': []}, f)
+            })], 'users': [{'id': 'admin-id', 'username': 'admin', 'password_hash': panel.hash_password('admin'), 'role': 'admin', 'enabled': True}], 'user_connections': []}, f)
         self._monitor_flag = panel._conn_monitor_started
         panel._conn_monitor_started = True
 
@@ -773,7 +773,7 @@ class RestoreForwardTests(unittest.TestCase):
                     'wireguard': {'installed': True, 'port': '51820'},  # no public port
                 }),
                 server_with({}),  # nothing to forward
-            ], 'users': [], 'user_connections': []}, f)
+            ], 'users': [{'id': 'admin-id', 'username': 'admin', 'password_hash': panel.hash_password('admin'), 'role': 'admin', 'enabled': True}], 'user_connections': []}, f)
         self._monitor_flag = panel._conn_monitor_started
         panel._conn_monitor_started = True
         self._delay = panel.RESTORE_FORWARD_DELAY

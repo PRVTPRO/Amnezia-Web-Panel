@@ -785,8 +785,12 @@ def is_running() -> bool:
     return _bot_task is not None and not _bot_task.done()
 
 
-def launch_bot(token: str, load_data_fn: Callable, generate_vpn_link_fn: Callable, save_data_fn: Optional[Callable] = None, self_service_svc=None):
-    global _bot_task
+_ssh_credential_resolver = None
+
+
+def launch_bot(token: str, load_data_fn: Callable, generate_vpn_link_fn: Callable, save_data_fn: Optional[Callable] = None, self_service_svc=None, credential_resolver=None):
+    global _bot_task, _ssh_credential_resolver
+    _ssh_credential_resolver = credential_resolver
     _bot_task = asyncio.create_task(
         _run_bot(token, load_data_fn, generate_vpn_link_fn, save_data_fn, self_service_svc),
         name="telegram_bot",
@@ -1228,12 +1232,16 @@ def _get_ssh_and_manager(server: dict, proto: str):
     from managers.nginx_manager import NginxManager
     from managers.exit_manager import ExitManager
 
+    if _ssh_credential_resolver:
+        password, private_key = _ssh_credential_resolver(server)
+    else:
+        password, private_key = server.get("password", ""), server.get("private_key", "")
     ssh = SSHManager(
         server["host"],
         server.get("ssh_port", 22),
         server["username"],
-        server.get("password", ""),
-        server.get("private_key", ""),
+        password,
+        private_key,
     )
     base = protocol_base(proto)
     if base == "xray":

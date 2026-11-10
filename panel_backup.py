@@ -16,6 +16,7 @@ import zipfile
 import zlib
 
 from peer_recovery import STATE_FILE_LOCK, RecoveryStore, DISASTER_HOLD, digest
+from credential_store import default_key_path
 
 MAX_FILE_BYTES = 32 * 1024 * 1024
 MAX_TOTAL_BYTES = 128 * 1024 * 1024
@@ -123,6 +124,7 @@ def _entries(data_file, trust_file, system_trust):
     data = _path(data_file)
     result = {'state/data.json': data}
     optional = {'state/data.json.peer-creates.json': Path(str(data) + '.peer-creates.json'),
+                'state/data.json.credential.key': Path(default_key_path(data_file)),
                 'state/data.json.lifecycle-uncertain.json': Path(str(data) + '.lifecycle-uncertain.json'),
                 'state/data.json.srv_warp_state.json': Path(str(data) + '.srv_warp_state.json'),
                 'trust/ssh_known_hosts': _path(trust_file)}
@@ -168,6 +170,21 @@ def _validate_content(name, raw):
             raise BackupError('invalid_state_structure')
 
 
+def _require_migrated_content(name, raw):
+    """Fail closed rather than exporting legacy reusable secrets."""
+    if name == 'state/data.json':
+        state = _json(raw)
+        for server in state.get('servers', []):
+            if isinstance(server, dict) and (server.get('password') or server.get('private_key')):
+                raise BackupError('plaintext_ssh_credentials_require_migration')
+    elif name.startswith('state/data.json.recovery/') and name.endswith('.json'):
+        record = _json(raw)
+        snapshot = record.get('peer_creates_snapshot') if isinstance(record, dict) else None
+        if (isinstance(record, dict) and 'before_base64' in record) or \
+                (isinstance(snapshot, dict) and 'base64' in snapshot):
+            raise BackupError('legacy_recovery_snapshot_requires_migration')
+
+
 class ArchiveJob:
     """Anonymous private tempfile: OS closes/unlinks it even on process exit."""
     def __init__(self):
@@ -201,6 +218,7 @@ class ArchiveJob:
                         if total > MAX_TOTAL_BYTES:
                             raise BackupError('state_too_large')
                         _validate_content(name, raw)
+                        _require_migrated_content(name, raw)
                         archive.writestr(name, raw)
                         records.append({'path': name, 'size': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()})
                     # Also detect unmanaged replacements/creations during the read.
@@ -243,6 +261,7 @@ def _member(name):
             any(s in ('', '.', '..') for s in name.split('/')) or p.as_posix() != name):
         raise BackupError('unsafe_archive_path')
     fixed = {'state/data.json', 'state/data.json.peer-creates.json',
+             'state/data.json.credential.key',
              'state/data.json.lifecycle-uncertain.json',
              'state/data.json.srv_warp_state.json',
              'trust/ssh_known_hosts', 'trust/system_known_hosts'}

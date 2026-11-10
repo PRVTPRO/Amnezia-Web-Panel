@@ -24,5 +24,8 @@ services:
       - amnezia_data:/app/data
       - cloudflare_warp:/var/lib/cloudflare-warp
 
+    environment:
+      PANEL_BIND_ALL_INTERFACES: ${PANEL_BIND_ALL_INTERFACES:-1}
+
 volumes:
   cloudflare_warp:

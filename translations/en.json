@@ -1224,5 +1224,15 @@
   "server_load_cpu": "CPU",
   "server_load_ram": "RAM",
   "server_load_disk": "Disk",
-  "server_load_net": "Network"
+  "server_load_net": "Network",
+  "setup_title": "Create the first administrator",
+  "setup_password_confirm": "Confirm password",
+  "setup_submit": "Create administrator",
+  "setup_creating": "Creating administrator...",
+  "setup_error": "Administrator setup failed",
+  "setup_username_invalid": "Enter a username (1–64 characters)",
+  "setup_password_short": "Password must be 12–256 characters long",
+  "setup_password_mismatch": "Passwords do not match",
+  "setup_already_completed": "Initial setup is already complete. Sign in instead.",
+  "legacy_backup_disabled": "Legacy JSON export is disabled because it could expose reusable credentials. Use the complete admin-only archive; keep it secret—it includes the credential key for portability."
 }

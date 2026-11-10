@@ -116,7 +116,7 @@
         {% for server in servers %}
         <div class="card card-hover server-card" id="server-{{ loop.index0 }}" data-idx="{{ loop.index0 }}" data-uid="{{ server.uid or '' }}"
             data-name="{{ server.name }}" data-host="{{ server.host }}" data-port="{{ server.ssh_port }}"
-            data-username="{{ server.username }}" data-auth="{{ 'key' if server.private_key else 'password' }}"
+            data-username="{{ server.username }}" data-auth="{{ 'key' if (server.ssh_credentials.has_private_key if server.ssh_credentials else server.private_key) else 'password' }}"
             data-self-service="{{ 'true' if server.get('self_service_enabled') else 'false' }}"
             data-ssh-cooldown="{{ server.get('ssh_cooldown_base') or 30 }}"
             data-peer-poll="{{ server.get('peer_poll_interval') or 0 }}"

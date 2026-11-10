@@ -220,10 +220,7 @@ response; the standard user-connection dialog retains it until success.
 
 
 ### Initial Login
-*   **Username**: `admin`
-*   **Password**: `admin`
-> [!IMPORTANT]  
-> Secure your panel by changing the default password in the **Users** section immediately after first login.
+On a fresh installation no account is created automatically. Open `/login`, choose a unique username and a password of at least 12 characters, and create the first administrator. The setup form disappears as soon as any user record exists; there is no default `admin/admin` account. Existing installations keep their current users and password hashes unchanged.
 
 ## 🧰 Environment Variables
 
@@ -234,6 +231,8 @@ next to `app.py`, or next to the executable in the standalone builds from *Insta
 | --- | --- | --- |
 | `SECRET_KEY` | random on each start | Key used to sign session cookies. Without it a fresh key is generated at every start, which logs all admins out on restart — set a long random value in production. |
 | `DATA_FILE` | `<app dir>/data.json` | Path to the JSON state file (servers, users, API tokens, settings). `~` is expanded and missing parent directories are created on first save. |
+| `PANEL_BIND_ALL_INTERFACES` | unset (`1` in bundled Compose) | Runtime override for `settings.ssl.bind_all_interfaces`, without rewriting `data.json`. `1`, `true`, `yes` or `on` binds `0.0.0.0`; `0`, `false`, `no`, `off` (and unrecognized values) binds `127.0.0.1`. When unset, the Settings-page checkbox controls binding. The bundled Compose files enable it by default so the published container port is reachable; set `PANEL_BIND_ALL_INTERFACES=0` in `.env` to force loopback. |
+| `CREDENTIAL_KEY_FILE` | `<DATA_FILE>.credential.key` | AES-256 key used to encrypt managed-server SSH passwords/private keys and recovery snapshots. It is created automatically on first migration, must be readable only by the panel user, and is required to decrypt state. The complete admin backup includes it for portability; protect that archive like a root password. |
 | `TUNNEL_STATE_FILE` | `<app dir>/tunnels_state.json` | Path where Cloudflare/ngrok tunnel runtime state (PID, public URL) is persisted between restarts. |
 | `TUNNEL_BIN_DIR` | `<app dir>/bin` | Directory holding the panel-managed `cloudflared` / `ngrok` binaries downloaded from the **Settings** page. |
 | `AWG_IPV6` | `auto` | Dual-stack policy for AWG tunnels: `auto` probes the host and the protocol container, `off` keeps every tunnel IPv4-only, `on` forces dual-stack. |
@@ -268,6 +267,7 @@ Docker Compose additionally reads these from your shell or from an `.env` file n
 | --- | --- | --- |
 | `APP_PORT` | `5000` | Host port published for the panel container. |
 | `DATA_FILE` | `/app/data/data.json` | Forwarded into the container; keep it under `/app/data` so state stays on the `amnezia_data` volume. |
+| `PANEL_BIND_ALL_INTERFACES` | `1` | Forwarded into the container and enabled by default in both Compose files so `APP_PORT` is reachable from outside Docker. Set it to `0` in `.env` to override the published container back to `127.0.0.1` without editing `data.json`. |
 
 ## 🔧 Project Details
 
@@ -350,7 +350,7 @@ web-panel/
 ## 🛡 Security Recommendations
 
 *   **Reverse Proxy**: It is highly recommended to run the panel behind Nginx/Apache with an SSL certificate.
-*   **SSH Keys**: Use SSH keys rather than passwords for connecting to your VPN servers.
+*   **SSH Keys**: Use SSH keys rather than passwords for connecting to your VPN servers. Both SSH passwords and private keys are sealed with AES-256-GCM in `data.json`; legacy plaintext fields are migrated automatically. Keep `<DATA_FILE>.credential.key` private and back it up only through the admin-only complete archive (or copy it together with `data.json` for a manual migration). The legacy plaintext JSON download is disabled.
 *   **Secret Key**: Set a custom `SECRET_KEY` environment variable for secure session management (see [Environment Variables](#-environment-variables)).
 *   **IPv6**: if your servers have global IPv6 but Docker is IPv4-only, leave `AWG_IPV6` at `auto` — the panel probes the container and keeps tunnels IPv4-only rather than blackholing client IPv6. Set `AWG_IPV6=off` to disable dual-stack everywhere.
 *   **SMTP Password**: stored in `data.json` next to the other credentials. Use a mailbox dedicated to the panel (or an app password), not your personal account, and keep `data.json` readable only by the user the panel runs as.

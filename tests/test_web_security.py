@@ -106,7 +106,10 @@ class BackupUploadSecurityTests(unittest.TestCase):
             records = list(Path(str(path) + '.recovery').glob('*.json'))
             self.assertEqual(len(records), 1)
             record = json.loads(records[0].read_bytes())
-            self.assertEqual(__import__('base64').b64decode(record['before_base64']), before)
+            from credential_store import CredentialStore, default_key_path
+            snapshot = CredentialStore(default_key_path(path)).open_bytes(
+                record['before_sealed'], 'recovery-before')
+            self.assertEqual(snapshot, before)
             self.assertEqual(record['phase'], 'committed')
 
 

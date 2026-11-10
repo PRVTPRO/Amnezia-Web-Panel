@@ -1224,5 +1224,15 @@
   "server_load_cpu": "CPU",
   "server_load_ram": "RAM",
   "server_load_disk": "磁盘",
-  "server_load_net": "网络"
+  "server_load_net": "网络",
+  "setup_title": "创建首位管理员",
+  "setup_password_confirm": "确认密码",
+  "setup_submit": "创建管理员",
+  "setup_creating": "正在创建管理员...",
+  "setup_error": "管理员创建失败",
+  "setup_username_invalid": "请输入用户名（1–64 个字符）",
+  "setup_password_short": "密码长度必须为 12–256 个字符",
+  "setup_password_mismatch": "两次输入的密码不一致",
+  "setup_already_completed": "初始设置已完成，请直接登录。",
+  "legacy_backup_disabled": "旧版 JSON 导出已禁用，因为它可能泄露可重复使用的凭据。请使用仅限管理员的完整归档并妥善保密；为便于迁移，归档包含凭据加密密钥。"
 }

@@ -67,7 +67,7 @@ class AwgPluginApiTests(unittest.TestCase):
         seed = {'servers': [{'name': 's', 'host': '127.0.0.1', 'ssh_port': 1,
                              'username': 'root', 'password': 'x', 'private_key': '',
                              'server_info': {}, 'uid': 'u0', 'protocols': {}}],
-                'users': [], 'user_connections': []}
+                'users': [{'id': 'admin-id', 'username': 'admin', 'password_hash': panel.hash_password('admin'), 'role': 'admin', 'enabled': True}], 'user_connections': []}
         Path(panel.DATA_FILE).write_text(json.dumps(seed), encoding='utf-8')
 
         self.updater = FakeUpdater()

@@ -1224,5 +1224,15 @@
   "server_load_cpu": "CPU",
   "server_load_ram": "RAM",
   "server_load_disk": "دیسک",
-  "server_load_net": "شبکه"
+  "server_load_net": "شبکه",
+  "setup_title": "ایجاد نخستین مدیر",
+  "setup_password_confirm": "تأیید گذرواژه",
+  "setup_submit": "ایجاد مدیر",
+  "setup_creating": "در حال ایجاد مدیر...",
+  "setup_error": "ایجاد مدیر ناموفق بود",
+  "setup_username_invalid": "نام کاربری را وارد کنید (۱ تا ۶۴ نویسه)",
+  "setup_password_short": "گذرواژه باید ۱۲ تا ۲۵۶ نویسه باشد",
+  "setup_password_mismatch": "گذرواژه‌ها یکسان نیستند",
+  "setup_already_completed": "راه‌اندازی اولیه انجام شده است. وارد شوید.",
+  "legacy_backup_disabled": "خروجی JSON قدیمی غیرفعال است زیرا می‌توانست اطلاعات احراز هویت قابل استفاده مجدد را افشا کند. از بایگانی کامل مخصوص مدیر استفاده کنید و آن را محرمانه نگه دارید؛ برای انتقال، کلید رمزنگاری نیز در آن قرار دارد."
 }

@@ -102,7 +102,7 @@ class WarpTemplateRenderTests(unittest.TestCase):
         self._data_file = panel.DATA_FILE
         panel.DATA_FILE = os.path.join(self.tmp, 'data.json')
         with open(panel.DATA_FILE, 'w', encoding='utf-8') as handle:
-            json.dump({'servers': seed_servers(), 'users': [],
+            json.dump({'servers': seed_servers(), 'users': [{'id': 'admin-id', 'username': 'admin', 'password_hash': panel.hash_password('admin'), 'role': 'admin', 'enabled': True}],
                        'user_connections': []}, handle)
         self._monitor_flag = panel._conn_monitor_started
         panel._conn_monitor_started = True

@@ -48,6 +48,13 @@ PANEL_ACCESS_KEYS = {
 }
 
 
+SECURITY_SETUP_KEYS = {
+    'setup_title', 'setup_password_confirm', 'setup_submit', 'setup_creating',
+    'setup_error', 'setup_username_invalid', 'setup_password_short',
+    'setup_password_mismatch', 'setup_already_completed', 'legacy_backup_disabled',
+}
+
+
 def read_text(path):
     with open(path, encoding="utf-8") as handle:
         return handle.read()
@@ -192,7 +199,7 @@ class TestC6Translations(unittest.TestCase):
         for locale in LOCALES[1:]:
             self.assertEqual(sets[locale], base, locale)
         self.assertTrue(PANEL_ACCESS_KEYS <= base, 'panel access translations missing')
-        previous = '\n'.join(sorted(base - PANEL_ACCESS_KEYS))
+        previous = '\n'.join(sorted(base - PANEL_ACCESS_KEYS - SECURITY_SETUP_KEYS))
         self.assertEqual(hashlib.sha256(previous.encode('utf-8')).hexdigest(),
                          PRE_PANEL_ACCESS_KEYS_SHA256,
                          'Existing catalogue changed outside the declared additions')

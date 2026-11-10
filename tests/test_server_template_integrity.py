@@ -21,8 +21,8 @@ class TestServerTemplateIntegrity(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp, \
              patch.object(app, 'DATA_FILE', str(Path(tmp) / 'data.json')):
-            # Seed an empty data file so startup migrations create the default admin.
-            Path(app.DATA_FILE).write_text(_json.dumps({'servers': [], 'users': []}), encoding='utf-8')
+            # Seed a synthetic admin explicitly; startup never creates defaults.
+            Path(app.DATA_FILE).write_text(_json.dumps({'servers': [], 'users': [{'id': 'admin-id', 'username': 'admin', 'password_hash': app.hash_password('admin'), 'role': 'admin', 'enabled': True}]}), encoding='utf-8')
             with TestClient(app.app) as client:
                 login = client.post(
                     "/api/auth/login",

@@ -240,7 +240,7 @@ class DnatApiTests(unittest.TestCase):
         with open(panel.DATA_FILE, 'w', encoding='utf-8') as f:
             json.dump({'servers': [server_with({
                 'awg2': {'installed': True, 'port': '55424', 'base_protocol': 'awg2'},
-            })], 'users': [], 'user_connections': []}, f)
+            })], 'users': [{'id': 'admin-id', 'username': 'admin', 'password_hash': panel.hash_password('admin'), 'role': 'admin', 'enabled': True}], 'user_connections': []}, f)
         self._monitor_flag = panel._conn_monitor_started
         panel._conn_monitor_started = True
 
@@ -297,7 +297,7 @@ class DnatRestoreTests(unittest.TestCase):
             json.dump({'servers': [server_with({
                 'awg2': {'installed': True, 'port': '55424',
                          'public_host': '203.0.113.9', 'public_port': '8443'},
-            })], 'users': [], 'user_connections': []}, f)
+            })], 'users': [{'id': 'admin-id', 'username': 'admin', 'password_hash': panel.hash_password('admin'), 'role': 'admin', 'enabled': True}], 'user_connections': []}, f)
         self._monitor_flag = panel._conn_monitor_started
         panel._conn_monitor_started = True
         self._delay = panel.RESTORE_FORWARD_DELAY

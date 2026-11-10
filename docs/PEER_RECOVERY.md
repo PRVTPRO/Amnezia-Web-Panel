@@ -127,8 +127,10 @@ For disaster recovery:
 5. On interruption retry the same command/operation ID; inspect the private
    journal if concurrent manual changes prevent proof of commit. Do not restore
    a second time over newer data. Snapshots are at `DATA_FILE.recovery/ID.json`,
-   with original bytes in `before_base64` and their `before_sha256`. For rollback,
-   decode/verify those bytes offline, then use the same validated recovery tool
+   with original bytes sealed by AES-256-GCM in `before_sealed` and their
+   `before_sha256`. The encryption key is `<DATA_FILE>.credential.key`; keep it
+   private and include it only in the admin-only complete archive. For rollback,
+   decrypt/verify those bytes offline, then use the same validated recovery tool
    with a new operation ID (a corrupt original requires another valid backup).
 6. The atomic replacement includes a durable disaster-recovery hold: panel
    startup refuses to launch monitors/background tasks until node reconciliation

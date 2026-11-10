@@ -13,6 +13,7 @@ services:
 
     environment:
       DATA_FILE: /app/data/data.json
+      PANEL_BIND_ALL_INTERFACES: ${PANEL_BIND_ALL_INTERFACES:-1}
     restart: unless-stopped
 
     healthcheck:
