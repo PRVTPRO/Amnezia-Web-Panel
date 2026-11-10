@@ -2258,6 +2258,10 @@ async def _user_create_protocol(api: TelegramAPI, chat_id: int, message_id: int,
         await api.answer_callback(callback_id, text=_tt(lang, "access_denied"))
         await api.edit_message(chat_id, message_id, f"❌ {_tt(lang, 'access_denied')}")
         return
+    if not panel_user.get("enabled", True):
+        await api.answer_callback(callback_id, text=_tt(lang, "account_disabled"))
+        await api.edit_message(chat_id, message_id, f"❌ {_tt(lang, 'account_disabled')}")
+        return
 
     await api.answer_callback(callback_id)
 
@@ -2313,6 +2317,10 @@ async def _user_delete_confirm(api: TelegramAPI, chat_id: int, message_id: int, 
     if not panel_user:
         await api.answer_callback(callback_id, text=_tt(lang, "access_denied"))
         await api.edit_message(chat_id, message_id, f"❌ {_tt(lang, 'access_denied')}")
+        return
+    if not panel_user.get("enabled", True):
+        await api.answer_callback(callback_id, text=_tt(lang, "account_disabled"))
+        await api.edit_message(chat_id, message_id, f"❌ {_tt(lang, 'account_disabled')}")
         return
 
     if not self_service_svc:
