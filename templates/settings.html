@@ -75,6 +75,20 @@
                     <input type="text" class="form-input" id="tg_token" value="{{ telegram_settings.token or '' }}"
                         placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11">
                 </div>
+                <div class="form-group">
+                    <label style="display: flex; align-items: center; gap: var(--space-sm); cursor: pointer;">
+                        <input type="checkbox" id="tg_auto_create_users" {% if telegram_settings.auto_create_users %}checked{% endif %}>
+                        {{ _('telegram_auto_create_users') }}
+                    </label>
+                    <p class="form-hint">{{ _('telegram_auto_create_users_desc') }}</p>
+                </div>
+                <div class="form-group">
+                    <label style="display: flex; align-items: center; gap: var(--space-sm); cursor: pointer;">
+                        <input type="checkbox" id="tg_create_users_disabled" {% if telegram_settings.create_users_disabled %}checked{% endif %}>
+                        {{ _('telegram_create_users_disabled') }}
+                    </label>
+                    <p class="form-hint">{{ _('telegram_create_users_disabled_desc') }}</p>
+                </div>
                 <div class="row-between" style="margin-top: var(--space-md);">
                     <div style="display: flex; align-items: center; gap: var(--space-sm);">
                         <span style="font-size: 0.85rem; color: var(--text-muted);">{{ _('bot_status') }}:</span>
@@ -1143,7 +1157,9 @@
 
         const telegram = {
             token: document.getElementById('tg_token').value.trim(),
-            enabled: botCurrentlyRunning
+            enabled: botCurrentlyRunning,
+            auto_create_users: document.getElementById('tg_auto_create_users').checked,
+            create_users_disabled: document.getElementById('tg_create_users_disabled').checked
         };
 
         const ssl = {
