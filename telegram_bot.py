@@ -167,6 +167,7 @@ TG_TRANSLATIONS = {
         "description_label": "Description",
         "protocol_display": "Protocol",
         "cmd_start": "Open bot menu",
+        "btn_open_panel": "Open Panel",
         "cmd_connections": "Show my connections",
         "cmd_connect": "Create a new connection",
         "cmd_disconnect": "Delete a connection",
@@ -321,6 +322,7 @@ TG_TRANSLATIONS = {
         "description_label": "توضیحات",
         "protocol_display": "پروتکل",
         "cmd_start": "باز کردن منوی ربات",
+        "btn_open_panel": "باز کردن پنل",
         "cmd_connections": "نمایش اتصال‌های من",
         "cmd_connect": "ساخت اتصال جدید",
         "cmd_disconnect": "حذف یک اتصال",
@@ -475,6 +477,7 @@ TG_TRANSLATIONS = {
         "description_label": "Description",
         "protocol_display": "Protocole",
         "cmd_start": "Ouvrir le menu du bot",
+        "btn_open_panel": "Ouvrir le panneau",
         "cmd_connections": "Afficher mes connexions",
         "cmd_connect": "Créer une connexion",
         "cmd_disconnect": "Supprimer une connexion",
@@ -629,6 +632,7 @@ TG_TRANSLATIONS = {
         "description_label": "Описание",
         "protocol_display": "Протокол",
         "cmd_start": "Открыть меню бота",
+        "btn_open_panel": "Открыть панель",
         "cmd_connections": "Показать мои подключения",
         "cmd_connect": "Создать новое подключение",
         "cmd_disconnect": "Удалить подключение",
@@ -782,6 +786,7 @@ TG_TRANSLATIONS = {
         "description_label": "描述",
         "protocol_display": "协议",
         "cmd_start": "打开机器人菜单",
+        "btn_open_panel": "打开面板",
         "cmd_connections": "查看我的连接",
         "cmd_connect": "创建新连接",
         "cmd_disconnect": "删除连接",
@@ -914,20 +919,25 @@ async def _set_default_commands(api: TelegramAPI):
     for lang in sorted(set(TG_TRANSLATIONS) - {"en"}):
         await api.call("setMyCommands", commands=_command_menu(lang), language_code=lang)
 
-async def _set_webapp_menu_button(api: TelegramAPI, load_data_fn: Callable):
-    """Expose the existing panel as the bot's Telegram Mini App."""
+async def _set_webapp_menu_button(
+    api: TelegramAPI, load_data_fn: Callable,
+    chat_id: Optional[int] = None, lang: str = "en",
+):
+    """Expose the existing panel as the Telegram Mini App menu button."""
     panel_url = _panel_public_url(load_data_fn())
+    params = {}
+    if chat_id is not None:
+        params["chat_id"] = chat_id
     if not panel_url.startswith("https://"):
-        await api.call("setChatMenuButton", menu_button={"type": "default"})
+        params["menu_button"] = {"type": "default"}
+        await api.call("setChatMenuButton", **params)
         return
-    result = await api.call(
-        "setChatMenuButton",
-        menu_button={
-            "type": "web_app",
-            "text": "Open Panel",
-            "web_app": {"url": panel_url},
-        },
-    )
+    params["menu_button"] = {
+        "type": "web_app",
+        "text": _tt(lang, "btn_open_panel"),
+        "web_app": {"url": panel_url},
+    }
+    result = await api.call("setChatMenuButton", **params)
     if not result.get("ok"):
         logger.warning("Telegram WebApp menu button could not be configured: %s", result)
 
@@ -1537,13 +1547,16 @@ async def _handle_start(api: TelegramAPI, msg: dict, load_data_fn: Callable,
     tg_username = msg["from"].get("username")
     first_name = msg["from"].get("first_name", "")
     data = load_data_fn()
-    try:
-        await _set_webapp_menu_button(api, load_data_fn)
-    except Exception as exc:
-        logger.warning("Telegram WebApp menu button refresh failed: %s", exc)
     lang = _telegram_language(data, tg_id)
     if not lang:
-        await api.send_message(chat_id, _tt("en", "language_prompt"),
+        lang = _tg_lang(msg.get("from") or {})
+    try:
+        if _is_private_chat(msg.get("chat")):
+            await _set_webapp_menu_button(api, load_data_fn, chat_id=chat_id, lang=lang)
+    except Exception as exc:
+        logger.warning("Telegram WebApp menu button refresh failed: %s", exc)
+    if not _telegram_language(data, tg_id):
+        await api.send_message(chat_id, _tt(lang, "language_prompt"),
                                reply_markup=_language_keyboard())
         return
 
