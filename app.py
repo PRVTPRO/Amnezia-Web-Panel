@@ -2647,7 +2647,8 @@ def tpl(request, template, **kwargs):
                                      'telegram_webapp_auth_unavailable')
         }),
         'telegram_webapp_auth_enabled': bool(
-            (data.get('settings', {}).get('telegram') or {}).get('webapp_initdata_auth')
+            data.get('users')
+            and (data.get('settings', {}).get('telegram') or {}).get('webapp_initdata_auth')
             and (data.get('settings', {}).get('telegram') or {}).get('token')
         ),
         'all_translations_json': json.dumps(TRANSLATIONS)
