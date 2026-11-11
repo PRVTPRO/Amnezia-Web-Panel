@@ -1240,5 +1240,10 @@
   "setup_already_completed": "初始设置已完成，请直接登录。",
   "legacy_backup_disabled": "旧版 JSON 导出已禁用，因为它可能泄露可重复使用的凭据。请使用仅限管理员的完整归档并妥善保密；为便于迁移，归档包含凭据加密密钥。",
   "max_connections_per_user_label": "自助服务最大连接数",
-  "max_connections_per_user_hint": "设为 0 时使用全局自助服务限制。允许范围：0–100。"
+  "max_connections_per_user_hint": "设为 0 时使用全局自助服务限制。允许范围：0–100。",
+  "telegram_webapp_auth": "使用 Telegram initData 在 WebApp 中授权",
+  "telegram_webapp_auth_desc": "启用后，用户在 Telegram 内打开面板时，服务器验证 initData 后将自动登录。如果未填写机器人 Token，则显示常规登录表单。",
+  "telegram_webapp_auth_invalid": "Telegram 授权数据无效或已过期。请使用常规登录表单，或从 Telegram 重新打开应用。",
+  "telegram_webapp_account_not_found": "找不到与此 Telegram 账户关联的面板账户。请联系管理员或启用自动创建用户功能。",
+  "telegram_webapp_auth_unavailable": "尚未配置 Telegram WebApp 授权。请使用常规登录。"
 }
