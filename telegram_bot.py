@@ -2664,6 +2664,11 @@ async def _dispatch(api: TelegramAPI, update: dict, load_data_fn: Callable, gene
                 await api.answer_callback(callback_id, _tt(lang, "saving_not_available"))
                 return
             lang = selected
+            if _is_private_chat(chat):
+                try:
+                    await _set_webapp_menu_button(api, load_data_fn, chat_id=chat_id, lang=lang)
+                except Exception as exc:
+                    logger.warning("Telegram WebApp menu button language update failed: %s", exc)
             await api.answer_callback(callback_id, _tt(lang, "language_saved"))
             panel_user = _find_user(load_data_fn, tg_id, tg_username)
             created_password = None
