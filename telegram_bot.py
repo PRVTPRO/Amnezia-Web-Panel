@@ -914,6 +914,24 @@ async def _set_default_commands(api: TelegramAPI):
     for lang in sorted(set(TG_TRANSLATIONS) - {"en"}):
         await api.call("setMyCommands", commands=_command_menu(lang), language_code=lang)
 
+async def _set_webapp_menu_button(api: TelegramAPI, load_data_fn: Callable):
+    """Expose the existing panel as the bot's Telegram Mini App."""
+    panel_url = _panel_public_url(load_data_fn())
+    if not panel_url.startswith("https://"):
+        await api.call("setChatMenuButton", menu_button={"type": "default"})
+        return
+    result = await api.call(
+        "setChatMenuButton",
+        menu_button={
+            "type": "web_app",
+            "text": "Open Panel",
+            "web_app": {"url": panel_url},
+        },
+    )
+    if not result.get("ok"):
+        logger.warning("Telegram WebApp menu button could not be configured: %s", result)
+
+
 
 # ----------------------------------------------------------------------- #
 #  Generic helpers
@@ -2545,6 +2563,10 @@ async def _run_bot(token: str, load_data_fn: Callable, generate_vpn_link_fn: Cal
             return
         logger.info(f"Telegram bot logged in as @{me['result']['username']}")
         await _set_default_commands(api)
+        try:
+            await _set_webapp_menu_button(api, load_data_fn)
+        except Exception as exc:
+            logger.warning("Telegram WebApp menu button setup failed: %s", exc)
 
         while True:
             try:
