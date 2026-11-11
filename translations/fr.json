@@ -1240,5 +1240,10 @@
   "setup_already_completed": "La configuration initiale est terminée. Connectez-vous.",
   "legacy_backup_disabled": "L’export JSON est désactivé car il pouvait exposer des identifiants réutilisables. Utilisez l’archive complète réservée aux administrateurs et gardez-la secrète : elle inclut la clé de chiffrement pour la portabilité.",
   "max_connections_per_user_label": "Nombre maximal de connexions libre-service",
-  "max_connections_per_user_hint": "0 = utiliser la limite globale du libre-service. Valeurs autorisées : 0 à 100."
+  "max_connections_per_user_hint": "0 = utiliser la limite globale du libre-service. Valeurs autorisées : 0 à 100.",
+  "telegram_webapp_auth": "Autoriser la connexion au WebApp Telegram avec initData",
+  "telegram_webapp_auth_desc": "Si cette option est activée, les utilisateurs ouvrant le panneau dans Telegram seront connectés après vérification de initData par le serveur. Si le token du bot est vide, le formulaire de connexion habituel sera affiché. Le bouton WebApp du bot nécessite une URL HTTPS publique pour le panneau.",
+  "telegram_webapp_auth_invalid": "Les données d’autorisation Telegram sont invalides ou expirées. Utilisez le formulaire de connexion habituel ou rouvrez l’application depuis Telegram.",
+  "telegram_webapp_account_not_found": "Aucun compte du panneau n’est associé à ce compte Telegram. Contactez l’administrateur ou activez la création automatique des utilisateurs.",
+  "telegram_webapp_auth_unavailable": "L’autorisation WebApp Telegram n’est pas configurée. Utilisez la connexion habituelle."
 }
