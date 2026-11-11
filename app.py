@@ -3828,7 +3828,7 @@ def _verify_telegram_webapp_init_data(init_data: str, bot_token: str, now: Optio
         raise ValueError('invalid_init_data')
     if not isinstance(telegram_user, dict) or not str(telegram_user.get('id') or '').isdigit():
         raise ValueError('invalid_init_data')
-    data_check_string = '\\n'.join(f'{key}={values[key]}' for key in sorted(values))
+    data_check_string = '\n'.join(f'{key}={values[key]}' for key in sorted(values))
     secret_key = hmac.new(b'WebAppData', bot_token.encode('utf-8'), hashlib.sha256).digest()
     calculated_hash = hmac.new(secret_key, data_check_string.encode('utf-8'), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(calculated_hash, received_hash.lower()):
