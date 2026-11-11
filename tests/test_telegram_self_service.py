@@ -93,6 +93,62 @@ class TestTelegramLanguagePreference(unittest.IsolatedAsyncioTestCase):
                          {'lang:en', 'lang:fa', 'lang:fr', 'lang:ru', 'lang:zh'})
 
 
+class TestTelegramPanelPublicUrl(unittest.TestCase):
+    def test_ssl_domain_uses_https_and_configured_panel_port(self):
+        data = {'settings': {'ssl': {
+            'enabled': True, 'domain': 'panel.example.com', 'panel_port': 5000,
+        }}}
+        self.assertEqual(
+            tg_bot._panel_public_url(data),
+            'https://panel.example.com:5000',
+        )
+
+    def test_standard_https_port_is_omitted(self):
+        data = {'settings': {'ssl': {
+            'enabled': True, 'domain': 'panel.example.com', 'panel_port': 443,
+        }}}
+        self.assertEqual(tg_bot._panel_public_url(data), 'https://panel.example.com')
+
+    def test_duckdns_domain_is_used_when_ssl_domain_is_empty(self):
+        data = {'settings': {
+            'ssl': {'enabled': True, 'domain': '', 'panel_port': 8443},
+            'duckdns': {'enabled': True, 'domain': 'my-panel.duckdns.org'},
+        }}
+        self.assertEqual(
+            tg_bot._panel_public_url(data),
+            'https://my-panel.duckdns.org:8443',
+        )
+
+    def test_domain_without_ssl_uses_http(self):
+        data = {'settings': {'ssl': {
+            'enabled': False, 'domain': 'panel.example.com', 'panel_port': 5000,
+        }}}
+        self.assertEqual(
+            tg_bot._panel_public_url(data),
+            'http://panel.example.com:5000',
+        )
+
+    def test_missing_public_domain_does_not_return_localhost(self):
+        self.assertEqual(tg_bot._panel_public_url({'settings': {'ssl': {'enabled': True}}}), '')
+
+    def test_credentials_message_contains_clickable_escaped_url(self):
+        message = tg_bot._telegram_credentials_message(
+            {'username': 'new-user', 'enabled': True},
+            'secret', 'ru', 'https://panel.example.com:5000?a=1&b=2',
+        )
+        self.assertIn(
+            '<a href="https://panel.example.com:5000?a=1&amp;b=2">',
+            message,
+        )
+        self.assertIn('https://panel.example.com:5000?a=1&amp;b=2</a>', message)
+
+    def test_credentials_message_explains_missing_panel_url(self):
+        message = tg_bot._telegram_credentials_message(
+            {'username': 'new-user', 'enabled': True}, 'secret', 'ru',
+        )
+        self.assertIn('Адрес панели не настроен', message)
+
+
 class TestTelegramAutomaticRegistration(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         tg_bot._callback_refs.clear()
