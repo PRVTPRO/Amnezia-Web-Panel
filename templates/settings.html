@@ -89,6 +89,13 @@
                     </label>
                     <p class="form-hint">{{ _('telegram_create_users_disabled_desc') }}</p>
                 </div>
+                <div class="form-group">
+                    <label style="display: flex; align-items: center; gap: var(--space-sm); cursor: pointer;">
+                        <input type="checkbox" id="tg_webapp_initdata_auth" {% if telegram_settings.webapp_initdata_auth %}checked{% endif %}>
+                        {{ _('telegram_webapp_auth') }}
+                    </label>
+                    <p class="form-hint">{{ _('telegram_webapp_auth_desc') }}</p>
+                </div>
                 <div class="row-between" style="margin-top: var(--space-md);">
                     <div style="display: flex; align-items: center; gap: var(--space-sm);">
                         <span style="font-size: 0.85rem; color: var(--text-muted);">{{ _('bot_status') }}:</span>
@@ -1159,7 +1166,8 @@
             token: document.getElementById('tg_token').value.trim(),
             enabled: botCurrentlyRunning,
             auto_create_users: document.getElementById('tg_auto_create_users').checked,
-            create_users_disabled: document.getElementById('tg_create_users_disabled').checked
+            create_users_disabled: document.getElementById('tg_create_users_disabled').checked,
+            webapp_initdata_auth: document.getElementById('tg_webapp_initdata_auth').checked
         };
 
         const ssl = {
