@@ -218,8 +218,11 @@
         </div>
     </div>
 
+    {% if telegram_webapp_auth_enabled %}
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    {% endif %}
     <script>
-        // The login page only needs the three strings its inline JS references;
+        // The login page only needs the strings its inline JS references;
         // dumping the full UI dictionary here would publicly showcase every
         // panel feature (servers, protocols, integrations) in view-source.
         window.I18N = {{ login_translations_json | safe }};
@@ -334,6 +337,31 @@
                 spinner.classList.add('hidden');
             }
         }
+
+        {% if telegram_webapp_auth_enabled %}
+        (async function tryTelegramWebAppLogin() {
+            const webApp = window.Telegram && window.Telegram.WebApp;
+            if (!webApp || !webApp.initData) return;
+            try {
+                webApp.ready();
+                webApp.expand();
+                const response = await fetch('/api/auth/telegram-webapp', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ init_data: webApp.initData }),
+                });
+                const result = await response.json();
+                if (!response.ok) throw new Error(result.error || _('telegram_webapp_auth_invalid'));
+                window.location.replace('/');
+            } catch (error) {
+                const errorElement = document.getElementById('loginError');
+                if (errorElement) {
+                    errorElement.textContent = error.message || _('telegram_webapp_auth_invalid');
+                    errorElement.classList.add('visible');
+                }
+            }
+        })();
+        {% endif %}
 
         async function doLogin(e) {
             e.preventDefault();
