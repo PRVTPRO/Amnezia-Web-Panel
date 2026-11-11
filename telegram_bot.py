@@ -1537,6 +1537,10 @@ async def _handle_start(api: TelegramAPI, msg: dict, load_data_fn: Callable,
     tg_username = msg["from"].get("username")
     first_name = msg["from"].get("first_name", "")
     data = load_data_fn()
+    try:
+        await _set_webapp_menu_button(api, load_data_fn)
+    except Exception as exc:
+        logger.warning("Telegram WebApp menu button refresh failed: %s", exc)
     lang = _telegram_language(data, tg_id)
     if not lang:
         await api.send_message(chat_id, _tt("en", "language_prompt"),
