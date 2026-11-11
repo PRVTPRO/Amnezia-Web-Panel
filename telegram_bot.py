@@ -14,6 +14,7 @@ import shlex
 import sys
 import secrets
 import time
+import urllib.parse
 import uuid
 from datetime import datetime
 from typing import Optional, Callable
@@ -60,7 +61,8 @@ TG_TRANSLATIONS = {
         "credentials_title": "Your panel account has been created.",
         "credentials_login": "Login",
         "credentials_password": "Password",
-        "credentials_instructions": "To sign in, open your Amnezia Web Panel address in a browser and enter these credentials on the login page.",
+        "credentials_instructions": "To sign in, open {panel_url} in a browser and enter these credentials on the login page.",
+        "credentials_no_url": "The panel address is not configured. Contact the administrator to get the correct login address.",
         "credentials_disabled": "Your account was created disabled. Contact the administrator to enable it before signing in.",
         "no_connections_create": "You have no connections yet. Tap the button below to create one!",
         "no_connections_contact_admin": "You have no connections yet. Please contact your administrator.",
@@ -213,7 +215,8 @@ TG_TRANSLATIONS = {
         "credentials_title": "حساب پنل شما ایجاد شد.",
         "credentials_login": "نام کاربری",
         "credentials_password": "گذرواژه",
-        "credentials_instructions": "برای ورود، نشانی پنل وب Amnezia را در مرورگر باز کنید و این اطلاعات را در صفحه ورود وارد کنید.",
+        "credentials_instructions": "برای ورود، {panel_url} را در مرورگر باز کنید و این اطلاعات را در صفحه ورود وارد کنید.",
+        "credentials_no_url": "نشانی پنل تنظیم نشده است. برای دریافت نشانی صحیح ورود با مدیر تماس بگیرید.",
         "credentials_disabled": "حساب شما غیرفعال ایجاد شده است. پیش از ورود، برای فعال‌سازی با مدیر تماس بگیرید.",
         "no_connections_create": "هنوز اتصالی ندارید. برای ساخت اولین اتصال، دکمه زیر را بزنید!",
         "no_connections_contact_admin": "هنوز اتصالی ندارید. لطفاً با مدیر تماس بگیرید.",
@@ -366,7 +369,8 @@ TG_TRANSLATIONS = {
         "credentials_title": "Votre compte du panneau a été créé.",
         "credentials_login": "Identifiant",
         "credentials_password": "Mot de passe",
-        "credentials_instructions": "Pour vous connecter, ouvrez l’adresse de votre panneau Web Amnezia dans un navigateur et saisissez ces identifiants sur la page de connexion.",
+        "credentials_instructions": "Pour vous connecter, ouvrez {panel_url} dans un navigateur et saisissez ces identifiants sur la page de connexion.",
+        "credentials_no_url": "L’adresse du panneau n’est pas configurée. Contactez l’administrateur pour obtenir l’adresse de connexion correcte.",
         "credentials_disabled": "Votre compte a été créé désactivé. Contactez l’administrateur pour l’activer avant de vous connecter.",
         "no_connections_create": "Vous n’avez pas encore de connexion. Appuyez sur le bouton ci-dessous pour en créer une !",
         "no_connections_contact_admin": "Vous n’avez pas encore de connexion. Contactez votre administrateur.",
@@ -519,7 +523,8 @@ TG_TRANSLATIONS = {
         "credentials_title": "Ваш аккаунт панели создан.",
         "credentials_login": "Логин",
         "credentials_password": "Пароль",
-        "credentials_instructions": "Для входа откройте адрес веб-панели Amnezia в браузере и введите эти данные на странице авторизации.",
+        "credentials_instructions": "Для входа откройте {panel_url} в браузере и введите эти данные на странице авторизации.",
+        "credentials_no_url": "Адрес панели не настроен. Обратитесь к администратору, чтобы получить правильную ссылку для входа.",
         "credentials_disabled": "Аккаунт создан отключённым. Перед входом обратитесь к администратору для его активации.",
         "no_connections_create": "У вас пока нет подключений. Нажмите кнопку ниже, чтобы создать первое.",
         "no_connections_contact_admin": "У вас пока нет подключений. Обратитесь к администратору.",
@@ -671,7 +676,8 @@ TG_TRANSLATIONS = {
         "credentials_title": "你的面板账户已创建。",
         "credentials_login": "用户名",
         "credentials_password": "密码",
-        "credentials_instructions": "登录时，请在浏览器中打开 Amnezia Web Panel 地址，并在登录页面输入这些凭据。",
+        "credentials_instructions": "登录时，请在浏览器中打开 {panel_url}，并在登录页面输入这些凭据。",
+        "credentials_no_url": "尚未配置面板地址。请联系管理员获取正确的登录地址。",
         "credentials_disabled": "你的账户已创建但处于禁用状态。请联系管理员启用账户后再登录。",
         "no_connections_create": "你还没有连接。点击下方按钮创建一个吧！",
         "no_connections_contact_admin": "你还没有连接。请联系管理员。",
@@ -1076,15 +1082,77 @@ def _auto_create_telegram_user(data: dict, from_user: dict, save_data_fn: Option
     return user, random_password
 
 
-def _telegram_credentials_message(user: dict, password: str, lang: str) -> str:
+def _panel_public_url(data: dict) -> str:
+    """Build the browser-facing panel URL from the saved public host settings."""
+    settings = (data or {}).get("settings", {}) or {}
+    ssl = settings.get("ssl", {}) or {}
+    duckdns = settings.get("duckdns", {}) or {}
+    panel_access = settings.get("panel_access", {}) or {}
+
+    configured_host = (
+        ssl.get("domain")
+        or (duckdns.get("domain") if duckdns.get("enabled") else "")
+        or panel_access.get("allowed_domain")
+        or ""
+    )
+    configured_host = str(configured_host).strip()
+    if not configured_host:
+        return ""
+
+    # Accept a hostname (normal settings format) or a full URL (legacy/manual).
+    parsed = urllib.parse.urlsplit(
+        configured_host if "://" in configured_host else f"//{configured_host}"
+    )
+    scheme = parsed.scheme.lower() if parsed.scheme else (
+        "https" if ssl.get("enabled") else "http"
+    )
+    if (
+        scheme not in ("http", "https")
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.path not in ("", "/")
+        or parsed.query
+        or parsed.fragment
+    ):
+        return ""
+
+    try:
+        configured_port = parsed.port
+        panel_port = int(ssl.get("panel_port", 5000) or 5000)
+    except (TypeError, ValueError):
+        return ""
+    port = configured_port if configured_port is not None else panel_port
+    if not 1 <= port <= 65535:
+        return ""
+
+    hostname = parsed.hostname
+    if ":" in hostname:
+        hostname = f"[{hostname}]"
+    default_port = 443 if scheme == "https" else 80
+    authority = hostname if port == default_port else f"{hostname}:{port}"
+    return f"{scheme}://{authority}"
+
+
+def _telegram_credentials_message(
+    user: dict, password: str, lang: str, panel_url: str = ""
+) -> str:
     lines = [
         f"<b>{_tt(lang, 'credentials_title')}</b>",
         f"{_tt(lang, 'credentials_login')}: <code>{_e(user.get('username'))}</code>",
         f"{_tt(lang, 'credentials_password')}: <code>{_e(password)}</code>",
         "",
-        _tt(lang, "credentials_disabled") if not user.get("enabled", True)
-        else _tt(lang, "credentials_instructions"),
     ]
+    if not user.get("enabled", True):
+        lines.append(_tt(lang, "credentials_disabled"))
+    elif panel_url:
+        safe_url = _e(panel_url)
+        lines.append(_tt(
+            lang, "credentials_instructions",
+            panel_url=f'<a href="{safe_url}">{safe_url}</a>',
+        ))
+    else:
+        lines.append(_tt(lang, "credentials_no_url"))
     return "\n".join(lines)
 
 
@@ -1464,7 +1532,7 @@ async def _handle_start(api: TelegramAPI, msg: dict, load_data_fn: Callable,
         if created:
             panel_user, created_password = created
     if created_password:
-        await api.send_message(chat_id, _telegram_credentials_message(panel_user, created_password, lang))
+        await api.send_message(chat_id, _telegram_credentials_message(panel_user, created_password, lang, _panel_public_url(load_data_fn())))
 
     if not panel_user:
         await api.send_message(
@@ -2565,7 +2633,7 @@ async def _dispatch(api: TelegramAPI, update: dict, load_data_fn: Callable, gene
                 if created:
                     panel_user, created_password = created
             if created_password:
-                await api.send_message(chat_id, _telegram_credentials_message(panel_user, created_password, lang))
+                await api.send_message(chat_id, _telegram_credentials_message(panel_user, created_password, lang, _panel_public_url(load_data_fn())))
             if not panel_user:
                 await api.edit_message(chat_id, message_id,
                                        f"{_tt(lang, 'account_not_linked')}\n"
