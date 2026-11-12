@@ -555,6 +555,29 @@
     @media (max-width: 420px) {
         .srv-header .srv-status-btn { white-space: normal; line-height: 1.2; text-align: start; }
     }
+
+    .connection-sort { position: relative; }
+    .connection-sort > summary { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; list-style: none; }
+    .connection-sort > summary::-webkit-details-marker { display: none; }
+    .connection-sort[open] > summary { border-color: var(--border-focus); }
+    .connection-sort-menu {
+        position: absolute;
+        top: calc(100% + 7px);
+        inset-inline-end: 0;
+        z-index: 1100;
+        width: 230px;
+        max-width: calc(100vw - 24px);
+        padding: 12px;
+        display: grid;
+        gap: 7px;
+        background: var(--bg-card);
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-lg);
+        box-shadow: var(--shadow-lg);
+    }
+    .connection-sort-menu label { margin-top: 3px; color: var(--text-muted); font-size: .75rem; font-weight: 600; }
+    .connection-sort-menu .form-select { width: 100%; min-width: 0; }
+
 </style>
 {% endblock %}
 
@@ -1984,6 +2007,29 @@
             {{ _('connections') }}
         </h2>
         <div class="page-header__actions">
+            <details class="connection-sort">
+                <summary class="btn btn-secondary btn-sm">⇅ {{ _('sort') }}</summary>
+                <div class="connection-sort-menu">
+                    <label for="connSortField">{{ _('sort_by') }}</label>
+                    <select class="form-select" id="connSortField" onchange="applyConnectionSort()">
+                        <option value="name">{{ _('sort_name') }}</option>
+                        <option value="created">{{ _('sort_created') }}</option>
+                        <option value="handshake">{{ _('sort_handshake') }}</option>
+                        <option value="rx">{{ _('sort_rx') }}</option>
+                        <option value="tx">{{ _('sort_tx') }}</option>
+                        <option value="maxspeed">{{ _('sort_max_speed') }}</option>
+                        <option value="total">{{ _('sort_total_traffic') }}</option>
+                        <option value="ip">{{ _('sort_ip') }}</option>
+                        <option value="quota">{{ _('sort_quota') }}</option>
+                        <option value="expiry">{{ _('sort_expiry') }}</option>
+                    </select>
+                    <label for="connSortDirection">{{ _('sort_direction') }}</label>
+                    <select class="form-select" id="connSortDirection" onchange="applyConnectionSort()">
+                        <option value="asc">{{ _('sort_ascending') }}</option>
+                        <option value="desc">{{ _('sort_descending') }}</option>
+                    </select>
+                </div>
+            </details>
             <select class="form-select" id="connProtoSelect" onchange="loadConnections()"
                 style="width:auto;">
                 <option value="awg">AmneziaWG</option>
@@ -6302,6 +6348,7 @@
 
     async function loadConnections(isPoll, force) {
         const proto = document.getElementById('connProtoSelect').value;
+        updateConnectionSortOptions(proto);
         markActiveProtocolCard();
         const loading = document.getElementById('connectionsLoading');
         const emptyEl = document.getElementById('connectionsEmpty');
@@ -6396,6 +6443,16 @@
 
                 // Per-peer bandwidth limit badge (AWG): ⚡∞ by default, 🐢 X Mbps when a limit is set
                 const maxSpeed = parseFloat(userData.maxSpeed || 0) || 0;
+                const createdTimestamp = Date.parse(created) || 0;
+                const handshakeAge = parseHandshakeAgo(handshake);
+                const handshakeTimestamp = handshakeAge === null ? 0 : Date.now() - handshakeAge * 1000;
+                const rxBytes = Number(userData.dataReceivedBytes) || 0;
+                const txBytes = Number(userData.dataSentBytes) || 0;
+                const totalBytes = proto === 'telemt'
+                    ? (Number(userData.total_octets) || 0)
+                    : rxBytes + txBytes;
+                const quotaBytes = Number(userData.quota) || 0;
+                const expiryTimestamp = Date.parse(userData.expiry || '') || 0;
                 if (proto.startsWith('awg') || protoBase(proto) === 'wireguard') metaHtml += `<span class="traffic-badge traffic-limit" title="${_('max_speed')}">${maxSpeed > 0 ? '🐢 ' + maxSpeed + ' Mbps' : '⚡<span style="font-size:1.25em; line-height:0;">∞</span>'}</span>`;
 
                 if (proto === 'telemt') {
@@ -6428,7 +6485,7 @@
                 const canShowConfig = proto === 'xray' || true; // always show 📄 button
 
                 listEl.innerHTML += `
-                    <div class="client-item" style="${disabledStyle}" data-maxspeed="${maxSpeed}" data-assigned-user="${client.assigned_user_id || ''}" data-server-id="${SERVER_ID}" data-protocol="${escapeHtml(proto)}" data-client-id="${escapeHtml(client.clientId).replace(/"/g, '&quot;')}" data-peer-name="${escapeHtml(name).replace(/"/g, '&quot;')}">
+                    <div class="client-item" style="${disabledStyle}" data-maxspeed="${maxSpeed}" data-sort-name="${escapeHtml(name)}" data-sort-created="${createdTimestamp}" data-sort-handshake="${handshakeTimestamp}" data-sort-rx="${rxBytes}" data-sort-tx="${txBytes}" data-sort-maxspeed="${maxSpeed}" data-sort-total="${totalBytes}" data-sort-ip="${escapeHtml(peerIp)}" data-sort-quota="${quotaBytes}" data-sort-expiry="${expiryTimestamp}" data-assigned-user="${client.assigned_user_id || ''}" data-server-id="${SERVER_ID}" data-protocol="${escapeHtml(proto)}" data-client-id="${escapeHtml(client.clientId).replace(/"/g, '&quot;')}" data-peer-name="${escapeHtml(name).replace(/"/g, '&quot;')}">
                         <div class="client-info">
                             <div class="client-avatar${client._online ? ' avatar-online' : ''}">${initial}</div>
                             <div>
@@ -6453,6 +6510,7 @@
         } finally {
             window.connLoading = false;
             PeerQueue.reapplyRowStates();
+            applyConnectionSort();
             highlightPeerFromQuery();
             // A switch was requested mid-flight: load the currently selected
             // protocol now (the stale response above was dropped).
@@ -6991,6 +7049,78 @@
             total += parseInt(m[1], 10) * mult[m[2]];
         }
         return matched ? total : null;
+    }
+
+    const CONNECTION_SORT_ATTRIBUTES = {
+        name: 'sortName',
+        created: 'sortCreated',
+        handshake: 'sortHandshake',
+        rx: 'sortRx',
+        tx: 'sortTx',
+        maxspeed: 'sortMaxspeed',
+        total: 'sortTotal',
+        ip: 'sortIp',
+        quota: 'sortQuota',
+        expiry: 'sortExpiry'
+    };
+
+    function connectionSortAvailable(field, proto) {
+        const isAwg = proto.startsWith('awg');
+        const isWireGuard = protoBase(proto) === 'wireguard';
+        switch (field) {
+            case 'name': return true;
+            case 'created': return proto !== 'telemt';
+            case 'handshake': return proto !== 'telemt' && proto !== 'xray';
+            case 'rx':
+            case 'tx': return proto !== 'telemt';
+            case 'maxspeed':
+            case 'ip': return isAwg || isWireGuard;
+            case 'total': return true;
+            case 'quota':
+            case 'expiry': return proto === 'telemt';
+            default: return false;
+        }
+    }
+
+    function updateConnectionSortOptions(proto) {
+        const select = document.getElementById('connSortField');
+        if (!select) return;
+        Array.from(select.options).forEach(option => {
+            option.disabled = !connectionSortAvailable(option.value, proto);
+        });
+        if (select.selectedOptions.length && select.selectedOptions[0].disabled) {
+            select.value = 'name';
+        }
+    }
+
+    function applyConnectionSort() {
+        const list = document.getElementById('connectionsListInner');
+        const fieldSelect = document.getElementById('connSortField');
+        const directionSelect = document.getElementById('connSortDirection');
+        if (!list || !fieldSelect || !directionSelect) return;
+
+        const field = fieldSelect.value;
+        const attr = CONNECTION_SORT_ATTRIBUTES[field];
+        if (!attr) return;
+        const direction = directionSelect.value === 'desc' ? -1 : 1;
+        const rows = Array.from(list.querySelectorAll(':scope > .client-item'));
+        rows.sort((a, b) => {
+            const av = a.dataset[attr] || '';
+            const bv = b.dataset[attr] || '';
+            let result;
+            if (field === 'name' || field === 'ip') {
+                result = av.localeCompare(bv, undefined, { numeric: true, sensitivity: 'base' });
+            } else {
+                // Missing, empty and invalid numeric values are all zero.
+                result = (Number(av) || 0) - (Number(bv) || 0);
+            }
+            if (result) return result * direction;
+            // Stable and predictable secondary order, regardless of direction.
+            return (a.dataset.sortName || '').localeCompare(
+                b.dataset.sortName || '', undefined, { numeric: true, sensitivity: 'base' }
+            );
+        });
+        rows.forEach(row => list.appendChild(row));
     }
 
     // Compact fixed-ish length: "45s ago" / "3m 51s ago" / "2h 29m ago" / "2d 3h ago"
