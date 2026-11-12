@@ -120,6 +120,12 @@ class CheburcheckRenderTests(unittest.TestCase):
         self.assertIn('if (!addresses.length) return;', text)
         self.assertIn('cbRowAddresses', text)
 
+    def test_quiet_fields_are_inline(self):
+        text = SETTINGS_TEMPLATE.read_text(encoding='utf-8')
+        self.assertIn('cb_quiet_fields', text)
+        self.assertIn('align-items:flex-end', text)
+        self.assertIn("style.display = on ? 'flex' : 'none'", text)
+
     def test_override_input_appears_only_after_its_checkbox(self):
         text = SETTINGS_TEMPLATE.read_text(encoding='utf-8')
         self.assertIn('class="cb-override"', text)

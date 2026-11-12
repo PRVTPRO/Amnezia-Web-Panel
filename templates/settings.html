@@ -775,7 +775,7 @@
                 </label>
                 <p class="form-hint">{{ _('cheburcheck_quiet_hint') }}</p>
             </div>
-            <div class="form-group" id="cb_quiet_fields" style="{% if not settings.get('cheburcheck', {}).get('quiet_enabled') %}display:none;{% endif %} gap:12px;">
+            <div class="form-group" id="cb_quiet_fields" style="display:{% if not settings.get('cheburcheck', {}).get('quiet_enabled') %}none{% else %}flex{% endif %}; align-items:flex-end; gap:12px;">
                 <div>
                     <label class="form-label">{{ _('cheburcheck_quiet_from') }}</label>
                     <select class="form-input" id="cb_quiet_start" style="width:auto;">
@@ -1925,7 +1925,7 @@ document.querySelectorAll('.cb-server').forEach(cb => {
 // Quiet-hour fields only make sense once the window is enabled.
 function toggleQuietFields() {
     const on = document.getElementById('cb_quiet_enabled').checked;
-    document.getElementById('cb_quiet_fields').style.display = on ? '' : 'none';
+    document.getElementById('cb_quiet_fields').style.display = on ? 'flex' : 'none';
 }
 document.getElementById('cb_quiet_enabled').addEventListener('change', toggleQuietFields);
 

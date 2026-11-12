@@ -256,7 +256,7 @@ class RunOneTests(unittest.TestCase):
         self.assertEqual(rec['status'], 'unknown')
         self.assertIn('no verdicts', rec['error'])
 
-    def test_writes_banned_on_static_block(self):
+    def test_static_list_hit_alone_is_not_a_ban(self):
         import asyncio
 
         async def go():
@@ -268,8 +268,8 @@ class RunOneTests(unittest.TestCase):
 
         asyncio.run(go())
         rec = self._record('u2', '46.30.41.17')
-        self.assertEqual(rec['status'], 'banned')
-        self.assertNotIn('error', rec)
+        self.assertEqual(rec['status'], 'unknown')   # no probe verdicts at all
+        self.assertTrue(rec['static']['blocked'])
 
     def test_empty_target_never_reaches_network(self):
         import asyncio

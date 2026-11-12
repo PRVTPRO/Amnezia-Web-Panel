@@ -212,11 +212,10 @@ def _quote(s):
 def classify(static_blocked, probe_verdicts, probe_responses):
     """Return 'banned' / 'clean' / 'unknown'.
 
-    Only the TSPU verdict (and a static registry hit) counts as banned: SNI,
-    DNS and CDN verdicts are restrictions, not bans.
+    Only the TSPU verdict is a ban. ``static_blocked`` (the address is inside a
+    blocked CDN subnet or the RKN registry) is reported in the record but does
+    not flip the status; the argument is kept for backward compatibility.
     """
-    if static_blocked:
-        return "banned"
     if any(v in BAN_VERDICTS for v in (probe_verdicts or [])):
         return "banned"
     if not probe_responses:
@@ -356,11 +355,11 @@ def build_summary(host, static, probe, error=None):
     # comes from the "done" event and may exceed what the stream delivered.
     answered = len([r for r in regions if r.get("verdicts")])
     winner = select_verdict(regions, is_static_cdn)
-    # A ban is a TSPU verdict or a static registry hit; SNI/DNS/CDN verdicts do
-    # not flip the status (they are reported as restrictions).
-    if banned or bool(static.get("blocked")):
+    # A ban is a TSPU verdict only: SNI/DNS/CDN verdicts and a static CDN/RKN
+    # hit are reported as facts, they do not flip the status.
+    if banned:
         status = "banned"
-    elif winner in ("ok", "whitelist") or (answered and not banned):
+    elif answered and not banned:
         status = "clean"
     else:
         status = "unknown"

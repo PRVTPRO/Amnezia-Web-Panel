@@ -185,12 +185,28 @@ class TestBuildSummaryFailurePaths(unittest.TestCase):
         self.assertEqual(s["status"], "unknown")
         self.assertIn("no verdicts", s["error"])
 
-    def test_banned_wins_over_error(self):
+    def test_static_hit_without_tspu_is_not_a_ban(self):
+        """A CDN/RKN list hit alone must not flip the status to banned."""
         s = cheburcheck.build_summary("1.2.3.4",
                                       {"blocked": True, "blocked_subnets": ["1.2.3.0/24"]},
                                       None, error="probe failed")
-        self.assertEqual(s["status"], "banned")
+        self.assertEqual(s["status"], "unknown")
+        self.assertTrue(s["static"]["blocked"])
         self.assertEqual(s["error"], "probe failed")
+
+    def test_static_hit_with_tspu_is_a_ban(self):
+        probe = {"regions": [{"region": "r", "verdicts": ["tspu_block"]}],
+                 "response_count": 1, "verdicts": ["tspu_block"],
+                 "verdict_counts": {"tspu_block": 1}}
+        s = cheburcheck.build_summary("1.2.3.4", {"blocked": True}, probe)
+        self.assertEqual(s["status"], "banned")
+
+    def test_static_hit_with_clean_probe_is_clean(self):
+        probe = {"regions": [{"region": "r", "verdicts": ["ok"]}],
+                 "response_count": 1, "verdicts": ["ok"],
+                 "verdict_counts": {"ok": 1}}
+        s = cheburcheck.build_summary("1.2.3.4", {"blocked": True}, probe)
+        self.assertEqual(s["status"], "clean")
 
     def test_record_has_no_regions_payload(self):
         static = {"blocked": False, "geo": {}}
@@ -209,7 +225,8 @@ class TestCdnAndVerdictVoting(unittest.TestCase):
         self.assertEqual(cheburcheck.classify(False, ["cdn_block"], 5), "clean")
         self.assertEqual(cheburcheck.classify(False, ["dns_spoofing"], 5), "clean")
         self.assertEqual(cheburcheck.classify(False, ["tspu_block"], 5), "banned")
-        self.assertEqual(cheburcheck.classify(True, ["ok"], 5), "banned")
+        # A static CDN/RKN hit alone is not a ban either.
+        self.assertEqual(cheburcheck.classify(True, ["ok"], 5), "clean")
 
     def test_ok_turns_into_cdn_block_for_static_cdn_without_unblocked_hosts(self):
         verdicts = cheburcheck.normalize_verdicts(
