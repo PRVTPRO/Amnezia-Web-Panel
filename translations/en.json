@@ -99,6 +99,8 @@
   "port_xray_hint": "Default port: 443 (recommended for Xray). Make sure it's not taken by another web server.",
   "reinstall": "Reinstall",
   "uninstall_confirm": "Uninstall {}? All connections and configurations will be lost.",
+  "uninstall_archive_confirm": "{name} has leftover accounting records: {ids}. The panel will verify that each peer is stopped or absent, archive the records with unverified final counters, and uninstall the protocol. Continue?",
+  "uninstall_archived": "Archived {count} leftover accounting record(s).",
   "stop_container_confirm": "Stop container {}?",
   "start_container_confirm": "Start container {}?",
   "stopping": "Stopping",

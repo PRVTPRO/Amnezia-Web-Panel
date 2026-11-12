@@ -98,6 +98,8 @@
   "port_xray_hint": "推荐端口: 443。请确保未被其他 Web 服务器使用。",
   "reinstall": "重新安装",
   "uninstall_confirm": "确定卸载 {}？所有连接和配置都将丢失。",
+  "uninstall_archive_confirm": "{name} 仍有计费记录：{ids}。面板将验证每个客户端均已停止或不存在，以最终计数未经验证的状态归档这些记录，然后卸载协议。是否继续？",
+  "uninstall_archived": "已归档 {count} 条计费记录。",
   "stop_container_confirm": "停止容器 {}？",
   "start_container_confirm": "启动容器 {}？",
   "stopping": "停止中",

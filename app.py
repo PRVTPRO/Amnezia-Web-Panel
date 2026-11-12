@@ -8561,7 +8561,8 @@ def api_ipv6_operation(request: Request, server_id: int, op_id: str):
 
 @app.post('/api/servers/{server_id}/uninstall', tags=["Protocols"])
 @serialize_peer_lifecycle
-async def api_uninstall_protocol(request: Request, server_id: int, req: ProtocolRequest):
+async def api_uninstall_protocol(request: Request, server_id: int, req: ProtocolRequest,
+                                 archive_blocking: bool = False):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
@@ -8569,7 +8570,7 @@ async def api_uninstall_protocol(request: Request, server_id: int, req: Protocol
         if server_id < 0 or server_id >= len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         guard = _traffic_removal_guard(data, server_id=server_id, protocol=req.protocol)
-        if guard is not None:
+        if guard is not None and (not archive_blocking or protocol_base(req.protocol) != 'xray'):
             return guard
         server = data['servers'][server_id]
         if srv_warp_ctx(server, req.protocol).get('active'):
@@ -8577,6 +8578,31 @@ async def api_uninstall_protocol(request: Request, server_id: int, req: Protocol
             # tear down a container whose egress rules are still applied.
             raise SrvWarpError('srv_warp_xor_conflict', 409)
         base = protocol_base(req.protocol)
+        blocked = (ownership_rows(data, server_id=server_id, protocol=req.protocol)
+                   if archive_blocking else [])
+        archive_states = {}
+        archive_baselines = {c.get('id'): c.get('last_bytes') for c in blocked}
+        for conn in blocked:
+            observed, quiescent = await asyncio.to_thread(_probe_blocking_peer, server, conn)
+            if not quiescent:
+                return JSONResponse({
+                    'error': 'A peer linked to this protocol is still active; '
+                             'stop or remove it before archiving its accounting.',
+                    'code': 'blocked_peer_still_active',
+                    'blocking': [_blocking_row_public(conn)],
+                }, status_code=409)
+            archive_states[conn.get('id')] = observed
+        if blocked:
+            async with DATA_LOCK:
+                current = load_data()
+                current_blocked = ownership_rows(
+                    current, server_id=server_id, protocol=req.protocol)
+                if [c.get('id') for c in current_blocked] != [c.get('id') for c in blocked]:
+                    return JSONResponse({
+                        'error': 'Connection accounting changed; refresh the server page and retry.',
+                        'code': 'traffic_finalization_required',
+                        'blocking': [_blocking_row_public(c) for c in current_blocked],
+                    }, status_code=409)
         if base in AWG_PROTOCOLS and ((server.get('protocols') or {}).get(req.protocol) or {}).get('exit_link'):
             # Drop our peer on the exit while the container still exists
             try:
@@ -8592,20 +8618,59 @@ async def api_uninstall_protocol(request: Request, server_id: int, req: Protocol
             await asyncio.to_thread(manager.remove_container)
         else:
             await asyncio.to_thread(manager.remove_container, req.protocol)
-        if req.protocol in server.get('protocols', {}):
-            del server['protocols'][req.protocol]
+        archived = 0
+        if blocked:
+            async with DATA_LOCK:
+                with STATE_FILE_LOCK:
+                    data = load_data()
+                    current = data['servers'][server_id]
+                    current_blocked = ownership_rows(
+                        data, server_id=server_id, protocol=req.protocol)
+                    if (current.get('uid') != server.get('uid')
+                            or [c.get('id') for c in current_blocked] != [c.get('id') for c in blocked]):
+                        return JSONResponse({
+                            'error': 'Connection accounting changed; refresh the server page and retry.',
+                            'code': 'traffic_finalization_required',
+                            'blocking': [_blocking_row_public(c) for c in current_blocked],
+                        }, status_code=409)
+                    before = pathlib_read_data_bytes()
+                    operation_id = uuid.uuid4().hex
+                    actor = _actor_id(request, True)
+                    for conn in current_blocked:
+                        observed = archive_states.get(conn.get('id'))
+                        if conn.get('last_bytes') != archive_baselines.get(conn.get('id')):
+                            # A newer accounting scrape owns this baseline now. Never
+                            # reinterpret the older probe as a counter reset.
+                            observed = None
+                        finalize_connection_record(
+                            data, conn, current, observed,
+                            time.time(), 'protocol_uninstall_absent', operation_id, True)
+                    if req.protocol in current.get('protocols', {}):
+                        del current['protocols'][req.protocol]
+                    commit_finalize(
+                        DATA_FILE, operation_id, actor, 'protocol_archive_uninstall',
+                        recovery_digest({'server_uid': current.get('uid'),
+                                         'protocol': req.protocol,
+                                         'mode': 'protocol_uninstall_absent'}),
+                        before, data)
+                    archived = len(current_blocked)
+                    server = current
+                    _invalidate_ip_status(server.get('uid'))
+        else:
+            if req.protocol in server.get('protocols', {}):
+                del server['protocols'][req.protocol]
+                save_data(data)
+                _invalidate_ip_status(server.get('uid'))
+            # The instance is gone: its peers are gone with it, so connections
+            # pointing at this (server, protocol) would dangle forever — the
+            # modal would list a phantom that errors with 'Client not found'
+            # on every action. Purge them like server/user deletion does.
+            data['user_connections'] = [
+                c for c in data.get('user_connections', [])
+                if not (c.get('server_id') == server_id
+                        and c.get('protocol') == req.protocol)
+            ]
             save_data(data)
-            _invalidate_ip_status(server.get('uid'))
-        # The instance is gone: its peers are gone with it, so connections
-        # pointing at this (server, protocol) would dangle forever — the
-        # modal would list a phantom that errors with 'Client not found'
-        # on every action. Purge them like server/user deletion does.
-        data['user_connections'] = [
-            c for c in data.get('user_connections', [])
-            if not (c.get('server_id') == server_id
-                    and c.get('protocol') == req.protocol)
-        ]
-        save_data(data)
         ssh.disconnect()
         if base == 'exit':
             detached = await exit_link_svc.detach_entries_for_exit(server.get('uid'), 'exit_uninstalled')
@@ -8615,7 +8680,10 @@ async def api_uninstall_protocol(request: Request, server_id: int, req: Protocol
             restored = await exit_link_svc.disable_dns_via_exit_for_exit(server.get('uid'))
             if restored:
                 return {'status': 'success', 'dns_restored': restored}
-        return {'status': 'success'}
+        response = {'status': 'success'}
+        if archived:
+            response['archived'] = archived
+        return response
     except SrvWarpError:
         raise
     except Exception as e:
@@ -12027,7 +12095,13 @@ def _probe_blocking_peer(server, conn):
     try:
         ssh.connect()
         manager = get_protocol_manager(ssh, conn['protocol'])
-        clients = _manager_call(manager, 'get_clients', conn['protocol'])
+        if protocol_base(conn['protocol']) == 'xray':
+            try:
+                clients = manager.get_clients(conn['protocol'], strict=True)
+            except RuntimeError as error:
+                raise RecoveryError('incomplete_peer_state') from error
+        else:
+            clients = _manager_call(manager, 'get_clients', conn['protocol'])
         if not isinstance(clients, list):
             raise RecoveryError('incomplete_peer_state')
         peers = [c for c in clients

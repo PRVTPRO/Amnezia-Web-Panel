@@ -129,9 +129,9 @@ def parse_acct_counters(text):
         if not m:
             continue
         pkts, bytez, in_if, out_if = int(m.group(1)), int(m.group(2)), m.group(3), m.group(4)
-        if out_if in (SMARTR_EXIT_IF, 'eth0'):      # egress row
+        if out_if == SMARTR_EXIT_IF or out_if.startswith('eth'):  # egress row
             path, direction = ('via_exit' if out_if == SMARTR_EXIT_IF else 'direct'), 'out'
-        elif in_if in (SMARTR_EXIT_IF, 'eth0'):     # ingress row
+        elif in_if == SMARTR_EXIT_IF or in_if.startswith('eth'):  # ingress row
             path, direction = ('via_exit' if in_if == SMARTR_EXIT_IF else 'direct'), 'in'
         else:
             continue
@@ -204,12 +204,18 @@ iptables -t mangle -N $CH 2>/dev/null || true
 iptables -t mangle -F $CH
 iptables -t mangle -A $CH -s "$X_SUBNET" -o __EXIT_IF__ -j RETURN
 iptables -t mangle -A $CH -s "$X_SUBNET" -o eth0 -j RETURN
+iptables -t mangle -A $CH -s "$X_SUBNET" -o eth1 -j RETURN
 iptables -t mangle -C POSTROUTING -j $CH 2>/dev/null || iptables -t mangle -A POSTROUTING -j $CH
 # ingress: internet -> client (download per path)
 iptables -t mangle -N $CHI 2>/dev/null || true
 iptables -t mangle -F $CHI
+# PREROUTING runs before reverse DNAT; conntrack still exposes the client source.
+iptables -t mangle -A $CHI -i __EXIT_IF__ -m conntrack --ctorigsrc "$X_SUBNET" -j RETURN || { echo "smartroute: conntrack ingress accounting failed"; exit 1; }
+iptables -t mangle -A $CHI -i eth0 -m conntrack --ctorigsrc "$X_SUBNET" -j RETURN || { echo "smartroute: conntrack ingress accounting failed"; exit 1; }
+iptables -t mangle -A $CHI -i eth1 -m conntrack --ctorigsrc "$X_SUBNET" -j RETURN || { echo "smartroute: conntrack ingress accounting failed"; exit 1; }
 iptables -t mangle -A $CHI -i __EXIT_IF__ -d "$X_SUBNET" -j RETURN
 iptables -t mangle -A $CHI -i eth0 -d "$X_SUBNET" -j RETURN
+iptables -t mangle -A $CHI -i eth1 -d "$X_SUBNET" -j RETURN
 iptables -t mangle -C PREROUTING -j $CHI 2>/dev/null || iptables -t mangle -A PREROUTING -j $CHI
 if command -v conntrack >/dev/null 2>&1; then conntrack -D -s "$X_SUBNET" >/dev/null 2>&1
 else echo "! conntrack-tools missing: flows opened before the change keep their old path until they end"; fi
@@ -602,9 +608,11 @@ class SmartRouteManager:
         out, _, code = self.ssh.run_command(f'ls {SMARTR_INSTANCES} 2>/dev/null')
         instances = sorted(out.split()) if code == 0 and out.strip() else []
         return {
+            **status,
             'installed': self.is_installed(),
             'status': status,
             'next_run': next_run,
+            'next_update': next_run,
             'instances': instances,
         }
 

@@ -125,6 +125,14 @@ class AcctParsingTests(unittest.TestCase):
         self.assertEqual(out['direct_out'], {'pkts': 5, 'bytes': 500})
         self.assertEqual(out['direct_in'], {'pkts': 2, 'bytes': 200})
 
+    def test_eth1_rows_mapped_to_direct(self):
+        text = ('    5      500 RETURN  all -- * eth1 10.8.0.0/24  0.0.0.0/0\n'
+                '    2      200 RETURN  all -- eth1 * 0.0.0.0/0  10.8.0.0/24\n')
+        out = parse_acct_counters(text)
+        self.assertEqual(out['direct_out'], {'pkts': 5, 'bytes': 500})
+        self.assertEqual(out['direct_in'], {'pkts': 2, 'bytes': 200})
+        self.assertEqual(out['direct'], {'pkts': 7, 'bytes': 700})
+
     def test_missing_chain_is_zero(self):
         out = parse_acct_counters('')
         for key in ('via_exit', 'direct', 'via_exit_out', 'direct_out',
@@ -270,6 +278,29 @@ class InstallRemoveScriptTests(unittest.TestCase):
                 self.assertNotIn(bad, tpl)
         self.assertIn(f'table $TABLE', CONTAINER_APPLY_SCRIPT)
 
+    def test_enable_accounts_for_eth1_and_masqueraded_ingress(self):
+        script = render_container_script(
+            CONTAINER_ENABLE_SCRIPT, config_path='/opt/amnezia/awg/awg0.conf',
+            subnet_default='10.8.0.0/24')
+        for interface in ('exit0', 'eth0', 'eth1'):
+            self.assertIn(
+                f'iptables -t mangle -A $CHI -i {interface} '
+                '-m conntrack --ctorigsrc "$X_SUBNET" -j RETURN',
+                script)
+        self.assertIn('iptables -t mangle -A $CH -s "$X_SUBNET" -o eth1 -j RETURN',
+                      script)
+        # Keep destination matching for non-NAT layouts as a fallback.
+        self.assertIn('iptables -t mangle -A $CHI -i eth1 -d "$X_SUBNET" -j RETURN',
+                      script)
+
+    def test_conntrack_ingress_failure_aborts_enable(self):
+        rules = [line for line in CONTAINER_ENABLE_SCRIPT.splitlines()
+                 if '--ctorigsrc' in line]
+        self.assertEqual(len(rules), 3)
+        for rule in rules:
+            self.assertNotIn('|| true', rule)
+            self.assertIn('exit 1', rule)
+
     def test_render_substitutes_constants(self):
         rendered = render_container_script(
             CONTAINER_ENABLE_SCRIPT, config_path='/opt/amnezia/awg/awg0.conf',
@@ -357,6 +388,10 @@ class ManagerFlowTests(unittest.TestCase):
         status = self.mgr.host_status()
         self.assertTrue(status['installed'])
         self.assertEqual(status['status']['prefixes_v4'], 8000)
+        self.assertEqual(status['prefixes_v4'], 8000)
+        self.assertEqual(status['prefixes_v6'], 300)
+        self.assertEqual(status['updated_at'], '2026-10-14T10:00:00')
+        self.assertEqual(status['next_update'], status['next_run'])
         self.assertEqual(status['instances'], ['amnezia-awg2', 'amnezia-awg3'])
 
     def test_counters_read(self):

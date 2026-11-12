@@ -1,6 +1,8 @@
 import json
 import os
 import re
+import shutil
+import subprocess
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -218,6 +220,51 @@ class RknBlockUiWiringTests(unittest.TestCase):
 
 
 
+class ProtocolUninstallAccountingUiTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('node'), 'Node.js required')
+    def test_blocking_records_offer_verified_archive_retry(self):
+        page = read('templates', 'server.html')
+        match = re.search(r'async function uninstallProtocol\(.*?\n    \}', page, re.S)
+        self.assertIsNotNone(match)
+        script = '''
+const calls = [], confirmations = [], toasts = [];
+const SERVER_ID = 7;
+const _ = key => key === 'uninstall_archive_confirm' ? 'Archive {name}: {ids}?' : key;
+const getProtoTitle = () => 'Xray';
+const protoBase = proto => proto.split('__')[0];
+const showToast = (message, kind) => toasts.push([message, kind]);
+const setTimeout = () => {};
+const window = {};
+const confirm = message => { confirmations.push(message); return true; };
+const apiCall = async (url, method, body) => {
+  calls.push(url);
+  if (calls.length === 1) {
+    const error = new Error('blocked');
+    error.payload = {code: 'traffic_finalization_required', blocking: [
+      {connection_id: 'xray-link-0', client_id: 'peer-0'}
+    ]};
+    throw error;
+  }
+  return {status: 'success', archived: 1};
+};
+''' + match.group() + '''
+uninstallProtocol('xray').then(() => {
+  console.log(JSON.stringify({calls, confirmations, toasts}));
+}).catch(error => { console.error(error); process.exitCode = 1; });
+'''
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertEqual(output['calls'], [
+            '/api/servers/7/uninstall',
+            '/api/servers/7/uninstall?archive_blocking=true',
+        ])
+        self.assertEqual(len(output['confirmations']), 2)
+        self.assertIn('xray-link-0', output['confirmations'][1])
+        self.assertIn('peer-0', output['confirmations'][1])
+        self.assertIn(['uninstall_archived', 'success'], output['toasts'])
+
+
 class SmartRouteUiWiringTests(unittest.TestCase):
     """Smart Route is a host-level marketplace app: its card must bypass the
     protocol installer, the split toggle lives in the exit-link modal, and
@@ -259,6 +306,26 @@ class SmartRouteUiWiringTests(unittest.TestCase):
         self.assertIn('smartroute-toggle-btn', self.page)
         # the card must not be shown via the container-status path
         self.assertIn("if (app.proto === 'smartroute') return;", self.page)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node.js required')
+    def test_smartroute_updated_time_is_compact_and_on_a_new_line(self):
+        match = re.search(r'function formatSmartRouteTime\(ts\) \{.*?\n    \}', self.page, re.S)
+        self.assertIsNotNone(match, 'Smart Route timestamp formatter is missing')
+        script = match.group() + '''
+console.log(JSON.stringify([
+  formatSmartRouteTime('2026-11-10T14:00:18'),
+  formatSmartRouteTime('2026-11-10 14:00:18'),
+  formatSmartRouteTime('unknown'),
+  formatSmartRouteTime('')
+]));
+'''
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), [
+            '10-11-2026 14:00:18', '10-11-2026 14:00:18', 'unknown', ''])
+        self.assertIn(
+            "${_('smartroute_updated')}: <br>${escapeHtml(formatSmartRouteTime(host.updated_at))}",
+            self.page)
 
     def test_card_dns_pair_inputs(self):
         self.assertIn('id="smartroute-direct-dns"', self.page)

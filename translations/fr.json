@@ -98,6 +98,8 @@
   "port_xray_hint": "Port recommandé : 443. Assurez-vous qu'il n'est pas utilisé par un serveur web.",
   "reinstall": "Réinstaller",
   "uninstall_confirm": "Désinstaller {} ? Toutes les données seront perdues.",
+  "uninstall_archive_confirm": "{name} conserve des enregistrements de comptabilité : {ids}. Le panneau vérifiera que chaque pair est arrêté ou absent, archivera les enregistrements avec des compteurs finaux non vérifiés, puis désinstallera le protocole. Continuer ?",
+  "uninstall_archived": "{count} enregistrement(s) de comptabilité archivé(s).",
   "stop_container_confirm": "Arrêter le conteneur {} ?",
   "start_container_confirm": "Démarrer le conteneur {} ?",
   "stopping": "Arrêt",

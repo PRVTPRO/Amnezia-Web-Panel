@@ -343,10 +343,17 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         return {'status': 'success', 'protocol': self.protocol, 'port': port, 'log': results}
 
     def remove_container(self):
-        self.ssh.run_sudo_command(f"docker stop {self.container_name}")
-        self.ssh.run_sudo_command(f"docker rm -fv {self.container_name}")
+        commands = (
+            (f"docker stop {self.container_name}", 'no such container'),
+            (f"docker rm -fv {self.container_name}", 'no such container'),
+        )
         if self.instance <= 1:
-            self.ssh.run_sudo_command(f"docker rmi {self.image_name}")
+            commands += ((f"docker rmi {self.image_name}", 'no such image'),)
+        for command, absent_marker in commands:
+            out, err, code = self.ssh.run_sudo_command(command)
+            detail = (err or out or '').strip()
+            if code != 0 and absent_marker not in detail.lower():
+                raise RuntimeError(f"Xray uninstall failed: {detail or f'exit code {code}'}")
         return True
 
     # ===================== CLIENT MANAGEMENT =====================
@@ -510,11 +517,34 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
             meta['public_key'] = self._derive_pubkey_from_priv(meta['private_key'])
         return meta
 
-    def _get_clients_table(self):
-        """Read clientsTable, trying both layout filenames."""
+    def _get_clients_table(self, strict=False):
+        """Read clientsTable, trying both layout filenames.
+
+        Strict recovery reads distinguish a valid empty table from an unreadable
+        or malformed one; ordinary UI reads retain the legacy empty fallback.
+        """
         layout = self._detect_layout()
         primary = 'clientsTable' if layout == 'native' else 'clientsTable.json'
         fallback = 'clientsTable.json' if layout == 'native' else 'clientsTable'
+        if strict:
+            for fname in dict.fromkeys((primary, fallback)):
+                path = f"{self._config_dir()}/{fname}"
+                out, _, code = self.ssh.run_sudo_command(
+                    f"docker exec {self.container_name} cat {path} 2>/dev/null")
+                if code != 0:
+                    out, _, code = self.ssh.run_sudo_command(f"cat {path} 2>/dev/null")
+                if code != 0:
+                    continue
+                if not (out or '').strip():
+                    return []
+                try:
+                    table = json.loads(out)
+                except (TypeError, ValueError) as error:
+                    raise RuntimeError('Xray clients table is not valid JSON') from error
+                if not isinstance(table, list):
+                    raise RuntimeError('Xray clients table has an invalid structure')
+                return table
+            raise RuntimeError('Xray clients table is unavailable')
         for fname in (primary, fallback):
             out = self._read_remote_file(f"{self._config_dir()}/{fname}")
             if not out or not out.strip():
@@ -633,9 +663,11 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
             v = int(v)
         return f"{v} {powers.get(n, 'B')}"
 
-    def get_clients(self, protocol=None):
+    def get_clients(self, protocol=None, strict=False):
         config = self._get_server_json()
         if not config:
+            if strict:
+                raise RuntimeError('Xray live config is unavailable')
             return []
 
         self._upgrade_config_for_stats(config, restart=False)
@@ -646,7 +678,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
             if ib.get('protocol') == 'vless':
                 xray_clients.extend(ib.get('settings', {}).get('clients', []))
 
-        clients_table = self._get_clients_table()
+        clients_table = self._get_clients_table(strict=strict)
         table_ids = {c['clientId'] for c in clients_table}
 
         # Auto-import clients present in server.json but missing from clientsTable
@@ -722,7 +754,8 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         )
         return url
 
-    def add_client(self, protocol, client_name, server_host, port, public_port=None):
+    def add_client(self, protocol, client_name, server_host, port, public_port=None,
+                   warp_ctx=None):
         client_id = str(uuid.uuid4())
         
         config = self._get_server_json()

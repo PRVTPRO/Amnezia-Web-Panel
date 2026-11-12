@@ -73,6 +73,10 @@ PANEL_ACCESS_KEYS = {
     'panel_access_domain_label',
 }
 
+PROTOCOL_UNINSTALL_KEYS = {
+    'uninstall_archive_confirm', 'uninstall_archived',
+}
+
 
 SECURITY_SETUP_KEYS = {
     'setup_title', 'setup_password_confirm', 'setup_submit', 'setup_creating',
@@ -257,7 +261,7 @@ class TestC6Translations(unittest.TestCase):
         # PANEL_ACCESS_KEYS does. The keys already inside the frozen hash (e.g.
         # the ipv6 set) must NOT be subtracted again.
         previous = '\n'.join(sorted(base - PANEL_ACCESS_KEYS - SECURITY_SETUP_KEYS
-                                    - CHEBURCHECK_KEYS))
+                                    - CHEBURCHECK_KEYS - PROTOCOL_UNINSTALL_KEYS))
         self.assertEqual(hashlib.sha256(previous.encode('utf-8')).hexdigest(),
                          PRE_PANEL_ACCESS_KEYS_SHA256,
                          'Existing catalogue changed outside the declared additions')
@@ -265,7 +269,7 @@ class TestC6Translations(unittest.TestCase):
     def test_new_keys_present_in_every_locale(self):
         for locale in LOCALES:
             data = translation(locale)
-            for key in NEW_KEYS | PANEL_ACCESS_KEYS:
+            for key in NEW_KEYS | PANEL_ACCESS_KEYS | PROTOCOL_UNINSTALL_KEYS:
                 self.assertIn(key, data)
                 self.assertTrue(str(data[key]).strip(), "%s empty in %s" % (key, locale))
 

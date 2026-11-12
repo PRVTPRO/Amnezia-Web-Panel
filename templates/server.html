@@ -5422,14 +5422,28 @@
         }
     }
 
-    async function uninstallProtocol(proto) {
+    async function uninstallProtocol(proto, archiveBlocking = false) {
         const name = getProtoTitle(proto);
-        if (!confirm(_('uninstall_confirm').replace('{}', name))) return;
+        if (!archiveBlocking && !confirm(_('uninstall_confirm').replace('{}', name))) return;
         try {
-            await apiCall(`/api/servers/${SERVER_ID}/uninstall`, 'POST', { protocol: proto });
+            const query = archiveBlocking ? '?archive_blocking=true' : '';
+            const result = await apiCall(`/api/servers/${SERVER_ID}/uninstall${query}`, 'POST', { protocol: proto });
+            if (result.archived) {
+                showToast(_('uninstall_archived').replace('{count}', result.archived), 'success');
+            }
             showToast(`${name} ${_('stopped')}`, 'success');
             setTimeout(() => window.location.reload(), 800);
         } catch (err) {
+            const blocking = err.payload?.blocking || [];
+            if (!archiveBlocking && protoBase(proto) === 'xray' &&
+                    err.payload?.code === 'traffic_finalization_required' && blocking.length) {
+                const ids = blocking.map(row => [row.connection_id, row.client_id]
+                    .filter(Boolean).join('/')).join(', ');
+                const message = _('uninstall_archive_confirm')
+                    .replace('{name}', name).replace('{ids}', ids);
+                if (confirm(message)) await uninstallProtocol(proto, true);
+                return;
+            }
             showToast(_('error') + ': ' + err.message, 'error');
         }
     }
@@ -5927,6 +5941,12 @@
         return SMARTR_ERROR_KEYS.includes(err.message) ? _(err.message) : err.message;
     }
 
+    function formatSmartRouteTime(ts) {
+        if (!ts) return '';
+        const m = String(ts).match(/^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}:\d{2}:\d{2})/);
+        return m ? `${m[3]}-${m[2]}-${m[1]} ${m[4]}` : String(ts);
+    }
+
     function renderSmartRouteCard() {
         const status = smartRouteStatus;
         const installed = !!(status && status.installed);
@@ -5954,9 +5974,9 @@
         const rows = [
             `${_('smartroute_prefixes_v4')}: ${host.prefixes_v4 != null ? host.prefixes_v4 : '—'}`,
             `${_('smartroute_prefixes_v6')}: ${host.prefixes_v6 != null ? host.prefixes_v6 : '—'}`,
-            `${_('smartroute_card_active_instances')}: ${splits.length ? splits.map(getProtoTitle).join(', ') : _('smartroute_split_none')}`,
+            `${_('smartroute_card_active_instances')}:<br>${splits.length ? splits.map(getProtoTitle).join(', ') : _('smartroute_split_none')}`,
         ];
-        if (host.updated_at) rows.push(`${_('smartroute_updated')}: ${escapeHtml(host.updated_at)}`);
+        if (host.updated_at) rows.push(`${_('smartroute_updated')}: <br>${escapeHtml(formatSmartRouteTime(host.updated_at))}`);
         if (host.error) rows.push(`<span style="color:var(--danger, #f87171)">${escapeHtml(host.error)}</span>`);
         const grid = document.getElementById('smartroute-info-grid');
         if (grid) grid.innerHTML = rows.map(r => `<div>${r}</div>`).join('');
@@ -6111,7 +6131,7 @@
             `${_('smartroute_prefixes_v6')}: ${host.prefixes_v6 != null ? host.prefixes_v6 : '—'}`,
         ];
         if (host.source_v4) rows.push(`${_('smartroute_source')}: ${escapeHtml(host.source_v4)}`);
-        if (host.updated_at) rows.push(`${_('smartroute_updated')}: ${escapeHtml(host.updated_at)}`);
+        if (host.updated_at) rows.push(`${_('smartroute_updated')}: ${escapeHtml(formatSmartRouteTime(host.updated_at))}`);
         if (host.next_update) rows.push(`${_('smartroute_next_update')}: ${escapeHtml(host.next_update)}`);
         document.getElementById('smartRouteListsInfo').innerHTML = rows.map(r => `<div>${r}</div>`).join('');
         document.getElementById('smartRouteListsError').textContent = host.error || '';
