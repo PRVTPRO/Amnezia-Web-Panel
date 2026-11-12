@@ -390,6 +390,10 @@
     }
     .srv-header .srv-status-btn .ssh-trust-dot,
     .srv-header .srv-status-btn .awg-plugin-dot { width: 7px; height: 7px; }
+    .srv-header .srv-status-btn .cheburcheck-dot { width: 7px; height: 7px; background: var(--text-muted, #888); border-radius: 50%; flex: 0 0 auto; }
+    .srv-header .srv-status-btn.is-danger .cheburcheck-dot { background: var(--danger, #f85149); }
+    .srv-header .srv-status-btn.is-warn .cheburcheck-dot { background: var(--warning, #d29922); }
+    .srv-header .srv-status-btn.is-ok .cheburcheck-dot { background: var(--success, #3fb950); }
     .srv-header .srv-status-btn.is-update {
         background: var(--success-bg);
         border-color: var(--success-border);
@@ -556,6 +560,33 @@
 
 {% block content %}
 {% if current_user and current_user.role == 'admin' %}
+{% if cheburcheck_enabled %}
+<div class="modal-backdrop" id="cheburcheckModal" aria-hidden="true">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="cheburcheckModalTitle">
+        <div class="modal-header">
+            <h2 class="modal-title" id="cheburcheckModalTitle">{{ _('cheburcheck_title') }}</h2>
+            <button type="button" class="modal-close" onclick="closeModal('cheburcheckModal')" aria-label="{{ _('close') }}">
+                &times;
+            </button>
+        </div>
+        <div class="modal-body">
+            <div id="cheburcheck-summary" class="text-muted">{{ _('cheburcheck_loading') }}</div>
+            <div id="cheburcheck-details" class="hidden" style="margin-top: var(--space-md);"></div>
+            <p class="form-hint" style="margin-top: var(--space-md);">{{ _('cheburcheck_hint') }}</p>
+            <div class="flex gap-sm" style="margin-top: var(--space-md);">
+                <button type="button" class="btn btn-secondary btn-sm" id="cheburcheck-run-btn"
+                        onclick="runCheburcheckNow()">{{ _('cheburcheck_run_now') }}</button>
+                <span id="cheburcheck-spinner" style="display:none; align-self:center;">
+                    <span class="spinner" style="display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,0.25);border-top-color:#fff;border-radius:50%;animation:spin 0.6s linear infinite;"></span>
+                    {{ _('cheburcheck_checking') }}
+                </span>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endif %}
+
 <div class="modal-backdrop" id="sshTrustModal">
     <div class="modal" style="max-width: 560px;">
         <div class="modal-header">
@@ -1341,6 +1372,14 @@
                     {{ ui_icon('plug', 14) }}
                     <span id="awgPluginBtnText">{{ _('awg_plugin_button') }}</span>
                 </button>
+                {% if cheburcheck_enabled %}
+                <button class="btn btn-sm srv-status-btn" type="button" id="cheburcheckBtn"
+                        onclick="openCheburcheckModal()" data-state="unknown">
+                    <span class="cheburcheck-dot" id="cheburcheckDot"></span>
+                    {{ ui_icon('shield', 14) }}
+                    <span id="cheburcheckBtnText">{{ _('cheburcheck_button') }}</span>
+                </button>
+                {% endif %}
                 {% endif %}
             </div>
         </div>
@@ -7623,5 +7662,90 @@
         ipStatusPoller = setInterval(() => { if (!document.hidden) loadIpStatus(); }, 60000);
     }
     document.addEventListener('visibilitychange', () => { if (!document.hidden) loadIpStatus(); });
+</script>
+<script>
+function cheburAge(checkedAt) {
+    if (!checkedAt) return '';
+    const then = new Date(checkedAt).getTime();
+    if (isNaN(then)) return '';
+    const mins = Math.floor((Date.now() - then) / 60000);
+    if (mins < 1) return _('cheburcheck_just_now');
+    if (mins < 60) return mins + ' ' + _('cheburcheck_min_ago');
+    const h = Math.floor(mins / 60);
+    if (h < 24) return h + ' ' + _('cheburcheck_hours_ago');
+    return Math.floor(h / 24) + ' ' + _('cheburcheck_days_ago');
+}
+
+async function loadCheburcheck() {
+    try {
+        const r = await apiCall(`/api/servers/${SERVER_ID}/cheburcheck`, 'GET');
+        const d = r && r.data;
+        const el = document.getElementById('cheburcheck-summary');
+        if (!el) return;
+        if (!d) { el.textContent = _('cheburcheck_no_data'); return; }
+        const status = d.status || 'unknown';
+        const icon = status === 'banned' ? '&#128683;' : (status === 'clean' ? '&#9989;' : '&#128993;');
+        const label = status === 'banned' ? _('cheburcheck_banned')
+            : (status === 'clean' ? _('cheburcheck_clean') : _('cheburcheck_unknown'));
+        const br = (d.probe || {}).blocking_regions || 0;
+        const rc = (d.probe || {}).response_count || 0;
+        const age = cheburAge(d.checked_at);
+        // A stale verdict is not a current one: mark it instead of letting an
+        // old "clean" read as today's answer.
+        const stale = age && age.indexOf(_('cheburcheck_days_ago')) === 0;
+        const staleTag = stale ? ' &#9888;&#65039; ' + _('cheburcheck_stale') : '';
+        const errTag = d.error ? ' &middot; ' + _('cheburcheck_error') + ': ' + escapeHtml(String(d.error)) : '';
+        el.innerHTML = `${icon} <b>${label}</b> &middot; ${_('cheburcheck_regions_blocked')}: ${br}/${rc}`
+            + (age ? ` &middot; ${_('cheburcheck_checked_at')}: ${age}${staleTag}` : '')
+            + errTag;
+        cheburcheckButtonState(status);
+    } catch (e) {
+        const el = document.getElementById('cheburcheck-summary');
+        if (el) el.textContent = _('cheburcheck_error') + ': ' + (e.message || e);
+    }
+}
+
+// The check takes 15-60s, so it runs in the background and this polls instead
+// of holding the HTTP request open (a proxy abort looks like "nothing happened").
+async function runCheburcheckNow() {
+    const btn = document.getElementById('cheburcheck-run-btn');
+    const sp = document.getElementById('cheburcheck-spinner');
+    if (btn) btn.disabled = true;
+    if (sp) sp.style.display = '';
+    try {
+        const r = await apiCall(`/api/servers/${SERVER_ID}/cheburcheck/run`, 'POST', {});
+        if (r && r.started === 0) { showToast(_('cheburcheck_master_off'), 'error'); return; }
+        const startedAt = Date.now();
+        for (let i = 0; i < 40; i++) {
+            await new Promise(res => setTimeout(res, 2000));
+            const st = await apiCall(`/api/servers/${SERVER_ID}/cheburcheck`, 'GET');
+            if (!st.running) { await loadCheburcheck(); return; }
+            if (Date.now() - startedAt > 90000) break;
+        }
+        await loadCheburcheck();
+        showToast(_('cheburcheck_still_running'), 'info');
+    } catch (e) {
+        alert(_('cheburcheck_error') + ': ' + (e.message || e));
+    } finally {
+        if (btn) btn.disabled = false;
+        if (sp) sp.style.display = 'none';
+    }
+}
+function cheburcheckButtonState(status) {
+    const btn = document.getElementById('cheburcheckBtn');
+    if (!btn) return;
+    btn.classList.remove('is-danger', 'is-warn', 'is-ok');
+    btn.removeAttribute('data-state');
+    if (status === 'banned') { btn.classList.add('is-danger'); btn.dataset.state = 'banned'; }
+    else if (status === 'unknown') { btn.classList.add('is-warn'); btn.dataset.state = 'unknown'; }
+    else { btn.classList.add('is-ok'); btn.dataset.state = 'clean'; }
+}
+
+function openCheburcheckModal() {
+    openModal('cheburcheckModal');
+    loadCheburcheck();
+}
+
+document.addEventListener('DOMContentLoaded', loadCheburcheck);
 </script>
 {% endblock %}

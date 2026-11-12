@@ -170,6 +170,12 @@
                 {% endif %}
             </div>
 
+            {% if cheburcheck_enabled %}
+            <div class="server-alerts" id="server-alerts-{{ loop.index0 }}" style="margin-top: var(--space-sm);">
+                <div id="chebur-alert-{{ loop.index0 }}" style="display:none;"></div>
+            </div>
+            {% endif %}
+
             <div class="server-actions">
                 <span class="reorder-btns">
                     <button type="button" class="btn btn-secondary btn-sm btn-icon" onclick="moveServer({{ loop.index0 }}, -1)"
@@ -931,6 +937,7 @@
         startAllPings();
         setupDragAndDrop();
         loadRknScanFlags();
+        loadCheburcheckFlags();
     });
 
     // Red "scans detected" button per server card, fed from the cached flags endpoint.
@@ -947,6 +954,34 @@
             }
         } catch (e) {
             console.warn('rkn scan flags failed:', e);
+        }
+    }
+
+    // Ban badge per server card, fed from the cached cheburcheck flags.
+    async function loadCheburcheckFlags() {
+        try {
+            const res = await apiCall('/api/servers/cheburcheck_flags', 'GET');
+            const flags = (res && res.flags) ? res.flags : {};
+            for (const [id, f] of Object.entries(flags)) {
+                if (!f) continue;
+                const el = document.getElementById('chebur-alert-' + id);
+                if (!el) continue;
+                if (f.status === 'banned') {
+                    const n = f.blocking_regions || 0;
+                    const label = n > 0
+                        ? `🚫 ${_('cheburcheck_ban_badge')} (${n})`
+                        : `🚫 ${_('cheburcheck_ban_badge')}`;
+                    el.innerHTML = `<button class="btn btn-danger btn-sm" style="width:100%; font-weight:700"
+                        onclick="location.href='/server/${id}#cheburcheck-card'">${label}</button>`;
+                    el.style.display = '';
+                } else if (f.status === 'unknown') {
+                    el.innerHTML = `<button class="btn btn-secondary btn-sm" style="width:100%;"
+                        onclick="location.href='/server/${id}#cheburcheck-card'">🟡 ${_('cheburcheck_unknown_badge')}</button>`;
+                    el.style.display = '';
+                }
+            }
+        } catch (e) {
+            console.warn('cheburcheck flags failed:', e);
         }
     }
 </script>

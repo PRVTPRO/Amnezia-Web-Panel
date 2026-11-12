@@ -742,6 +742,71 @@
             </form>
         </div>
 
+        <!-- BLOCK: Cheburcheck (Russia block check) -->
+        <div class="card" id="settings-cheburcheck" style="margin-top: var(--space-lg);">
+            <h3 class="card-title" style="margin-bottom: var(--space-lg);">🚫 {{ _('cheburcheck_settings_title') }}</h3>
+            <p class="form-hint" style="margin-bottom: var(--space-md);">{{ _('cheburcheck_settings_intro') }}</p>
+            <div class="form-group">
+                <label class="form-label">
+                    <input type="checkbox" id="cb_enabled" {% if settings.get('cheburcheck', {}).get('enabled') %}checked{% endif %}>
+                    {{ _('cheburcheck_enable') }}
+                </label>
+                <p class="form-hint">{{ _('cheburcheck_enable_hint') }}</p>
+            </div>
+            {# Everything below is inert until the master switch is on: no checks,
+               no badges, no header button, no popup anywhere in the panel. #}
+            <div id="cb_body" style="{% if not settings.get('cheburcheck', {}).get('enabled') %}display:none;{% endif %}">
+            <div class="form-group">
+                <label class="form-label">{{ _('cheburcheck_interval') }}</label>
+                <input type="number" class="form-input" id="cb_interval" min="1" max="24" value="{{ settings.get('cheburcheck', {}).get('interval_hours', 1) }}" style="width:120px;">
+                <p class="form-hint">{{ _('cheburcheck_interval_hint') }}</p>
+            </div>
+            <div class="form-group">
+                <label class="form-label">
+                    <input type="checkbox" id="cb_quiet_enabled" {% if settings.get('cheburcheck', {}).get('quiet_enabled') %}checked{% endif %}>
+                    {{ _('cheburcheck_quiet_enable') }}
+                </label>
+                <p class="form-hint">{{ _('cheburcheck_quiet_hint') }}</p>
+            </div>
+            <div class="form-group" id="cb_quiet_fields" style="{% if not settings.get('cheburcheck', {}).get('quiet_enabled') %}display:none;{% endif %} gap:12px;">
+                <div>
+                    <label class="form-label">{{ _('cheburcheck_quiet_from') }}</label>
+                    <select class="form-input" id="cb_quiet_start" style="width:auto;">
+                        {% for h in range(24) %}
+                        <option value="{{ h }}" {% if settings.get('cheburcheck', {}).get('quiet_start', 0) == h %}selected{% endif %}>{{ '%02d:00' % h }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div>
+                    <label class="form-label">{{ _('cheburcheck_quiet_to') }}</label>
+                    <select class="form-input" id="cb_quiet_end" style="width:auto;">
+                        {% for h in range(24) %}
+                        <option value="{{ h }}" {% if settings.get('cheburcheck', {}).get('quiet_end', 0) == h %}selected{% endif %}>{{ '%02d:00' % h }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">{{ _('cheburcheck_servers_label') }}</label>
+                <div id="cb_servers_list" style="display:flex; flex-direction:column; gap:6px; margin-top:6px;">
+                    {% for server in servers %}
+                    <label class="form-label" style="font-weight:normal;">
+                        <input type="checkbox" class="cb-server" data-uid="{{ server.uid }}"
+                            {% if settings.get('cheburcheck', {}).get('servers', {}).get(server.uid) %}checked{% endif %}>
+                        {{ server.name }} ({{ server.host }})
+                    </label>
+                    {% endfor %}
+                </div>
+                <p class="form-hint">{{ _('cheburcheck_servers_hint') }}</p>
+            </div>
+            <div style="margin-top: var(--space-md);">
+                <button type="button" class="btn btn-primary btn-sm" onclick="saveCheburcheckSettings()">{{ _('save') }}</button>
+                <button type="button" class="btn btn-secondary btn-sm" onclick="runAllCheburcheck()" style="margin-left:8px;">{{ _('cheburcheck_run_all') }}</button>
+                <span id="cb_status" style="margin-left:12px;" class="text-muted"></span>
+            </div>
+            </div>{# /cb_body #}
+        </div>
+
         <!-- BLOCK: About & Updates -->
         <div class="card" id="settings-about" style="margin-top: var(--space-lg);">
             <h3 class="card-title" style="margin-bottom: var(--space-lg);"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="margin-right: 6px; vertical-align: -2px;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>{{ _('about_title') }}</h3>
@@ -1678,4 +1743,81 @@
     });
 </script>
 <script src="/static/js/settings-nav.js?v={{ static_v }}" defer></script>
+<script>
+function collectCheburcheckSettings() {
+    const servers = {};
+    document.querySelectorAll('.cb-server').forEach(cb => {
+        if (cb.dataset.uid) servers[cb.dataset.uid] = cb.checked;
+    });
+    return {
+        enabled: document.getElementById('cb_enabled').checked,
+        interval_hours: parseInt(document.getElementById('cb_interval').value || '1', 10),
+        servers,
+        quiet_enabled: document.getElementById('cb_quiet_enabled').checked,
+        quiet_start: parseInt(document.getElementById('cb_quiet_start').value || '0', 10),
+        quiet_end: parseInt(document.getElementById('cb_quiet_end').value || '0', 10),
+    };
+}
+
+async function saveCheburcheckSettings() {
+    const st = document.getElementById('cb_status');
+    try {
+        await apiCall('/api/settings/cheburcheck', 'POST', collectCheburcheckSettings());
+        if (st) st.textContent = '✓ ' + (window._('saved') || 'saved');
+    } catch (e) {
+        if (st) st.textContent = '✗ ' + (e.message || e);
+    }
+}
+
+// The master switch gates the whole block: no checks or markup without it.
+// It persists on its own - hiding the block must look disabled AND stay disabled
+// after a reload, otherwise F5 brings the checkbox back.
+document.getElementById('cb_enabled').addEventListener('change', async (e) => {
+    document.getElementById('cb_body').style.display = e.target.checked ? '' : 'none';
+    const st = document.getElementById('cb_status');
+    if (st) st.textContent = '…';
+    try {
+        await apiCall('/api/settings/cheburcheck', 'POST', collectCheburcheckSettings());
+        if (st) st.textContent = '✓ ' + (window._('saved') || 'saved');
+    } catch (err) {
+        if (st) st.textContent = '✗ ' + (err.message || err);
+    }
+});
+
+// Quiet-hour fields only make sense once the window is enabled.
+function toggleQuietFields() {
+    const on = document.getElementById('cb_quiet_enabled').checked;
+    document.getElementById('cb_quiet_fields').style.display = on ? '' : 'none';
+}
+document.getElementById('cb_quiet_enabled').addEventListener('change', toggleQuietFields);
+
+// Fire the batch run in the background (each probe takes up to ~90s) and then
+// poll the flags endpoint until it reports the run finished.
+async function runAllCheburcheck() {
+    const st = document.getElementById('cb_status');
+    if (st) st.textContent = '…';
+    try {
+        const res = await apiCall('/api/servers/cheburcheck/run_all', 'POST', {});
+        const count = res.started || 0;
+        if (!count) { if (st) st.textContent = (window._('cheburcheck_none_enabled') || 'no servers selected'); return; }
+        if (st) st.textContent = (window._('cheburcheck_running_all') || 'checking') + ' ' + count;
+        for (let i = 0; i < 60; i++) {
+            await new Promise(r => setTimeout(r, 5000));
+            let flags;
+            try { flags = await apiCall('/api/servers/cheburcheck_flags', 'GET'); }
+            catch (e) { continue; }
+            if (!flags.running) {
+                const banned = Object.values(flags.flags || {}).filter(f => f && f.status === 'banned').length;
+                if (st) st.textContent = '✓ ' + (banned ? (banned + ' ' + (window._('cheburcheck_ban_badge') || 'banned')) : (window._('done') || 'done'));
+                return;
+            }
+        }
+        if (st) st.textContent = (window._('cheburcheck_running_all') || 'checking') + '…';
+    } catch (e) {
+        if (st) st.textContent = '✗ ' + (e.message || e);
+    }
+}
+</script>
+
+</script>
 {% endblock %}
