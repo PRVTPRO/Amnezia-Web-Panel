@@ -6445,7 +6445,7 @@
                 const maxSpeed = parseFloat(userData.maxSpeed || 0) || 0;
                 const createdTimestamp = Date.parse(created) || 0;
                 const handshakeAge = parseHandshakeAgo(handshake);
-                const handshakeTimestamp = handshakeAge === null ? 0 : Date.now() - handshakeAge * 1000;
+                const handshakeTimestamp = handshakeAge === null ? 0 : handshakeAge;
                 const rxBytes = Number(userData.dataReceivedBytes) || 0;
                 const txBytes = Number(userData.dataSentBytes) || 0;
                 const totalBytes = proto === 'telemt'
