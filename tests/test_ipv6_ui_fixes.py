@@ -73,6 +73,16 @@ PANEL_ACCESS_KEYS = {
     'panel_access_domain_label',
 }
 
+# Explicit additions from #319; keep the pre-existing catalogue fingerprint.
+USER_LIMIT_KEYS = {'max_connections_per_user_label', 'max_connections_per_user_hint'}
+TELEGRAM_ACCOUNT_KEYS = {
+    'telegram_auto_create_users', 'telegram_auto_create_users_desc',
+    'telegram_create_users_disabled', 'telegram_create_users_disabled_desc',
+    'telegram_webapp_auth', 'telegram_webapp_auth_desc',
+    'telegram_webapp_auth_invalid', 'telegram_webapp_auth_unavailable',
+    'telegram_webapp_account_not_found',
+}
+
 PROTOCOL_UNINSTALL_KEYS = {
     'uninstall_archive_confirm', 'uninstall_archived',
 }
@@ -261,7 +271,8 @@ class TestC6Translations(unittest.TestCase):
         # PANEL_ACCESS_KEYS does. The keys already inside the frozen hash (e.g.
         # the ipv6 set) must NOT be subtracted again.
         previous = '\n'.join(sorted(base - PANEL_ACCESS_KEYS - SECURITY_SETUP_KEYS
-                                    - CHEBURCHECK_KEYS - PROTOCOL_UNINSTALL_KEYS))
+                                    - CHEBURCHECK_KEYS - PROTOCOL_UNINSTALL_KEYS
+                                    - USER_LIMIT_KEYS - TELEGRAM_ACCOUNT_KEYS))
         self.assertEqual(hashlib.sha256(previous.encode('utf-8')).hexdigest(),
                          PRE_PANEL_ACCESS_KEYS_SHA256,
                          'Existing catalogue changed outside the declared additions')
@@ -269,7 +280,8 @@ class TestC6Translations(unittest.TestCase):
     def test_new_keys_present_in_every_locale(self):
         for locale in LOCALES:
             data = translation(locale)
-            for key in NEW_KEYS | PANEL_ACCESS_KEYS | PROTOCOL_UNINSTALL_KEYS:
+            for key in (NEW_KEYS | PANEL_ACCESS_KEYS | PROTOCOL_UNINSTALL_KEYS
+                        | USER_LIMIT_KEYS | TELEGRAM_ACCOUNT_KEYS):
                 self.assertIn(key, data)
                 self.assertTrue(str(data[key]).strip(), "%s empty in %s" % (key, locale))
 
