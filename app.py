@@ -3353,19 +3353,7 @@ async def startup():
 
     # Start periodic background tasks
     try:
-        _loaded = _cheburcheck_load_cache()
-        # Orphaned uids (a deleted server) are dropped here; records whose
-        # target changed stay until the next real check for that uid, so the
-        # reader can still tell "target changed" from "not checked yet".
-        _uids = {s.get('uid') for s in data.get('servers', []) if s.get('uid')}
-        _clean = {uid: records for uid, records in _loaded.items()
-                  if uid in _uids and isinstance(records, dict)}
-        if len(_clean) != len(_loaded):
-            logger.info('Cheburcheck: dropped %d orphaned cache records' %
-                        (len(_loaded) - len(_clean)))
-        CHEBURCHECK_CACHE.update(_clean)
-        if _clean != _loaded or os.path.exists(_cheburcheck_legacy_path()):
-            _cheburcheck_persist()
+        _cheburcheck_startup_cache(data)
     except Exception:
         logger.warning('Cheburcheck: cache load/migration failed', exc_info=True)
     asyncio.create_task(periodic_background_tasks())
@@ -3820,6 +3808,27 @@ def _cheburcheck_migrate_settings(data):
         # unknown names are dropped: the server is gone
     cfg['servers'] = new_flags
     return changed
+
+
+def _cheburcheck_startup_cache(data):
+    """Load the persisted cache at startup and migrate the legacy layout.
+
+    Records whose target changed stay until the next real check for that uid,
+    so the reader can still tell "target changed" from "not checked yet". A
+    consumed legacy file is always written back to the sibling path, otherwise
+    a restart before the next check would lose the cache.
+    """
+    had_legacy = os.path.exists(_cheburcheck_legacy_path())
+    loaded = _cheburcheck_load_cache()
+    uids = {s.get('uid') for s in data.get('servers', []) if s.get('uid')}
+    clean = {uid: records for uid, records in loaded.items()
+             if uid in uids and isinstance(records, dict)}
+    if len(clean) != len(loaded):
+        logger.info('Cheburcheck: dropped %d orphaned cache records' %
+                    (len(loaded) - len(clean)))
+    CHEBURCHECK_CACHE.update(clean)
+    if clean != loaded or had_legacy:
+        _cheburcheck_persist()
 
 
 def _cheburcheck_synthetic(target, error):

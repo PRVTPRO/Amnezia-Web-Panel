@@ -556,6 +556,24 @@ class CacheTests(unittest.TestCase):
         self.assertTrue(self.app._cheburcheck_cache_path())
         self.assertFalse(Path(legacy).exists())
 
+    def test_startup_writes_sibling_after_consuming_legacy(self):
+        path = self._legacy()
+        Path(path).write_text(json.dumps({'u1': _rec('95.81.126.149')}),
+                              encoding='utf-8')
+        data = {'servers': [{'uid': 'u1'}]}
+        self.app._cheburcheck_startup_cache(data)
+        sibling = Path(self.app._cheburcheck_cache_path())
+        self.assertTrue(sibling.exists())
+        saved = json.loads(sibling.read_text(encoding='utf-8'))
+        self.assertEqual(saved['u1']['95.81.126.149']['status'], 'clean')
+
+    def test_startup_drops_orphan_uids(self):
+        sibling = Path(self.app._cheburcheck_cache_path())
+        sibling.write_text(json.dumps({'ghost': {'a': _rec('a')}}),
+                           encoding='utf-8')
+        self.app._cheburcheck_startup_cache({'servers': [{'uid': 'u1'}]})
+        self.assertNotIn('ghost', self.app.CHEBURCHECK_CACHE)
+
     def test_persist_prunes_stale_targets_only_when_given(self):
         self.app.CHEBURCHECK_CACHE['u1'] = {'old': _rec('old'),
                                             'keep': _rec('keep')}
