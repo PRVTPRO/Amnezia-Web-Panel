@@ -3618,23 +3618,16 @@ def _cheburcheck_override(cfg, uid):
 def cheburcheck_targets(server, cfg=None):
     """Addresses to check for one server.
 
-    Default resolution (A1): the public endpoint of every installed client
-    protocol instance -- ``public_host`` when set, otherwise the server's
-    SSH address. An explicit per-server override (A2) replaces the resolution.
-    Empty list when nothing client-facing is installed.
+    Always includes the server's own (SSH) address and the public endpoint of
+    every installed client protocol instance. A per-server extra list adds
+    domains on top of that set; it does not replace it.
     """
     if cfg is None:
         cfg = (load_data().get('settings') or {}).get('cheburcheck') or {}
-    override = _cheburcheck_override(cfg, server.get('uid'))
-    if override is not None:
-        try:
-            return _cheburcheck_normalize_targets(override)
-        except ValueError as exc:
-            # A hand-edited data.json must not break the whole page/API.
-            logger.warning("Cheburcheck: ignoring invalid override for %s: %s",
-                           server.get('uid'), exc)
-            return []
     out = set()
+    host = str(server.get('host') or '').strip()
+    if host:
+        out.add(host)
     protocols = server.get('protocols')
     if isinstance(protocols, dict):
         for proto, record in protocols.items():
@@ -3644,10 +3637,18 @@ def cheburcheck_targets(server, cfg=None):
                 continue
             if protocol_base(str(proto)) not in CHEBURCHECK_CLIENT_PROTOCOLS:
                 continue
-            host, _port = protocol_public_endpoint(server, proto)
-            host = str(host or '').strip()
-            if host:
-                out.add(host)
+            target, _port = protocol_public_endpoint(server, proto)
+            target = str(target or '').strip()
+            if target:
+                out.add(target)
+    override = _cheburcheck_override(cfg, server.get('uid'))
+    if override:
+        try:
+            out.update(_cheburcheck_normalize_targets(override))
+        except ValueError as exc:
+            # A hand-edited data.json must not break the whole page/API.
+            logger.warning("Cheburcheck: ignoring invalid extra addresses for %s: %s",
+                           server.get('uid'), exc)
     return sorted(out)
 
 

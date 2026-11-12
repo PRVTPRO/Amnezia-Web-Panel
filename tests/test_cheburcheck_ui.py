@@ -179,6 +179,6 @@ class TranslationValuesTests(unittest.TestCase):
         self.assertIn('VPN-подключения', ru['cheburcheck_hint'])
         self.assertIn('VPN connection', en['cheburcheck_hint'])
         self.assertIn('{count}', ru['cheburcheck_targets_show'])
-        self.assertEqual(ru['cheburcheck_override_toggle'], 'свои адреса')
+        self.assertEqual(ru['cheburcheck_override_toggle'], 'доп. адреса')
         self.assertIn('{count}', en['cheburcheck_targets_show'])
-        self.assertEqual(ru['cheburcheck_override_toggle'], 'свои адреса')
+        self.assertEqual(ru['cheburcheck_override_toggle'], 'доп. адреса')

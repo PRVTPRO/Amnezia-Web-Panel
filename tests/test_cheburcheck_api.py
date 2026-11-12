@@ -142,7 +142,7 @@ class CheburcheckApiTests(unittest.TestCase):
         self.assertEqual(r.json(), {'ok': True, 'started': 0, 'reason': 'no_servers'})
 
     def test_run_all_no_targets(self):
-        df = _seed(self._tmp.name, [{'name': 'EMPTY', 'host': '1.2.3.4',
+        df = _seed(self._tmp.name, [{'name': 'EMPTY', 'host': '',
                                      'uid': 'u3'}],
                    {'cheburcheck': {'enabled': True, 'servers': {'u3': True}}})
         self.df = df
@@ -177,7 +177,7 @@ class CheburcheckApiTests(unittest.TestCase):
         self.assertNotIn('data', body)
 
     def test_get_empty_resolution_uses_service_key(self):
-        df = _seed(self._tmp.name, [{'name': 'EMPTY', 'host': '1.2.3.4',
+        df = _seed(self._tmp.name, [{'name': 'EMPTY', 'host': '',
                                      'uid': 'u3'}],
                    {'cheburcheck': {'enabled': True, 'servers': {'u3': True}}})
         self.df = df
@@ -330,11 +330,12 @@ class TargetResolutionTests(unittest.TestCase):
         base.update(kwargs)
         return base
 
-    def test_public_host_wins(self):
+    def test_ssh_address_always_checked_plus_public_host(self):
         srv = self.server(protocols={'awg3': {'public_host': 'vpn.example.com'}})
-        self.assertEqual(self.app.cheburcheck_targets(srv, {}), ['vpn.example.com'])
+        self.assertEqual(self.app.cheburcheck_targets(srv, {}),
+                         ['10.0.0.1', 'vpn.example.com'])
 
-    def test_host_fallback(self):
+    def test_host_only_when_no_public_host(self):
         srv = self.server(protocols={'awg': {}})
         self.assertEqual(self.app.cheburcheck_targets(srv, {}), ['10.0.0.1'])
 
@@ -347,37 +348,42 @@ class TargetResolutionTests(unittest.TestCase):
         self.assertEqual(self.app.cheburcheck_targets(srv, {}),
                          ['10.0.0.1', 'a.example'])
 
-    def test_skips_uninstalled_and_infrastructure_protocols(self):
+    def test_infrastructure_protocols_never_added_but_ssh_stays(self):
         srv = self.server(protocols={
             'awg': {'installed': False},
             'nginx': {'public_host': 'site.example'},
             'adguard': {'public_host': 'dns.example'},
             'mystery': {},
         })
-        self.assertEqual(self.app.cheburcheck_targets(srv, {}), [])
+        self.assertEqual(self.app.cheburcheck_targets(srv, {}), ['10.0.0.1'])
 
     def test_missing_installed_key_means_installed(self):
         srv = self.server(protocols={'xray': {'public_host': 'vpn.example'}})
-        self.assertEqual(self.app.cheburcheck_targets(srv, {}), ['vpn.example'])
+        self.assertEqual(self.app.cheburcheck_targets(srv, {}),
+                         ['10.0.0.1', 'vpn.example'])
 
     def test_public_port_is_not_part_of_target(self):
         srv = self.server(protocols={'xray': {'public_host': 'vpn.example',
                                               'public_port': '8443'}})
-        self.assertEqual(self.app.cheburcheck_targets(srv, {}), ['vpn.example'])
+        self.assertEqual(self.app.cheburcheck_targets(srv, {}),
+                         ['10.0.0.1', 'vpn.example'])
 
-    def test_invalid_stored_override_is_ignored(self):
-        cfg = {'targets': {'u': ['bad host']}}
-        self.assertEqual(self.app.cheburcheck_targets(self.server(), cfg), [])
-
-    def test_override_replaces_resolution(self):
+    def test_extra_addresses_are_added_on_top(self):
         cfg = {'targets': {'u': ['9.9.9.9']}}
         srv = self.server(protocols={'awg': {'public_host': 'vpn.example'}})
-        self.assertEqual(self.app.cheburcheck_targets(srv, cfg), ['9.9.9.9'])
+        self.assertEqual(self.app.cheburcheck_targets(srv, cfg),
+                         ['10.0.0.1', '9.9.9.9', 'vpn.example'])
 
-    def test_override_is_deduplicated_and_sorted(self):
-        cfg = {'targets': {'u': ['b.example', 'a.example', 'a.example']}}
+    def test_extra_addresses_deduplicated_and_sorted(self):
+        cfg = {'targets': {'u': ['b.example', 'a.example', 'a.example',
+                                 '10.0.0.1']}}
         self.assertEqual(self.app.cheburcheck_targets(self.server(), cfg),
-                         ['a.example', 'b.example'])
+                         ['10.0.0.1', 'a.example', 'b.example'])
+
+    def test_invalid_extra_addresses_are_ignored(self):
+        cfg = {'targets': {'u': ['bad host']}}
+        self.assertEqual(self.app.cheburcheck_targets(self.server(), cfg),
+                         ['10.0.0.1'])
 
     def test_invalid_targets_raise(self):
         with self.assertRaises(ValueError):
@@ -395,12 +401,14 @@ class SettingsTargetsTests(CheburcheckApiTests):
 
     def test_override_round_trip_and_resolved(self):
         r = self.client.post('/api/settings/cheburcheck',
-                             json={'targets': {'u1': ['vpn.example.com']}})
+                             json={'targets': {'u1': ['extra.example.com']}})
         self.assertEqual(r.status_code, 200, r.text)
-        self.assertEqual(self._saved_targets(), {'u1': ['vpn.example.com']})
+        self.assertEqual(self._saved_targets(), {'u1': ['extra.example.com']})
         body = self.client.get('/api/settings/cheburcheck').json()
-        self.assertEqual(body['targets'], {'u1': ['vpn.example.com']})
-        self.assertEqual(body['targets_resolved']['u1'], ['vpn.example.com'])
+        self.assertEqual(body['targets'], {'u1': ['extra.example.com']})
+        # The extra list adds to the SSH address, it does not replace it.
+        self.assertEqual(body['targets_resolved']['u1'],
+                         ['95.81.126.149', 'extra.example.com'])
 
     def test_override_invalid_value_rejects_whole_post(self):
         before = self.df.read_text(encoding='utf-8')
@@ -482,7 +490,7 @@ class SingleRunTests(CheburcheckApiTests):
         self.assertEqual(r.json(), {'ok': True, 'already_running': True})
 
     def test_run_endpoint_no_targets(self):
-        self.df = _seed(self._tmp.name, [{'name': 'EMPTY', 'host': '1.2.3.4',
+        self.df = _seed(self._tmp.name, [{'name': 'EMPTY', 'host': '',
                                           'uid': 'u3'}],
                         {'cheburcheck': {'enabled': True,
                                          'servers': {'u3': True}}})
@@ -609,7 +617,7 @@ class CacheTests(unittest.TestCase):
                   'protocols': {'awg': {'public_host': 'a.example'}}}
         cache = {'u1': {'old.example': _rec('old.example')}}
         records = self.app._cheburcheck_records_for(server, {}, cache)
-        self.assertEqual(set(records), {'a.example'})
+        self.assertEqual(set(records), {'10.0.0.1', 'a.example'})
 
     def test_aggregate_takes_worst_verdict_and_sums_probes(self):
         records = {

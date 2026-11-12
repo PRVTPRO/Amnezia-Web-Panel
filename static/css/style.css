@@ -803,7 +803,6 @@ a:hover {
     font-weight: 500;
     color: var(--text-secondary);
     margin-bottom: var(--space-xs);
-    text-transform: uppercase;
     letter-spacing: 0.05em;
 }
 
