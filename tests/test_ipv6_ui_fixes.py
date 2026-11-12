@@ -64,6 +64,9 @@ NEW_KEYS = {
     "cheburcheck_targets_intro",
     "cheburcheck_targets_show",
     "cheburcheck_restrictions",
+    "cheburcheck_remarks_badge",
+    "cheburcheck_static_hit",
+    "cheburcheck_static_rkn",
     "cheburcheck_override_toggle",
     "cheburcheck_override_placeholder",
 }
@@ -127,6 +130,9 @@ CHEBURCHECK_KEYS = {
     'cheburcheck_partial', 'cheburcheck_no_targets', 'cheburcheck_targets_intro',
     'cheburcheck_targets_show',
     'cheburcheck_restrictions',
+    'cheburcheck_remarks_badge',
+    'cheburcheck_static_hit',
+    'cheburcheck_static_rkn',
     'cheburcheck_override_toggle',
     'cheburcheck_override_placeholder',
 }

@@ -372,6 +372,7 @@ def build_summary(host, static, probe, error=None):
         verdict = region_verdict(region, is_static_cdn)
         if verdict:
             display_counts[verdict] = display_counts.get(verdict, 0) + 1
+    static_hit = bool(static.get("blocked") or static.get("cdn_providers"))
     record = {
         "target": host,
         "status": status,                      # banned / clean / unknown
@@ -394,6 +395,7 @@ def build_summary(host, static, probe, error=None):
             "static_cdn": is_static_cdn,
             "ban_regions": len(banned),
             "restricted_regions": len(restricted),
+            "static_hit": static_hit,
             "blocking_regions": len(banned),        # compat: ban-based
             "clear_regions": max(0, answered - len(banned)),
         },

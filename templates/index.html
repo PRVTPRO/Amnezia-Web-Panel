@@ -968,11 +968,18 @@
                 if (!el) continue;
                 if (f.status === 'banned') {
                     const n = (f.probe && f.probe.blocking_regions) || 0;
+                    const remarks = f.remarks || 0;
+                    const extra = remarks > 0 ? ` · ${_('cheburcheck_remarks_badge')} (${remarks})` : '';
                     const label = n > 0
-                        ? `🚫 ${_('cheburcheck_ban_badge')} (${n})`
-                        : `🚫 ${_('cheburcheck_ban_badge')}`;
+                        ? `🚫 ${_('cheburcheck_ban_badge')} (${n})${extra}`
+                        : `🚫 ${_('cheburcheck_ban_badge')}${extra}`;
                     el.innerHTML = `<button class="btn btn-danger btn-sm" style="width:100%; font-weight:700"
                         onclick="location.href='/server/${id}'">${label}</button>`;
+                    el.style.display = '';
+                } else if ((f.remarks || 0) > 0) {
+                    const remarks = f.remarks;
+                    el.innerHTML = `<button class="btn btn-secondary btn-sm" style="width:100%;"
+                        onclick="location.href='/server/${id}'">⚠️ ${_('cheburcheck_remarks_badge')} (${remarks})</button>`;
                     el.style.display = '';
                 }
             }

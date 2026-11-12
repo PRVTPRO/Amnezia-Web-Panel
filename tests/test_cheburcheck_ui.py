@@ -99,6 +99,19 @@ class CheburcheckRenderTests(unittest.TestCase):
         self.assertNotIn('#cheburcheck-card', text)
         self.assertIn('probe.blocking_regions', text)
 
+    def test_badge_shows_remarks_and_ban_with_remarks(self):
+        text = INDEX_TEMPLATE.read_text(encoding='utf-8')
+        self.assertIn("f.remarks", text)
+        self.assertIn('cheburcheck_remarks_badge', text)
+        # a ban with extra remarks appends them to the red badge
+        self.assertIn('${extra}', text)
+
+    def test_modal_is_wider_and_marks_static_lists(self):
+        text = SERVER_TEMPLATE.read_text(encoding='utf-8')
+        self.assertIn('#cheburcheckModal .modal { max-width: 720px; }', text)
+        self.assertIn('cheburcheck_static_hit', text)
+        self.assertIn('cheburcheck_static_rkn', text)
+
     def test_staleness_is_timestamp_based(self):
         text = SERVER_TEMPLATE.read_text(encoding='utf-8')
         start = text.index('async function loadCheburcheck')
@@ -186,5 +199,6 @@ class TranslationValuesTests(unittest.TestCase):
         self.assertIn('VPN connection', en['cheburcheck_hint'])
         self.assertIn('{count}', ru['cheburcheck_targets_show'])
         self.assertEqual(ru['cheburcheck_override_toggle'], 'доп. адреса')
+        self.assertEqual(ru['cheburcheck_remarks_badge'], 'замечания')
+        self.assertEqual(en['cheburcheck_static_hit'], 'in lists')
         self.assertIn('{count}', en['cheburcheck_targets_show'])
-        self.assertEqual(ru['cheburcheck_override_toggle'], 'доп. адреса')

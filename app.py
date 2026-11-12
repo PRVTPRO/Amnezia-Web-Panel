@@ -3844,7 +3844,8 @@ def _cheburcheck_synthetic(target, error):
                    'reverse_lookup': []},
         'probe': {'online_probes': None, 'response_count': 0,
                   'verdict_counts': {}, 'blocking_regions': 0,
-                  'restricted_regions': 0, 'clear_regions': 0},
+                  'restricted_regions': 0, 'static_hit': False,
+                  'clear_regions': 0},
         'partial': False,
     }
 
@@ -3993,10 +3994,18 @@ def _cheburcheck_aggregate(records):
             errors.append(str(error))
     checked = [record.get('checked_at') for record in records.values()
                if record.get('checked_at')]
+    static_hit = any(
+        bool((record.get('static') or {}).get('blocked'))
+        or bool((record.get('static') or {}).get('cdn_providers'))
+        for record in records.values())
     return {
         'checked_at': max(checked) if checked else None,
         'status': status,
         'target': worst[0],
+        'static_hit': static_hit,
+        # A static list hit counts as one more remark beside the probe
+        # restrictions, so the card can show "замечания (N)".
+        'remarks': restricted + (1 if static_hit else 0),
         'probe': {'response_count': response,
                   'blocking_regions': blocking,
                   'restricted_regions': restricted,
@@ -6516,6 +6525,8 @@ async def api_cheburcheck_flags(request: Request):
         summary, _records = _cheburcheck_summary_for(srv, cfg, cache)
         out[str(i)] = {'status': summary['status'],
                        'probe': summary['probe'],
+                       'remarks': summary['remarks'],
+                       'static_hit': summary['static_hit'],
                        'enabled': True}
     return {'enabled': enabled,
             'running': bool(_CHEBURCHECK_TASK is not None and not _CHEBURCHECK_TASK.done()),
@@ -6546,6 +6557,8 @@ async def api_cheburcheck_get(request: Request, server_id: int):
         'status': summary['status'],
         'target': summary['target'],
         'probe': summary['probe'],
+        'remarks': summary['remarks'],
+        'static_hit': summary['static_hit'],
         'error': summary['error'],
         'targets': records,
     }

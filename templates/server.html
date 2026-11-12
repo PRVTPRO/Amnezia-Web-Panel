@@ -391,6 +391,7 @@
     .srv-header .srv-status-btn .ssh-trust-dot,
     .srv-header .srv-status-btn .awg-plugin-dot { width: 7px; height: 7px; }
     .srv-header .srv-status-btn .cheburcheck-dot { width: 7px; height: 7px; background: var(--text-muted, #888); border-radius: 50%; flex: 0 0 auto; }
+    #cheburcheckModal .modal { max-width: 720px; }
     .srv-header .srv-status-btn.is-danger .cheburcheck-dot { background: var(--danger, #f85149); }
     .srv-header .srv-status-btn.is-warn .cheburcheck-dot { background: var(--warning, #d29922); }
     .srv-header .srv-status-btn.is-ok .cheburcheck-dot { background: var(--success, #3fb950); }
@@ -7709,6 +7710,7 @@ async function loadCheburcheck() {
         const br = ((r && r.probe) || {}).blocking_regions || 0;
         const rc = br + (((r && r.probe) || {}).clear_regions || 0);
         const rr = ((r && r.probe) || {}).restricted_regions || 0;
+        const remarks = (r && r.remarks) || 0;
         const age = cheburAge(r && r.checked_at);
         // Staleness is a timestamp comparison: locale text never matches.
         const stale = cheburcheckStale(r && r.checked_at);
@@ -7716,8 +7718,10 @@ async function loadCheburcheck() {
         const errTag = (r && r.error)
             ? ' &middot; ' + _('cheburcheck_error') + ': ' + escapeHtml(String(r.error)) : '';
         const restrictTag = rr > 0 ? ` &middot; ${_('cheburcheck_restrictions')}: ${rr}` : '';
+        const listTag = (r && r.static_hit) ? ` &middot; ${_('cheburcheck_static_hit')}` : '';
+        const remarksTag = remarks > 0 && rr === 0 ? ` &middot; ${_('cheburcheck_remarks_badge')}: ${remarks}` : '';
         el.innerHTML = `${icon} <b>${label}</b> &middot; ${_('cheburcheck_regions_blocked')}: ${br}/${rc}`
-            + restrictTag
+            + restrictTag + listTag + remarksTag
             + (age ? ` &middot; ${_('cheburcheck_checked_at')}: ${age}${staleTag}` : '')
             + errTag;
         const targets = (r && r.targets) || {};
@@ -7764,11 +7768,16 @@ function cheburcheckTargetRow(target, rec) {
     const staleTag = cheburcheckStale(rec.checked_at) ? ' &#9888;&#65039;' : '';
     const partialTag = rec.partial ? ' &middot; ' + _('cheburcheck_partial') : '';
     const restrictTag = rr > 0 ? ` &middot; ${_('cheburcheck_restrictions')}: ${rr}` : '';
+    const staticBits = [];
+    if ((rec.static || {}).blocked) staticBits.push(_('cheburcheck_static_rkn'));
+    if (((rec.static || {}).cdn_providers || []).length) staticBits.push('CDN');
+    const staticTag = staticBits.length
+        ? ` &middot; ${_('cheburcheck_static_hit')}: ${staticBits.join(', ')}` : '';
     const err = rec.error
         ? ' &middot; ' + _('cheburcheck_error') + ': ' + escapeHtml(String(rec.error)) : '';
     const border = 'padding:4px 8px;border-top:1px solid var(--border,#333);';
     return `<tr><td style="${border}">${escapeHtml(String(target))}</td>`
-        + `<td style="${border}">${icon} <b>${label}</b>${partialTag}${restrictTag}</td>`
+        + `<td style="${border}">${icon} <b>${label}</b>${partialTag}${restrictTag}${staticTag}</td>`
         + `<td style="${border}">${br}/${rc}</td>`
         + `<td style="${border}">${age ? escapeHtml(age) + staleTag : '&mdash;'}</td>`
         + `<td style="${border}">${err}</td></tr>`;
