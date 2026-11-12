@@ -113,7 +113,8 @@ class PeerCreateService:
         return self.recovery_task
 
     @serialize_peer_lifecycle
-    async def create(self, user_id, server_id, protocol, name, operation_id=None):
+    async def create(self, user_id, server_id, protocol, name, operation_id=None,
+                     expected_server_uid=None):
         if str(protocol).split('__', 1)[0] not in ('awg', 'awg2', 'awg3', 'awg_legacy'):
             raise PeerCreateError('Protocol has no inactive-create adapter', 409)
         # Read and persist the intent before even obtaining a pooled SSH client.
@@ -127,6 +128,8 @@ class PeerCreateService:
             server = data['servers'][server_id]
             if not server.get('uid'):
                 raise PeerCreateError('Server identity is not initialized', 409)
+            if expected_server_uid is not None and server['uid'] != expected_server_uid:
+                raise PeerCreateError('Server identity changed', 409)
             identity = [user_id, server['uid'], protocol, name]
             try:
                 op_id = str(uuid.UUID(operation_id)) if operation_id else str(

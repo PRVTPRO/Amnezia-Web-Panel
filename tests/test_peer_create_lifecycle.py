@@ -112,6 +112,15 @@ class AdminCreateLifecycle(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.remote.peers, {})
         self.assertEqual(result.status_code, 409)
 
+    async def test_expected_server_uid_is_checked_before_intent_or_ssh(self):
+        for uid in ('', 'another-node'):
+            with self.assertRaises(panel.PeerCreateError) as error:
+                await self.service.create('u', 0, 'awg3', 'device', self.op_id,
+                                          expected_server_uid=uid)
+            self.assertEqual(error.exception.status_code, 409)
+            self.assertFalse(self.path.exists())
+            self.assertEqual(self.remote.peers, {})
+
     async def test_journal_is_durable_before_any_remote_action(self):
         self.remote.release.clear()
         task = asyncio.create_task(self.create())
