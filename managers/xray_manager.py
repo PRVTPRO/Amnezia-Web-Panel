@@ -708,17 +708,40 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
 
         stats = self._query_xray_stats()
 
+        # The stats API only reports cumulative per-client counters, so "last
+        # activity" is derived here: counters that grew since the previous
+        # poll mean the client exchanged traffic in between. The counters are
+        # persisted alongside the stamped lastSeen; when they shrink (a
+        # container restart resets them), they are re-baselined instead so
+        # growth from zero registers as fresh activity later on.
+        stats_dirty = False
         for c in clients_table:
             uid = c.get('clientId', '')
-            if uid in stats:
-                user_data = c.setdefault('userData', {})
-                rx = stats[uid]['rx']
-                tx = stats[uid]['tx']
-                if rx > 0 or tx > 0:
+            if uid not in stats:
+                continue
+            user_data = c.setdefault('userData', {})
+            rx = stats[uid]['rx']
+            tx = stats[uid]['tx']
+            prev_total = ((user_data.get('dataReceivedBytes') or 0)
+                          + (user_data.get('dataSentBytes') or 0))
+            if rx + tx > prev_total:
+                user_data['lastSeen'] = datetime.now().isoformat()
+                stats_dirty = True
+            if rx > 0 or tx > 0:
+                if (user_data.get('dataReceivedBytes') != rx
+                        or user_data.get('dataSentBytes') != tx):
                     user_data['dataReceived'] = self._format_bytes(rx)
                     user_data['dataSent'] = self._format_bytes(tx)
                     user_data['dataReceivedBytes'] = rx
                     user_data['dataSentBytes'] = tx
+                    stats_dirty = True
+            elif rx + tx < prev_total:
+                user_data['dataReceivedBytes'] = rx
+                user_data['dataSentBytes'] = tx
+                stats_dirty = True
+
+        if stats_dirty:
+            self._save_clients_table(clients_table)
 
         return clients_table
 

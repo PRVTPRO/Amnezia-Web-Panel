@@ -6408,13 +6408,18 @@
                     const hsSec = parseHandshakeAgo(handshake);
                     const isOnline = hsSec !== null && hsSec < 180;
                     if (handshake) metaHtml += `<span class="meta-handshake${isOnline ? ' meta-online' : ''}">🤝 ${formatHandshakeCompact(handshake)}</span>`;
+                    // Xray has no handshake concept: lastSeen is stamped by the
+                    // panel whenever the client's traffic counters grow between polls.
+                    const seenSec = isoAgeSeconds(userData.lastSeen);
+                    const seenOnline = seenSec !== null && seenSec < 180;
+                    if (userData.lastSeen) metaHtml += `<span class="meta-handshake${seenOnline ? ' meta-online' : ''}" title="${_('last_seen')}">🕐 ${formatAgoCompact(seenSec)}</span>`;
                     // awg show reports transfer from the SERVER perspective:
                     // "received" = client upload, "sent" = client download.
                     if (sent) metaHtml += `<span class="traffic-badge traffic-down">↓ ${sent}</span>`;
                     if (received) metaHtml += `<span class="traffic-badge traffic-up">↑ ${received}</span>`;
                     const rates = computeRates(client.clientId, userData);
                     if (rates) metaHtml += `<span class="traffic-badge speed-badge${rates.active ? ' speed-active' : ''}">↓${formatBytes(Math.round(rates.rx))}/s ↑${formatBytes(Math.round(rates.tx))}/s</span>`;
-                    if (isOnline) client._online = true;
+                    if (isOnline || seenOnline) client._online = true;
                 }
 
                 if (!enabled) metaHtml += `<span class="badge badge-danger" style="font-size:0.65rem">${_('stop')}</span>`;
@@ -7001,6 +7006,23 @@
         if (sec < 3600) return Math.floor(sec / 60) + 'm ' + (sec % 60) + 's ago';
         if (sec < 86400) return Math.floor(sec / 3600) + 'h ' + Math.floor((sec % 3600) / 60) + 'm ago';
         return Math.floor(sec / 86400) + 'd ' + Math.floor((sec % 86400) / 3600) + 'h ago';
+    }
+
+    // Age in seconds of an ISO timestamp stored by the panel (xray lastSeen)
+    function isoAgeSeconds(iso) {
+        if (!iso) return null;
+        const t = Date.parse(iso);
+        if (isNaN(t)) return null;
+        return Math.max(0, (Date.now() - t) / 1000);
+    }
+
+    // Compact coarse-grained variant: "45s ago" / "12m ago" / "5h 20m ago" / "3d ago"
+    function formatAgoCompact(sec) {
+        if (sec === null) return '';
+        if (sec < 60) return Math.floor(sec) + 's ago';
+        if (sec < 3600) return Math.floor(sec / 60) + 'm ago';
+        if (sec < 86400) return Math.floor(sec / 3600) + 'h ' + Math.floor((sec % 3600) / 60) + 'm ago';
+        return Math.floor(sec / 86400) + 'd ago';
     }
 
     // Speed = delta of cumulative bytes between two polls (same approach as wg-easy)
