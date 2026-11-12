@@ -1776,6 +1776,7 @@ function renderCheburcheckTargets() {
     const fallback = window.CHEBURCHECK_SSH_FALLBACK || {};
     list.textContent = '';
     if (!enabled) return;
+    const rows = [];
     document.querySelectorAll('.cb-server').forEach(cb => {
         if (!cb.checked) return;
         const uid = cb.dataset.uid;
@@ -1808,13 +1809,31 @@ function renderCheburcheckTargets() {
             hint.textContent = warnings.join(' ');
             row.appendChild(hint);
         }
-        list.appendChild(row);
+        rows.push(row);
     });
-    if (!list.childNodes.length) {
+    if (!rows.length) {
         const empty = document.createElement('div');
         empty.className = 'form-hint';
         empty.textContent = {{ _('cheburcheck_none_enabled') | tojson }};
         list.appendChild(empty);
+        return;
+    }
+    // With a long fleet the address list gets in the way: collapse it behind a
+    // spoiler as soon as more than three servers are checked.
+    if (rows.length > 3) {
+        const details = document.createElement('details');
+        const summary = document.createElement('summary');
+        const labelTemplate = {{ _('cheburcheck_targets_show') | tojson }};
+        summary.textContent = labelTemplate.replace('{count}', String(rows.length));
+        summary.style.cursor = 'pointer';
+        details.appendChild(summary);
+        const body = document.createElement('div');
+        body.style.marginTop = '6px';
+        rows.forEach(row => body.appendChild(row));
+        details.appendChild(body);
+        list.appendChild(details);
+    } else {
+        rows.forEach(row => list.appendChild(row));
     }
 }
 

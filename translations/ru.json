@@ -1258,6 +1258,7 @@
   "cheburcheck_partial": "частично",
   "cheburcheck_no_targets": "нет целей для проверки",
   "cheburcheck_targets_intro": "Адреса, которые уходят в cheburcheck.ru (по отмеченным серверам):",
+  "cheburcheck_targets_show": "Показать адреса ({count})",
   "cheburcheck_override_placeholder": "Свои адреса через запятую (необязательно)",
   "cheburcheck_ssh_fallback_warning": "Для протокола {name} публичный адрес не задан — передаётся SSH-адрес сервера.",
   "cheburcheck_override_host_warning": "Адрес совпадает с SSH-адресом сервера.",

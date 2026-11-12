@@ -114,6 +114,13 @@ class CheburcheckRenderTests(unittest.TestCase):
         self.assertIn("inp.addEventListener('input', renderCheburcheckTargets)", text)
         self.assertIn('renderCheburcheckTargets();', text)
 
+    def test_long_target_lists_collapse_into_spoiler(self):
+        text = SETTINGS_TEMPLATE.read_text(encoding='utf-8')
+        self.assertIn("document.createElement('details')", text)
+        self.assertIn("document.createElement('summary')", text)
+        self.assertIn('rows.length > 3', text)
+        self.assertIn('cheburcheck_targets_show', text)
+
 
 class CheburcheckRenderDisabledTests(CheburcheckRenderTests):
     enabled = False
@@ -158,3 +165,5 @@ class TranslationValuesTests(unittest.TestCase):
         self.assertIn('VPN-подключения', ru['cheburcheck_hint'])
         self.assertIn('VPN connection', en['cheburcheck_hint'])
         self.assertIn('{name}', ru['cheburcheck_ssh_fallback_warning'])
+        self.assertIn('{count}', ru['cheburcheck_targets_show'])
+        self.assertIn('{count}', en['cheburcheck_targets_show'])
