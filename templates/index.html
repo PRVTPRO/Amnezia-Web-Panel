@@ -974,10 +974,6 @@
                     el.innerHTML = `<button class="btn btn-danger btn-sm" style="width:100%; font-weight:700"
                         onclick="location.href='/server/${id}'">${label}</button>`;
                     el.style.display = '';
-                } else if (f.status === 'unknown') {
-                    el.innerHTML = `<button class="btn btn-secondary btn-sm" style="width:100%;"
-                        onclick="location.href='/server/${id}'">🟡 ${_('cheburcheck_unknown_badge')}</button>`;
-                    el.style.display = '';
                 }
             }
         } catch (e) {

@@ -70,15 +70,15 @@ class CheburcheckRenderTests(unittest.TestCase):
         self.assertEqual(segment.count('</script>'), 1)
 
     # --- T9 (master on) ---------------------------------------------------
-    def test_settings_list_contains_targets_and_warnings(self):
+    def test_settings_list_contains_targets(self):
         html = self.client.get('/settings').text
         self.assertIn('cb_targets_list', html)
         self.assertIn('window.CHEBURCHECK_TARGETS', html)
         self.assertIn('vpn.example.com', html)
-        # EURO has no public_host -> SSH fallback warning context
-        self.assertIn('protocol_fallback', html)
-        self.assertIn('cheburcheck_ssh_fallback_warning', html)
-        self.assertIn('cheburcheck_override_host_warning', html)
+        # No protocol/container names are mentioned anywhere in the block.
+        self.assertNotIn('protocol_fallback', html)
+        self.assertNotIn('cheburcheck_ssh_fallback_warning', html)
+        self.assertIn('cheburcheck_override_toggle', html)
         self.assertIn('cb_master_off', html)
         # master on -> the off notice is hidden, the target list is visible
         off_line = [line for line in html.splitlines() if 'id="cb_master_off"' in line][0]
@@ -110,9 +110,22 @@ class CheburcheckRenderTests(unittest.TestCase):
 
     def test_target_list_is_rerendered_on_changes(self):
         text = SETTINGS_TEMPLATE.read_text(encoding='utf-8')
-        self.assertIn("cb.addEventListener('change', renderCheburcheckTargets)", text)
+        self.assertIn("cb.addEventListener('change'", text)
+        self.assertIn("toggle.addEventListener('change'", text)
         self.assertIn("inp.addEventListener('input', renderCheburcheckTargets)", text)
         self.assertIn('renderCheburcheckTargets();', text)
+
+    def test_list_skips_servers_without_targets(self):
+        text = SETTINGS_TEMPLATE.read_text(encoding='utf-8')
+        self.assertIn('if (!addresses.length) return;', text)
+        self.assertIn('cbRowAddresses', text)
+
+    def test_override_input_appears_only_after_its_checkbox(self):
+        text = SETTINGS_TEMPLATE.read_text(encoding='utf-8')
+        self.assertIn('class="cb-override"', text)
+        self.assertIn('cb-override-wrap', text)
+        self.assertIn('cbSyncRow', text)
+        self.assertIn("input.style.display = (serverOn && toggle.checked)", text)
 
     def test_long_target_lists_collapse_into_spoiler(self):
         text = SETTINGS_TEMPLATE.read_text(encoding='utf-8')
@@ -125,11 +138,12 @@ class CheburcheckRenderTests(unittest.TestCase):
 class CheburcheckRenderDisabledTests(CheburcheckRenderTests):
     enabled = False
 
-    def test_settings_list_contains_targets_and_warnings(self):
+    def test_settings_list_contains_targets(self):
         html = self.client.get('/settings').text
         # Both states are in the DOM; the master-off notice is the visible one.
         self.assertIn('cb_targets_list', html)
         self.assertIn('window.CHEBURCHECK_TARGETS', html)
+        self.assertIn('cb_master_off', html)
 
     def test_server_modal_renders_disclaimer(self):
         html = self.client.get('/server/0').text
@@ -164,6 +178,7 @@ class TranslationValuesTests(unittest.TestCase):
         self.assertEqual(en['cheburcheck_clean'], 'No restrictions detected')
         self.assertIn('VPN-подключения', ru['cheburcheck_hint'])
         self.assertIn('VPN connection', en['cheburcheck_hint'])
-        self.assertIn('{name}', ru['cheburcheck_ssh_fallback_warning'])
         self.assertIn('{count}', ru['cheburcheck_targets_show'])
+        self.assertEqual(ru['cheburcheck_override_toggle'], 'свои адреса')
         self.assertIn('{count}', en['cheburcheck_targets_show'])
+        self.assertEqual(ru['cheburcheck_override_toggle'], 'свои адреса')

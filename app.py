@@ -6443,46 +6443,10 @@ def _cheburcheck_server_index(server_id, data):
 
 
 def _cheburcheck_targets_context(data):
-    """uid -> resolved targets for every server (settings page, A6/D1r)."""
+    """uid -> resolved targets for every server (settings page, A6)."""
     cfg = (data.get('settings') or {}).get('cheburcheck') or {}
     return {srv.get('uid'): cheburcheck_targets(srv, cfg)
             for srv in data.get('servers', [])}
-
-
-def _cheburcheck_ssh_fallback_context(data):
-    """uid -> [{kind, name, target}] for targets equal to the SSH address."""
-    cfg = (data.get('settings') or {}).get('cheburcheck') or {}
-    out = {}
-    for srv in data.get('servers', []):
-        uid = srv.get('uid')
-        host = str(srv.get('host') or '').strip()
-        if uid is None or not host:
-            continue
-        items = []
-        override = _cheburcheck_override(cfg, uid)
-        if override is not None:
-            if host in override:
-                items.append({'kind': 'override', 'name': '', 'target': host})
-        else:
-            protocols = srv.get('protocols')
-            if isinstance(protocols, dict):
-                for proto, record in protocols.items():
-                    if not isinstance(record, dict):
-                        continue
-                    if not record.get('installed', True):
-                        continue
-                    if protocol_base(str(proto)) not in CHEBURCHECK_CLIENT_PROTOCOLS:
-                        continue
-                    public = str(record.get('public_host') or '').strip()
-                    if public == host:
-                        items.append({'kind': 'protocol_explicit',
-                                      'name': str(proto), 'target': host})
-                    elif not public:
-                        items.append({'kind': 'protocol_fallback',
-                                      'name': str(proto), 'target': host})
-        if items:
-            out[uid] = items
-    return out
 
 
 def _cheburcheck_flagged(server, cfg):
@@ -11720,7 +11684,6 @@ def settings_page(request: Request):
         backup_csrf=backup_csrf,
         self_service_protocol_choices=self_service_protocol_choices(),
         cheburcheck_targets=_cheburcheck_targets_context(data),
-        cheburcheck_ssh_fallback=_cheburcheck_ssh_fallback_context(data),
     )
 
 

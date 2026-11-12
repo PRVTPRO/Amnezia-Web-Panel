@@ -797,17 +797,27 @@
                 <label class="form-label">{{ _('cheburcheck_servers_label') }}</label>
                 <div id="cb_servers_list" style="display:flex; flex-direction:column; gap:10px; margin-top:6px;">
                     {% for server in servers %}
-                    <div style="display:flex; flex-direction:column; gap:4px;">
+                    {% set cb_override = (settings.get('cheburcheck', {}).get('targets') or {}).get(server.uid) or [] %}
+                    <div style="display:flex; flex-direction:column; gap:4px;" data-cb-row="{{ server.uid }}">
                         <label class="form-label" style="font-weight:normal;">
                             <input type="checkbox" class="cb-server" data-uid="{{ server.uid }}"
                                 data-name="{{ server.name }}" data-host="{{ server.host }}"
                                 {% if settings.get('cheburcheck', {}).get('servers', {}).get(server.uid) %}checked{% endif %}>
                             {{ server.name }} ({{ server.host }})
                         </label>
-                        <input type="text" class="form-input cb-targets" data-uid="{{ server.uid }}"
-                               placeholder="{{ _('cheburcheck_override_placeholder') }}"
-                               value="{{ ((settings.get('cheburcheck', {}).get('targets') or {}).get(server.uid) or []) | join(', ') }}"
-                               style="font-size:0.9em;">
+                        <div class="cb-override-wrap" data-uid="{{ server.uid }}"
+                             style="display:{% if settings.get('cheburcheck', {}).get('servers', {}).get(server.uid) %}flex{% else %}none{% endif %}; align-items:center; gap:8px;">
+                            <label class="form-label" style="font-weight:normal; font-size:0.9em; white-space:nowrap;">
+                                <input type="checkbox" class="cb-override" data-uid="{{ server.uid }}"
+                                       data-had-override="{% if cb_override %}1{% else %}0{% endif %}"
+                                       {% if cb_override %}checked{% endif %}>
+                                {{ _('cheburcheck_override_toggle') }}
+                            </label>
+                            <input type="text" class="form-input cb-targets" data-uid="{{ server.uid }}"
+                                   placeholder="{{ _('cheburcheck_override_placeholder') }}"
+                                   value="{{ cb_override | join(', ') }}"
+                                   style="font-size:0.9em; display:{% if cb_override %}block{% else %}none{% endif %};">
+                        </div>
                     </div>
                     {% endfor %}
                 </div>
@@ -1759,56 +1769,49 @@
 <script src="/static/js/settings-nav.js?v={{ static_v }}" defer></script>
 <script>
 window.CHEBURCHECK_TARGETS = {{ (cheburcheck_targets or {}) | tojson }};
-window.CHEBURCHECK_SSH_FALLBACK = {{ (cheburcheck_ssh_fallback or {}) | tojson }};
-const CB_WARNING_TEXT = {
-    protocol_fallback: {{ _('cheburcheck_ssh_fallback_warning') | tojson }},
-    protocol_explicit: {{ _('cheburcheck_override_host_warning') | tojson }},
-    override: {{ _('cheburcheck_override_host_warning') | tojson }},
-};
 function cbOverrideValues(input) {
     return (input.value || '').split(',').map(v => v.trim()).filter(Boolean);
+}
+function cbRowAddresses(uid) {
+    const serverBox = document.querySelector(`.cb-server[data-uid="${uid}"]`);
+    if (!serverBox || !serverBox.checked) return [];
+    const toggle = document.querySelector(`.cb-override[data-uid="${uid}"]`);
+    const input = document.querySelector(`.cb-targets[data-uid="${uid}"]`);
+    if (toggle && toggle.checked && input) return cbOverrideValues(input);
+    return (window.CHEBURCHECK_TARGETS || {})[uid] || [];
+}
+function cbSyncRow(uid) {
+    const serverBox = document.querySelector(`.cb-server[data-uid="${uid}"]`);
+    const wrap = document.querySelector(`.cb-override-wrap[data-uid="${uid}"]`);
+    const toggle = document.querySelector(`.cb-override[data-uid="${uid}"]`);
+    const input = document.querySelector(`.cb-targets[data-uid="${uid}"]`);
+    if (!serverBox || !wrap || !toggle || !input) return;
+    const serverOn = serverBox.checked;
+    wrap.style.display = serverOn ? 'flex' : 'none';
+    if (!serverOn) toggle.checked = false;
+    input.style.display = (serverOn && toggle.checked) ? 'block' : 'none';
 }
 function renderCheburcheckTargets() {
     const list = document.getElementById('cb_targets_list');
     if (!list) return;
     const enabled = document.getElementById('cb_enabled').checked;
-    const targets = window.CHEBURCHECK_TARGETS || {};
-    const fallback = window.CHEBURCHECK_SSH_FALLBACK || {};
     list.textContent = '';
     if (!enabled) return;
     const rows = [];
     document.querySelectorAll('.cb-server').forEach(cb => {
         if (!cb.checked) return;
         const uid = cb.dataset.uid;
-        const host = cb.dataset.host || '';
         const name = cb.dataset.name || uid;
-        const input = document.querySelector(`.cb-targets[data-uid="${uid}"]`);
-        const override = input ? cbOverrideValues(input) : [];
-        const addresses = override.length ? override : (targets[uid] || []);
+        const addresses = cbRowAddresses(uid);
+        if (!addresses.length) return;   // nothing is checked for this server
         const row = document.createElement('div');
         row.style.marginBottom = '8px';
         const title = document.createElement('b');
         title.textContent = name + ': ';
         row.appendChild(title);
         const addrs = document.createElement('span');
-        addrs.textContent = addresses.length ? addresses.join(', ')
-            : {{ _('cheburcheck_no_targets') | tojson }};
+        addrs.textContent = addresses.join(', ');
         row.appendChild(addrs);
-        const warnings = [];
-        (fallback[uid] || []).forEach(item => {
-            if (item.kind === 'override') return;   // computed from the field below
-            const text = (CB_WARNING_TEXT[item.kind] || '').replace('{name}', item.name || '');
-            if (text) warnings.push(text);
-        });
-        if (override.length && host && override.indexOf(host) !== -1) {
-            warnings.push(CB_WARNING_TEXT.override || '');
-        }
-        if (warnings.length) {
-            const hint = document.createElement('div');
-            hint.className = 'form-hint';
-            hint.textContent = warnings.join(' ');
-            row.appendChild(hint);
-        }
         rows.push(row);
     });
     if (!rows.length) {
@@ -1852,10 +1855,16 @@ function collectCheburcheckSettings() {
         if (cb.dataset.uid) servers[cb.dataset.uid] = cb.checked;
     });
     const targets = {};
-    document.querySelectorAll('.cb-targets').forEach(inp => {
-        if (!inp.dataset.uid) return;
-        const values = cbOverrideValues(inp);
-        if (values.length) targets[inp.dataset.uid] = values;
+    document.querySelectorAll('.cb-override').forEach(toggle => {
+        const uid = toggle.dataset.uid;
+        if (!uid) return;
+        const input = document.querySelector(`.cb-targets[data-uid="${uid}"]`);
+        if (toggle.checked) {
+            // Explicit list (an empty value removes the override).
+            targets[uid] = input ? cbOverrideValues(input) : [];
+        } else if (toggle.dataset.hadOverride === '1') {
+            targets[uid] = [];              // override was switched off
+        }
     });
     return {
         enabled: document.getElementById('cb_enabled').checked,
@@ -1895,10 +1904,22 @@ document.getElementById('cb_enabled').addEventListener('change', async (e) => {
 });
 
 document.querySelectorAll('.cb-server').forEach(cb => {
-    cb.addEventListener('change', renderCheburcheckTargets);
+    cb.addEventListener('change', () => {
+        cbSyncRow(cb.dataset.uid);
+        renderCheburcheckTargets();
+    });
+});
+document.querySelectorAll('.cb-override').forEach(toggle => {
+    toggle.addEventListener('change', () => {
+        cbSyncRow(toggle.dataset.uid);
+        renderCheburcheckTargets();
+    });
 });
 document.querySelectorAll('.cb-targets').forEach(inp => {
     inp.addEventListener('input', renderCheburcheckTargets);
+});
+document.querySelectorAll('.cb-server').forEach(cb => {
+    cbSyncRow(cb.dataset.uid);
 });
 
 // Quiet-hour fields only make sense once the window is enabled.

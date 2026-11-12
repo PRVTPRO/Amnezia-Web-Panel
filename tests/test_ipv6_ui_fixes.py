@@ -64,9 +64,8 @@ NEW_KEYS = {
     "cheburcheck_targets_intro",
     "cheburcheck_targets_show",
     "cheburcheck_restrictions",
+    "cheburcheck_override_toggle",
     "cheburcheck_override_placeholder",
-    "cheburcheck_ssh_fallback_warning",
-    "cheburcheck_override_host_warning",
 }
 
 # The catalogue had 1218 key names right before panel access (#305). Freeze
@@ -128,8 +127,8 @@ CHEBURCHECK_KEYS = {
     'cheburcheck_partial', 'cheburcheck_no_targets', 'cheburcheck_targets_intro',
     'cheburcheck_targets_show',
     'cheburcheck_restrictions',
-    'cheburcheck_override_placeholder', 'cheburcheck_ssh_fallback_warning',
-    'cheburcheck_override_host_warning',
+    'cheburcheck_override_toggle',
+    'cheburcheck_override_placeholder',
 }
 
 
