@@ -104,6 +104,11 @@
                     <input class="form-input" type="number" step="0.01" min="0" id="newTrafficLimit" placeholder="0">
                 </div>
                 <div class="form-group">
+                    <label class="form-label">{{ _('max_connections_per_user_label') }}</label>
+                    <input class="form-input" type="number" id="newMaxConnections" min="0" max="100" step="1" value="0">
+                    <div class="form-hint">{{ _('max_connections_per_user_hint') }}</div>
+                </div>
+                <div class="form-group">
                     <label class="form-label">{{ _('traffic_reset_strategy_label') }}</label>
                     <select class="form-select" id="newTrafficResetStrategy">
                         <option value="never">{{ _('traffic_reset_never') }}</option>
@@ -217,6 +222,11 @@
             <div class="form-group">
                 <label class="form-label">{{ _('edit_user_email') }}</label>
                 <input type="email" class="form-input" id="editUserEmail" placeholder="user@example.com">
+            </div>
+            <div class="form-group">
+                <label class="form-label">{{ _('max_connections_per_user_label') }}</label>
+                <input type="number" class="form-input" id="editUserMaxConnections" min="0" max="100" step="1" value="0">
+                <div class="form-hint">{{ _('max_connections_per_user_hint') }}</div>
             </div>
             <div class="grid grid-2">
                 <div class="form-group">
@@ -686,6 +696,7 @@
                             </div>
                             <div class="client-meta">
                                 <span style="cursor:pointer; color:var(--primary); text-decoration: underline;" onclick="viewUserConnections('${u.id}', '${u.username.replace(/'/g, "\\'")}')">🔗 ${u.connections_count} ${_('connections')}</span>
+                                ${u.max_connections > 0 ? `<span>🔗 ${u.connections_count} / ${u.max_connections}</span>` : ''}
                                 ${u.created_at ? `<span>📅 ${u.created_at.substring(0, 10)}</span>` : ''}
                                 ${u.telegramId ? `<span>💬 ${u.telegramId}</span>` : ''}
                                 ${u.email ? `<span>📧 ${u.email}</span>` : ''}
@@ -733,7 +744,7 @@
                                 onclick="openAddConnectionForUser('${u.id}', '${u.username}')" 
                                 title="${_('add_connection')}">🔗</button>
                         <button class="btn btn-secondary btn-sm btn-icon" 
-                                onclick='openEditUser({"id": "${u.id}", "username": "${u.username}", "tg": "${u.telegramId || ""}", "email": "${u.email || ""}", "desc": "${u.description || ""}", "limit": "${u.traffic_limit ? (u.traffic_limit / Math.pow(1024, 3)).toFixed(2) : 0}", "strategy": "${u.traffic_reset_strategy || 'never'}", "expiration": "${u.expiration_date || ''}"})'
+                                onclick='openEditUser({"id": "${u.id}", "username": "${u.username}", "tg": "${u.telegramId || ""}", "email": "${u.email || ""}", "desc": "${u.description || ""}", "limit": "${u.traffic_limit ? (u.traffic_limit / Math.pow(1024, 3)).toFixed(2) : 0}", "maxConnections": "${u.max_connections ?? 0}", "strategy": "${u.traffic_reset_strategy || 'never'}", "expiration": "${u.expiration_date || ''}"})'
                                 title="${_('edit')}">${ICON_PENCIL}</button>
                         <button class="btn btn-secondary btn-sm btn-icon" onclick="openShareModal(this.dataset)"
                                 data-id="${u.id}" data-username="${u.username}" data-token="${u.share_token || ''}"
@@ -880,6 +891,7 @@
                 email: document.getElementById('newEmail').value || null,
                 description: document.getElementById('newDescription').value || null,
                 traffic_limit: parseFloat(document.getElementById('newTrafficLimit').value || '0'),
+                max_connections: parseInt(document.getElementById('newMaxConnections').value || '0', 10),
                 traffic_reset_strategy: document.getElementById('newTrafficResetStrategy').value,
                 expiration_date: getDateTimeValue('newExpirationDate', 'newExpirationTime'),
             };
@@ -1515,6 +1527,7 @@
         document.getElementById('editUserEmail').value = data.email || '';
         document.getElementById('editUserDesc').value = data.desc || '';
         document.getElementById('editUserLimit').value = data.limit || '0';
+        document.getElementById('editUserMaxConnections').value = data.maxConnections ?? 0;
         document.getElementById('editUserTrafficResetStrategy').value = data.strategy || 'never';
         setDateTimeValue('editUserExpiration', 'editUserExpirationTime', data.expiration);
         document.getElementById('editUserPass').value = '';
@@ -1557,6 +1570,7 @@
             email: document.getElementById('editUserEmail').value,
             description: document.getElementById('editUserDesc').value,
             traffic_limit: parseFloat(document.getElementById('editUserLimit').value || '0'),
+            max_connections: parseInt(document.getElementById('editUserMaxConnections').value || '0', 10),
             traffic_reset_strategy: document.getElementById('editUserTrafficResetStrategy').value,
             expiration_date: getDateTimeValue('editUserExpiration', 'editUserExpirationTime'),
             password: document.getElementById('editUserPass').value || null

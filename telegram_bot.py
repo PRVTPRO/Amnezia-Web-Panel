@@ -6,13 +6,17 @@ Runs as a background asyncio task alongside the FastAPI app.
 from peer_accounting import serialize_peer_lifecycle
 from protocol_names import server_protocol_names
 import asyncio
+import hashlib
 import html
 import logging
 import os
 import shlex
 import sys
+import secrets
 import time
+import urllib.parse
 import uuid
+from datetime import datetime
 from typing import Optional, Callable
 
 import httpx
@@ -47,12 +51,19 @@ SERVICE_PROTOCOLS = {"dns", "adguard", "socks5", "nginx", "exit"}
 TG_TRANSLATIONS = {
     "en": {
         "hi": "Hi",
+        "account_disabled": "Account disabled",
         "account_not_linked": "Your Telegram account is not linked to any panel user.",
         "contact_admin_to_link": "Please contact your administrator — they need to add your Telegram ID to your profile.",
         "your_telegram_id": "Your Telegram ID",
         "registered_admin": "You are registered as <b>{username}</b> with <b>Admin</b> role.",
         "choose_action": "Choose an action:",
         "registered_as": "You are registered as <b>{username}</b>.",
+        "credentials_title": "Your panel account has been created.",
+        "credentials_login": "Login",
+        "credentials_password": "Password",
+        "credentials_instructions": "To sign in, open {panel_url} in a browser and enter these credentials on the login page.",
+        "credentials_no_url": "The panel address is not configured. Contact the administrator to get the correct login address.",
+        "credentials_disabled": "Your account was created disabled. Contact the administrator to enable it before signing in.",
         "no_connections_create": "You have no connections yet. Tap the button below to create one!",
         "no_connections_contact_admin": "You have no connections yet. Please contact your administrator.",
         "your_connections": "<b>Your connections</b> ({count}) — tap to get config:",
@@ -103,6 +114,7 @@ TG_TRANSLATIONS = {
         "self_service_no_servers": "No servers are available for self-service connection creation.\nPlease contact your administrator.",
         "self_service_disabled_contact": "Self-service is disabled. Contact your administrator.",
         "self_service_unavailable": "Self-service is not available.",
+        "max_connections_reached": "You have reached your connection limit. Delete an existing connection or contact your administrator.",
         "server_not_self_service": "This server is not available for self-service.",
         "no_protocols_available": "No protocols available on this server.",
         "name_empty": "Name cannot be empty. Send a connection name or /cancel.",
@@ -155,6 +167,7 @@ TG_TRANSLATIONS = {
         "description_label": "Description",
         "protocol_display": "Protocol",
         "cmd_start": "Open bot menu",
+        "btn_open_panel": "Open Panel",
         "cmd_connections": "Show my connections",
         "cmd_connect": "Create a new connection",
         "cmd_disconnect": "Delete a connection",
@@ -193,12 +206,19 @@ TG_TRANSLATIONS = {
     },
     "fa": {
         "hi": "سلام",
+        "account_disabled": "حساب کاربری غیرفعال است",
         "account_not_linked": "حساب تلگرام شما به هیچ‌یک از کاربران پنل پیوند داده نشده است.",
         "contact_admin_to_link": "لطفاً با مدیر تماس بگیرید؛ او باید شناسه تلگرام شما را به پروفایلتان اضافه کند.",
         "your_telegram_id": "شناسه تلگرام شما",
         "registered_admin": "شما با نام <b>{username}</b> و نقش <b>مدیر</b> ثبت شده‌اید.",
         "choose_action": "یک گزینه را انتخاب کنید:",
         "registered_as": "شما با نام <b>{username}</b> ثبت شده‌اید.",
+        "credentials_title": "حساب پنل شما ایجاد شد.",
+        "credentials_login": "نام کاربری",
+        "credentials_password": "گذرواژه",
+        "credentials_instructions": "برای ورود، {panel_url} را در مرورگر باز کنید و این اطلاعات را در صفحه ورود وارد کنید.",
+        "credentials_no_url": "نشانی پنل تنظیم نشده است. برای دریافت نشانی صحیح ورود با مدیر تماس بگیرید.",
+        "credentials_disabled": "حساب شما غیرفعال ایجاد شده است. پیش از ورود، برای فعال‌سازی با مدیر تماس بگیرید.",
         "no_connections_create": "هنوز اتصالی ندارید. برای ساخت اولین اتصال، دکمه زیر را بزنید!",
         "no_connections_contact_admin": "هنوز اتصالی ندارید. لطفاً با مدیر تماس بگیرید.",
         "your_connections": "<b>اتصال‌های شما</b> ({count}) — برای دریافت پیکربندی بزنید:",
@@ -249,6 +269,7 @@ TG_TRANSLATIONS = {
         "self_service_no_servers": "هیچ سروری برای ساخت اتصال به‌صورت سلف‌سرویس در دسترس نیست.\nلطفاً با مدیر تماس بگیرید.",
         "self_service_disabled_contact": "سلف‌سرویس غیرفعال است. با مدیر تماس بگیرید.",
         "self_service_unavailable": "سلف‌سرویس در دسترس نیست.",
+        "max_connections_reached": "به سقف تعداد اتصال‌ها رسیده‌اید. برای ادامه یک اتصال قبلی را حذف کنید یا با مدیر تماس بگیرید.",
         "server_not_self_service": "این سرور برای سلف‌سرویس در دسترس نیست.",
         "no_protocols_available": "هیچ پروتکلی روی این سرور در دسترس نیست.",
         "name_empty": "نام نمی‌تواند خالی باشد. نام اتصال یا /cancel را بفرستید.",
@@ -301,6 +322,7 @@ TG_TRANSLATIONS = {
         "description_label": "توضیحات",
         "protocol_display": "پروتکل",
         "cmd_start": "باز کردن منوی ربات",
+        "btn_open_panel": "باز کردن پنل",
         "cmd_connections": "نمایش اتصال‌های من",
         "cmd_connect": "ساخت اتصال جدید",
         "cmd_disconnect": "حذف یک اتصال",
@@ -339,12 +361,19 @@ TG_TRANSLATIONS = {
     },
     "fr": {
         "hi": "Bonjour",
+        "account_disabled": "Compte désactivé",
         "account_not_linked": "Votre compte Telegram n’est associé à aucun utilisateur du panneau.",
         "contact_admin_to_link": "Contactez votre administrateur : il doit ajouter votre identifiant Telegram à votre profil.",
         "your_telegram_id": "Votre identifiant Telegram",
         "registered_admin": "Vous êtes enregistré sous <b>{username}</b> avec le rôle <b>Admin</b>.",
         "choose_action": "Choisissez une action :",
         "registered_as": "Vous êtes enregistré sous <b>{username}</b>.",
+        "credentials_title": "Votre compte du panneau a été créé.",
+        "credentials_login": "Identifiant",
+        "credentials_password": "Mot de passe",
+        "credentials_instructions": "Pour vous connecter, ouvrez {panel_url} dans un navigateur et saisissez ces identifiants sur la page de connexion.",
+        "credentials_no_url": "L’adresse du panneau n’est pas configurée. Contactez l’administrateur pour obtenir l’adresse de connexion correcte.",
+        "credentials_disabled": "Votre compte a été créé désactivé. Contactez l’administrateur pour l’activer avant de vous connecter.",
         "no_connections_create": "Vous n’avez pas encore de connexion. Appuyez sur le bouton ci-dessous pour en créer une !",
         "no_connections_contact_admin": "Vous n’avez pas encore de connexion. Contactez votre administrateur.",
         "your_connections": "<b>Vos connexions</b> ({count}) — appuyez pour obtenir la configuration :",
@@ -395,6 +424,7 @@ TG_TRANSLATIONS = {
         "self_service_no_servers": "Aucun serveur n’est disponible pour créer une connexion en libre-service.\nContactez votre administrateur.",
         "self_service_disabled_contact": "Le libre-service est désactivé. Contactez votre administrateur.",
         "self_service_unavailable": "Le libre-service n’est pas disponible.",
+        "max_connections_reached": "Vous avez atteint la limite de connexions. Supprimez une connexion existante ou contactez votre administrateur.",
         "server_not_self_service": "Ce serveur n’est pas disponible en libre-service.",
         "no_protocols_available": "Aucun protocole disponible sur ce serveur.",
         "name_empty": "Le nom ne peut pas être vide. Envoyez un nom de connexion ou /cancel.",
@@ -447,6 +477,7 @@ TG_TRANSLATIONS = {
         "description_label": "Description",
         "protocol_display": "Protocole",
         "cmd_start": "Ouvrir le menu du bot",
+        "btn_open_panel": "Ouvrir le panneau",
         "cmd_connections": "Afficher mes connexions",
         "cmd_connect": "Créer une connexion",
         "cmd_disconnect": "Supprimer une connexion",
@@ -485,12 +516,19 @@ TG_TRANSLATIONS = {
     },
     "ru": {
         "hi": "Привет",
+        "account_disabled": "Аккаунт отключён",
         "account_not_linked": "Ваш аккаунт Telegram не привязан ни к одному пользователю панели.",
         "contact_admin_to_link": "Обратитесь к администратору — он должен добавить ваш Telegram ID в профиль.",
         "your_telegram_id": "Ваш Telegram ID",
         "registered_admin": "Вы зарегистрированы как <b>{username}</b> с ролью <b>Admin</b>.",
         "choose_action": "Выберите действие:",
         "registered_as": "Вы зарегистрированы как <b>{username}</b>.",
+        "credentials_title": "Ваш аккаунт панели создан.",
+        "credentials_login": "Логин",
+        "credentials_password": "Пароль",
+        "credentials_instructions": "Для входа откройте {panel_url} в браузере и введите эти данные на странице авторизации.",
+        "credentials_no_url": "Адрес панели не настроен. Обратитесь к администратору, чтобы получить правильную ссылку для входа.",
+        "credentials_disabled": "Аккаунт создан отключённым. Перед входом обратитесь к администратору для его активации.",
         "no_connections_create": "У вас пока нет подключений. Нажмите кнопку ниже, чтобы создать первое.",
         "no_connections_contact_admin": "У вас пока нет подключений. Обратитесь к администратору.",
         "your_connections": "<b>Ваши подключения</b> ({count}) — нажмите, чтобы получить конфигурацию:",
@@ -541,6 +579,7 @@ TG_TRANSLATIONS = {
         "self_service_no_servers": "Нет серверов, доступных для создания подключений через self-service.\nОбратитесь к администратору.",
         "self_service_disabled_contact": "Self-service отключён. Обратитесь к администратору.",
         "self_service_unavailable": "Self-service недоступен.",
+        "max_connections_reached": "Достигнут лимит подключений. Удалите одно из существующих подключений или обратитесь к администратору.",
         "server_not_self_service": "Этот сервер недоступен для self-service.",
         "no_protocols_available": "На этом сервере нет доступных протоколов.",
         "name_empty": "Имя не может быть пустым. Отправьте имя подключения или /cancel.",
@@ -593,6 +632,7 @@ TG_TRANSLATIONS = {
         "description_label": "Описание",
         "protocol_display": "Протокол",
         "cmd_start": "Открыть меню бота",
+        "btn_open_panel": "Открыть панель",
         "cmd_connections": "Показать мои подключения",
         "cmd_connect": "Создать новое подключение",
         "cmd_disconnect": "Удалить подключение",
@@ -637,6 +677,12 @@ TG_TRANSLATIONS = {
         "registered_admin": "你已注册为 <b>{username}</b>，角色为 <b>Admin</b>。",
         "choose_action": "请选择操作：",
         "registered_as": "你已注册为 <b>{username}</b>。",
+        "credentials_title": "你的面板账户已创建。",
+        "credentials_login": "用户名",
+        "credentials_password": "密码",
+        "credentials_instructions": "登录时，请在浏览器中打开 {panel_url}，并在登录页面输入这些凭据。",
+        "credentials_no_url": "尚未配置面板地址。请联系管理员获取正确的登录地址。",
+        "credentials_disabled": "你的账户已创建但处于禁用状态。请联系管理员启用账户后再登录。",
         "no_connections_create": "你还没有连接。点击下方按钮创建一个吧！",
         "no_connections_contact_admin": "你还没有连接。请联系管理员。",
         "your_connections": "<b>你的连接</b>（{count}）— 点击获取配置：",
@@ -687,6 +733,7 @@ TG_TRANSLATIONS = {
         "self_service_no_servers": "目前没有可用于自助创建连接的服务器。\n请联系管理员。",
         "self_service_disabled_contact": "自助服务已禁用。请联系管理员。",
         "self_service_unavailable": "自助服务不可用。",
+        "max_connections_reached": "已达到连接数量上限。请删除一个现有连接，或联系管理员。",
         "server_not_self_service": "此服务器不支持自助服务。",
         "no_protocols_available": "此服务器没有可用协议。",
         "name_empty": "名称不能为空。请发送连接名称或 /cancel。",
@@ -739,6 +786,7 @@ TG_TRANSLATIONS = {
         "description_label": "描述",
         "protocol_display": "协议",
         "cmd_start": "打开机器人菜单",
+        "btn_open_panel": "打开面板",
         "cmd_connections": "查看我的连接",
         "cmd_connect": "创建新连接",
         "cmd_disconnect": "删除连接",
@@ -871,6 +919,29 @@ async def _set_default_commands(api: TelegramAPI):
     for lang in sorted(set(TG_TRANSLATIONS) - {"en"}):
         await api.call("setMyCommands", commands=_command_menu(lang), language_code=lang)
 
+async def _set_webapp_menu_button(
+    api: TelegramAPI, load_data_fn: Callable,
+    chat_id: Optional[int] = None, lang: str = "en",
+):
+    """Expose the existing panel as the Telegram Mini App menu button."""
+    panel_url = _panel_public_url(load_data_fn())
+    params = {}
+    if chat_id is not None:
+        params["chat_id"] = chat_id
+    if not panel_url.startswith("https://"):
+        params["menu_button"] = {"type": "default"}
+        await api.call("setChatMenuButton", **params)
+        return
+    params["menu_button"] = {
+        "type": "web_app",
+        "text": _tt(lang, "btn_open_panel"),
+        "web_app": {"url": panel_url},
+    }
+    result = await api.call("setChatMenuButton", **params)
+    if not result.get("ok"):
+        logger.warning("Telegram WebApp menu button could not be configured: %s", result)
+
+
 
 # ----------------------------------------------------------------------- #
 #  Generic helpers
@@ -967,6 +1038,150 @@ def _resolve_public_endpoint(server: dict, protocol: str):
     host = str(info.get("public_host") or "").strip() or server.get("host", "")
     public_port = str(info.get("public_port") or "").strip() or None
     return host, public_port
+
+
+def _auto_create_telegram_user(data: dict, from_user: dict, save_data_fn: Optional[Callable]):
+    """Create a panel account for a first-time Telegram user when enabled."""
+    telegram_settings = (data.get("settings") or {}).get("telegram") or {}
+    if telegram_settings.get("auto_create_users") is not True or not save_data_fn:
+        return None
+
+    tg_id = str((from_user or {}).get("id") or "").strip()
+    if not tg_id:
+        return None
+    users = data.setdefault("users", [])
+    existing = next((u for u in users
+                     if str(u.get("telegramId") or "").strip() == tg_id), None)
+    if existing:
+        return existing, None
+
+    parts = [
+        str((from_user or {}).get("first_name") or "").strip(),
+        str((from_user or {}).get("last_name") or "").strip(),
+    ]
+    display_name = " ".join(part for part in parts if part).strip()
+    if not display_name:
+        display_name = str((from_user or {}).get("username") or "").strip()
+    if not display_name:
+        display_name = f"Telegram {tg_id}"
+
+    username = display_name[:80]
+    if any(str(user.get("username") or "").casefold() == username.casefold()
+           for user in users):
+        suffix = f" ({tg_id})"
+        username = username[:max(1, 80 - len(suffix))] + suffix
+
+    now = datetime.now()
+    random_password = secrets.token_urlsafe(48)
+    salt = secrets.token_hex(16)
+    password_digest = hashlib.pbkdf2_hmac(
+        "sha256", random_password.encode(), salt.encode(), 100000
+    )
+    create_disabled = bool(telegram_settings.get("create_users_disabled", False))
+    user = {
+        "id": str(uuid.uuid4()),
+        "username": username,
+        "password_hash": f"{salt}${password_digest.hex()}",
+        "role": "user",
+        "telegramId": tg_id,
+        "email": None,
+        "description": "Created automatically from Telegram",
+        "traffic_limit": 0,
+        "max_connections": 0,
+        "traffic_reset_strategy": "never",
+        "traffic_used": 0,
+        "traffic_total": 0,
+        "last_reset_at": now.isoformat(),
+        "expiration_date": None,
+        "enabled": not create_disabled,
+        "disable_reasons": ["manual"] if create_disabled else [],
+        "access_revision": 0,
+        "access_sync_pending": False,
+        "created_at": now.isoformat(),
+        "remnawave_uuid": None,
+        "share_enabled": False,
+        "share_token": secrets.token_urlsafe(16),
+        "share_password_hash": None,
+        "share_auth_revision": 0,
+    }
+    users.append(user)
+    save_data_fn(data)
+    logger.info("Created panel user from Telegram account %s", tg_id)
+    return user, random_password
+
+
+def _panel_public_url(data: dict) -> str:
+    """Build the browser-facing panel URL from the saved public host settings."""
+    settings = (data or {}).get("settings", {}) or {}
+    ssl = settings.get("ssl", {}) or {}
+    duckdns = settings.get("duckdns", {}) or {}
+    panel_access = settings.get("panel_access", {}) or {}
+
+    configured_host = (
+        ssl.get("domain")
+        or (duckdns.get("domain") if duckdns.get("enabled") else "")
+        or panel_access.get("allowed_domain")
+        or ""
+    )
+    configured_host = str(configured_host).strip()
+    if not configured_host:
+        return ""
+
+    # Accept a hostname (normal settings format) or a full URL (legacy/manual).
+    parsed = urllib.parse.urlsplit(
+        configured_host if "://" in configured_host else f"//{configured_host}"
+    )
+    scheme = parsed.scheme.lower() if parsed.scheme else (
+        "https" if ssl.get("enabled") else "http"
+    )
+    if (
+        scheme not in ("http", "https")
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.path not in ("", "/")
+        or parsed.query
+        or parsed.fragment
+    ):
+        return ""
+
+    try:
+        configured_port = parsed.port
+        panel_port = int(ssl.get("panel_port", 5000) or 5000)
+    except (TypeError, ValueError):
+        return ""
+    port = configured_port if configured_port is not None else panel_port
+    if not 1 <= port <= 65535:
+        return ""
+
+    hostname = parsed.hostname
+    if ":" in hostname:
+        hostname = f"[{hostname}]"
+    default_port = 443 if scheme == "https" else 80
+    authority = hostname if port == default_port else f"{hostname}:{port}"
+    return f"{scheme}://{authority}"
+
+
+def _telegram_credentials_message(
+    user: dict, password: str, lang: str, panel_url: str = ""
+) -> str:
+    lines = [
+        f"<b>{_tt(lang, 'credentials_title')}</b>",
+        f"{_tt(lang, 'credentials_login')}: <code>{_e(user.get('username'))}</code>",
+        f"{_tt(lang, 'credentials_password')}: <code>{_e(password)}</code>",
+        "",
+    ]
+    if not user.get("enabled", True):
+        lines.append(_tt(lang, "credentials_disabled"))
+    elif panel_url:
+        safe_url = _e(panel_url)
+        lines.append(_tt(
+            lang, "credentials_instructions",
+            panel_url=f'<a href="{safe_url}">{safe_url}</a>',
+        ))
+    else:
+        lines.append(_tt(lang, "credentials_no_url"))
+    return "\n".join(lines)
 
 
 def _find_user(load_data_fn: Callable, tg_id: str, username: Optional[str] = None):
@@ -1334,11 +1549,25 @@ async def _handle_start(api: TelegramAPI, msg: dict, load_data_fn: Callable,
     data = load_data_fn()
     lang = _telegram_language(data, tg_id)
     if not lang:
-        await api.send_message(chat_id, _tt("en", "language_prompt"),
+        lang = _tg_lang(msg.get("from") or {})
+    try:
+        if _is_private_chat(msg.get("chat")):
+            await _set_webapp_menu_button(api, load_data_fn, chat_id=chat_id, lang=lang)
+    except Exception as exc:
+        logger.warning("Telegram WebApp menu button refresh failed: %s", exc)
+    if not _telegram_language(data, tg_id):
+        await api.send_message(chat_id, _tt(lang, "language_prompt"),
                                reply_markup=_language_keyboard())
         return
 
     panel_user = _find_user(load_data_fn, tg_id, tg_username)
+    created_password = None
+    if not panel_user and _is_private_chat(msg.get("chat")):
+        created = _auto_create_telegram_user(data, msg.get("from") or {}, save_data_fn)
+        if created:
+            panel_user, created_password = created
+    if created_password:
+        await api.send_message(chat_id, _telegram_credentials_message(panel_user, created_password, lang, _panel_public_url(load_data_fn())))
 
     if not panel_user:
         await api.send_message(
@@ -1927,6 +2156,10 @@ async def _handle_pending_input(api: TelegramAPI, msg: dict, load_data_fn: Calla
             _pending_inputs.pop(key, None)
             await api.send_message(chat_id, f"❌ {_tt(lang, 'access_denied')}")
             return True
+        if not panel_user.get("enabled", True):
+            _pending_inputs.pop(key, None)
+            await api.send_message(chat_id, f"❌ {_tt(lang, 'account_disabled')}")
+            return True
         name = text[:80].strip()
         if not name:
             await api.send_message(chat_id, _tt(lang, "name_empty"))
@@ -1961,66 +2194,165 @@ async def _handle_pending_input(api: TelegramAPI, msg: dict, load_data_fn: Calla
     return False
 
 
-# ----------------------------------------------------------------------- #
-#  Self-service user create wizard
-# ----------------------------------------------------------------------- #
-async def _user_create_start(api: TelegramAPI, chat_id: int, message_id: int, callback_id: str, tg_id: str, tg_username: Optional[str], load_data_fn: Callable, self_service_svc, lang: str = "en"):
+async def _user_create_access(api: TelegramAPI, chat_id: int, panel_user: dict,
+                               load_data_fn: Callable, self_service_svc, lang: str,
+                               message_id: Optional[int] = None):
+    """Validate all account/channel quotas before asking the user for wizard input."""
+    async def show(message):
+        if message_id is None:
+            await api.send_message(chat_id, message)
+        else:
+            await api.edit_message(chat_id, message_id, message)
+
+    data = load_data_fn()
+    if not panel_user.get("enabled", True):
+        await show(f"❌ {_tt(lang, 'account_disabled')}")
+        return None
+    if not _self_service_telegram_enabled(data):
+        await show(_tt(lang, "self_service_disabled_contact"))
+        return None
+    if not self_service_svc:
+        if not panel_user.get("enabled", True):
+            await show(f"❌ {_tt(lang, 'account_disabled')}")
+            return None
+        user_limit = max(0, int(panel_user.get("max_connections") or 0))
+        if user_limit <= 0:
+            user_limit = max(0, int(_self_service_settings(data).get("max_connections_per_user", 5) or 0))
+        used = sum(1 for conn in data.get("user_connections", [])
+                   if conn.get("user_id") == panel_user.get("id"))
+        if used >= user_limit:
+            await show(f"❌ {_tt(lang, 'max_connections_reached')}")
+            return None
+        return {"remaining_connections": user_limit - used}
+
+    try:
+        options = await self_service_svc.get_self_service_options(panel_user["id"], "telegram")
+    except Exception as exc:
+        error_text = str(exc)
+        if "User is disabled" in error_text:
+            await show(f"❌ {_tt(lang, 'account_disabled')}")
+        elif "Maximum self-service connections reached" in error_text:
+            await show(f"❌ {_tt(lang, 'max_connections_reached')}")
+        else:
+            logger.warning("Bot: self-service preflight rejected user %s: %s",
+                           panel_user.get("id"), error_text)
+            await show(f"❌ {_tt(lang, 'self_service_unavailable')}")
+        return None
+
+    if int(options.get("remaining_connections", 1)) <= 0:
+        await show(f"❌ {_tt(lang, 'max_connections_reached')}")
+        return None
+    return options
+
+
+async def _user_prompt_connection_name(api: TelegramAPI, chat_id: int,
+                                       message_id: Optional[int], tg_id: str,
+                                       server_id: int, proto: str, server: dict,
+                                       lang: str = "en"):
+    _pending_inputs[_pending_key(chat_id, tg_id)] = {
+        "kind": "user_add_client_name",
+        "sid": server_id,
+        "proto": proto,
+        "ts": time.time(),
+    }
+    message = (
+        f"➕ <b>{_tt(lang, 'btn_create_connection')}</b>\n\n"
+        f"{_tt(lang, 'protocol_label')}: <b>{_e(_protocol_display_name(proto, server))}</b>\n\n"
+        f"{_tt(lang, 'send_device_name')}\n"
+        f"{_tt(lang, 'example_label')}: <code>Ivan iPhone</code>\n\n"
+        f"{_tt(lang, 'cancel_instruction')}"
+    )
+    markup = {"inline_keyboard": [[{
+        "text": f"❌ {_tt(lang, 'btn_cancel')}",
+        "callback_data": "user_create_cancel",
+    }]]}
+    if message_id is None:
+        await api.send_message(chat_id, message, reply_markup=markup)
+    else:
+        await api.edit_message(chat_id, message_id, message, reply_markup=markup)
+
+
+async def _user_show_protocols(api: TelegramAPI, chat_id: int,
+                               message_id: Optional[int], server_id: int,
+                               server: dict, available_protos: list,
+                               lang: str = "en"):
+    server_name = server.get("name") or server.get("host") or _tt(
+        lang, "default_server", number=server_id + 1)
+    rows = [[{
+        "text": _protocol_display_name(proto, server),
+        "callback_data": _ref("user_create_protocol", {"sid": server_id, "proto": proto}),
+    }] for proto in available_protos]
+    rows.append([{
+        "text": f"⬅️ {_tt(lang, 'btn_back')}",
+        "callback_data": "user_create",
+    }])
+    message = (
+        f"🖥 <b>{_e(server_name)}</b>\n\n"
+        f"{_tt(lang, 'choose_protocol')}"
+    )
+    markup = {"inline_keyboard": rows}
+    if message_id is None:
+        await api.send_message(chat_id, message, reply_markup=markup)
+    else:
+        await api.edit_message(chat_id, message_id, message, reply_markup=markup)
+
+
+async def _user_create_wizard(api: TelegramAPI, chat_id: int, tg_id: str,
+                              tg_username: Optional[str], load_data_fn: Callable,
+                              self_service_svc, lang: str = "en",
+                              message_id: Optional[int] = None):
     panel_user = _find_user(load_data_fn, tg_id, tg_username)
+    async def show(message, markup=None):
+        if message_id is None:
+            await api.send_message(chat_id, message, reply_markup=markup)
+        else:
+            await api.edit_message(chat_id, message_id, message, reply_markup=markup)
+
     if not panel_user:
-        await api.answer_callback(callback_id, text=_tt(lang, "access_denied"))
-        await api.edit_message(chat_id, message_id, f"❌ {_tt(lang, 'access_denied')}")
+        await show(f"❌ {_tt(lang, 'access_denied')}")
+        return
+
+    options = await _user_create_access(
+        api, chat_id, panel_user, load_data_fn, self_service_svc, lang, message_id)
+    if options is None:
         return
 
     data = load_data_fn()
-    if not _self_service_telegram_enabled(data):
-        await api.answer_callback(callback_id)
-        await api.edit_message(
-            chat_id,
-            message_id,
-            _tt(lang, "self_service_disabled_contact"),
-        )
-        return
-
     eligible = _get_eligible_servers(data)
     if not eligible:
-        await api.answer_callback(callback_id)
-        await api.edit_message(
-            chat_id,
-            message_id,
-            _tt(lang, "self_service_no_servers"),
-        )
+        await show(_tt(lang, "self_service_no_servers"))
         return
 
+    if len(eligible) == 1:
+        server_id, server, protocols = eligible[0]
+        if len(protocols) == 1:
+            await _user_prompt_connection_name(
+                api, chat_id, message_id, tg_id, server_id, protocols[0], server, lang)
+        else:
+            await _user_show_protocols(
+                api, chat_id, message_id, server_id, server, protocols, lang)
+        return
+
+    message = f"➕ <b>{_tt(lang, 'btn_create_connection')}</b>\n\n{_tt(lang, 'choose_server')}"
+    markup = _user_create_server_keyboard(eligible, lang)
+    await show(message, markup)
+
+
+async def _user_create_start(api: TelegramAPI, chat_id: int, message_id: int,
+                              callback_id: str, tg_id: str,
+                              tg_username: Optional[str], load_data_fn: Callable,
+                              self_service_svc, lang: str = "en"):
     await api.answer_callback(callback_id)
-    await api.edit_message(
-        chat_id,
-        message_id,
-        f"➕ <b>{_tt(lang, 'btn_create_connection')}</b>\n\n{_tt(lang, 'choose_server')}",
-        reply_markup=_user_create_server_keyboard(eligible, lang),
-    )
+    await _user_create_wizard(
+        api, chat_id, tg_id, tg_username, load_data_fn, self_service_svc,
+        lang, message_id)
 
 
-async def _user_create_start_message(api: TelegramAPI, chat_id: int, tg_id: str, tg_username: Optional[str], load_data_fn: Callable, lang: str = "en"):
-    panel_user = _find_user(load_data_fn, tg_id, tg_username)
-    if not panel_user:
-        await api.send_message(chat_id, f"❌ {_tt(lang, 'access_denied')}")
-        return
-
-    data = load_data_fn()
-    if not _self_service_telegram_enabled(data):
-        await api.send_message(chat_id, _tt(lang, "self_service_disabled_contact"))
-        return
-
-    eligible = _get_eligible_servers(data)
-    if not eligible:
-        await api.send_message(chat_id, _tt(lang, "self_service_no_servers"))
-        return
-
-    await api.send_message(
-        chat_id,
-        f"➕ <b>{_tt(lang, 'btn_create_connection')}</b>\n\n{_tt(lang, 'choose_server')}",
-        reply_markup=_user_create_server_keyboard(eligible, lang),
-    )
+async def _user_create_start_message(api: TelegramAPI, chat_id: int, tg_id: str,
+                                     tg_username: Optional[str], load_data_fn: Callable,
+                                     self_service_svc, lang: str = "en"):
+    await _user_create_wizard(
+        api, chat_id, tg_id, tg_username, load_data_fn, self_service_svc, lang)
 
 
 async def _user_create_server(api: TelegramAPI, chat_id: int, message_id: int, callback_id: str, tg_id: str, tg_username: Optional[str], server_id: int, load_data_fn: Callable, self_service_svc, lang: str = "en"):
@@ -2028,6 +2360,10 @@ async def _user_create_server(api: TelegramAPI, chat_id: int, message_id: int, c
     if not panel_user:
         await api.answer_callback(callback_id, text=_tt(lang, "access_denied"))
         await api.edit_message(chat_id, message_id, f"❌ {_tt(lang, 'access_denied')}")
+        return
+    if not panel_user.get("enabled", True):
+        await api.answer_callback(callback_id, text=_tt(lang, "account_disabled"))
+        await api.edit_message(chat_id, message_id, f"❌ {_tt(lang, 'account_disabled')}")
         return
 
     await api.answer_callback(callback_id)
@@ -2053,18 +2389,13 @@ async def _user_create_server(api: TelegramAPI, chat_id: int, message_id: int, c
         await api.edit_message(chat_id, message_id, _tt(lang, "no_protocols_available"))
         return
 
-    server_name = server.get("name") or server.get("host") or _tt(lang, "default_server", number=server_id + 1)
-    rows = []
-    for proto in available_protos:
-        rows.append([{"text": _protocol_display_name(proto, server), "callback_data": _ref("user_create_protocol", {"sid": server_id, "proto": proto})}])
-    rows.append([{"text": f" {_tt(lang, 'btn_back')}", "callback_data": "user_create"}])
+    if len(available_protos) == 1:
+        await _user_prompt_connection_name(
+            api, chat_id, message_id, tg_id, server_id, available_protos[0], server, lang)
+        return
 
-    await api.edit_message(
-        chat_id,
-        message_id,
-        f" {_tt(lang, 'servers_title')}: <b>{_e(server_name)}</b>\n\n{_tt(lang, 'choose_protocol')}",
-        reply_markup={"inline_keyboard": rows},
-    )
+    await _user_show_protocols(
+        api, chat_id, message_id, server_id, server, available_protos, lang)
 
 
 async def _user_create_protocol(api: TelegramAPI, chat_id: int, message_id: int, callback_id: str, tg_id: str, tg_username: Optional[str], server_id: int, proto: str, load_data_fn: Callable, lang: str = "en"):
@@ -2075,26 +2406,15 @@ async def _user_create_protocol(api: TelegramAPI, chat_id: int, message_id: int,
         await api.answer_callback(callback_id, text=_tt(lang, "access_denied"))
         await api.edit_message(chat_id, message_id, f"❌ {_tt(lang, 'access_denied')}")
         return
+    if not panel_user.get("enabled", True):
+        await api.answer_callback(callback_id, text=_tt(lang, "account_disabled"))
+        await api.edit_message(chat_id, message_id, f"❌ {_tt(lang, 'account_disabled')}")
+        return
 
     await api.answer_callback(callback_id)
 
-    _pending_inputs[_pending_key(chat_id, tg_id)] = {
-        "kind": "user_add_client_name",
-        "sid": server_id,
-        "proto": proto,
-        "ts": time.time(),
-    }
-
-    await api.edit_message(
-        chat_id,
-        message_id,
-        f"➕ <b>{_tt(lang, 'btn_create_connection')}</b>\n\n"
-        f"{_tt(lang, 'protocol_label')}: <b>{_e(_protocol_display_name(proto, server))}</b>\n\n"
-        f"{_tt(lang, 'send_device_name')}\n"
-        f"{_tt(lang, 'example_label')}: <code>Ivan iPhone</code>\n\n"
-        f"{_tt(lang, 'cancel_instruction')}",
-        reply_markup={"inline_keyboard": [[{"text": f"❌ {_tt(lang, 'btn_cancel')}", "callback_data": "user_create_cancel"}]]},
-    )
+    await _user_prompt_connection_name(
+        api, chat_id, message_id, tg_id, server_id, proto, server, lang)
 
 
 async def _user_create_cancel(api: TelegramAPI, chat_id: int, message_id: int, callback_id: str, tg_id: str, tg_username: Optional[str], load_data_fn: Callable, lang: str = "en"):
@@ -2145,6 +2465,10 @@ async def _user_delete_confirm(api: TelegramAPI, chat_id: int, message_id: int, 
     if not panel_user:
         await api.answer_callback(callback_id, text=_tt(lang, "access_denied"))
         await api.edit_message(chat_id, message_id, f"❌ {_tt(lang, 'access_denied')}")
+        return
+    if not panel_user.get("enabled", True):
+        await api.answer_callback(callback_id, text=_tt(lang, "account_disabled"))
+        await api.edit_message(chat_id, message_id, f"❌ {_tt(lang, 'account_disabled')}")
         return
 
     if not self_service_svc:
@@ -2234,7 +2558,10 @@ async def _user_create_connection(api: TelegramAPI, chat_id: int, panel_user: di
                     await api.edit_message(chat_id, loading_msg_id, f"✅ {_tt(lang, 'connection_created_success')}")
     except Exception as e:
         logger.exception("Bot: self-service create failed")
-        await api.send_message(chat_id, f"❌ {_tt(lang, 'error')}: {_tt(lang, 'self_service_unavailable')}")
+        if "Maximum self-service connections reached" in str(e):
+            await api.send_message(chat_id, f"❌ {_tt(lang, 'max_connections_reached')}")
+        else:
+            await api.send_message(chat_id, f"❌ {_tt(lang, 'error')}: {_tt(lang, 'self_service_unavailable')}")
 
 
 # ----------------------------------------------------------------------- #
@@ -2253,6 +2580,10 @@ async def _run_bot(token: str, load_data_fn: Callable, generate_vpn_link_fn: Cal
             return
         logger.info(f"Telegram bot logged in as @{me['result']['username']}")
         await _set_default_commands(api)
+        try:
+            await _set_webapp_menu_button(api, load_data_fn)
+        except Exception as exc:
+            logger.warning("Telegram WebApp menu button setup failed: %s", exc)
 
         while True:
             try:
@@ -2296,7 +2627,7 @@ async def _dispatch(api: TelegramAPI, update: dict, load_data_fn: Callable, gene
             else:
                 await _send_user_connections(api, chat_id, panel_user, load_data_fn, lang=lang)
         elif text.startswith("/connect"):
-            await _user_create_start_message(api, chat_id, str(msg["from"]["id"]), tg_username, load_data_fn, lang)
+            await _user_create_start_message(api, chat_id, str(msg["from"]["id"]), tg_username, load_data_fn, self_service_svc, lang)
         elif text.startswith("/disconnect"):
             panel_user = _find_user(load_data_fn, str(msg["from"]["id"]), tg_username)
             if not panel_user:
@@ -2333,8 +2664,20 @@ async def _dispatch(api: TelegramAPI, update: dict, load_data_fn: Callable, gene
                 await api.answer_callback(callback_id, _tt(lang, "saving_not_available"))
                 return
             lang = selected
+            if _is_private_chat(chat):
+                try:
+                    await _set_webapp_menu_button(api, load_data_fn, chat_id=chat_id, lang=lang)
+                except Exception as exc:
+                    logger.warning("Telegram WebApp menu button language update failed: %s", exc)
             await api.answer_callback(callback_id, _tt(lang, "language_saved"))
             panel_user = _find_user(load_data_fn, tg_id, tg_username)
+            created_password = None
+            if not panel_user and _is_private_chat(chat):
+                created = _auto_create_telegram_user(load_data_fn(), cq.get("from") or {}, save_data_fn)
+                if created:
+                    panel_user, created_password = created
+            if created_password:
+                await api.send_message(chat_id, _telegram_credentials_message(panel_user, created_password, lang, _panel_public_url(load_data_fn())))
             if not panel_user:
                 await api.edit_message(chat_id, message_id,
                                        f"{_tt(lang, 'account_not_linked')}\n"

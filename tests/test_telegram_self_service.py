@@ -93,6 +93,135 @@ class TestTelegramLanguagePreference(unittest.IsolatedAsyncioTestCase):
                          {'lang:en', 'lang:fa', 'lang:fr', 'lang:ru', 'lang:zh'})
 
 
+class TestTelegramPanelPublicUrl(unittest.TestCase):
+    def test_ssl_domain_uses_https_and_configured_panel_port(self):
+        data = {'settings': {'ssl': {
+            'enabled': True, 'domain': 'panel.example.com', 'panel_port': 5000,
+        }}}
+        self.assertEqual(
+            tg_bot._panel_public_url(data),
+            'https://panel.example.com:5000',
+        )
+
+    def test_standard_https_port_is_omitted(self):
+        data = {'settings': {'ssl': {
+            'enabled': True, 'domain': 'panel.example.com', 'panel_port': 443,
+        }}}
+        self.assertEqual(tg_bot._panel_public_url(data), 'https://panel.example.com')
+
+    def test_duckdns_domain_is_used_when_ssl_domain_is_empty(self):
+        data = {'settings': {
+            'ssl': {'enabled': True, 'domain': '', 'panel_port': 8443},
+            'duckdns': {'enabled': True, 'domain': 'my-panel.duckdns.org'},
+        }}
+        self.assertEqual(
+            tg_bot._panel_public_url(data),
+            'https://my-panel.duckdns.org:8443',
+        )
+
+    def test_domain_without_ssl_uses_http(self):
+        data = {'settings': {'ssl': {
+            'enabled': False, 'domain': 'panel.example.com', 'panel_port': 5000,
+        }}}
+        self.assertEqual(
+            tg_bot._panel_public_url(data),
+            'http://panel.example.com:5000',
+        )
+
+    def test_missing_public_domain_does_not_return_localhost(self):
+        self.assertEqual(tg_bot._panel_public_url({'settings': {'ssl': {'enabled': True}}}), '')
+
+    def test_credentials_message_contains_clickable_escaped_url(self):
+        message = tg_bot._telegram_credentials_message(
+            {'username': 'new-user', 'enabled': True},
+            'secret', 'ru', 'https://panel.example.com:5000?a=1&b=2',
+        )
+        self.assertIn(
+            '<a href="https://panel.example.com:5000?a=1&amp;b=2">',
+            message,
+        )
+        self.assertIn('https://panel.example.com:5000?a=1&amp;b=2</a>', message)
+
+    def test_credentials_message_explains_missing_panel_url(self):
+        message = tg_bot._telegram_credentials_message(
+            {'username': 'new-user', 'enabled': True}, 'secret', 'ru',
+        )
+        self.assertIn('Адрес панели не настроен', message)
+
+
+class TestTelegramAutomaticRegistration(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        tg_bot._callback_refs.clear()
+        tg_bot._pending_inputs.clear()
+        self.data = base_data()
+        self.api = AsyncMock()
+        self.api.send_message = AsyncMock()
+        self.api.edit_message = AsyncMock()
+        self.api.answer_callback = AsyncMock()
+
+    async def test_first_start_creates_user_when_enabled(self):
+        self.data['settings']['telegram'] = {
+            'auto_create_users': True,
+            'create_users_disabled': True,
+        }
+        msg = _text_message(chat_id=333, from_id=333, text='/start')
+        msg['message']['from'].update({'first_name': 'Ivan', 'last_name': 'Petrov'})
+        save = lambda data: self.data.update(copy.deepcopy(data))
+
+        await tg_bot._dispatch(self.api, msg, lambda: self.data,
+                               lambda *args: 'vpn://x', save)
+
+        self.assertFalse(any(u.get('telegramId') == '333' for u in self.data['users']))
+        callback = _callback_update(chat_id=333, from_id=333, data_str='lang:ru')
+        callback['callback_query']['from'].update({'first_name': 'Ivan', 'last_name': 'Petrov'})
+        await tg_bot._dispatch(self.api, callback, lambda: self.data,
+                               lambda *args: 'vpn://x', save)
+
+        created = next(u for u in self.data['users'] if u.get('telegramId') == '333')
+        self.assertEqual(created['username'], 'Ivan Petrov')
+        self.assertEqual(created['role'], 'user')
+        self.assertIsNone(created['email'])
+        self.assertIsNone(created['expiration_date'])
+        self.assertFalse(created['enabled'])
+        self.assertIn('manual', created['disable_reasons'])
+        self.assertTrue(created['password_hash'])
+        self.assertNotEqual(created['password_hash'], '')
+        sent_texts = [call.args[1] for call in self.api.send_message.call_args_list
+                      if len(call.args) > 1]
+        credentials = next(text for text in sent_texts if 'Ваш аккаунт панели создан.' in text)
+        self.assertIn('Логин:', credentials)
+        self.assertIn('Пароль:', credentials)
+        self.assertIn('обратитесь к администратору', credentials)
+
+    async def test_first_start_does_not_create_user_by_default(self):
+        msg = _text_message(chat_id=333, from_id=333, text='/start')
+        save = lambda data: self.data.update(copy.deepcopy(data))
+
+        await tg_bot._dispatch(self.api, msg, lambda: self.data,
+                               lambda *args: 'vpn://x', save)
+
+        self.assertFalse(any(u.get('telegramId') == '333' for u in self.data['users']))
+
+    async def test_first_start_creates_enabled_user_when_disabled_option_is_off(self):
+        self.data['settings']['telegram'] = {'auto_create_users': True}
+        msg = _text_message(chat_id=444, from_id=444, text='/start')
+        msg['message']['from'].update({'first_name': 'Jane', 'last_name': 'Doe'})
+        save = lambda data: self.data.update(copy.deepcopy(data))
+
+        await tg_bot._dispatch(self.api, msg, lambda: self.data,
+                               lambda *args: 'vpn://x', save)
+
+        callback = _callback_update(chat_id=444, from_id=444, data_str='lang:en')
+        callback['callback_query']['from'].update({'first_name': 'Jane', 'last_name': 'Doe'})
+        await tg_bot._dispatch(self.api, callback, lambda: self.data,
+                               lambda *args: 'vpn://x', save)
+
+        created = next(u for u in self.data['users'] if u.get('telegramId') == '444')
+        self.assertEqual(created['username'], 'Jane Doe')
+        self.assertTrue(created['enabled'])
+        self.assertEqual(created['disable_reasons'], [])
+
+
 class TestTelegramPublicEndpoint(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.api = AsyncMock()
@@ -185,6 +314,21 @@ class TestUserSlashCommands(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Create connection', text)
         self.assertIn('Choose a server', text)
         self.assertIn('Server 1', keyboard_text)
+
+    async def test_connect_command_stops_immediately_when_connection_limit_is_reached(self):
+        msg = _text_message(chat_id=111, from_id=111, text='/connect', language_code='ru')
+        service = MagicMock()
+        service.get_self_service_options = AsyncMock(return_value={
+            'remaining_connections': 0,
+        })
+
+        await _dispatch_message_with_service(self.api, msg, self.load_data, service)
+
+        text = self.api.send_message.call_args[0][1]
+        self.assertIn('Достигнут лимит подключений', text)
+        self.assertNotIn('Выберите сервер', text)
+        self.assertNotIn('Choose a server', text)
+        self.assertNotIn('reply_markup', self.api.send_message.call_args.kwargs)
 
     async def test_connect_command_is_rejected_in_group_chat(self):
         msg = _text_message(chat_id=-100, from_id=111, text='/connect', chat_type='group')
@@ -289,12 +433,64 @@ class TestUserCreateCallback(unittest.IsolatedAsyncioTestCase):
         # Verify there are callback buttons (resolved refs)
         self.assertIn('callback_data', keyboard_text)
 
+    async def test_user_create_reports_disabled_account_before_showing_wizard(self):
+        self.data['users'][0]['enabled'] = False
+        msg = _callback_update(chat_id=111, from_id=111, data_str='user_create')
+
+        await _dispatch_callback(self.api, msg, self.load_data)
+
+        text = self.api.edit_message.call_args[0][2]
+        self.assertIn('Аккаунт отключён', text)
+        self.assertNotIn('Выберите сервер', text)
+        self.assertIsNone(self.api.edit_message.call_args.kwargs.get('reply_markup'))
+
+    async def test_user_create_skips_server_and_protocol_when_only_one_choice(self):
+        self.data['settings']['self_service']['allowed_protocols'] = ['awg']
+        msg = _callback_update(chat_id=111, from_id=111, data_str='user_create')
+
+        await _dispatch_callback(self.api, msg, self.load_data)
+
+        text = self.api.edit_message.call_args[0][2]
+        self.assertIn('Отправьте имя устройства', text)
+        self.assertNotIn('Выберите сервер', text)
+        self.assertNotIn('Выберите протокол', text)
+        self.assertEqual(
+            tg_bot._pending_inputs[tg_bot._pending_key(111, '111')]['sid'], 0)
+        self.assertEqual(
+            tg_bot._pending_inputs[tg_bot._pending_key(111, '111')]['proto'], 'awg')
+
+    async def test_user_create_server_skips_protocol_when_only_one_choice(self):
+        self.data['settings']['self_service']['allowed_protocols'] = ['awg']
+        ref_key = tg_bot._ref('user_create_server', {'sid': 0})
+        msg = _callback_update(chat_id=111, from_id=111, data_str=ref_key)
+
+        await _dispatch_callback(self.api, msg, self.load_data)
+
+        text = self.api.edit_message.call_args[0][2]
+        self.assertIn('Отправьте имя устройства', text)
+        self.assertNotIn('Выберите протокол', text)
+
+    async def test_user_create_stops_immediately_when_connection_limit_is_reached(self):
+        msg = _callback_update(chat_id=111, from_id=111, data_str='user_create', language_code='ru')
+        service = MagicMock()
+        service.get_self_service_options = AsyncMock(return_value={
+            'remaining_connections': 0,
+        })
+
+        await _dispatch_callback_with_service(self.api, msg, self.load_data, service)
+
+        text = self.api.edit_message.call_args[0][2]
+        self.assertIn('Достигнут лимит подключений', text)
+        self.assertNotIn('Выберите сервер', text)
+        self.assertIsNone(self.api.edit_message.call_args.kwargs.get('reply_markup'))
+
     async def test_user_create_panel_uses_russian_when_telegram_language_is_ru(self):
         msg = _callback_update(chat_id=111, from_id=111, data_str='user_create', language_code='ru')
         await _dispatch_callback(self.api, msg, self.load_data)
         text = self.api.edit_message.call_args[0][2]
         self.assertIn('Создать подключение', text)
-        self.assertIn('Выберите сервер', text)
+        self.assertIn('Выберите протокол', text)
+        self.assertNotIn('Выберите сервер', text)
         self.assertNotIn('Create connection', text)
         self.assertNotIn('Choose a server', text)
 
@@ -717,6 +913,26 @@ class TestTelegramLocalization(unittest.IsolatedAsyncioTestCase):
                         collections.Counter(re.findall(r'\{[^{}]*\}', value)),
                         collections.Counter(re.findall(r'\{[^{}]*\}', reference[key])),
                     )
+
+    async def test_disabled_account_message_is_localized_for_every_language(self):
+        expected = {
+            'en': 'Account disabled',
+            'fa': 'حساب کاربری غیرفعال است',
+            'fr': 'Compte désactivé',
+            'ru': 'Аккаунт отключён',
+            'zh': '账户已被禁用',
+        }
+        for lang, phrase in expected.items():
+            with self.subTest(lang=lang):
+                self.api.reset_mock()
+                await tg_bot._user_create_access(
+                    self.api, 999, {'id': 'user-1', 'enabled': False},
+                    self.load_data, None, lang,
+                )
+                self.assertEqual(
+                    self.api.send_message.call_args.args[1],
+                    f'❌ {phrase}',
+                )
 
     def test_language_codes_are_normalized_to_panel_locales(self):
         samples = {'en-US': 'en', 'fa-IR': 'fa', 'fr-FR': 'fr', 'RU_ru': 'ru',
