@@ -1285,5 +1285,10 @@
   "telegram_webapp_auth_desc": "Si cette option est activée, les utilisateurs ouvrant le panneau dans Telegram seront connectés après vérification de initData par le serveur. Si le token du bot est vide, le formulaire de connexion habituel sera affiché. Le bouton WebApp du bot nécessite une URL HTTPS publique pour le panneau.",
   "telegram_webapp_auth_invalid": "Les données d’autorisation Telegram sont invalides ou expirées. Utilisez le formulaire de connexion habituel ou rouvrez l’application depuis Telegram.",
   "telegram_webapp_account_not_found": "Aucun compte du panneau n’est associé à ce compte Telegram. Contactez l’administrateur ou activez la création automatique des utilisateurs.",
-  "telegram_webapp_auth_unavailable": "L’autorisation WebApp Telegram n’est pas configurée. Utilisez la connexion habituelle."
+  "telegram_webapp_auth_unavailable": "L’autorisation WebApp Telegram n’est pas configurée. Utilisez la connexion habituelle.",
+  "xray_fingerprint_title": "Empreinte Xray",
+  "xray_fingerprint_label": "Empreinte uTLS",
+  "xray_fingerprint_hint": "Utilisée dans tous les liens VLESS émis pour cette instance. Reality accepte n’importe quelle empreinte — si chrome est bloqué sur votre réseau, choisissez-en une autre. Les liens déjà émis conservent leur empreinte.",
+  "xray_fingerprint_btn": "Empreinte",
+  "xray_fingerprint_saved": "Empreinte enregistrée"
 }

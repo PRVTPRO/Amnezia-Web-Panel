@@ -2685,6 +2685,39 @@
     </div>
 </div>
 
+<!-- ===== Xray Fingerprint Modal ===== -->
+<div class="modal-backdrop" id="xrayFingerprintModal">
+    <div class="modal">
+        <div class="modal-header">
+            <h2 class="modal-title">{{ _('xray_fingerprint_title') }}</h2>
+            <button class="modal-close" onclick="closeModal('xrayFingerprintModal')">×</button>
+        </div>
+        <div class="form-group">
+            <label class="form-label">{{ _('xray_fingerprint_label') }}</label>
+            <select class="form-select" id="xrayFingerprintSelect">
+                <option value="chrome">chrome</option>
+                <option value="firefox">firefox</option>
+                <option value="safari">safari</option>
+                <option value="ios">ios</option>
+                <option value="android">android</option>
+                <option value="edge">edge</option>
+                <option value="360">360</option>
+                <option value="qq">qq</option>
+                <option value="random">random</option>
+                <option value="randomized">randomized</option>
+            </select>
+            <div class="form-hint">{{ _('xray_fingerprint_hint') }}</div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="closeModal('xrayFingerprintModal')">{{ _('cancel') }}</button>
+            <button class="btn btn-primary" onclick="saveXrayFingerprint()" id="xrayFpSaveBtn">
+                <span id="xrayFpSaveBtnText">{{ _('save') }}</span>
+                <div class="spinner hidden" id="xrayFpSaveSpinner"></div>
+            </button>
+        </div>
+    </div>
+</div>
+
 <!-- ===== NGINX Site Modal ===== -->
 <div class="modal-backdrop" id="siteConfigModal">
     <div class="modal" style="max-width:680px;">
@@ -4351,6 +4384,9 @@
                 } else if (info.port) {
                     grid += `<div class="protocol-info-item"><span class="protocol-info-label">${_('port')}</span><span class="protocol-info-value">${info.port}/${(['xray', 'telemt'].includes(protoBase(proto))) ? 'TCP' : 'UDP'}</span></div>`;
                 }
+                if (protoBase(proto) === 'xray' && info.fingerprint) {
+                    grid += `<div class="protocol-info-item"><span class="protocol-info-label">${_('xray_fingerprint_label')}</span><span class="protocol-info-value">${escapeHtml(info.fingerprint)}</span></div>`;
+                }
                 if (!isService && info.clients_count !== undefined) {
                     grid += `<div class="protocol-info-item"><span class="protocol-info-label">${_('connections')}</span><span class="protocol-info-value">${info.clients_count}</span></div>`;
                 }
@@ -4402,14 +4438,15 @@
                     <button class="btn btn-secondary btn-sm" onclick="showProtocolBackups('${proto}')">${_('backup')}</button>
                     <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')">${_('uninstall')}</button>
                 `;
-            } else {
+            } else if (protoBase(proto) === 'xray') {
                 actionsEl.innerHTML = `
                     <button class="btn btn-secondary btn-sm" onclick="selectProtocolForConns('${proto}')" style="flex:1">${_('connections')}</button>
+                    <button class="btn btn-secondary btn-sm" onclick="openXrayFingerprint('${proto}')" title="${_('xray_fingerprint_hint')}">${_('xray_fingerprint_btn')}</button>
                     <button class="btn btn-secondary btn-sm" onclick="showProtocolBackups('${proto}')">${_('backup')}</button>
                     <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')">${_('uninstall')}</button>
                 `;
                 showConnectionsSection();
-            }
+            } else {
             // Show control buttons (stop + optional config). Services use the
             // container's own config UI (AdGuard web wizard / our SOCKS5 modal /
             // unbound's static config), so we don't expose a raw editor for them.
@@ -6267,6 +6304,48 @@
             if (res.status === 'success') {
                 showToast(_('socks5_settings_saved'), 'success');
                 closeModal('socks5SettingsModal');
+                setTimeout(() => checkServer(), 500);
+            } else {
+                throw new Error(res.message || res.error || 'Unknown error');
+            }
+        } catch (err) {
+            showToast(_('error') + ': ' + err.message, 'error');
+        } finally {
+            btn.disabled = false;
+            text.textContent = _('save');
+            spinner.classList.add('hidden');
+        }
+    }
+
+    // ========== Xray Fingerprint ==========
+    let currentXrayProto = 'xray';
+
+    async function openXrayFingerprint(proto = 'xray') {
+        currentXrayProto = proto || 'xray';
+        try {
+            const data = await apiCall(`/api/servers/${SERVER_ID}/xray/fingerprint?protocol=${encodeURIComponent(currentXrayProto)}`);
+            document.getElementById('xrayFingerprintSelect').value = data.fingerprint || 'chrome';
+            openModal('xrayFingerprintModal');
+        } catch (err) {
+            showToast(_('error') + ': ' + err.message, 'error');
+        }
+    }
+
+    async function saveXrayFingerprint() {
+        const btn = document.getElementById('xrayFpSaveBtn');
+        const text = document.getElementById('xrayFpSaveBtnText');
+        const spinner = document.getElementById('xrayFpSaveSpinner');
+        btn.disabled = true;
+        text.textContent = _('saving') || 'Saving...';
+        spinner.classList.remove('hidden');
+        try {
+            const res = await apiCall(`/api/servers/${SERVER_ID}/xray/fingerprint`, 'POST', {
+                protocol: currentXrayProto,
+                fingerprint: document.getElementById('xrayFingerprintSelect').value
+            });
+            if (res.status === 'success') {
+                showToast(_('xray_fingerprint_saved'), 'success');
+                closeModal('xrayFingerprintModal');
                 setTimeout(() => checkServer(), 500);
             } else {
                 throw new Error(res.message || res.error || 'Unknown error');

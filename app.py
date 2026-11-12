@@ -60,7 +60,11 @@ from managers.awg_plugin_updater import (
     PluginUpdateError,
     stage_step as awg_plugin_stage_step,
 )
-from managers.xray_manager import XrayManager
+from managers.xray_manager import (
+    XrayManager,
+    XRAY_DEFAULT_FINGERPRINT,
+    XRAY_FINGERPRINTS,
+)
 from managers.wireguard_manager import WireGuardManager
 from managers.backup_manager import BackupManager
 import telegram_bot as tg_bot
@@ -1869,6 +1873,24 @@ def build_amnezia_xray_config(config_text, description):
     }
 
 
+def xray_stored_fingerprint(server, protocol):
+    """The Reality fingerprint the panel remembers for this xray connection
+    (a protocol record field in data.json), or None for the built-in default."""
+    if protocol_base(protocol) != 'xray':
+        return None
+    record = (server.get('protocols') or {}).get(protocol) or {}
+    fp = record.get('fingerprint')
+    return fp if fp in XRAY_FINGERPRINTS else None
+
+
+def xray_fp_kwargs(server, protocol):
+    """Keyword args carrying the stored fingerprint into XrayManager link
+    builders; empty for every other protocol so managers keep their signature."""
+    if protocol_base(protocol) != 'xray':
+        return {}
+    return {'fingerprint': xray_stored_fingerprint(server, protocol)}
+
+
 def build_amnezia_config(config_text, description):
     """Wrap a WireGuard/AmneziaWG config into Amnezia's own server config format.
 
@@ -2966,6 +2988,13 @@ class ConnectionSpeedRequest(BaseModel):
     # Validate numeric bounds in the handler so non-standard JSON NaN/Infinity
     # also receive a JSON error without serializing the invalid number back.
     max_speed: float = Field(strict=True, description='Finite Mbit/s, 0..1000000 in steps of 0.1; 0 = unlimited')
+
+
+class XrayFingerprintRequest(BaseModel):
+    protocol: str = 'xray'
+    # None/'' resets to the built-in default (chrome).
+    fingerprint: Optional[str] = None
+
 
 class SaveConnectionConfigRequest(BaseModel):
     protocol: str = 'awg'
@@ -6522,6 +6551,8 @@ def api_check_server(request: Request, server_id: int):
                 for key in ('domain', 'email', 'site_url'):
                     if db_proto.get(key) not in (None, ''):
                         merged[key] = db_proto[key]
+            if protocol_base(proto) == 'xray' and db_proto.get('fingerprint'):
+                merged['fingerprint'] = db_proto['fingerprint']
             if protocol_base(proto) == 'exit':
                 for key in ('subnet', 'public_key', 'obfuscation'):
                     if db_proto.get(key) not in (None, ''):
@@ -8175,6 +8206,56 @@ def api_awg_settings_save(request: Request, server_id: int, req: AwgSettingsRequ
     except Exception as e:
         logger.exception("Error saving AWG settings")
         return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.get('/api/servers/{server_id}/xray/fingerprint', tags=["Protocols"])
+def api_xray_fingerprint_get(request: Request, server_id: int, protocol: str = 'xray'):
+    """The Reality fingerprint VLESS links are issued with on this connection."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if protocol_base(protocol) != 'xray':
+        return JSONResponse({'error': 'Not an Xray protocol'}, status_code=400)
+    data = load_data()
+    if server_id < 0 or server_id >= len(data['servers']):
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    server = data['servers'][server_id]
+    return {
+        'fingerprint': xray_stored_fingerprint(server, protocol) or XRAY_DEFAULT_FINGERPRINT,
+        'choices': list(XRAY_FINGERPRINTS),
+    }
+
+
+@app.post('/api/servers/{server_id}/xray/fingerprint', tags=["Protocols"])
+def api_xray_fingerprint_save(request: Request, server_id: int, req: XrayFingerprintRequest):
+    """Remember the Reality fingerprint VLESS links are issued with.
+
+    Panel-side only (a protocol record field in data.json): Reality does not
+    pin the client hello, so the node is not touched and links already issued
+    keep working. fingerprint=None resets to the built-in default.
+    """
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if protocol_base(req.protocol) != 'xray':
+        return JSONResponse({'error': 'Not an Xray protocol'}, status_code=400)
+    fp = (req.fingerprint or '').strip() or None
+    if fp is not None and fp not in XRAY_FINGERPRINTS:
+        return JSONResponse({'error': 'Unknown fingerprint'}, status_code=400)
+    try:
+        data = load_data()
+        if server_id < 0 or server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        record = server.setdefault('protocols', {}).setdefault(req.protocol, {})
+        if fp is None:
+            record.pop('fingerprint', None)
+        else:
+            record['fingerprint'] = fp
+        save_data(data)
+        return {'status': 'success', 'fingerprint': fp or XRAY_DEFAULT_FINGERPRINT}
+    except Exception:
+        logger.exception("Error saving Xray fingerprint")
+        return JSONResponse({'error': 'internal_error', 'code': 'internal_error'},
+                            status_code=500)
 
 
 IPV6_CONFLICT_CODES = frozenset({
@@ -10020,6 +10101,11 @@ def api_add_connection(request: Request, server_id: int, req: AddConnectionReque
             )
         elif protocol_base(req.protocol) == 'wireguard':
             result = manager.add_client(req.name, pub_host, public_port=pub_port)
+        elif protocol_base(req.protocol) == 'xray':
+            result = manager.add_client(req.protocol, req.name, pub_host, port,
+                                        public_port=pub_port,
+                                        fingerprint=xray_stored_fingerprint(server, req.protocol),
+                                        warp_ctx=srv_warp_ctx(server, req.protocol))
         else:
             result = manager.add_client(req.protocol, req.name, pub_host, port,
                                         public_port=pub_port,
@@ -10363,7 +10449,7 @@ def api_get_connection_config(request: Request, server_id: int, req: ConnectionA
         ssh = get_ssh(server)
         ssh.connect()
         manager = get_protocol_manager(ssh, req.protocol)
-        config = _manager_call(manager, 'get_client_config', req.protocol, req.client_id, pub_host, port, public_port=pub_port)
+        config = _manager_call(manager, 'get_client_config', req.protocol, req.client_id, pub_host, port, public_port=pub_port, **xray_fp_kwargs(server, req.protocol))
         ssh.disconnect()
         return {'config': config, **config_payloads(config, server, req.protocol)}
     except Exception as e:
@@ -10748,7 +10834,7 @@ async def api_add_user_connection(request: Request, user_id: str, req: AddUserCo
             # Use existing client
             target_client_id = req.client_id
             # Retrieve config for existing client
-            config = await asyncio.to_thread(_manager_call, manager, 'get_client_config', req.protocol, req.client_id, pub_host, port, public_port=pub_port)
+            config = await asyncio.to_thread(_manager_call, manager, 'get_client_config', req.protocol, req.client_id, pub_host, port, public_port=pub_port, **xray_fp_kwargs(server, req.protocol))
             result = {'client_id': target_client_id, 'config': config}
         else:
             # Create new client
@@ -10761,6 +10847,12 @@ async def api_add_user_connection(request: Request, user_id: str, req: AddUserCo
                     secret=req.telemt_secret,
                     user_ad_tag=req.telemt_ad_tag,
                     max_tcp_conns=req.telemt_max_conns
+                )
+            elif protocol_base(req.protocol) == 'xray':
+                result = await asyncio.to_thread(
+                    manager.add_client, req.protocol, req.name, pub_host, port,
+                    public_port=pub_port,
+                    fingerprint=xray_stored_fingerprint(server, req.protocol)
                 )
             else:
                 result = await asyncio.to_thread(manager.add_client, req.protocol, req.name, pub_host, port, public_port=pub_port)
@@ -11138,7 +11230,7 @@ def api_share_config(token: str, connection_id: str, request: Request):
         ssh.connect()
         # Use appropriate manager for the protocol
         manager = get_protocol_manager(ssh, conn['protocol'])
-        config = _manager_call(manager, 'get_client_config', conn['protocol'], conn['client_id'], pub_host, port, public_port=pub_port)
+        config = _manager_call(manager, 'get_client_config', conn['protocol'], conn['client_id'], pub_host, port, public_port=pub_port, **xray_fp_kwargs(server, conn['protocol']))
         ssh.disconnect()
         return {'config': config, **config_payloads(config, server, conn['protocol'])}
     except Exception as e:
@@ -11170,7 +11262,7 @@ def api_my_connection_config(request: Request, connection_id: str):
         ssh.connect()
         # Use appropriate manager for the protocol (fixes Telemt/Xray not working for users)
         manager = get_protocol_manager(ssh, conn['protocol'])
-        config = _manager_call(manager, 'get_client_config', conn['protocol'], conn['client_id'], pub_host, port, public_port=pub_port)
+        config = _manager_call(manager, 'get_client_config', conn['protocol'], conn['client_id'], pub_host, port, public_port=pub_port, **xray_fp_kwargs(server, conn['protocol']))
         ssh.disconnect()
         return {'config': config, **config_payloads(config, server, conn['protocol'])}
     except Exception as e:
