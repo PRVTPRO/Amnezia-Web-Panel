@@ -569,16 +569,8 @@ def load_data():
     data.setdefault('users', [])
     data.setdefault('user_connections', [])
     data.setdefault('api_tokens', [])
-    users_migrated = False
-    for user in data.get('users', []):
-        raw_limit = user.get('max_connections', 0)
-        try:
-            normalized_limit = max(0, min(100, int(raw_limit or 0)))
-        except (TypeError, ValueError, OverflowError):
-            normalized_limit = 0
-        if user.get('max_connections') != normalized_limit:
-            user['max_connections'] = normalized_limit
-            users_migrated = True
+    # Legacy users inherit the configured limit through ConnectionService.
+    # A read must not migrate unrelated users or persist defaults on denial.
     settings = data.setdefault('settings', {})
     settings.setdefault('appearance', {
         'title': 'Amnezia',
@@ -643,7 +635,7 @@ def load_data():
         server.pop('rkn_block_enabled', None)
     # Transparent upgrade: legacy plaintext SSH fields are sealed atomically on
     # first read, then only the AES-GCM envelope is kept on disk.
-    needs_save = users_migrated
+    needs_save = False
     if any(isinstance(s, dict) and ('password' in s or 'private_key' in s)
            for s in data.get('servers', [])):
         from credential_store import CredentialStore, default_key_path

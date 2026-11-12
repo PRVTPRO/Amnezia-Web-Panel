@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from typing import Optional
 import unittest
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi.responses import JSONResponse
 from user_state import reconcile_user_state, traffic_server_identity
 
@@ -36,7 +36,7 @@ def actual_code(path, data_file, request_type=object, response_type=JSONResponse
             node.decorator_list = []
     ns = dict(
         asyncio=asyncio, datetime=datetime, os=os, json=json, tempfile=tempfile,
-        BaseModel=BaseModel, Optional=Optional, Request=request_type,
+        BaseModel=BaseModel, Field=Field, Optional=Optional, Request=request_type,
         JSONResponse=response_type, DATA_FILE=str(data_file),
         DATA_LOCK=asyncio.Lock(), DEFAULT_MAIL_SETTINGS={},
         DEFAULT_SELF_SERVICE_SETTINGS={}, logger=logging.getLogger('mock-panel'),
