@@ -578,6 +578,14 @@
     .connection-sort-menu label { margin-top: 3px; color: var(--text-muted); font-size: .75rem; font-weight: 600; }
     .connection-sort-menu .form-select { width: 100%; min-width: 0; }
 
+    @media (max-width: 640px) {
+        /* Keep the sort popup inside the viewport on narrow screens. */
+        .connection-sort-menu {
+            inset-inline-start: 0;
+            inset-inline-end: auto;
+        }
+    }
+
     /* Keep the protocol picker visually aligned with the adjacent header buttons. */
     .connection-protocol-select {
         width: auto;
