@@ -2948,6 +2948,7 @@ class EditConnectionRequest(BaseModel):
 
 
 class ConnectionActionRequest(BaseModel):
+    server_uid: Optional[str] = None
     protocol: str = 'awg'
     client_id: str = ''
     allow_unverified: bool = False
@@ -3157,6 +3158,7 @@ def _normalize_telegram_id(value):
 
 
 class AddUserConnectionRequest(BaseModel):
+    server_uid: Optional[str] = None
     server_id: int
     protocol: str = 'awg'
     name: str = 'VPN Connection'
@@ -10338,7 +10340,7 @@ def api_get_connection_config(request: Request, server_id: int, req: ConnectionA
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
         data = load_data()
-        if server_id >= len(data['servers']):
+        if server_id < 0 or server_id >= len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         # Only explicit privileged roles may view unowned connections.
         if user.get('role') not in ('admin', 'support'):
@@ -10355,16 +10357,46 @@ def api_get_connection_config(request: Request, server_id: int, req: ConnectionA
             if not owned:
                 return JSONResponse({'error': 'Forbidden'}, status_code=403)
         server = data['servers'][server_id]
+        expected_uid = getattr(req, 'server_uid', None)
+        if expected_uid is not None and server.get('uid') != expected_uid:
+            return JSONResponse({'error': 'Server identity changed'}, status_code=409)
+        endpoint = (server.get('uid'), server.get('host'), server.get('ssh_port', 22), server.get('username'))
         if not req.client_id:
             return JSONResponse({'error': 'Client ID is required'}, status_code=400)
+        if expected_uid is not None and req.protocol not in server.get('protocols', {}):
+            return JSONResponse({'error': 'Protocol instance not found'}, status_code=404)
         proto_info = server.get('protocols', {}).get(req.protocol, {})
+        instance_fields = ('installed', 'base_protocol', 'instance', 'container_name',
+                           'port', 'public_host', 'public_port')
+        instance_identity = tuple(proto_info.get(key) for key in instance_fields)
         port = proto_info.get('port', '55424')
         pub_host, pub_port = protocol_public_endpoint(server, req.protocol)
         ssh = get_ssh(server)
-        ssh.connect()
-        manager = get_protocol_manager(ssh, req.protocol)
-        config = _manager_call(manager, 'get_client_config', req.protocol, req.client_id, pub_host, port, public_port=pub_port)
-        ssh.disconnect()
+        try:
+            ssh.connect()
+            manager = get_protocol_manager(ssh, req.protocol)
+            config = _manager_call(manager, 'get_client_config', req.protocol, req.client_id, pub_host, port, public_port=pub_port)
+        finally:
+            ssh.disconnect()
+        if expected_uid is not None:
+            fresh = load_data()
+            latest = fresh.get('servers', [])
+            current = latest[server_id] if server_id < len(latest) else {}
+            actual = (current.get('uid'), current.get('host'), current.get('ssh_port', 22), current.get('username'))
+            current_info = current.get('protocols', {}).get(req.protocol, {})
+            if (actual != endpoint or req.protocol not in current.get('protocols', {})
+                    or tuple(current_info.get(key) for key in instance_fields) != instance_identity):
+                return JSONResponse({'error': 'Server identity changed'}, status_code=409)
+            actor = next((u for u in fresh.get('users', []) if u.get('id') == user['id']), None)
+            if not actor or not actor.get('enabled', True):
+                return JSONResponse({'error': 'Forbidden'}, status_code=403)
+            if actor.get('role') not in ('admin', 'support') and not any(
+                    c.get('user_id') == actor['id'] and c.get('server_id') == server_id
+                    and c.get('client_id') == req.client_id
+                    and protocol_base(c.get('protocol', '')) == protocol_base(req.protocol)
+                    and protocol_instance(c.get('protocol', '')) == protocol_instance(req.protocol)
+                    for c in fresh.get('user_connections', [])):
+                return JSONResponse({'error': 'Forbidden'}, status_code=403)
         return {'config': config, **config_payloads(config, server, req.protocol)}
     except Exception as e:
         logger.exception("Error getting connection config")
@@ -10700,8 +10732,11 @@ async def api_add_user_connection(request: Request, user_id: str, req: AddUserCo
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
         if not req.client_id and protocol_base(req.protocol) in ('awg', 'awg2', 'awg3', 'awg_legacy'):
+            options = {}
+            if getattr(req, 'server_uid', None) is not None:
+                options['expected_server_uid'] = req.server_uid
             result = await peer_creates.create(user_id, req.server_id, req.protocol,
-                                               req.name, req.operation_id)
+                                               req.name, req.operation_id, **options)
             data = load_data()
             operation = peer_creates.journal.read()[result['operation_id']]
             server = next(server for server in data['servers']
@@ -11896,6 +11931,21 @@ def _backup_admin(request):
     if isinstance(actor, dict) and actor.get('role') != 'admin':
         return None
     return actor
+
+
+@app.get('/api/integration/inventory', tags=["Servers"])
+async def api_integration_inventory(request: Request):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403,
+                            headers=PRIVATE_HEADERS)
+    from integration_inventory import integration_inventory
+    try:
+        async with DATA_LOCK:
+            result = integration_inventory(load_data(), protocol_base)
+        return JSONResponse(result, headers=PRIVATE_HEADERS)
+    except (ValueError, TypeError, AttributeError):
+        return JSONResponse({'error': 'Inventory cannot be verified'},
+                            status_code=503, headers=PRIVATE_HEADERS)
 
 
 @app.get('/api/settings/backup/download', tags=["Settings"])
