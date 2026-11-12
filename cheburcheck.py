@@ -4,8 +4,9 @@ in Russia (RKN lists + TSPU/SNI/DNS probes via https://cheburcheck.ru).
 Public API:
   - fetch_check(target)            -> static check (lists, geo, complaints) or None
   - fetch_probe(id, timeout, ...)  -> aggregated probe dict or None (retries on 429)
-  - classify(static_blocked, verdicts, responses) -> 'banned'|'clean'|'unknown'
-  - blocking_regions(regions)      -> regions carrying a blocking verdict
+  - classify(static_blocked, verdicts, responses, is_static_cdn=False) -> status
+  - select_verdict(regions, is_static_cdn) -> verdict by majority vote (like the site)
+  - blocking_regions(regions, is_static_cdn) -> regions carrying a blocking verdict
   - build_summary(host, static, probe, error=None) -> stored record for one server
 """
 import asyncio
@@ -27,6 +28,11 @@ CHECK_SPACING = 2.2
 PROBE_SPACING = 12.5
 
 BLOCKING_VERDICTS = {"tspu_block", "sni_block", "dns_spoofing", "cdn_block"}
+# Only the TSPU verdict means "banned": SNI/DNS/CDN hits stay visible as
+# restrictions but do not flip the status. Note that a raw cdn_block is only
+# meaningful for targets found in CDN subnets (see normalize_verdicts).
+BAN_VERDICTS = {"tspu_block"}
+RESTRICTION_VERDICTS = {"sni_block", "dns_spoofing", "cdn_block"}
 
 # Global spacing across all callers (single panel IP).
 _check_lock = asyncio.Lock()
@@ -174,6 +180,13 @@ async def _read_probe_stream(check_id, timeout):
             "dpi_hop": r.get("dpi_hop"),
             "target_hop": r.get("target_hop"),
             "cached": bool(r.get("cached")),
+            # Needed to mirror the site's verdict display: a raw cdn_block only
+            # counts when the static check found the target in CDN subnets, and
+            # a plain ok turns into cdn_block for CDN targets whose control
+            # hosts were not unblocked.
+            "cdn_unblocked": bool(r.get("cdn_unblocked")),
+            "host_results": (None if r.get("host_results") is None
+                             else len(r.get("host_results") or [])),
         })
     return {
         "online_probes": (started or {}).get("online_probes"),
@@ -197,10 +210,14 @@ def _quote(s):
 
 
 def classify(static_blocked, probe_verdicts, probe_responses):
-    """Return 'banned' / 'clean' / 'unknown'."""
+    """Return 'banned' / 'clean' / 'unknown'.
+
+    Only the TSPU verdict (and a static registry hit) counts as banned: SNI,
+    DNS and CDN verdicts are restrictions, not bans.
+    """
     if static_blocked:
         return "banned"
-    if any(v in BLOCKING_VERDICTS for v in (probe_verdicts or [])):
+    if any(v in BAN_VERDICTS for v in (probe_verdicts or [])):
         return "banned"
     if not probe_responses:
         return "unknown"
@@ -209,13 +226,81 @@ def classify(static_blocked, probe_verdicts, probe_responses):
     return "clean"
 
 
-def blocking_regions(regions):
+# Priority used by the site to pick one verdict per probe and then by majority
+# vote (frontend selectProbeVerdict).
+VERDICT_PRIORITY = ("tspu_block", "sni_block", "dns_spoofing", "whitelist",
+                    "cdn_block", "ok", "uncertain")
+
+
+def static_is_cdn(static):
+    """True when the static check found the target in CDN provider subnets."""
+    return bool((static or {}).get("cdn_providers"))
+
+
+def normalize_verdicts(verdicts, is_static_cdn, cdn_unblocked=False,
+                       host_results=None):
+    """Mirror the site's displayProbeVerdicts() mapping.
+
+    * raw cdn_block -> cdn_block for CDN targets, otherwise -> ok;
+    * ok -> cdn_block for CDN targets whose control hosts were not unblocked
+      (``cdn_unblocked`` false) and that reported host results;
+    * when any blocking verdict is present, plain ok entries are dropped.
+    """
     out = []
-    for r in regions or []:
-        vs = r.get("verdicts") or []
-        if any(v in BLOCKING_VERDICTS for v in vs):
-            out.append(r)
+    for verdict in verdicts or []:
+        if verdict == "cdn_block":
+            out.append("cdn_block" if is_static_cdn else "ok")
+        elif (is_static_cdn and not cdn_unblocked
+              and (host_results is None or host_results != 0)
+              and verdict == "ok"):
+            out.append("cdn_block")
+        else:
+            out.append(verdict)
+    if any(v in BLOCKING_VERDICTS for v in out):
+        out = [v for v in out if v != "ok"]
     return out
+
+
+def region_verdict(region, is_static_cdn):
+    """Highest-priority verdict of one probe, after the display mapping."""
+    verdicts = normalize_verdicts(
+        region.get("verdicts"), is_static_cdn,
+        cdn_unblocked=region.get("cdn_unblocked"),
+        host_results=region.get("host_results"))
+    return next((v for v in VERDICT_PRIORITY if v in verdicts), None)
+
+
+def select_verdict(regions, is_static_cdn):
+    """Majority vote across probes; ties go to the higher-priority verdict."""
+    votes = {}
+    for region in regions or []:
+        verdict = region_verdict(region, is_static_cdn)
+        if verdict:
+            votes[verdict] = votes.get(verdict, 0) + 1
+    winner = None
+    best = 0
+    for verdict in VERDICT_PRIORITY:
+        count = votes.get(verdict, 0)
+        if count > best:
+            winner, best = verdict, count
+    return None if winner == "uncertain" else winner
+
+
+def ban_regions(regions, is_static_cdn=False):
+    """Regions whose verdict is a TSPU block (the only ban verdict)."""
+    return [r for r in (regions or [])
+            if region_verdict(r, is_static_cdn) in BAN_VERDICTS]
+
+
+def restricted_regions(regions, is_static_cdn=False):
+    """Regions carrying SNI/DNS/CDN restrictions (not bans)."""
+    return [r for r in (regions or [])
+            if region_verdict(r, is_static_cdn) in RESTRICTION_VERDICTS]
+
+
+# Kept for callers/tests written before the ban/restriction split.
+def blocking_regions(regions, is_static_cdn=False):
+    return ban_regions(regions, is_static_cdn)
 
 
 def in_quiet_hours(cfg, now=None):
@@ -264,13 +349,30 @@ def build_summary(host, static, probe, error=None):
     pv = probe.get("verdicts") or []
     pr = probe.get("response_count") or 0
     regions = probe.get("regions") or []
-    blocked = blocking_regions(regions)
+    is_static_cdn = static_is_cdn(static)
+    banned = ban_regions(regions, is_static_cdn)
+    restricted = restricted_regions(regions, is_static_cdn)
     # Count only regions that actually returned verdicts: ``response_count``
     # comes from the "done" event and may exceed what the stream delivered.
     answered = len([r for r in regions if r.get("verdicts")])
-    status = classify(bool(static.get("blocked")), pv, pr)
+    winner = select_verdict(regions, is_static_cdn)
+    # A ban is a TSPU verdict or a static registry hit; SNI/DNS/CDN verdicts do
+    # not flip the status (they are reported as restrictions).
+    if banned or bool(static.get("blocked")):
+        status = "banned"
+    elif winner in ("ok", "whitelist") or (answered and not banned):
+        status = "clean"
+    else:
+        status = "unknown"
     if status == "unknown" and not error:
         error = "probe returned no verdicts" if pr == 0 else "probe undecided"
+    # Verdict counts as displayed by the site (after the CDN mapping and the
+    # per-probe priority), plus the raw counts for diagnostics.
+    display_counts = {}
+    for region in regions:
+        verdict = region_verdict(region, is_static_cdn)
+        if verdict:
+            display_counts[verdict] = display_counts.get(verdict, 0) + 1
     record = {
         "target": host,
         "status": status,                      # banned / clean / unknown
@@ -287,11 +389,16 @@ def build_summary(host, static, probe, error=None):
         "probe": {
             "online_probes": probe.get("online_probes"),
             "response_count": pr,
-            "verdict_counts": probe.get("verdict_counts") or {},
-            "blocking_regions": len(blocked),
-            "clear_regions": max(0, answered - len(blocked)),
+            "verdict": winner,
+            "verdict_counts": display_counts,
+            "raw_verdict_counts": probe.get("verdict_counts") or {},
+            "static_cdn": is_static_cdn,
+            "ban_regions": len(banned),
+            "restricted_regions": len(restricted),
+            "blocking_regions": len(banned),        # compat: ban-based
+            "clear_regions": max(0, answered - len(banned)),
         },
-        "partial": bool(answered and 0 < len(blocked) < answered),
+        "partial": bool(answered and 0 < len(banned) < answered),
     }
     if error:
         record["error"] = str(error)

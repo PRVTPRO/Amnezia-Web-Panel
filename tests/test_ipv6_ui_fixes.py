@@ -63,6 +63,7 @@ NEW_KEYS = {
     "cheburcheck_no_targets",
     "cheburcheck_targets_intro",
     "cheburcheck_targets_show",
+    "cheburcheck_restrictions",
     "cheburcheck_override_placeholder",
     "cheburcheck_ssh_fallback_warning",
     "cheburcheck_override_host_warning",
@@ -126,6 +127,7 @@ CHEBURCHECK_KEYS = {
     'cheburcheck_target', 'cheburcheck_status', 'cheburcheck_regions_short',
     'cheburcheck_partial', 'cheburcheck_no_targets', 'cheburcheck_targets_intro',
     'cheburcheck_targets_show',
+    'cheburcheck_restrictions',
     'cheburcheck_override_placeholder', 'cheburcheck_ssh_fallback_warning',
     'cheburcheck_override_host_warning',
 }

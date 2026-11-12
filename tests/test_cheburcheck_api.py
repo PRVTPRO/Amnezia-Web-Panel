@@ -158,6 +158,7 @@ class CheburcheckApiTests(unittest.TestCase):
         self.assertEqual(ids['0']['status'], 'unknown')
         self.assertEqual(ids['0']['probe'], {'response_count': 0,
                                              'blocking_regions': 0,
+                                             'restricted_regions': 0,
                                              'clear_regions': 0})
 
     def test_flags_show_cached_verdict_for_flagged_server(self):
@@ -624,6 +625,7 @@ class CacheTests(unittest.TestCase):
         self.assertEqual(agg['target'], 'b.example')
         self.assertEqual(agg['probe'], {'response_count': 8,
                                         'blocking_regions': 2,
+                                        'restricted_regions': 0,
                                         'clear_regions': 5})
         self.assertIn('probe failed', agg['error'])
 

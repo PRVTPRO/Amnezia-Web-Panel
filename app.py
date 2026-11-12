@@ -3843,7 +3843,7 @@ def _cheburcheck_synthetic(target, error):
                    'reverse_lookup': []},
         'probe': {'online_probes': None, 'response_count': 0,
                   'verdict_counts': {}, 'blocking_regions': 0,
-                  'clear_regions': 0},
+                  'restricted_regions': 0, 'clear_regions': 0},
         'partial': False,
     }
 
@@ -3979,6 +3979,8 @@ def _cheburcheck_aggregate(records):
                    key=lambda item: (-rank.get(item[1].get('status'), 0), item[0]))[0]
     blocking = sum(int((record.get('probe') or {}).get('blocking_regions') or 0)
                    for record in records.values())
+    restricted = sum(int((record.get('probe') or {}).get('restricted_regions') or 0)
+                     for record in records.values())
     clear = sum(int((record.get('probe') or {}).get('clear_regions') or 0)
                 for record in records.values())
     response = sum(int((record.get('probe') or {}).get('response_count') or 0)
@@ -3996,6 +3998,7 @@ def _cheburcheck_aggregate(records):
         'target': worst[0],
         'probe': {'response_count': response,
                   'blocking_regions': blocking,
+                  'restricted_regions': restricted,
                   'clear_regions': clear},
         'error': '; '.join(errors) if errors else None,
     }

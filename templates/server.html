@@ -7708,13 +7708,16 @@ async function loadCheburcheck() {
             : (status === 'clean' ? _('cheburcheck_clean') : _('cheburcheck_unknown'));
         const br = ((r && r.probe) || {}).blocking_regions || 0;
         const rc = br + (((r && r.probe) || {}).clear_regions || 0);
+        const rr = ((r && r.probe) || {}).restricted_regions || 0;
         const age = cheburAge(r && r.checked_at);
         // Staleness is a timestamp comparison: locale text never matches.
         const stale = cheburcheckStale(r && r.checked_at);
         const staleTag = stale ? ' &#9888;&#65039; ' + _('cheburcheck_stale') : '';
         const errTag = (r && r.error)
             ? ' &middot; ' + _('cheburcheck_error') + ': ' + escapeHtml(String(r.error)) : '';
+        const restrictTag = rr > 0 ? ` &middot; ${_('cheburcheck_restrictions')}: ${rr}` : '';
         el.innerHTML = `${icon} <b>${label}</b> &middot; ${_('cheburcheck_regions_blocked')}: ${br}/${rc}`
+            + restrictTag
             + (age ? ` &middot; ${_('cheburcheck_checked_at')}: ${age}${staleTag}` : '')
             + errTag;
         const targets = (r && r.targets) || {};
@@ -7756,14 +7759,16 @@ function cheburcheckTargetRow(target, rec) {
         : (status === 'clean' ? _('cheburcheck_clean') : _('cheburcheck_unknown'));
     const br = (rec.probe || {}).blocking_regions || 0;
     const rc = br + ((rec.probe || {}).clear_regions || 0);
+    const rr = (rec.probe || {}).restricted_regions || 0;
     const age = cheburAge(rec.checked_at);
     const staleTag = cheburcheckStale(rec.checked_at) ? ' &#9888;&#65039;' : '';
     const partialTag = rec.partial ? ' &middot; ' + _('cheburcheck_partial') : '';
+    const restrictTag = rr > 0 ? ` &middot; ${_('cheburcheck_restrictions')}: ${rr}` : '';
     const err = rec.error
         ? ' &middot; ' + _('cheburcheck_error') + ': ' + escapeHtml(String(rec.error)) : '';
     const border = 'padding:4px 8px;border-top:1px solid var(--border,#333);';
     return `<tr><td style="${border}">${escapeHtml(String(target))}</td>`
-        + `<td style="${border}">${icon} <b>${label}</b>${partialTag}</td>`
+        + `<td style="${border}">${icon} <b>${label}</b>${partialTag}${restrictTag}</td>`
         + `<td style="${border}">${br}/${rc}</td>`
         + `<td style="${border}">${age ? escapeHtml(age) + staleTag : '&mdash;'}</td>`
         + `<td style="${border}">${err}</td></tr>`;

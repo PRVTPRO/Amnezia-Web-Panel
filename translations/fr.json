@@ -1250,6 +1250,7 @@
   "cheburcheck_error": "Check failed",
   "cheburcheck_checked_at": "Checked",
   "cheburcheck_regions_blocked": "regions blocked",
+  "cheburcheck_restrictions": "restrictions (SNI/DNS/CDN)",
   "cheburcheck_banned": "Banned",
   "cheburcheck_clean": "Available",
   "cheburcheck_target": "Target",

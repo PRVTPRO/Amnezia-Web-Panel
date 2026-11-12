@@ -201,6 +201,87 @@ class TestBuildSummaryFailurePaths(unittest.TestCase):
         self.assertEqual(s["probe"]["blocking_regions"], 0)
 
 
+class TestCdnAndVerdictVoting(unittest.TestCase):
+    """Only the TSPU verdict is a ban; SNI/DNS/CDN are restrictions."""
+
+    def test_sni_and_cdn_are_not_bans(self):
+        self.assertEqual(cheburcheck.classify(False, ["sni_block"], 5), "clean")
+        self.assertEqual(cheburcheck.classify(False, ["cdn_block"], 5), "clean")
+        self.assertEqual(cheburcheck.classify(False, ["dns_spoofing"], 5), "clean")
+        self.assertEqual(cheburcheck.classify(False, ["tspu_block"], 5), "banned")
+        self.assertEqual(cheburcheck.classify(True, ["ok"], 5), "banned")
+
+    def test_ok_turns_into_cdn_block_for_static_cdn_without_unblocked_hosts(self):
+        verdicts = cheburcheck.normalize_verdicts(
+            ["ok"], True, cdn_unblocked=False, host_results=3)
+        self.assertEqual(verdicts, ["cdn_block"])
+        verdicts = cheburcheck.normalize_verdicts(
+            ["ok"], True, cdn_unblocked=True, host_results=3)
+        self.assertEqual(verdicts, ["ok"])
+
+    def test_display_counts_and_status_for_a_non_cdn_target(self):
+        # 24 raw cdn_block + 10 ok -> 34 "Доступен", one SNI block, 5 whitelist.
+        regions = ([{"region": f"r{i}", "verdicts": ["cdn_block"],
+                     "cdn_unblocked": False, "host_results": 2} for i in range(24)]
+                   + [{"region": f"o{i}", "verdicts": ["ok"],
+                       "cdn_unblocked": False, "host_results": 2} for i in range(10)]
+                   + [{"region": "s", "verdicts": ["sni_block"],
+                       "cdn_unblocked": False, "host_results": 2}]
+                   + [{"region": f"w{i}", "verdicts": ["whitelist"],
+                       "cdn_unblocked": False, "host_results": 2} for i in range(5)]
+                   + [{"region": "u", "verdicts": ["uncertain"],
+                       "cdn_unblocked": False, "host_results": 2}])
+        probe = {"regions": regions, "response_count": 41,
+                 "verdicts": ["cdn_block"] * 24 + ["ok"] * 10 + ["sni_block",
+                                                                 "uncertain"]
+                 + ["whitelist"] * 5,
+                 "verdict_counts": {"cdn_block": 24, "ok": 10, "sni_block": 1,
+                                    "whitelist": 5, "uncertain": 1}}
+        rec = cheburcheck.build_summary("lamanama.duckdns.org", {}, probe)
+        self.assertEqual(rec["status"], "clean")
+        self.assertEqual(rec["probe"]["verdict"], "ok")
+        self.assertEqual(rec["probe"]["verdict_counts"],
+                         {"ok": 34, "sni_block": 1, "whitelist": 5,
+                          "uncertain": 1})
+        # No TSPU verdict -> nothing banned, but the SNI hit is a restriction.
+        self.assertEqual(rec["probe"]["ban_regions"], 0)
+        self.assertEqual(rec["probe"]["blocking_regions"], 0)
+        self.assertEqual(rec["probe"]["restricted_regions"], 1)
+        self.assertEqual(rec["probe"]["clear_regions"], 41)
+        self.assertFalse(rec["probe"]["static_cdn"])
+
+    def test_tspu_verdict_bans(self):
+        probe = {"regions": [{"region": "r", "verdicts": ["tspu_block"],
+                              "cdn_unblocked": False, "host_results": 2}],
+                 "response_count": 1, "verdicts": ["tspu_block"],
+                 "verdict_counts": {"tspu_block": 1}}
+        rec = cheburcheck.build_summary("1.2.3.4", {}, probe)
+        self.assertEqual(rec["status"], "banned")
+        self.assertEqual(rec["probe"]["ban_regions"], 1)
+        self.assertEqual(rec["probe"]["restricted_regions"], 0)
+
+    def test_cdn_target_reports_restriction_not_ban(self):
+        probe = {"regions": [{"region": "r", "verdicts": ["cdn_block"],
+                              "cdn_unblocked": False, "host_results": 2}],
+                 "response_count": 1, "verdicts": ["cdn_block"],
+                 "verdict_counts": {"cdn_block": 1}}
+        static = {"cdn_providers": {"Cloudflare": [{"subnet": "1.2.3.0/24"}]}}
+        rec = cheburcheck.build_summary("cdn.example", static, probe)
+        self.assertEqual(rec["status"], "clean")
+        self.assertEqual(rec["probe"]["restricted_regions"], 1)
+        self.assertTrue(rec["probe"]["static_cdn"])
+
+    def test_majority_vote_and_restriction_counters(self):
+        regions = [{"region": "s", "verdicts": ["sni_block"],
+                    "cdn_unblocked": False, "host_results": 2}]
+        regions += [{"region": f"o{i}", "verdicts": ["ok"],
+                     "cdn_unblocked": False, "host_results": 2}
+                    for i in range(34)]
+        self.assertEqual(cheburcheck.select_verdict(regions, False), "ok")
+        self.assertEqual(len(cheburcheck.ban_regions(regions, False)), 0)
+        self.assertEqual(len(cheburcheck.restricted_regions(regions, False)), 1)
+
+
 class TestQuietHours(unittest.TestCase):
     """in_quiet_hours: the window during which no check runs."""
 
