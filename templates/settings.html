@@ -753,6 +753,13 @@
                 </label>
                 <p class="form-hint">{{ _('cheburcheck_enable_hint') }}</p>
             </div>
+            {# Shown outside #cb_body: with the master switch off the admin must see
+               why nothing is checked, not an empty collapsed body. #}
+            <div id="cb_targets_block" style="margin-bottom: var(--space-md); {% if not settings.get('cheburcheck', {}).get('enabled') %}display:none;{% endif %}">
+                <p class="form-hint" style="margin-bottom:6px;">{{ _('cheburcheck_targets_intro') }}</p>
+                <div id="cb_targets_list" class="text-muted"></div>
+            </div>
+            <p id="cb_master_off" class="form-hint" style="margin-bottom: var(--space-md); {% if settings.get('cheburcheck', {}).get('enabled') %}display:none;{% endif %}">{{ _('cheburcheck_master_off') }}</p>
             {# Everything below is inert until the master switch is on: no checks,
                no badges, no header button, no popup anywhere in the panel. #}
             <div id="cb_body" style="{% if not settings.get('cheburcheck', {}).get('enabled') %}display:none;{% endif %}">
@@ -788,13 +795,20 @@
             </div>
             <div class="form-group">
                 <label class="form-label">{{ _('cheburcheck_servers_label') }}</label>
-                <div id="cb_servers_list" style="display:flex; flex-direction:column; gap:6px; margin-top:6px;">
+                <div id="cb_servers_list" style="display:flex; flex-direction:column; gap:10px; margin-top:6px;">
                     {% for server in servers %}
-                    <label class="form-label" style="font-weight:normal;">
-                        <input type="checkbox" class="cb-server" data-uid="{{ server.uid }}"
-                            {% if settings.get('cheburcheck', {}).get('servers', {}).get(server.uid) %}checked{% endif %}>
-                        {{ server.name }} ({{ server.host }})
-                    </label>
+                    <div style="display:flex; flex-direction:column; gap:4px;">
+                        <label class="form-label" style="font-weight:normal;">
+                            <input type="checkbox" class="cb-server" data-uid="{{ server.uid }}"
+                                data-name="{{ server.name }}" data-host="{{ server.host }}"
+                                {% if settings.get('cheburcheck', {}).get('servers', {}).get(server.uid) %}checked{% endif %}>
+                            {{ server.name }} ({{ server.host }})
+                        </label>
+                        <input type="text" class="form-input cb-targets" data-uid="{{ server.uid }}"
+                               placeholder="{{ _('cheburcheck_override_placeholder') }}"
+                               value="{{ ((settings.get('cheburcheck', {}).get('targets') or {}).get(server.uid) or []) | join(', ') }}"
+                               style="font-size:0.9em;">
+                    </div>
                     {% endfor %}
                 </div>
                 <p class="form-hint">{{ _('cheburcheck_servers_hint') }}</p>
@@ -1744,15 +1758,91 @@
 </script>
 <script src="/static/js/settings-nav.js?v={{ static_v }}" defer></script>
 <script>
+window.CHEBURCHECK_TARGETS = {{ (cheburcheck_targets or {}) | tojson }};
+window.CHEBURCHECK_SSH_FALLBACK = {{ (cheburcheck_ssh_fallback or {}) | tojson }};
+const CB_WARNING_TEXT = {
+    protocol_fallback: {{ _('cheburcheck_ssh_fallback_warning') | tojson }},
+    protocol_explicit: {{ _('cheburcheck_override_host_warning') | tojson }},
+    override: {{ _('cheburcheck_override_host_warning') | tojson }},
+};
+function cbOverrideValues(input) {
+    return (input.value || '').split(',').map(v => v.trim()).filter(Boolean);
+}
+function renderCheburcheckTargets() {
+    const list = document.getElementById('cb_targets_list');
+    if (!list) return;
+    const enabled = document.getElementById('cb_enabled').checked;
+    const targets = window.CHEBURCHECK_TARGETS || {};
+    const fallback = window.CHEBURCHECK_SSH_FALLBACK || {};
+    list.textContent = '';
+    if (!enabled) return;
+    document.querySelectorAll('.cb-server').forEach(cb => {
+        if (!cb.checked) return;
+        const uid = cb.dataset.uid;
+        const host = cb.dataset.host || '';
+        const name = cb.dataset.name || uid;
+        const input = document.querySelector(`.cb-targets[data-uid="${uid}"]`);
+        const override = input ? cbOverrideValues(input) : [];
+        const addresses = override.length ? override : (targets[uid] || []);
+        const row = document.createElement('div');
+        row.style.marginBottom = '8px';
+        const title = document.createElement('b');
+        title.textContent = name + ': ';
+        row.appendChild(title);
+        const addrs = document.createElement('span');
+        addrs.textContent = addresses.length ? addresses.join(', ')
+            : {{ _('cheburcheck_no_targets') | tojson }};
+        row.appendChild(addrs);
+        const warnings = [];
+        (fallback[uid] || []).forEach(item => {
+            if (item.kind === 'override') return;   // computed from the field below
+            const text = (CB_WARNING_TEXT[item.kind] || '').replace('{name}', item.name || '');
+            if (text) warnings.push(text);
+        });
+        if (override.length && host && override.indexOf(host) !== -1) {
+            warnings.push(CB_WARNING_TEXT.override || '');
+        }
+        if (warnings.length) {
+            const hint = document.createElement('div');
+            hint.className = 'form-hint';
+            hint.textContent = warnings.join(' ');
+            row.appendChild(hint);
+        }
+        list.appendChild(row);
+    });
+    if (!list.childNodes.length) {
+        const empty = document.createElement('div');
+        empty.className = 'form-hint';
+        empty.textContent = {{ _('cheburcheck_none_enabled') | tojson }};
+        list.appendChild(empty);
+    }
+}
+
+function toggleCheburcheckBody(on) {
+    document.getElementById('cb_body').style.display = on ? '' : 'none';
+    const block = document.getElementById('cb_targets_block');
+    const off = document.getElementById('cb_master_off');
+    if (block) block.style.display = on ? '' : 'none';
+    if (off) off.style.display = on ? 'none' : '';
+    renderCheburcheckTargets();
+}
+
 function collectCheburcheckSettings() {
     const servers = {};
     document.querySelectorAll('.cb-server').forEach(cb => {
         if (cb.dataset.uid) servers[cb.dataset.uid] = cb.checked;
     });
+    const targets = {};
+    document.querySelectorAll('.cb-targets').forEach(inp => {
+        if (!inp.dataset.uid) return;
+        const values = cbOverrideValues(inp);
+        if (values.length) targets[inp.dataset.uid] = values;
+    });
     return {
         enabled: document.getElementById('cb_enabled').checked,
         interval_hours: parseInt(document.getElementById('cb_interval').value || '1', 10),
         servers,
+        targets,
         quiet_enabled: document.getElementById('cb_quiet_enabled').checked,
         quiet_start: parseInt(document.getElementById('cb_quiet_start').value || '0', 10),
         quiet_end: parseInt(document.getElementById('cb_quiet_end').value || '0', 10),
@@ -1764,6 +1854,7 @@ async function saveCheburcheckSettings() {
     try {
         await apiCall('/api/settings/cheburcheck', 'POST', collectCheburcheckSettings());
         if (st) st.textContent = '✓ ' + (window._('saved') || 'saved');
+        renderCheburcheckTargets();
     } catch (e) {
         if (st) st.textContent = '✗ ' + (e.message || e);
     }
@@ -1773,7 +1864,7 @@ async function saveCheburcheckSettings() {
 // It persists on its own - hiding the block must look disabled AND stay disabled
 // after a reload, otherwise F5 brings the checkbox back.
 document.getElementById('cb_enabled').addEventListener('change', async (e) => {
-    document.getElementById('cb_body').style.display = e.target.checked ? '' : 'none';
+    toggleCheburcheckBody(e.target.checked);
     const st = document.getElementById('cb_status');
     if (st) st.textContent = '…';
     try {
@@ -1782,6 +1873,13 @@ document.getElementById('cb_enabled').addEventListener('change', async (e) => {
     } catch (err) {
         if (st) st.textContent = '✗ ' + (err.message || err);
     }
+});
+
+document.querySelectorAll('.cb-server').forEach(cb => {
+    cb.addEventListener('change', renderCheburcheckTargets);
+});
+document.querySelectorAll('.cb-targets').forEach(inp => {
+    inp.addEventListener('input', renderCheburcheckTargets);
 });
 
 // Quiet-hour fields only make sense once the window is enabled.
@@ -1798,8 +1896,29 @@ async function runAllCheburcheck() {
     if (st) st.textContent = '…';
     try {
         const res = await apiCall('/api/servers/cheburcheck/run_all', 'POST', {});
-        const count = res.started || 0;
-        if (!count) { if (st) st.textContent = (window._('cheburcheck_none_enabled') || 'no servers selected'); return; }
+        const text = (key, fallback) => (window._(key) || fallback);
+        if (res && res.already_running) {
+            if (st) st.textContent = text('cheburcheck_still_running', 'check in progress');
+            return;
+        }
+        if (res && res.reason === 'disabled') {
+            if (st) st.textContent = text('cheburcheck_master_off', 'Cheburcheck master switch is off');
+            return;
+        }
+        if (res && res.reason === 'no_servers') {
+            if (st) st.textContent = text('cheburcheck_none_enabled', 'no servers selected');
+            return;
+        }
+        if (res && res.reason === 'no_targets') {
+            if (st) st.textContent = text('cheburcheck_no_targets', 'no targets configured');
+            return;
+        }
+        if (res && res.reason === 'nothing_started') {
+            if (st) st.textContent = text('cheburcheck_still_running', 'check in progress');
+            return;
+        }
+        const count = (res && res.started) || 0;
+        if (!count) return;
         if (st) st.textContent = (window._('cheburcheck_running_all') || 'checking') + ' ' + count;
         for (let i = 0; i < 60; i++) {
             await new Promise(r => setTimeout(r, 5000));
@@ -1817,7 +1936,6 @@ async function runAllCheburcheck() {
         if (st) st.textContent = '✗ ' + (e.message || e);
     }
 }
-</script>
-
+renderCheburcheckTargets();
 </script>
 {% endblock %}

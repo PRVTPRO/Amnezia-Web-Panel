@@ -7699,30 +7699,74 @@ function cheburAge(checkedAt) {
 async function loadCheburcheck() {
     try {
         const r = await apiCall(`/api/servers/${SERVER_ID}/cheburcheck`, 'GET');
-        const d = r && r.data;
         const el = document.getElementById('cheburcheck-summary');
+        const details = document.getElementById('cheburcheck-details');
         if (!el) return;
-        if (!d) { el.textContent = _('cheburcheck_no_data'); return; }
-        const status = d.status || 'unknown';
+        const status = (r && r.status) || 'unknown';
         const icon = status === 'banned' ? '&#128683;' : (status === 'clean' ? '&#9989;' : '&#128993;');
         const label = status === 'banned' ? _('cheburcheck_banned')
             : (status === 'clean' ? _('cheburcheck_clean') : _('cheburcheck_unknown'));
-        const br = (d.probe || {}).blocking_regions || 0;
-        const rc = (d.probe || {}).response_count || 0;
-        const age = cheburAge(d.checked_at);
-        // A stale verdict is not a current one: mark it instead of letting an
-        // old "clean" read as today's answer.
-        const stale = age && age.indexOf(_('cheburcheck_days_ago')) === 0;
+        const br = ((r && r.probe) || {}).blocking_regions || 0;
+        const rc = br + (((r && r.probe) || {}).clear_regions || 0);
+        const age = cheburAge(r && r.checked_at);
+        // Staleness is a timestamp comparison: locale text never matches.
+        const stale = cheburcheckStale(r && r.checked_at);
         const staleTag = stale ? ' &#9888;&#65039; ' + _('cheburcheck_stale') : '';
-        const errTag = d.error ? ' &middot; ' + _('cheburcheck_error') + ': ' + escapeHtml(String(d.error)) : '';
+        const errTag = (r && r.error)
+            ? ' &middot; ' + _('cheburcheck_error') + ': ' + escapeHtml(String(r.error)) : '';
         el.innerHTML = `${icon} <b>${label}</b> &middot; ${_('cheburcheck_regions_blocked')}: ${br}/${rc}`
             + (age ? ` &middot; ${_('cheburcheck_checked_at')}: ${age}${staleTag}` : '')
             + errTag;
+        const targets = (r && r.targets) || {};
+        if (details) {
+            const keys = Object.keys(targets).sort();
+            if (keys.length) {
+                const head = `<tr><th style="text-align:left;padding:4px 8px;">${_('cheburcheck_target')}</th>`
+                    + `<th style="text-align:left;padding:4px 8px;">${_('cheburcheck_status')}</th>`
+                    + `<th style="text-align:left;padding:4px 8px;">${_('cheburcheck_regions_short')}</th>`
+                    + `<th style="text-align:left;padding:4px 8px;">${_('cheburcheck_checked_at')}</th>`
+                    + `<th style="text-align:left;padding:4px 8px;">${_('cheburcheck_error')}</th></tr>`;
+                const rows = keys.map(target => cheburcheckTargetRow(target, targets[target] || {})).join('');
+                details.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:0.9em;">`
+                    + `<thead>${head}</thead><tbody>${rows}</tbody></table>`;
+                details.classList.remove('hidden');
+            } else {
+                details.innerHTML = '';
+                details.classList.add('hidden');
+            }
+        }
         cheburcheckButtonState(status);
     } catch (e) {
         const el = document.getElementById('cheburcheck-summary');
         if (el) el.textContent = _('cheburcheck_error') + ': ' + (e.message || e);
     }
+}
+
+function cheburcheckStale(checkedAt) {
+    if (!checkedAt) return false;                 // new Date(null) is 0, not NaN
+    const ts = new Date(checkedAt).getTime();
+    if (isNaN(ts)) return false;
+    return Date.now() - ts >= 24 * 3600 * 1000;
+}
+
+function cheburcheckTargetRow(target, rec) {
+    const status = rec.status || 'unknown';
+    const icon = status === 'banned' ? '&#128683;' : (status === 'clean' ? '&#9989;' : '&#128993;');
+    const label = status === 'banned' ? _('cheburcheck_banned')
+        : (status === 'clean' ? _('cheburcheck_clean') : _('cheburcheck_unknown'));
+    const br = (rec.probe || {}).blocking_regions || 0;
+    const rc = br + ((rec.probe || {}).clear_regions || 0);
+    const age = cheburAge(rec.checked_at);
+    const staleTag = cheburcheckStale(rec.checked_at) ? ' &#9888;&#65039;' : '';
+    const partialTag = rec.partial ? ' &middot; ' + _('cheburcheck_partial') : '';
+    const err = rec.error
+        ? ' &middot; ' + _('cheburcheck_error') + ': ' + escapeHtml(String(rec.error)) : '';
+    const border = 'padding:4px 8px;border-top:1px solid var(--border,#333);';
+    return `<tr><td style="${border}">${escapeHtml(String(target))}</td>`
+        + `<td style="${border}">${icon} <b>${label}</b>${partialTag}</td>`
+        + `<td style="${border}">${br}/${rc}</td>`
+        + `<td style="${border}">${age ? escapeHtml(age) + staleTag : '&mdash;'}</td>`
+        + `<td style="${border}">${err}</td></tr>`;
 }
 
 // The check takes 15-60s, so it runs in the background and this polls instead
@@ -7734,7 +7778,10 @@ async function runCheburcheckNow() {
     if (sp) sp.style.display = '';
     try {
         const r = await apiCall(`/api/servers/${SERVER_ID}/cheburcheck/run`, 'POST', {});
-        if (r && r.started === 0) { showToast(_('cheburcheck_master_off'), 'error'); return; }
+        if (r && r.reason === 'disabled') { showToast(_('cheburcheck_master_off'), 'error'); return; }
+        if (r && r.reason === 'no_targets') { showToast(_('cheburcheck_no_targets'), 'error'); return; }
+        if (r && r.already_running) { showToast(_('cheburcheck_still_running'), 'info'); return; }
+        if (!r || r.started === 0) return;
         const startedAt = Date.now();
         for (let i = 0; i < 40; i++) {
             await new Promise(res => setTimeout(res, 2000));

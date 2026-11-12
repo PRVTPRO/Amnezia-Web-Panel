@@ -263,6 +263,11 @@ def build_summary(host, static, probe, error=None):
     probe = probe or {}
     pv = probe.get("verdicts") or []
     pr = probe.get("response_count") or 0
+    regions = probe.get("regions") or []
+    blocked = blocking_regions(regions)
+    # Count only regions that actually returned verdicts: ``response_count``
+    # comes from the "done" event and may exceed what the stream delivered.
+    answered = len([r for r in regions if r.get("verdicts")])
     status = classify(bool(static.get("blocked")), pv, pr)
     if status == "unknown" and not error:
         error = "probe returned no verdicts" if pr == 0 else "probe undecided"
@@ -283,8 +288,10 @@ def build_summary(host, static, probe, error=None):
             "online_probes": probe.get("online_probes"),
             "response_count": pr,
             "verdict_counts": probe.get("verdict_counts") or {},
-            "blocking_regions": len(blocking_regions(probe.get("regions"))),
+            "blocking_regions": len(blocked),
+            "clear_regions": max(0, answered - len(blocked)),
         },
+        "partial": bool(answered and 0 < len(blocked) < answered),
     }
     if error:
         record["error"] = str(error)

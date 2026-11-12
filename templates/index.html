@@ -967,16 +967,16 @@
                 const el = document.getElementById('chebur-alert-' + id);
                 if (!el) continue;
                 if (f.status === 'banned') {
-                    const n = f.blocking_regions || 0;
+                    const n = (f.probe && f.probe.blocking_regions) || 0;
                     const label = n > 0
                         ? `🚫 ${_('cheburcheck_ban_badge')} (${n})`
                         : `🚫 ${_('cheburcheck_ban_badge')}`;
                     el.innerHTML = `<button class="btn btn-danger btn-sm" style="width:100%; font-weight:700"
-                        onclick="location.href='/server/${id}#cheburcheck-card'">${label}</button>`;
+                        onclick="location.href='/server/${id}'">${label}</button>`;
                     el.style.display = '';
                 } else if (f.status === 'unknown') {
                     el.innerHTML = `<button class="btn btn-secondary btn-sm" style="width:100%;"
-                        onclick="location.href='/server/${id}#cheburcheck-card'">🟡 ${_('cheburcheck_unknown_badge')}</button>`;
+                        onclick="location.href='/server/${id}'">🟡 ${_('cheburcheck_unknown_badge')}</button>`;
                     el.style.display = '';
                 }
             }
