@@ -1285,5 +1285,10 @@
   "telegram_webapp_auth_desc": "When enabled, users opening the panel inside Telegram are signed in after the server verifies Telegram initData. If the bot token is empty, regular login is shown. The bot's WebApp button requires a public HTTPS panel URL.",
   "telegram_webapp_auth_invalid": "Telegram authorization data is invalid or expired. Please use the regular login form or reopen the app from Telegram.",
   "telegram_webapp_account_not_found": "No panel account is linked to this Telegram account. Contact your administrator or enable automatic user creation.",
-  "telegram_webapp_auth_unavailable": "Telegram WebApp authorization is not configured. Please use regular login."
+  "telegram_webapp_auth_unavailable": "Telegram WebApp authorization is not configured. Please use regular login.",
+  "xray_fingerprint_title": "Xray fingerprint",
+  "xray_fingerprint_label": "uTLS fingerprint",
+  "xray_fingerprint_hint": "Used in every VLESS link issued for this instance. Reality accepts any fingerprint, so if the default chrome is blocked on your network, pick another one. Links already issued keep the fingerprint they were created with.",
+  "xray_fingerprint_btn": "Fingerprint",
+  "xray_fingerprint_saved": "Fingerprint saved"
 }

@@ -1285,5 +1285,10 @@
   "telegram_webapp_auth_desc": "启用后，用户在 Telegram 内打开面板时，服务器验证 initData 后将自动登录。如果未填写机器人 Token，则显示常规登录表单。机器人 WebApp 按钮要求面板具有公开的 HTTPS 地址。",
   "telegram_webapp_auth_invalid": "Telegram 授权数据无效或已过期。请使用常规登录表单，或从 Telegram 重新打开应用。",
   "telegram_webapp_account_not_found": "找不到与此 Telegram 账户关联的面板账户。请联系管理员或启用自动创建用户功能。",
-  "telegram_webapp_auth_unavailable": "尚未配置 Telegram WebApp 授权。请使用常规登录。"
+  "telegram_webapp_auth_unavailable": "尚未配置 Telegram WebApp 授权。请使用常规登录。",
+  "xray_fingerprint_title": "Xray 指纹",
+  "xray_fingerprint_label": "uTLS 指纹",
+  "xray_fingerprint_hint": "将用于此实例签发的所有 VLESS 链接。Reality 不限制指纹——如果默认的 chrome 在您的网络中被封锁，请选择其他指纹。已签发的链接保持原有指纹不变。",
+  "xray_fingerprint_btn": "指纹",
+  "xray_fingerprint_saved": "指纹已保存"
 }

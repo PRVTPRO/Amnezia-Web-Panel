@@ -11,6 +11,13 @@ logger = logging.getLogger(__name__)
 
 XRAY_CORE_VERSION = "v26.10.31"
 
+# uTLS client hello fingerprints a VLESS link may request. The Reality server
+# does not pin this value, so it is a per-link property, not a container
+# setting; chrome stays the historical default.
+XRAY_FINGERPRINTS = ('chrome', 'firefox', 'safari', 'ios', 'android', 'edge',
+                     '360', 'qq', 'random', 'randomized')
+XRAY_DEFAULT_FINGERPRINT = 'chrome'
+
 class XrayManager:
     """Manages Xray (VLESS-Reality) protocol installation and client management."""
     
@@ -722,7 +729,8 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
 
         return clients_table
 
-    def get_client_config(self, protocol, client_id, server_host, port, public_port=None):
+    def get_client_config(self, protocol, client_id, server_host, port, public_port=None,
+                          fingerprint=None):
         clients = self._get_clients_table()
         client = next((c for c in clients if c['clientId'] == client_id), None)
         if not client: return None
@@ -740,22 +748,27 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
 
         # Format URL
         # vless://{id}@{host}:{port}?type=tcp&security=reality&pbk={public_key}&sni={sni}&fp=chrome&sid={short_id}&spx=%2F&flow=xtls-rprx-vision#{name}
-        
+
         name = client.get('userData', {}).get('clientName', 'vpn')
         encoded_name = urllib.parse.quote(name)
-        
+
+        # The instance-level fingerprint chosen in the panel beats the default;
+        # an unknown value (hand-edited data.json) falls back instead of
+        # reaching the link.
+        fp = fingerprint if fingerprint in XRAY_FINGERPRINTS else XRAY_DEFAULT_FINGERPRINT
+
         url = (
             # meta.json is synced from the live server.json, so it beats the
             # port the panel remembers; an explicit public port beats both.
             f"vless://{client_id}@{server_host}:{public_port or meta.get('port', port)}"
             f"?type=tcp&security=reality&pbk={meta['public_key']}"
-            f"&sni={sni}&fp=chrome&sid={meta['short_id']}"
+            f"&sni={sni}&fp={fp}&sid={meta['short_id']}"
             f"&spx=%2F&flow=xtls-rprx-vision#{encoded_name}"
         )
         return url
 
     def add_client(self, protocol, client_name, server_host, port, public_port=None,
-                   warp_ctx=None):
+                   warp_ctx=None, fingerprint=None):
         client_id = str(uuid.uuid4())
         
         config = self._get_server_json()
@@ -797,7 +810,8 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
 
         return {
             'client_id': client_id,
-            'config': self.get_client_config(protocol, client_id, server_host, port, public_port)
+            'config': self.get_client_config(protocol, client_id, server_host, port, public_port,
+                                             fingerprint=fingerprint)
         }
 
     def toggle_client(self, protocol, client_id, enable):
