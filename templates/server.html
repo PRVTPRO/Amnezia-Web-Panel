@@ -2033,7 +2033,7 @@
                 <summary class="btn btn-secondary btn-sm">⇅ {{ _('sort') }}</summary>
                 <div class="connection-sort-menu">
                     <label for="connSortField">{{ _('sort_by') }}</label>
-                    <select class="form-select" id="connSortField" onchange="applyConnectionSort()">
+                    <select class="form-select" id="connSortField" onchange="applyConnectionSort(); closeConnectionSortPopup()">
                         <option value="name">{{ _('sort_name') }}</option>
                         <option value="created">{{ _('sort_created') }}</option>
                         <option value="handshake">{{ _('sort_handshake') }}</option>
@@ -2046,7 +2046,7 @@
                         <option value="expiry">{{ _('sort_expiry') }}</option>
                     </select>
                     <label for="connSortDirection">{{ _('sort_direction') }}</label>
-                    <select class="form-select" id="connSortDirection" onchange="applyConnectionSort()">
+                    <select class="form-select" id="connSortDirection" onchange="applyConnectionSort(); closeConnectionSortPopup()">
                         <option value="asc">{{ _('sort_ascending') }}</option>
                         <option value="desc">{{ _('sort_descending') }}</option>
                     </select>
@@ -7113,6 +7113,19 @@
             select.value = 'name';
         }
     }
+
+    function closeConnectionSortPopup() {
+        const popup = document.querySelector('.connection-sort');
+        if (popup) popup.open = false;
+    }
+
+    // Close the sort menu when the user clicks anywhere outside it.
+    document.addEventListener('click', event => {
+        const popup = document.querySelector('.connection-sort');
+        if (popup && popup.open && !popup.contains(event.target)) {
+            popup.open = false;
+        }
+    });
 
     function applyConnectionSort() {
         const list = document.getElementById('connectionsListInner');
