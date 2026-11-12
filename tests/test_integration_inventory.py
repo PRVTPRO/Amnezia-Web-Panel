@@ -25,6 +25,63 @@ def fixture():
 
 
 class IntegrationInventoryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_valid_inventory_keeps_the_deployed_v1_json_contract(self):
+        data = fixture()
+        data['user_connections'][0]['create_operation_id'] = 'operation-a'
+        self.assertEqual(integration_inventory(data, panel.protocol_base), {
+            'contract': 'integration-inventory-v1', 'complete': True,
+            'expected_server_uid': True,
+            'servers': [{'uid': 'node-a', 'name': 'A', 'protocols': {
+                'awg3__2': {'installed': True, 'base_protocol': 'awg3'},
+                'telemt': {'installed': True, 'base_protocol': 'telemt'}}}],
+            'users': [{'id': 'owner'}],
+            'user_connections': [{'id': 'connection', 'user_id': 'owner',
+                'server_id': 0, 'protocol': 'awg3__2', 'client_id': 'public-key',
+                'name': 'Device', 'create_operation_id': 'operation-a'}],
+        })
+
+    async def test_invalid_references_and_rows_fail_closed_without_mutation(self):
+        mutations = [
+            lambda d: d['user_connections'][0].update(server_id=-1),
+            lambda d: d['user_connections'][0].update(server_id=1),
+            lambda d: d['user_connections'][0].update(server_id=True),
+            lambda d: d['user_connections'][0].update(server_id='0'),
+            lambda d: d['user_connections'][0].update(protocol='awg3'),
+            lambda d: d['servers'][0]['protocols'].pop('awg3__2'),
+            lambda d: d['user_connections'][0].update(user_id='unknown'),
+            lambda d: d['user_connections'][0].update(client_id=' '),
+            lambda d: d['users'].append(None),
+            lambda d: d['servers'].append(None),
+            lambda d: d['user_connections'].append(None),
+        ]
+        for mutate in mutations:
+            with self.subTest(mutation=mutate):
+                data = fixture()
+                mutate(data)
+                before = copy.deepcopy(data)
+                with self.assertRaises(ValueError):
+                    integration_inventory(data, panel.protocol_base)
+                self.assertEqual(data, before)
+
+    async def test_duplicate_physical_peer_cannot_have_two_ownership_records(self):
+        data = fixture()
+        data['users'].append({'id': 'another-owner'})
+        data['user_connections'].append(dict(data['user_connections'][0],
+                                            id='another-link', user_id='another-owner'))
+        with self.assertRaises(ValueError):
+            integration_inventory(data, panel.protocol_base)
+
+    async def test_full_instances_remain_independent(self):
+        data = fixture()
+        data['servers'][0]['protocols']['awg3'] = {'installed': True}
+        data['user_connections'].append(dict(data['user_connections'][0],
+                                            id='other-instance', protocol='awg3'))
+        self.assertEqual(len(integration_inventory(data, panel.protocol_base)[
+            'user_connections']), 2)
+        data['servers'][0]['protocols']['awg3__1'] = {'installed': True}
+        with self.assertRaises(ValueError):
+            integration_inventory(data, panel.protocol_base)
+
     async def test_whitelist_is_complete_and_does_not_mutate(self):
         data = fixture()
         before = copy.deepcopy(data)
@@ -57,6 +114,7 @@ class IntegrationInventoryTests(unittest.IsolatedAsyncioTestCase):
                 result = await panel.api_integration_inventory(SimpleNamespace())
                 self.assertEqual(result.status_code, 200 if allowed else 403)
                 self.assertIn('no-store', result.headers['cache-control'])
+                self.assertIn('private', result.headers['cache-control'])
                 self.assertNotIn(b'SECRET_CANARY', result.body)
                 self.assertEqual(load.call_count, 1 if allowed else 0)
                 ssh.assert_not_called()
@@ -125,6 +183,47 @@ class ConfigIdentityTests(unittest.TestCase):
         self.assertNotIn(b'synthetic config', result.body)
         ssh.disconnect.assert_called_once()
 
+    def test_instance_changes_during_read_discard_config(self):
+        for change in ('removed', 'port', 'public_host', 'container_name'):
+            with self.subTest(change=change):
+                after = fixture()
+                if change == 'removed':
+                    after['servers'][0]['protocols'].pop('awg3__2')
+                else:
+                    after['servers'][0]['protocols']['awg3__2'][change] = 'changed'
+                result, ssh = self.read(after=after)
+                self.assertEqual(result.status_code, 409)
+                self.assertNotIn(b'synthetic config', result.body)
+                ssh.disconnect.assert_called_once()
+
+    def test_ownership_or_user_revoked_during_read_never_returns_config(self):
+        for change in ('ownership', 'user', 'disabled'):
+            with self.subTest(change=change):
+                after = fixture()
+                if change == 'ownership':
+                    after['user_connections'].clear()
+                elif change == 'user':
+                    after['users'].clear()
+                else:
+                    after['users'][0]['enabled'] = False
+                result, ssh = self.read(after=after)
+                self.assertEqual(result.status_code, 403)
+                self.assertNotIn(b'synthetic config', result.body)
+                ssh.disconnect.assert_called_once()
+
+    def test_bad_indices_and_missing_instance_never_open_ssh(self):
+        for index, proto, status in [(-1, 'awg3__2', 404), (1, 'awg3__2', 404),
+                                     (0, 'awg3', 404)]:
+            with self.subTest(index=index, protocol=proto), \
+                 patch.object(panel, '_request_user', return_value={'id': 'owner', 'role': 'admin'}), \
+                 patch.object(panel, 'load_data', return_value=fixture()), \
+                 patch.object(panel, 'get_ssh') as ssh:
+                result = panel.api_get_connection_config(SimpleNamespace(), index,
+                    panel.ConnectionActionRequest(server_uid='node-a', protocol=proto,
+                                                  client_id='public-key'))
+                self.assertEqual(result.status_code, status)
+                ssh.assert_not_called()
+
     def test_exception_releases_ssh(self):
         result, ssh = self.read(fail=True)
         self.assertEqual(result.status_code, 500)
@@ -180,6 +279,7 @@ class InventoryHTTPTests(unittest.TestCase):
     def check_private(self, response, status):
         self.assertEqual(response.status_code, status, response.text)
         self.assertIn('no-store', response.headers['cache-control'])
+        self.assertIn('private', response.headers['cache-control'])
         self.assertNotIn('SECRET_CANARY', response.text)
         self.assertNotIn('password_hash', response.text)
         self.assertNotIn('token_hash', response.text)
@@ -222,4 +322,13 @@ class InventoryHTTPTests(unittest.TestCase):
         self.data['servers'][0].pop('uid')
         self.check_private(self.client.get('/api/integration/inventory'), 503)
         self.data = before
+        self.check_private(self.client.get('/api/integration/inventory'), 200)
+
+    def test_invalid_connection_reference_is_503_and_never_a_partial_success(self):
+        self.login('support')
+        for index in (-1, 1):
+            with self.subTest(index=index):
+                self.data['user_connections'][0]['server_id'] = index
+                self.check_private(self.client.get('/api/integration/inventory'), 503)
+        self.data['user_connections'][0]['server_id'] = 0
         self.check_private(self.client.get('/api/integration/inventory'), 200)

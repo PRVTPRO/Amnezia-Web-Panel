@@ -130,6 +130,8 @@ class PeerCreateService:
                 raise PeerCreateError('Server identity is not initialized', 409)
             if expected_server_uid is not None and server['uid'] != expected_server_uid:
                 raise PeerCreateError('Server identity changed', 409)
+            if expected_server_uid is not None and protocol not in server.get('protocols', {}):
+                raise PeerCreateError('Protocol instance not found', 409)
             identity = [user_id, server['uid'], protocol, name]
             try:
                 op_id = str(uuid.UUID(operation_id)) if operation_id else str(

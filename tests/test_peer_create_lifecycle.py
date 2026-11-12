@@ -121,6 +121,26 @@ class AdminCreateLifecycle(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(self.path.exists())
             self.assertEqual(self.remote.peers, {})
 
+    async def test_uid_bound_missing_instance_never_persists_intent_or_opens_ssh(self):
+        with patch.object(self.service, 'get_ssh') as ssh:
+            with self.assertRaises(panel.PeerCreateError) as error:
+                await self.service.create('u', 0, 'awg3__2', 'device', self.op_id,
+                                          expected_server_uid='node')
+            self.assertEqual(error.exception.status_code, 409)
+            self.assertFalse(self.path.exists())
+            self.assertEqual(self.remote.peers, {})
+            ssh.assert_not_called()
+
+    async def test_uid_bound_server_bounds_never_persist_intent(self):
+        for index in (-1, 1):
+            with self.subTest(index=index), patch.object(self.service, 'get_ssh') as ssh:
+                with self.assertRaises(panel.PeerCreateError) as error:
+                    await self.service.create('u', index, 'awg3', 'device', self.op_id,
+                                              expected_server_uid='node')
+                self.assertEqual(error.exception.status_code, 404)
+                self.assertFalse(self.path.exists())
+                ssh.assert_not_called()
+
     async def test_journal_is_durable_before_any_remote_action(self):
         self.remote.release.clear()
         task = asyncio.create_task(self.create())

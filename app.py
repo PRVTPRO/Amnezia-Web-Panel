@@ -10363,7 +10363,12 @@ def api_get_connection_config(request: Request, server_id: int, req: ConnectionA
         endpoint = (server.get('uid'), server.get('host'), server.get('ssh_port', 22), server.get('username'))
         if not req.client_id:
             return JSONResponse({'error': 'Client ID is required'}, status_code=400)
+        if expected_uid is not None and req.protocol not in server.get('protocols', {}):
+            return JSONResponse({'error': 'Protocol instance not found'}, status_code=404)
         proto_info = server.get('protocols', {}).get(req.protocol, {})
+        instance_fields = ('installed', 'base_protocol', 'instance', 'container_name',
+                           'port', 'public_host', 'public_port')
+        instance_identity = tuple(proto_info.get(key) for key in instance_fields)
         port = proto_info.get('port', '55424')
         pub_host, pub_port = protocol_public_endpoint(server, req.protocol)
         ssh = get_ssh(server)
@@ -10374,11 +10379,24 @@ def api_get_connection_config(request: Request, server_id: int, req: ConnectionA
         finally:
             ssh.disconnect()
         if expected_uid is not None:
-            latest = load_data().get('servers', [])
+            fresh = load_data()
+            latest = fresh.get('servers', [])
             current = latest[server_id] if server_id < len(latest) else {}
             actual = (current.get('uid'), current.get('host'), current.get('ssh_port', 22), current.get('username'))
-            if actual != endpoint or req.protocol not in current.get('protocols', {}):
+            current_info = current.get('protocols', {}).get(req.protocol, {})
+            if (actual != endpoint or req.protocol not in current.get('protocols', {})
+                    or tuple(current_info.get(key) for key in instance_fields) != instance_identity):
                 return JSONResponse({'error': 'Server identity changed'}, status_code=409)
+            actor = next((u for u in fresh.get('users', []) if u.get('id') == user['id']), None)
+            if not actor or not actor.get('enabled', True):
+                return JSONResponse({'error': 'Forbidden'}, status_code=403)
+            if actor.get('role') not in ('admin', 'support') and not any(
+                    c.get('user_id') == actor['id'] and c.get('server_id') == server_id
+                    and c.get('client_id') == req.client_id
+                    and protocol_base(c.get('protocol', '')) == protocol_base(req.protocol)
+                    and protocol_instance(c.get('protocol', '')) == protocol_instance(req.protocol)
+                    for c in fresh.get('user_connections', [])):
+                return JSONResponse({'error': 'Forbidden'}, status_code=403)
         return {'config': config, **config_payloads(config, server, req.protocol)}
     except Exception as e:
         logger.exception("Error getting connection config")

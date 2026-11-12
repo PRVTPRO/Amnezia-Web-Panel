@@ -22,11 +22,23 @@ and does not save it. Existing authentication may independently record a
 Bearer token's last-used timestamp. Invalid/ambiguous identities return 503;
 they must not be interpreted as an empty catalog or deleted ownership.
 
+The complete projection also verifies server-index bounds, exact installed
+instance references and unique physical-peer ownership. Duplicate instance
+aliases or dangling links reject the whole response; records are never silently
+omitted. Different full instances remain independent, including instances of
+the same protocol. The valid v1 JSON shape is unchanged from the deployed
+inventory-p0 integration.
+
 Indices are not durable identities. Resolve by UID, retain the full protocol
 instance (for example `awg3__2`), and send optional `server_uid` with native
 user-connection creation or configuration reads. A mismatched UID rejects
 before SSH. Configuration reads also discard a result if the server endpoint
 or instance changes during SSH. The existing role/ownership checks remain.
+
+UID-bound configuration reads additionally reject instance metadata changes,
+owner removal and actor disable/demotion before returning a secret. UID-bound
+creation rejects a missing instance before writing an operation intent or
+obtaining SSH. Legacy callers omitting the optional UID retain their interface.
 Older callers omitting the optional field retain their previous behavior.
 
 This contract does not prove live capacity, VPN reachability, traffic freshness,
