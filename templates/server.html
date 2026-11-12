@@ -578,6 +578,28 @@
     .connection-sort-menu label { margin-top: 3px; color: var(--text-muted); font-size: .75rem; font-weight: 600; }
     .connection-sort-menu .form-select { width: 100%; min-width: 0; }
 
+    /* Keep the protocol picker visually aligned with the adjacent header buttons. */
+    .connection-protocol-select {
+        width: auto;
+        min-width: 0;
+        height: 36px;
+        padding: 6px 32px 6px 12px;
+        background-color: var(--bg-card);
+        background-position: right 11px center;
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-sm);
+        font-size: 0.8rem;
+        line-height: 1.2;
+    }
+    .connection-protocol-select:hover {
+        border-color: var(--border-hover);
+        background-color: var(--bg-card-hover);
+    }
+    .connection-protocol-select:focus {
+        border-color: var(--border-focus);
+        box-shadow: 0 0 0 3px var(--accent-glow);
+    }
+
 </style>
 {% endblock %}
 
@@ -2030,8 +2052,7 @@
                     </select>
                 </div>
             </details>
-            <select class="form-select" id="connProtoSelect" onchange="loadConnections()"
-                style="width:auto;">
+            <select class="form-select connection-protocol-select" id="connProtoSelect" onchange="loadConnections()">
                 <option value="awg">AmneziaWG</option>
                 <option value="awg2">AmneziaWG 2.0</option>
                 <option value="awg3">AmneziaWG 3.1</option>
