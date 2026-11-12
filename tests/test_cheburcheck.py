@@ -288,6 +288,19 @@ class TestCdnAndVerdictVoting(unittest.TestCase):
         self.assertEqual(rec["probe"]["restricted_regions"], 1)
         self.assertTrue(rec["probe"]["static_cdn"])
 
+    def test_raw_soft_verdicts_remain_visible_as_remarks(self):
+        """cdn_block for a non-CDN target becomes ok on the site, but the panel
+        still reports it as a remark instead of hiding it."""
+        probe = {"regions": [{"region": f"r{i}", "verdicts": ["cdn_block"],
+                              "host_results": 2} for i in range(4)],
+                 "response_count": 10, "verdicts": ["cdn_block"] * 4,
+                 "verdict_counts": {"cdn_block": 4, "ok": 6}}
+        rec = cheburcheck.build_summary("wokoko.duckdns.org", {}, probe)
+        self.assertEqual(rec["status"], "clean")
+        self.assertEqual(rec["probe"]["verdict"], "ok")
+        self.assertEqual(rec["probe"]["ban_regions"], 0)
+        self.assertEqual(rec["probe"]["restricted_regions"], 4)
+
     def test_majority_vote_and_restriction_counters(self):
         regions = [{"region": "s", "verdicts": ["sni_block"],
                     "cdn_unblocked": False, "host_results": 2}]

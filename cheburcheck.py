@@ -351,6 +351,14 @@ def build_summary(host, static, probe, error=None):
     is_static_cdn = static_is_cdn(static)
     banned = ban_regions(regions, is_static_cdn)
     restricted = restricted_regions(regions, is_static_cdn)
+    restricted_count = len(restricted)
+    if not restricted_count:
+        # The site maps a raw cdn_block to "ok" for non-CDN targets; keep the
+        # scanner's own SNI/DNS/CDN hits visible as remarks anyway.
+        raw_counts = probe.get("verdict_counts") or {}
+        restricted_count = sum(int(count) for verdict, count
+                               in raw_counts.items()
+                               if verdict in RESTRICTION_VERDICTS)
     # Count only regions that actually returned verdicts: ``response_count``
     # comes from the "done" event and may exceed what the stream delivered.
     answered = len([r for r in regions if r.get("verdicts")])
@@ -394,7 +402,7 @@ def build_summary(host, static, probe, error=None):
             "raw_verdict_counts": probe.get("verdict_counts") or {},
             "static_cdn": is_static_cdn,
             "ban_regions": len(banned),
-            "restricted_regions": len(restricted),
+            "restricted_regions": restricted_count,
             "static_hit": static_hit,
             "blocking_regions": len(banned),        # compat: ban-based
             "clear_regions": max(0, answered - len(banned)),
