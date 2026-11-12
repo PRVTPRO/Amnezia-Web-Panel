@@ -93,9 +93,12 @@ class MarketplaceBrowserTests(unittest.TestCase):
     def test_rkn_card_reload_outage_recovery_and_request_races(self):
         from playwright.sync_api import sync_playwright
         source = (ROOT / 'templates/server.html').read_text(encoding='utf-8')
-        functions = []
+        icons = re.findall(r'    const HEADER_BADGE_ICONS = \{.*?\n    \};', source, re.S)
+        self.assertEqual(len(icons), 1, 'use the actual header badge dependency')
+        functions = [icons[0]]
         for name in ('renderMarketplace', 'applyInstalledAppsVisibility', 'loadRknBlock',
-                     'renderRknBlockCard', 'checkServer', 'installRknBlock', 'uninstallRknBlock'):
+                     'renderRknBlockCard', 'headerStatusBadge', 'checkServer',
+                     'installRknBlock', 'uninstallRknBlock'):
             match = re.search(r'    (?:async )?function ' + name + r'\([^)]*\) \{.*?\n    \}', source, re.S)
             self.assertIsNotNone(match, name)
             functions.append(match[0])
@@ -109,6 +112,7 @@ class MarketplaceBrowserTests(unittest.TestCase):
             <div id="installLog"></div><div id="installProgressFill"></div>'''
         prelude = '''
 const SERVER_ID=0, calls=[], pending=[];
+let checkFailure=false, dockerInstalled=true;
 let rknBlockStatus={installed:true,available:false,agent_state:'unknown',running:false,healthy:false}, rknBlockLoadId=0, rknBlockBusy=false;
 let smartRouteStatus=null, currentProtocolStatus={}, installedAppsLoading=false;
 let warpStatus=null;
@@ -125,7 +129,10 @@ function renderInstallOpProgress(opId, flow) { calls.push(['op', flow, opId]); r
 const setInstalledAppsLoading=()=>{},updateStatusCounts=()=>{},loadSmartRouteStatus=async()=>null;
 window.confirm=()=>true;
 const apiCall=(url,method='GET')=>{calls.push({url,method});
- if(method==='POST')return Promise.resolve({operation_id:'op-test', connection:'ok',protocols:{}});
+ if(method==='POST') {
+  if(url.endsWith('/check') && checkFailure)return Promise.reject(new Error('SSH down'));
+  return Promise.resolve({operation_id:'op-test',connection:'ok',docker_installed:dockerInstalled,protocols:{}});
+ }
  return new Promise((resolve,reject)=>pending.push({resolve,reject}));};
 '''
         healthy = dict(installed=True, available=True, server_uid='fixture-node', running=True, healthy=True,
@@ -147,6 +154,10 @@ const apiCall=(url,method='GET')=>{calls.push({url,method});
                         page.evaluate('checkServer()')
                         self.assertEqual(page.evaluate('pending.length'), 1)
                         self.assertIn('server_uid=fixture-node', page.evaluate('calls[0].url'))
+                        self.assertEqual(page.locator('#statusBadges .badge-success').count(), 2)
+                        self.assertEqual(page.locator('#statusBadges svg[aria-hidden="true"]').count(), 2)
+                        self.assertIn('ssh_ok', page.locator('#statusBadges').inner_text())
+                        self.assertIn('docker_ok', page.locator('#statusBadges').inner_text())
                         page.evaluate('data => pending.shift().resolve(data)', healthy)
                         page.wait_for_function("document.getElementById('rknblock-status').textContent.includes('rknblock_state_on')")
                         page.evaluate('() => {loadRknBlock();}')
@@ -175,6 +186,27 @@ const apiCall=(url,method='GET')=>{calls.push({url,method});
                         self.assertTrue(page.locator('#proto-rknblock').is_visible())
                         self.assertTrue(page.locator('#marketplaceContent button').is_disabled())
                         self.assertEqual(page.evaluate("calls.filter(c=>typeof c.url === 'string' && c.url.includes('/rknblock/install')).length"), 1)
+
+                        # A failed server check must replace stale green badges,
+                        # while the installed RKN card survives its SSH outage.
+                        page.evaluate('() => {pending.length=0; checkFailure=true; return checkServer();}')
+                        self.assertEqual(page.locator('#statusBadges .badge-success').count(), 0)
+                        self.assertIn('server_connection_error', page.locator('#statusBadges .badge-danger').inner_text())
+                        self.assertEqual(page.locator('#statusBadges .badge-danger svg').count(), 1)
+                        page.evaluate("pending.shift().reject(new Error('SSH down'))")
+                        page.wait_for_function('rknBlockStatus.available === false')
+                        self.assertTrue(page.locator('#proto-rknblock').is_visible())
+                        self.assertTrue(page.locator('#marketplaceContent button').is_disabled())
+                        page.evaluate('() => {checkFailure=false; dockerInstalled=false; return checkServer();}')
+                        self.assertEqual(page.locator('#statusBadges .badge-success').count(), 1)
+                        self.assertIn('docker_not_installed', page.locator('#statusBadges .badge-warn').inner_text())
+                        page.evaluate('data => pending.shift().resolve(data)', healthy)
+                        page.wait_for_function('rknBlockStatus.available === true')
+                        page.evaluate('() => {dockerInstalled=true; return checkServer();}')
+                        self.assertEqual(page.locator('#statusBadges .badge-success').count(), 2)
+                        self.assertEqual(page.locator('#statusBadges .badge-danger').count(), 0)
+                        page.evaluate('data => pending.shift().resolve(data)', healthy)
+                        page.wait_for_function('rknBlockStatus.available === true')
                         page.close()
             finally:
                 browser.close()

@@ -228,14 +228,22 @@ class TestC5Styles(unittest.TestCase):
         self.assertIn(".ip-modal-table tr {", self.css)
         self.assertIn("attr(data-label)", self.css)
 
-    def test_server_ip_chips_stack_without_resizing_header_actions(self):
+    def test_server_ip_chips_wrap_without_resizing_header_actions(self):
         template = read_text(TEMPLATE_FILE)
-        self.assertIn('class="server-header__identity flex items-center gap-md"', template)
-        self.assertIn('class="server-header__details"', template)
-        chips = self.css[self.css.index('.ip-chips {'):]
-        self.assertIn('flex-direction: column', chips[:240])
-        self.assertIn('.page-header--card .page-header__actions {', self.css)
-        self.assertIn('flex: 0 0 auto', self.css)
+        header = template[template.index('<!-- Server Info Header -->'):
+                          template.index('<!-- Installed Applications Section -->')]
+        self.assertIn('class="srv-header__identity"', header)
+        self.assertIn('class="srv-header__ident"', header)
+        self.assertIn('class="page-header__actions srv-header__tools"', header)
+        self.assertIn('id="serverIpChips"', header)
+        identity = re.search(r'\.srv-header__identity\s*\{([^}]+)\}', template).group(1)
+        self.assertRegex(identity, r'min-width:\s*0')
+        for selector in (r'\.srv-header__tools', r'\.srv-header \.ip-chips',
+                         r'\.srv-header__actions'):
+            rule = re.search(selector + r'\s*\{([^}]+)\}', template).group(1)
+            self.assertRegex(rule, r'flex-wrap:\s*wrap')
+        self.assertRegex(template, r'(?s)@media \(max-width: 640px\).*?'
+                                  r'\.srv-header__tools\s*\{\s*display:\s*grid;')
 
 
 class TestC6Translations(unittest.TestCase):

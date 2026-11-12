@@ -4,6 +4,7 @@ import json
 import logging
 import base64
 import hashlib
+import hmac
 import ipaddress
 import secrets
 import uuid
@@ -568,6 +569,16 @@ def load_data():
     data.setdefault('users', [])
     data.setdefault('user_connections', [])
     data.setdefault('api_tokens', [])
+    users_migrated = False
+    for user in data.get('users', []):
+        raw_limit = user.get('max_connections', 0)
+        try:
+            normalized_limit = max(0, min(100, int(raw_limit or 0)))
+        except (TypeError, ValueError, OverflowError):
+            normalized_limit = 0
+        if user.get('max_connections') != normalized_limit:
+            user['max_connections'] = normalized_limit
+            users_migrated = True
     settings = data.setdefault('settings', {})
     settings.setdefault('appearance', {
         'title': 'Amnezia',
@@ -586,7 +597,12 @@ def load_data():
     settings.setdefault('captcha', {'enabled': False})
     settings.setdefault('exit_nodes', {'default_exit_uid': ''})
     settings.setdefault('ssh_jump', {'jump_host_uid': ''})
-    settings.setdefault('telegram', {'token': '', 'enabled': False})
+    telegram_settings = settings.setdefault('telegram', {'token': '', 'enabled': False})
+    if not isinstance(telegram_settings, dict):
+        telegram_settings = settings['telegram'] = {'token': '', 'enabled': False}
+    telegram_settings.setdefault('auto_create_users', False)
+    telegram_settings.setdefault('create_users_disabled', False)
+    telegram_settings.setdefault('webapp_initdata_auth', False)
     mail = settings.setdefault('mail', dict(DEFAULT_MAIL_SETTINGS))
     for key, value in DEFAULT_MAIL_SETTINGS.items():
         mail.setdefault(key, value)
@@ -627,11 +643,13 @@ def load_data():
         server.pop('rkn_block_enabled', None)
     # Transparent upgrade: legacy plaintext SSH fields are sealed atomically on
     # first read, then only the AES-GCM envelope is kept on disk.
+    needs_save = users_migrated
     if any(isinstance(s, dict) and ('password' in s or 'private_key' in s)
            for s in data.get('servers', [])):
         from credential_store import CredentialStore, default_key_path
-        if CredentialStore(default_key_path(DATA_FILE)).seal_document(data):
-            save_data(data)
+        needs_save = CredentialStore(default_key_path(DATA_FILE)).seal_document(data) or needs_save
+    if needs_save:
+        save_data(data)
     return data
 
 
@@ -2634,10 +2652,19 @@ def tpl(request, template, **kwargs):
         # UI dictionary (a feature showcase of the panel) into view-source.
         'login_translations_json': json.dumps({
             k: _t(k, lang) for k in ('login', 'logging_in', 'login_error',
-                                     'setup_submit', 'setup_creating', 'setup_error')
+                                     'setup_submit', 'setup_creating', 'setup_error',
+                                     'telegram_webapp_auth_invalid',
+                                     'telegram_webapp_account_not_found',
+                                     'telegram_webapp_auth_unavailable')
         }),
         'all_translations_json': json.dumps(TRANSLATIONS),
         'cheburcheck_enabled': cheburcheck_enabled(data),
+        'telegram_webapp_auth_enabled': bool(
+            data.get('users')
+            and (data.get('settings', {}).get('telegram') or {}).get('webapp_initdata_auth')
+            and (data.get('settings', {}).get('telegram') or {}).get('token')
+        ),
+        'all_translations_json': json.dumps(TRANSLATIONS)
     }
     ctx.update(kwargs)
     return templates.TemplateResponse(template, ctx)
@@ -2670,6 +2697,10 @@ def service_worker():
 
 
 # ======================== Pydantic Models ========================
+
+class TelegramWebAppAuthRequest(BaseModel):
+    init_data: str = Field(..., min_length=1, max_length=16384)
+
 
 class LoginRequest(BaseModel):
     username: str
@@ -2969,6 +3000,7 @@ class AddUserRequest(BaseModel):
     telemt_secret: Optional[str] = None
     telemt_ad_tag: Optional[str] = None
     telemt_max_conns: Optional[int] = None
+    max_connections: int = Field(0, ge=0, le=100)
 
 
 
@@ -3029,6 +3061,9 @@ class DuckDNSApplyRequest(BaseModel):
 class TelegramSettings(BaseModel):
     token: str = ''
     enabled: bool = False
+    auto_create_users: bool = False
+    create_users_disabled: bool = False
+    webapp_initdata_auth: bool = False
 
 
 class MailSettings(BaseModel):
@@ -3054,7 +3089,7 @@ class SelfServiceSettings(BaseModel):
     enabled: bool = False
     web_enabled: bool = True
     telegram_enabled: bool = True
-    max_connections_per_user: int = Field(5, ge=1, le=100)
+    max_connections_per_user: int = Field(5, ge=0, le=100)
     rate_limit_count: int = Field(3, ge=1, le=100)
     rate_limit_window_seconds: int = Field(60, ge=1, le=86400)
     allowed_protocols: List[str] = Field(default_factory=lambda: ['awg', 'awg2'])
@@ -3069,6 +3104,7 @@ class SelfServiceConnectionRequest(BaseModel):
 
 
 class UpdateUserRequest(BaseModel):
+    max_connections: Optional[int] = Field(None, ge=0, le=100)
     username: Optional[str] = None
     telegramId: Optional[str] = None
     email: Optional[str] = None
@@ -3953,6 +3989,82 @@ def api_captcha(request: Request):
     img_bytes.seek(0)
     
     return StreamingResponse(img_bytes, media_type="image/png")
+
+
+def _verify_telegram_webapp_init_data(init_data: str, bot_token: str, now: Optional[int] = None) -> dict:
+    """Validate Telegram Mini App initData and return its authenticated user."""
+    if not isinstance(init_data, str) or not init_data or len(init_data) > 16384:
+        raise ValueError('invalid_init_data')
+    try:
+        pairs = urllib.parse.parse_qsl(init_data, keep_blank_values=True, strict_parsing=True)
+    except (ValueError, UnicodeError):
+        raise ValueError('invalid_init_data')
+    values = {}
+    for key, value in pairs:
+        if key in values:
+            raise ValueError('invalid_init_data')
+        values[key] = value
+    received_hash = values.pop('hash', '')
+    if not re.fullmatch(r'[0-9a-fA-F]{64}', received_hash):
+        raise ValueError('invalid_init_data')
+    auth_date_raw = values.get('auth_date', '')
+    try:
+        auth_date = int(auth_date_raw)
+    except (TypeError, ValueError):
+        raise ValueError('invalid_init_data')
+    current_time = int(time.time()) if now is None else int(now)
+    if auth_date > current_time + 60 or current_time - auth_date > 86400:
+        raise ValueError('expired_init_data')
+    user_raw = values.get('user', '')
+    try:
+        telegram_user = json.loads(user_raw)
+    except (TypeError, ValueError):
+        raise ValueError('invalid_init_data')
+    if not isinstance(telegram_user, dict) or not str(telegram_user.get('id') or '').isdigit():
+        raise ValueError('invalid_init_data')
+    data_check_string = '\n'.join(f'{key}={values[key]}' for key in sorted(values))
+    secret_key = hmac.new(b'WebAppData', bot_token.encode('utf-8'), hashlib.sha256).digest()
+    calculated_hash = hmac.new(secret_key, data_check_string.encode('utf-8'), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(calculated_hash, received_hash.lower()):
+        raise ValueError('invalid_init_data')
+    return telegram_user
+
+
+@app.post('/api/auth/telegram-webapp', tags=["Authentication"])
+async def api_telegram_webapp_auth(request: Request, req: TelegramWebAppAuthRequest):
+    lang = request.cookies.get('lang', 'en')
+    data = load_data()
+    telegram_settings = (data.get('settings') or {}).get('telegram') or {}
+    bot_token = str(telegram_settings.get('token') or '').strip()
+    if telegram_settings.get('webapp_initdata_auth') is not True or not bot_token:
+        return JSONResponse({'error': _t('telegram_webapp_auth_unavailable', lang)}, status_code=403)
+    try:
+        telegram_user = _verify_telegram_webapp_init_data(req.init_data, bot_token)
+    except ValueError as exc:
+        key = 'telegram_webapp_auth_invalid'
+        if str(exc) == 'expired_init_data':
+            key = 'telegram_webapp_auth_invalid'
+        return JSONResponse({'error': _t(key, lang)}, status_code=401)
+
+    telegram_id = str(telegram_user['id'])
+    async with DATA_LOCK:
+        data = load_data()
+        users = data.get('users', [])
+        user = next((item for item in users
+                     if str(item.get('telegramId') or '').strip() == telegram_id), None)
+        if user is None and (data.get('settings', {}).get('telegram') or {}).get('auto_create_users') is True:
+            created = tg_bot._auto_create_telegram_user(data, telegram_user, save_data)
+            if created:
+                user = created[0]
+        if user is None:
+            return JSONResponse({'error': _t('telegram_webapp_account_not_found', lang)}, status_code=403)
+        if user.get('role') == 'none':
+            return JSONResponse({'error': _t('telegram_webapp_account_not_found', lang)}, status_code=403)
+        if not user.get('enabled', True):
+            return JSONResponse({'error': _t('account_disabled', lang)}, status_code=403)
+        request.session.clear()
+        request.session['user_id'] = user['id']
+    return {'status': 'success', 'role': user.get('role', 'user')}
 
 
 @app.post('/api/auth/login', tags=["Authentication"])
@@ -10256,6 +10368,7 @@ def api_list_users(request: Request, search: str = '', page: int = 1, size: int 
             'email': u.get('email'),
             'description': u.get('description'),
             'connections_count': sum(1 for c in conns if c['user_id'] == u['id']),
+            'max_connections': u.get('max_connections', 0),
             'traffic_used': u.get('traffic_used', 0),
             'traffic_total': u.get('traffic_total', 0),
             'traffic_limit': u.get('traffic_limit', 0),
@@ -10305,6 +10418,7 @@ def api_add_user(request: Request, req: AddUserRequest):
             'email': req.email,
             'description': req.description,
             'traffic_limit': int(req.traffic_limit * 1024**3) if req.traffic_limit else 0,
+            'max_connections': req.max_connections,
             'traffic_reset_strategy': req.traffic_reset_strategy or 'never',
             'traffic_used': 0,
             'traffic_total': 0,
@@ -10399,6 +10513,8 @@ async def api_update_user(request: Request, user_id: str, req: UpdateUserRequest
                     return JSONResponse({'error': str(exc)}, status_code=400)
             if req.email is not None: user['email'] = req.email
             if req.description is not None: user['description'] = req.description
+            if req.max_connections is not None:
+                user['max_connections'] = req.max_connections
             if req.traffic_limit is not None:
                 new_limit = int(req.traffic_limit * 1024**3)
                 user['traffic_limit'] = new_limit

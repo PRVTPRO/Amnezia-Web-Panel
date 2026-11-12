@@ -253,7 +253,7 @@
                 controls.style.display = 'flex';
                 disabledMsg.classList.add('hidden');
                 document.getElementById('connectionsCounter').textContent =
-                    _('connections_counter').replace('{0}', data.remaining_connections).replace('{1}', data.max_connections_per_user);
+                    _('connections_counter').replace('{0}', data.connections_count).replace('{1}', data.max_connections_per_user);
             } else {
                 controls.classList.add('hidden');
                 controls.style.display = 'none';

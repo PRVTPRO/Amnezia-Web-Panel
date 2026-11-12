@@ -216,27 +216,60 @@ class Ipv6UiBrowserTests(unittest.TestCase):
         finally:
             page.close()
 
-    def test_chips_fit_a_phone_viewport(self):
-        page = self._page(width=390)
-        try:
-            page.evaluate("""() => { renderIpChips({
-                host: {ipv4: '203.0.113.123', ipv6: '2a0a:9300:1:5::1',
-                       ipv6_state: 'enabled_no_peers'},
-                docker: {installed: true, ipv6_enabled: false,
-                         restart_required: true}}); }""")
-            metrics = page.evaluate("""() => {
-                const box = document.getElementById('serverIpChips');
-                const rects = [...box.querySelectorAll('.ip-chip')]
-                    .map(el => el.getBoundingClientRect().right);
-                return {scroll: box.scrollWidth, client: box.clientWidth,
-                        right: Math.max(...rects), width: window.innerWidth,
-                        visible: !box.hidden};
-            }""")
-            self.assertTrue(metrics['visible'])
-            self.assertLessEqual(metrics['scroll'], metrics['client'] + 1)
-            self.assertLessEqual(metrics['right'], metrics['width'] + 1)
-        finally:
-            page.close()
+    def test_header_chips_and_actions_fit_mobile_and_desktop(self):
+        from jinja2 import Environment, FileSystemLoader, select_autoescape
+        source = TEMPLATE.read_text(encoding='utf-8')
+        header = source[source.index('<!-- Server Info Header -->'):
+                        source.index('<!-- Installed Applications Section -->')]
+        env = Environment(loader=FileSystemLoader(ROOT / 'templates'),
+                          autoescape=select_autoescape(default_for_string=True))
+        html = env.from_string('{% from "_ui_icons.html" import ui_icon %}' + header).render(
+            server={'name': 'Synthetic dual-stack server', 'host': '203.0.113.123',
+                    'ssh_port': 22, 'username': 'admin'},
+            current_user={'role': 'admin'}, _=lambda key: EN.get(key, key))
+        styles = STYLE.read_text(encoding='utf-8') + re.search(r'<style>(.*?)</style>', source, re.S)[1]
+        for width in (375, 1440):
+            with self.subTest(width=width):
+                page = self.browser.new_page(viewport={'width': width, 'height': 900})
+                try:
+                    page.set_content(html)
+                    page.add_style_tag(content=styles)
+                    page.add_script_tag(content=STUBS + '\n' + _js_block())
+                    page.evaluate("document.getElementById('serverStatus').classList.remove('hidden')")
+                    before = page.locator('.srv-status-btn').evaluate_all(
+                        'els => els.map(el => el.getBoundingClientRect().width)')
+                    page.evaluate("""() => renderIpChips({
+                        host: {ipv4: '203.0.113.123', ipv6: '2a0a:9300:1:5::1',
+                               ipv6_state: 'enabled_no_peers'},
+                        docker: {installed: true, ipv6_enabled: false, restart_required: true}
+                    })""")
+                    self.assertEqual(self._states(page), ['on', 'warn', 'warn'])
+                    self.assertTrue(page.locator('#serverIpChips').is_visible())
+                    after = page.locator('.srv-status-btn').evaluate_all(
+                        'els => els.map(el => el.getBoundingClientRect().width)')
+                    self.assertEqual(len(before), 3)
+                    for old, new in zip(before, after):
+                        self.assertAlmostEqual(old, new, delta=1, msg='IP chips resize header tools')
+                    layout = page.evaluate("""() => ({
+                        direction: getComputedStyle(document.querySelector('.srv-header__main')).flexDirection,
+                        tools: getComputedStyle(document.querySelector('.srv-header__tools')).display,
+                        overflow: document.documentElement.scrollWidth > innerWidth,
+                        outside: [...document.querySelectorAll('.srv-header button, .ip-chip')]
+                            .filter(el => el.getClientRects().length)
+                            .filter(el => {const r=el.getBoundingClientRect();
+                                return r.left < -1 || r.right > innerWidth+1 || el.scrollWidth > el.clientWidth+1;})
+                            .map(el => el.id || el.className)
+                    })""")
+                    self.assertEqual(layout['direction'], 'column' if width == 375 else 'row')
+                    self.assertEqual(layout['tools'], 'grid' if width == 375 else 'flex')
+                    self.assertFalse(layout['overflow'])
+                    self.assertEqual(layout['outside'], [])
+                    page.evaluate('() => renderIpChips({host: {}, docker: {}, instances: []})')
+                    self.assertTrue(page.locator('#serverIpChips').evaluate('el => el.hidden'))
+                    self.assertEqual(page.locator('.ip-chip').count(), 0)
+                    self.assertTrue(page.locator('#serverStatsBtn').is_visible())
+                finally:
+                    page.close()
 
     def test_modal_preference_tristate_env_lock_and_read_only(self):
         page = self._page()
