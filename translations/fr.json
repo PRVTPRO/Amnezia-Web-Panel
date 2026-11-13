@@ -1285,5 +1285,14 @@
   "telegram_webapp_auth_desc": "Si cette option est activée, les utilisateurs ouvrant le panneau dans Telegram seront connectés après vérification de initData par le serveur. Si le token du bot est vide, le formulaire de connexion habituel sera affiché. Le bouton WebApp du bot nécessite une URL HTTPS publique pour le panneau.",
   "telegram_webapp_auth_invalid": "Les données d’autorisation Telegram sont invalides ou expirées. Utilisez le formulaire de connexion habituel ou rouvrez l’application depuis Telegram.",
   "telegram_webapp_account_not_found": "Aucun compte du panneau n’est associé à ce compte Telegram. Contactez l’administrateur ou activez la création automatique des utilisateurs.",
-  "telegram_webapp_auth_unavailable": "L’autorisation WebApp Telegram n’est pas configurée. Utilisez la connexion habituelle."
+  "telegram_webapp_auth_unavailable": "L’autorisation WebApp Telegram n’est pas configurée. Utilisez la connexion habituelle.",
+  "xray_update_hint": "La mise à jour reconstruit l’image et recrée le conteneur ; les connexions actives sont interrompues quelques secondes. Les clés et les réglages sont conservés. Si le nouveau noyau ne démarre pas, le panneau revient au précédent.",
+  "xray_update_stage_start": "Démarrage de la mise à jour",
+  "xray_update_stage_version": "Vérification des versions",
+  "xray_update_stage_arch": "Détection de l’architecture",
+  "xray_update_stage_build": "Construction de la nouvelle image (quelques minutes)",
+  "xray_update_stage_verify": "Vérification du nouveau noyau",
+  "xray_update_stage_swap": "Recréation du conteneur",
+  "xray_update_stage_check": "Attente du démarrage du noyau",
+  "xray_update_stage_done": "Terminé"
 }

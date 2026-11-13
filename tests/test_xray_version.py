@@ -40,8 +40,21 @@ class XrayVersionTests(unittest.TestCase):
         mgr.image_name = 'amneziavpn/amnezia-xray'
         text = mgr._dockerfile_content()
         self.assertIn('ARG XRAY_RELEASE="v26.10.31"', text)
-        self.assertIn('releases/download/${XRAY_RELEASE}/Xray-linux-64.zip', text)
+        self.assertIn('ARG XRAY_ARCH="64"', text)
+        self.assertIn('releases/download/${XRAY_RELEASE}/Xray-linux-${XRAY_ARCH}.zip', text)
         self.assertNotIn('v26.3.27', text)
+
+    def test_dockerfile_can_target_another_release_and_arch(self):
+        mgr = XrayManager.__new__(XrayManager)
+        mgr.protocol = 'xray'
+        mgr.instance = 1
+        mgr.base_protocol = 'xray'
+        mgr.container_name = 'amnezia-xray'
+        mgr.image_name = 'amneziavpn/amnezia-xray'
+        text = mgr._dockerfile_content(release='v99.9.9', arch='arm64-v8a')
+        self.assertIn('ARG XRAY_RELEASE="v99.9.9"', text)
+        self.assertIn('ARG XRAY_ARCH="arm64-v8a"', text)
+        self.assertNotIn('v26.10.31', text)
 
     def test_install_uploads_dockerfile_with_new_version(self):
         ssh = FakeSSH()

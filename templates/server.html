@@ -694,6 +694,17 @@
     let awgPluginStatus = null;
     const awgPluginOps = {};
 
+    const xrayStageLabels = {{ {
+        'start': _('xray_update_stage_start'),
+        'version': _('xray_update_stage_version'),
+        'arch': _('xray_update_stage_arch'),
+        'build': _('xray_update_stage_build'),
+        'verify': _('xray_update_stage_verify'),
+        'swap': _('xray_update_stage_swap'),
+        'check': _('xray_update_stage_check'),
+        'done': _('xray_update_stage_done')
+    } | tojson }};
+
     function awgPluginLabel(key) {
         return {{ {
             'button': _('awg_plugin_button'),
@@ -721,7 +732,8 @@
             'cancelling': _('awg_plugin_cancelling'),
             'cancelled': _('awg_plugin_cancelled'),
             'step': _('awg_plugin_step'),
-            'unknown': _('awg_plugin_unknown_version')
+            'unknown': _('awg_plugin_unknown_version'),
+            'xray_desc': _('xray_update_hint')
         } | tojson }};
     }
 
@@ -767,11 +779,75 @@
         }
     }
 
+    function applyPluginButtonState() {
+        const components = Object.values((awgPluginStatus && awgPluginStatus.components) || {});
+        const xrayUpdate = Object.values(xrayCoreStatus || {})
+            .some(item => item && item.update_available);
+        setAwgPluginButton(
+            components.some(item => item.update_available) || xrayUpdate ? 'update' : 'ok');
+    }
+
     function applyAwgPluginStatus(data) {
         awgPluginStatus = data;
-        const components = Object.values((data && data.components) || {});
-        setAwgPluginButton(components.some(item => item.update_available) ? 'update' : 'ok');
+        if (xrayProtocols.length) loadXrayCoreStatus().then(applyPluginButtonState);
+        applyPluginButtonState();
         return awgPluginStatus;
+    }
+
+    // Xray connections on this server, for the components dialog below.
+    const xrayProtocols = [
+        {%- for proto, info in (server.get('protocols') or {}).items()
+            if proto.split('__')[0] == 'xray' and info.get('installed') %}{{ proto | tojson }},
+        {%- endfor %}
+    ];
+    let xrayCoreStatus = null;
+    const XRAY_CORE_CACHE_KEY = 'xrayCoreStatus:v1:' + {{ (server.uid or server.host) | tojson }};
+
+    function readXrayCoreCache() {
+        try {
+            const raw = window.localStorage.getItem(XRAY_CORE_CACHE_KEY);
+            if (!raw) return null;
+            const entry = JSON.parse(raw);
+            if (!entry || !entry.ts || typeof entry.data === 'undefined') return null;
+            return entry;
+        } catch (error) {
+            return null;
+        }
+    }
+
+    function writeXrayCoreCache(data) {
+        try {
+            window.localStorage.setItem(XRAY_CORE_CACHE_KEY, JSON.stringify({ts: Date.now(), data: data}));
+        } catch (error) {
+            // Private mode or quota: the cache is an optimisation only.
+        }
+    }
+
+    async function loadXrayCoreStatus(force) {
+        if (!xrayProtocols.length) return applyXrayCoreStatus({});
+        const cached = readXrayCoreCache();
+        if (!force && cached && Date.now() - cached.ts < AWG_PLUGIN_CACHE_TTL) {
+            return applyXrayCoreStatus(cached.data);
+        }
+        try {
+            const pairs = await Promise.all(xrayProtocols.map(proto =>
+                apiCall('/api/servers/{{ server_id }}/xray/core?protocol=' + encodeURIComponent(proto))
+                    .then(data => [proto, data])
+                    .catch(() => [proto, null])));
+            const data = {};
+            pairs.forEach(([proto, info]) => { if (info) data[proto] = info; });
+            writeXrayCoreCache(data);
+            return applyXrayCoreStatus(data);
+        } catch (error) {
+            if (cached && cached.data) return applyXrayCoreStatus(cached.data);
+            return applyXrayCoreStatus({});
+        }
+    }
+
+    function applyXrayCoreStatus(data) {
+        xrayCoreStatus = data || {};
+        applyPluginButtonState();
+        return xrayCoreStatus;
     }
 
     async function loadAwgPluginStatus(force) {
@@ -797,6 +873,7 @@
         openModal('awgPluginModal');
         renderAwgPluginModal();
         if (!awgPluginStatus) loadAwgPluginStatus().then(renderAwgPluginModal);
+        else if (xrayProtocols.length && !xrayCoreStatus) loadXrayCoreStatus().then(renderAwgPluginModal);
     }
 
     function closeAwgPluginModal() {
@@ -821,7 +898,6 @@
         const labels = awgPluginLabel();
         if (!awgPluginStatus) {
             host.appendChild(awgPluginElement('p', 'text-muted', labels.error));
-            return;
         }
         const descriptions = {kernel_module: labels.kernel_desc, userspace: labels.userspace_desc};
         const titles = {kernel_module: labels.kernel, userspace: labels.userspace};
@@ -883,6 +959,168 @@
             const running = awgPluginOps[component];
             if (running && running.opId) renderAwgPluginProgress(component);
         });
+        renderXrayComponents(host);
+    }
+
+    function renderXrayComponents(host) {
+        if (!xrayProtocols.length) return;
+        const labels = awgPluginLabel();
+        xrayProtocols.forEach(proto => {
+            const info = (xrayCoreStatus || {})[proto];
+            const instance = proto.split('__')[1];
+            const component = 'xray-' + proto;
+            const available = !!(info && info.update_available);
+            const block = awgPluginElement('div', 'awg-plugin-component');
+            const head = awgPluginElement('div', 'awg-plugin-component-head');
+            head.appendChild(awgPluginElement('strong', '',
+                instance ? 'Xray-core #' + instance : 'Xray-core'));
+            const badge = awgPluginElement('span',
+                'badge ' + (available ? 'badge-success' : 'badge-info'));
+            badge.id = 'awgPluginBadge-' + component;
+            badge.appendChild(awgPluginElement('span', 'badge-dot'));
+            badge.appendChild(document.createTextNode(
+                ' ' + (available ? labels.available : labels.no_update)));
+            head.appendChild(badge);
+            block.appendChild(head);
+            block.appendChild(awgPluginElement('div', 'text-muted', labels.xray_desc));
+            const versions = awgPluginElement('div', 'awg-plugin-version');
+            versions.id = 'awgPluginVersions-' + component;
+            versions.appendChild(document.createTextNode(
+                labels.installed + ': ' + ((info && info.version) || labels.unknown)));
+            if (available && info.latest) {
+                versions.appendChild(document.createTextNode('  →  ' + labels.available + ': '));
+                versions.appendChild(awgPluginElement('span', 'awg-plugin-updated', info.latest));
+            }
+            block.appendChild(versions);
+            const actions = awgPluginElement('div', 'flex gap-sm');
+            actions.style.marginTop = 'var(--space-sm)';
+            if (available) {
+                const run = awgPluginElement('button', 'btn btn-primary btn-sm', labels.update_btn);
+                run.type = 'button';
+                run.id = 'awgPluginUpdate-' + component;
+                run.onclick = () => startXrayCoreUpdate(proto, run);
+                actions.appendChild(run);
+            }
+            if (actions.childNodes.length) block.appendChild(actions);
+            const progress = awgPluginElement('div', 'awg-plugin-progress hidden');
+            progress.id = 'awgPluginProgress-' + component;
+            block.appendChild(progress);
+            host.appendChild(block);
+            const running = awgPluginOps[component];
+            if (running && running.opId) renderXrayProgress(proto);
+        });
+    }
+
+    async function startXrayCoreUpdate(proto, button) {
+        const labels = awgPluginLabel();
+        if (!window.confirm(labels.confirm)) return;
+        button.disabled = true;
+        const component = 'xray-' + proto;
+        try {
+            const data = await apiCall('/api/servers/{{ server_id }}/xray/update', 'POST', {
+                protocol: proto
+            });
+            awgPluginOps[component] = {opId: data.operation_id, offset: 0, timer: null};
+            renderXrayProgress(proto);
+            pollXrayUpdate(proto);
+        } catch (error) {
+            button.disabled = false;
+            const block = button.closest('.awg-plugin-component');
+            if (block) {
+                const box = awgPluginElement('div', 'awg-plugin-log', error.message);
+                box.style.marginTop = 'var(--space-sm)';
+                block.appendChild(box);
+            }
+        }
+    }
+
+    function renderXrayProgress(proto) {
+        const component = 'xray-' + proto;
+        const host = document.getElementById('awgPluginProgress-' + component);
+        if (!host) return;
+        host.classList.remove('hidden');
+        host.textContent = '';
+        const labels = awgPluginLabel();
+        const progress = awgPluginElement('div', 'awg-progress');
+        const head = awgPluginElement('div', 'awg-progress-head');
+        head.appendChild(awgPluginElement('span', '', labels.step));
+        const percent = awgPluginElement('span', 'awg-progress-percent', '0%');
+        percent.id = 'awgProgressPercent-' + component;
+        head.appendChild(percent);
+        progress.appendChild(head);
+        const track = awgPluginElement('div', 'awg-progress-track');
+        track.setAttribute('role', 'progressbar');
+        track.setAttribute('aria-valuemin', '0');
+        track.setAttribute('aria-valuemax', '100');
+        track.setAttribute('aria-valuenow', '0');
+        track.id = 'awgProgressTrack-' + component;
+        const fill = awgPluginElement('div', 'awg-progress-fill');
+        fill.id = 'awgProgressFill-' + component;
+        track.appendChild(fill);
+        progress.appendChild(track);
+        host.appendChild(progress);
+        host.appendChild(awgPluginElement('div', 'awg-plugin-stage', labels.running));
+        const logBox = awgPluginElement('details', 'awg-plugin-details');
+        logBox.id = 'awgPluginLogBox-' + component;
+        logBox.appendChild(awgPluginElement('summary', '', labels.log));
+        const log = awgPluginElement('div', 'awg-plugin-log');
+        log.id = 'awgPluginLog-' + component;
+        log.setAttribute('aria-live', 'polite');
+        logBox.appendChild(log);
+        host.appendChild(logBox);
+        setAwgProgress(component, 0, 8, 0, true);
+    }
+
+    async function pollXrayUpdate(proto) {
+        const component = 'xray-' + proto;
+        const op = awgPluginOps[component];
+        if (!op) return;
+        const log = document.getElementById('awgPluginLog-' + component);
+        try {
+            const data = await apiCall('/api/servers/{{ server_id }}/install/progress?operation_id=' +
+                encodeURIComponent(op.opId) + '&offset=' + op.offset);
+            op.offset = data.next_offset;
+            setAwgProgress(component, data.step, data.total, data.percent, data.state === 'running');
+            (data.lines || []).forEach(line => {
+                if (log) log.textContent += '[' + line.ts + '] ' + line.stage + ': ' + line.text + '\n';
+                if (log) log.scrollTop = log.scrollHeight;
+            });
+            if (data.state === 'running') {
+                const stageLine = document.querySelector('#awgPluginProgress-' + component + ' .awg-plugin-stage');
+                if (stageLine && data.stage && xrayStageLabels[data.stage]) {
+                    stageLine.textContent = xrayStageLabels[data.stage];
+                }
+                op.timer = setTimeout(() => pollXrayUpdate(proto), 1000);
+                return;
+            }
+            const labels = awgPluginLabel();
+            const stage = document.querySelector('#awgPluginProgress-' + component + ' .awg-plugin-stage');
+            if (stage) {
+                if (data.state === 'success') {
+                    stage.textContent = labels.success + ' — Xray-core ' + (data.result && data.result.version || '');
+                    stage.className = 'awg-plugin-stage awg-plugin-updated';
+                } else {
+                    stage.textContent = labels.failed + ': ' + (data.error && data.error.message || '');
+                    stage.style.color = 'var(--danger)';
+                }
+            }
+            if (data.state === 'success') {
+                const versions = document.getElementById('awgPluginVersions-' + component);
+                if (versions) versions.textContent = labels.installed + ': Xray-core ' + (data.result && data.result.version || '');
+                const badge = document.getElementById('awgPluginBadge-' + component);
+                if (badge) {
+                    badge.className = 'badge badge-info';
+                    badge.textContent = labels.no_update;
+                }
+                const button = document.getElementById('awgPluginUpdate-' + component);
+                if (button) button.remove();
+                if (xrayCoreStatus && xrayCoreStatus[proto]) xrayCoreStatus[proto].update_available = false;
+                applyPluginButtonState();
+                setTimeout(() => checkServer(), 800);
+            }
+        } catch (error) {
+            op.timer = setTimeout(() => pollXrayUpdate(proto), 2000);
+        }
     }
 
     async function loadAwgPluginChangelog(component, version, box) {

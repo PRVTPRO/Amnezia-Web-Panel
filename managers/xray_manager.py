@@ -3,6 +3,7 @@ import os
 import uuid
 import logging
 import base64
+import re
 import shlex
 from datetime import datetime
 import urllib.parse
@@ -10,6 +11,9 @@ import urllib.parse
 logger = logging.getLogger(__name__)
 
 XRAY_CORE_VERSION = "v26.10.31"
+
+# uname -m -> asset suffix of the Xray-core Linux release archive
+XRAY_ARCH_ZIPS = {'x86_64': '64', 'aarch64': 'arm64-v8a', 'armv7l': 'arm32-v7a'}
 
 class XrayManager:
     """Manages Xray (VLESS-Reality) protocol installation and client management."""
@@ -165,14 +169,137 @@ class XrayManager:
             'port': meta.get('port')
         }
 
-    def _dockerfile_content(self):
+    def get_core_version(self):
+        """Xray-core version the running container reports, or None."""
+        out, _, code = self.ssh.run_sudo_command(
+            f"docker exec {self.container_name} /usr/bin/xray version 2>/dev/null")
+        if code != 0:
+            return None
+        match = re.search(r'^Xray\s+(\S+)', out or '', re.MULTILINE)
+        return match.group(1) if match else None
+
+    def get_node_arch(self):
+        """Machine architecture of the node, for the release archive name."""
+        out, _, _ = self.ssh.run_command("uname -m")
+        return (out or '').strip() or 'x86_64'
+
+    def update_core(self, target_release, progress=None):
+        """Rebuild the image with ``target_release`` and recreate the container.
+
+        The config, keys and clientsTable live in the config_dir volume and
+        survive the recreation untouched. The previous image is kept under a
+        ``:previous`` tag until the new container is seen running the target
+        version; a failed start rolls the container back to it.
+
+        ``progress(stage, message)`` mirrors the stages to an install op.
+        """
+
+        def report(stage, message):
+            if progress:
+                progress(stage, message)
+
+        current = self.get_core_version()
+        report('version', f"current core: {current or 'unknown'}")
+        if current and current.lstrip('v') == target_release.lstrip('v'):
+            return {'status': 'success', 'updated': False,
+                    'version': current, 'log': [f"core is already {current}"]}
+
+        arch = XRAY_ARCH_ZIPS.get(self.get_node_arch(), '64')
+        report('arch', f"node architecture: {self.get_node_arch()} (asset: {arch})")
+
+        # Keep the running image until the new one is proven working.
+        self.ssh.run_sudo_command(
+            f"docker tag {self.image_name} {self.image_name}:previous")
+
+        dockerfile_folder = f"/opt/amnezia/{self.container_name}"
+        self.ssh.run_sudo_command(f"mkdir -p {dockerfile_folder}")
+        self.ssh.upload_file_sudo(
+            self._dockerfile_content(release=target_release, arch=arch),
+            f"{dockerfile_folder}/Dockerfile")
+        report('build', f"building the image with Xray-core {target_release}")
+        _, err, code = self.ssh.run_sudo_command(
+            f"docker build --no-cache "
+            f"--build-arg XRAY_RELEASE={target_release} "
+            f"--build-arg XRAY_ARCH={arch} "
+            f"-t {self.image_name} {dockerfile_folder}", timeout=600)
+        if code != 0:
+            raise RuntimeError(f"Failed to build the new image: {err}")
+
+        report('verify', 'checking the new binary inside the image')
+        out, _, code = self.ssh.run_sudo_command(
+            f"docker run --rm --entrypoint=\"\" {self.image_name} "
+            f"/usr/bin/xray version")
+        if code != 0 or f"Xray {target_release.lstrip('v')}" not in (out or ''):
+            raise RuntimeError("the new image does not run the target Xray-core")
+
+        # The live server.json is authoritative for the port.
+        meta = self._get_meta_json() or {}
+        port = meta.get('port')
+        if not port:
+            raise RuntimeError("Xray port is unknown; cannot recreate the container")
         config_dir = self._config_dir()
+        run_cmd = f"""docker run -d \\
+--restart always \\
+--privileged \\
+--cap-add=NET_ADMIN \\
+-p {port}:{port}/tcp \\
+-p {port}:{port}/udp \\
+-v {config_dir}:{config_dir} \\
+--name {self.container_name} \\
+{self.image_name}"""
+
+        report('swap', f"recreating {self.container_name} (a few seconds of downtime)")
+        self.ssh.run_sudo_command(f"docker stop {self.container_name}")
+        self.ssh.run_sudo_command(f"docker rm -fv {self.container_name}")
+        _, err, code = self.ssh.run_sudo_command(run_cmd)
+        if code != 0:
+            raise RuntimeError(f"Failed to run the new container: {err}")
+
+        def running_target_version():
+            self.ssh.run_sudo_command("sleep 3")
+            if not self.check_container_running():
+                return None
+            return self.get_core_version()
+
+        report('check', 'waiting for the core to start')
+        version_now = running_target_version()
+        if (version_now or '').lstrip('v') != target_release.lstrip('v'):
+            report('error', f"the new core did not start (got {version_now or 'nothing'}); rolling back")
+            self.ssh.run_sudo_command(f"docker rm -fv {self.container_name}")
+            self.ssh.run_sudo_command(
+                f"docker tag {self.image_name}:previous {self.image_name}")
+            _, err, code = self.ssh.run_sudo_command(run_cmd)
+            if code != 0:
+                raise RuntimeError(f"rollback failed: {err}")
+            return {
+                'status': 'error',
+                'message': (f"Xray-core {target_release} did not start; "
+                            f"the previous core ({current or 'unknown'}) is running again"),
+                'version': current,
+                'updated': False,
+            }
+
+        # Success: retire the backup tag (the old image becomes dangling).
+        self.ssh.run_sudo_command(f"docker rmi {self.image_name}:previous")
+        report('done', f"Xray-core is now {target_release}")
+        return {
+            'status': 'success',
+            'updated': True,
+            'version': target_release.lstrip('v'),
+            'previous': current,
+            'log': [f"updated {current or '?'} -> {target_release}"],
+        }
+
+    def _dockerfile_content(self, release=None, arch='64'):
+        config_dir = self._config_dir()
+        release = release or XRAY_CORE_VERSION
         return f"""FROM alpine:3.15
 RUN apk add --no-cache curl unzip bash openssl netcat-openbsd dumb-init rng-tools xz iptables ip6tables
 RUN apk --update upgrade --no-cache
 RUN mkdir -p {config_dir}
-ARG XRAY_RELEASE="{XRAY_CORE_VERSION}"
-RUN curl -L -H "Cache-Control: no-cache" -o /root/xray.zip "https://github.com/XTLS/Xray-core/releases/download/${{XRAY_RELEASE}}/Xray-linux-64.zip" && \\
+ARG XRAY_RELEASE="{release}"
+ARG XRAY_ARCH="{arch}"
+RUN curl -L -H "Cache-Control: no-cache" -o /root/xray.zip "https://github.com/XTLS/Xray-core/releases/download/${{XRAY_RELEASE}}/Xray-linux-${{XRAY_ARCH}}.zip" && \\
     unzip /root/xray.zip -d /usr/bin/ && \\
     chmod a+x /usr/bin/xray && \\
     rm /root/xray.zip
