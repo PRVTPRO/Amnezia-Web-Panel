@@ -186,12 +186,33 @@ class ExitInstallTests(unittest.TestCase):
         self.assertIn('docker restart amnezia-exit', ssh.commands)
         self.assertTrue(any('ip link show transit0' in c for c in ssh.commands))
 
-    def test_install_with_obfuscation_writes_handshake_keys_only(self):
+    def test_install_with_obfuscation_defaults_to_awg31(self):
         ssh = FakeSSH()
         result = ExitManager(ssh).install_protocol('exit', port='55520', obfuscation=True)
 
         conf = ssh.files[CONF]
         self.assertTrue(result['obfuscation'])
+        self.assertEqual(result['protocol_version'], '3.1')
+        self.assertIn('HeaderProtectionKey', conf)
+        self.assertIn('MTU = 1400', conf)
+
+    def test_install_auto_falls_back_to_awg2_on_old_module(self):
+        ssh = FakeSSH()
+        ssh.module_version = '2.9.0'
+        result = ExitManager(ssh).install_protocol('exit', port='55520', obfuscation=True)
+
+        self.assertEqual(result['protocol_version'], '2.0')
+        for key in ('HeaderProtectionKey', 'S3', 'S4', 'I1'):
+            self.assertNotRegex(ssh.files[CONF], rf'(?m)^{key} = ')
+
+    def test_install_with_awg2_explicit_writes_handshake_keys_only(self):
+        ssh = FakeSSH()
+        result = ExitManager(ssh).install_protocol('exit', port='55520',
+                                                   obfuscation=True, awg3=False)
+
+        conf = ssh.files[CONF]
+        self.assertTrue(result['obfuscation'])
+        self.assertEqual(result['protocol_version'], '2.0')
         for key in ('Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'H1', 'H2', 'H3', 'H4'):
             self.assertRegex(conf, rf'(?m)^{key} = \S+$')
         for key in ('S3', 'S4', 'I1'):

@@ -225,7 +225,7 @@ fi
             raise RuntimeError(f"Failed to configure the transit endpoint: {err}")
 
     def install_protocol(self, protocol_type='exit', port=None, subnet=None,
-                         obfuscation=False, awg3=False, warp_ctx=None, **_ignored):
+                         obfuscation=False, awg3=None, warp_ctx=None, **_ignored):
         """Install the exit-node container.
 
         `subnet` is the transit subnet shared with the entry nodes (must be an
@@ -244,6 +244,10 @@ fi
             return {'status': 'error',
                     'message': 'Transit subnet must be an IPv4 /24 (peers get the last octet)'}
 
+        if obfuscation and awg3 is None:
+            # 3.1 is the default transit set; a host whose kernel cannot take
+            # it silently keeps the 2.0 set instead of failing the install.
+            awg3 = self._module_supports_awg3(self._host_awg_module_version())
         if obfuscation and awg3:
             module = self._host_awg_module_version()
             if not self._module_supports_awg3(module):
@@ -385,6 +389,40 @@ fi
             'mtu': transit_mtu(params),
             'awg_params': params,
         }
+
+    def apply_transit_params(self, awg3=False, obfuscation=True):
+        """Switch an installed exit between the WG / 2.0 / 3.1 parameter sets.
+
+        Regenerates only the obfuscation block of transit0.conf: the exit's
+        key pair, ListenPort, Address and every [Peer] (with its PSK) are
+        preserved, so no entry has to be re-linked and no client flow is
+        invalidated. The live apply goes through syncconf and falls back to
+        recreating the interface when the kernel refuses the change.
+        """
+        info = self.get_info()
+        port = info.get('port') or EXIT_DEFAULTS['port']
+        subnet = info.get('subnet') or EXIT_DEFAULTS['subnet']
+        net = ipaddress.ip_network(subnet, strict=False)
+        params = generate_transit_params(awg3=bool(awg3)) if obfuscation else None
+        if params and is_awg31_params(params):
+            module = self._host_awg_module_version()
+            if not self._module_supports_awg3(module):
+                raise RuntimeError(
+                    'AmneziaWG 3.1 needs the amneziawg kernel module 3.0+ '
+                    f'(this host has {module or "no amneziawg module"}); '
+                    'the transit would come up on userspace amneziawg-go')
+        self._configure_exit_container(port, net, params)
+        applied = 'syncconf'
+        try:
+            self._sync_server_config(self.PROTOCOL)
+        except RuntimeError:
+            applied = 'recreate'
+            self._restart_container(self.PROTOCOL)
+        self._verify_interface_up(self.PROTOCOL)
+        result = self.get_info()
+        result['applied'] = applied
+        result['backend'] = self.transit_backend()
+        return result
 
     # ===================== PEERS =====================
 

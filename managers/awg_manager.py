@@ -583,6 +583,61 @@ def transit_param_lines(params):
     )
 
 
+def transit_param_names():
+    """Config keys that belong to the obfuscation block (plus MTU)."""
+    names = {config_key.lower() for _, config_key in
+             TRANSIT_PARAM_KEYS + TRANSIT_AWG3_PARAM_KEYS}
+    names.add('mtu')
+    return names
+
+
+def rewrite_transit_conf(text, awg_params):
+    """Replace the obfuscation block and MTU of a transit config in place.
+
+    Everything else - the private key, Address, ListenPort, Table, the
+    ``# ProtocolVersion`` marker and every ``[Peer]`` section with its
+    PresharedKey - is copied through untouched. Used to switch an already
+    configured link between the 3.1 and 2.0 parameter sets: regenerating the
+    file from scratch would rotate the key pair and drop the peers.
+    """
+    names = transit_param_names()
+    version = '3.1' if is_awg31_params(awg_params) else (
+        '2.0' if awg_params else 'wireguard')
+    block = transit_param_lines(awg_params)
+    mtu = transit_mtu(awg_params)
+    out, in_interface, inserted = [], False, False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith('['):
+            in_interface = stripped == '[Interface]'
+            out.append(line)
+            continue
+        if not in_interface:
+            out.append(line)
+            continue
+        if not stripped:
+            out.append(line)
+            continue
+        if stripped.startswith('#'):
+            if stripped.lower().startswith('# protocolversion'):
+                out.append(f'# ProtocolVersion = {version}')
+            else:
+                out.append(line)
+            continue
+        name = stripped.split('=', 1)[0].strip().lower()
+        if name in names:
+            continue
+        out.append(line)
+        if name == 'address' and not inserted:
+            out.append(f'MTU = {mtu}')
+            if block:
+                out.extend(block.rstrip('\n').splitlines())
+            inserted = True
+    if not inserted:
+        raise RuntimeError('exit link config has no Address line')
+    return '\n'.join(out) + '\n'
+
+
 def transit_mtu(params, link_mtu=DEFAULT_LINK_MTU):
     """exit0 MTU that still fits the transit obfuscation overhead.
 
@@ -3179,6 +3234,7 @@ x_warp_up() {
             f"# ExitUid = {link.get('exit_uid', '')}",
             f"# ExitName = {link.get('exit_name', '')}",
             f"# Obfuscation = {'on' if link.get('obfuscation') else 'off'}",
+            f"# ProtocolVersion = {'3.1' if is_awg31_params(link.get('awg_params')) else ('2.0' if link.get('obfuscation') else 'wireguard')}",
             f"# DnsViaExit = {'on' if link.get('dns_via_exit') else 'off'}",
             f"PrivateKey = {ENTRY_PRIVATE_KEY_PLACEHOLDER}",
             f"Address = {link['transit_ip']}/{link.get('subnet_cidr', 24)}",
@@ -3282,6 +3338,43 @@ x_warp_up() {
         if code != 0:
             raise RuntimeError(f"Failed to update the DNS route of the link: {err or out}")
         return self._exit_apply(protocol_type)
+
+    def exit_update_params(self, protocol_type, awg_params):
+        """Switch an existing exit0.conf between the WG / 2.0 / 3.1 param sets.
+
+        Only the obfuscation lines and MTU are rewritten: the private key, the
+        address, Table and the [Peer] with its PresharedKey stay as they are,
+        so the exit never sees a new peer and the link keeps its keys. Applied
+        live with `awg syncconf` (interface and flows keep running); a kernel
+        that refuses the change (removing 3.1 keys is not allowed) falls back
+        to the recreate path every other link apply already uses.
+        """
+        container_name = self._container_name(protocol_type)
+        out, err, code = self.ssh.run_sudo_command(
+            f"docker exec -i {container_name} sh -c 'test -f {EXIT_CONF} && cat {EXIT_CONF}'")
+        if code != 0 or not (out or '').strip():
+            raise RuntimeError('This instance has no exit link file')
+        self.ssh.upload_file(rewrite_transit_conf(out, awg_params), '/tmp/_amnz_exit0.conf')
+        try:
+            for step in (
+                f"docker cp /tmp/_amnz_exit0.conf {container_name}:{EXIT_CONF}",
+                f"docker exec -i {container_name} chmod 600 {EXIT_CONF}",
+            ):
+                _out, _err, rc = self.ssh.run_sudo_command(step)
+                if rc != 0:
+                    raise RuntimeError(f"Failed to write exit0.conf: {_err or _out}")
+        finally:
+            self.ssh.run_command('rm -f /tmp/_amnz_exit0.conf')
+        applied = 'syncconf'
+        sync = self.ssh.run_sudo_command(
+            f"docker exec -i {container_name} bash -c '"
+            f"{self._quick_binary(protocol_type)} strip {EXIT_CONF} > /tmp/_amnz_exit0.sync && "
+            f"{self._wg_binary(protocol_type)} syncconf {EXIT_IFACE} /tmp/_amnz_exit0.sync'")
+        if sync[2] != 0:
+            applied = 'recreate'
+            self._exit_apply(protocol_type)
+        return {'applied': applied,
+                'backend': self.exit_link_backend(protocol_type)}
 
     def exit_unlink(self, protocol_type):
         """Tear the link down live and delete exit0.conf; the key pair stays

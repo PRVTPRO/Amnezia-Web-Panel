@@ -7170,7 +7170,8 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
                 port=req.port,
                 subnet=req.exit_subnet,
                 obfuscation=bool(req.exit_obfuscation),
-                awg3=bool(req.exit_awg3),
+                # None = auto: 3.1 when the kernel module supports it.
+                awg3=req.exit_awg3,
             )
         elif install_base in AWG_PROTOCOLS:
             install_args = (install_protocol,)
@@ -7483,6 +7484,27 @@ async def api_exit_link(request: Request, server_id: int, req: ExitLinkRequest):
         return _exit_link_error(e)
     except Exception as e:
         logger.exception("Error linking to exit node")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+class ExitTransitVersionRequest(BaseModel):
+    awg3: bool = True
+
+
+@app.post('/api/exit-nodes/{exit_uid}/transit-version', tags=["Protocols"])
+async def api_exit_transit_version(request: Request, exit_uid: str,
+                                   req: ExitTransitVersionRequest):
+    """Switch an exit and every entry linked to it between the AWG 3.1 and 2.0
+    transit parameter sets in place. Keys, PSKs, transit addresses and the peer
+    list are preserved, so nothing has to be re-linked."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        return await exit_link_svc.set_transit_version(exit_uid.strip(), bool(req.awg3))
+    except ExitLinkError as e:
+        return _exit_link_error(e)
+    except Exception as e:
+        logger.exception("Error switching the transit AWG version")
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
