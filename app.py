@@ -8204,6 +8204,23 @@ def _awg_protocols(server):
             if protocol_base(proto) in AWG_PROTOCOLS]
 
 
+def _xray_port_usage(ssh, server):
+    """Running/client info of every xray connection, for the header IP chips.
+
+    A failure on one connection is skipped, not fatal: the AWG part of the
+    payload stays valid and the chip simply undercounts.
+    """
+    usage = []
+    for proto in (server.get('protocols') or {}):
+        if protocol_base(proto) != 'xray':
+            continue
+        try:
+            usage.append(XrayManager(ssh, proto).get_port_usage())
+        except Exception:
+            logger.warning("Xray port usage failed for %s", proto, exc_info=True)
+    return usage
+
+
 def _ip_status_cache_ttl(payload):
     """20 s for a healthy payload, 3 s for a degraded or failed one."""
     if isinstance(payload, dict) and payload.get('state') == 'ok' \
@@ -8291,7 +8308,8 @@ def _ipv6_error(exc, default='state_unreadable'):
 
 @app.get('/api/servers/{server_id}/ip-status', tags=["Protocols"])
 def api_ip_status(request: Request, server_id: int):
-    """IPv4/IPv6 state of the host, Docker and every AWG instance.
+    """IPv4/IPv6 state of the host, Docker, every AWG instance and the
+    xray connections (as port usage: a running instance uses the host IP).
 
     Cached for 20 s per server: the page polls it and every miss costs several
     SSH round-trips. Mutations drop the entry themselves.
@@ -8309,7 +8327,8 @@ def api_ip_status(request: Request, server_id: int):
             ssh = get_ssh(server)
             ssh.connect()
             try:
-                status = AWGManager(ssh).get_ip_status(_awg_protocols(server))
+                status = AWGManager(ssh).get_ip_status(
+                    _awg_protocols(server), port_usage=_xray_port_usage(ssh, server))
             finally:
                 ssh.disconnect()
             _ip_status_cache_put(uid, status)

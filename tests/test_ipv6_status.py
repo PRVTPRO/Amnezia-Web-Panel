@@ -193,6 +193,43 @@ class IpStatusStateTests(unittest.TestCase):
         st = self._status(host=host_info(ipv4='203.0.113.9'))
         self.assertEqual(st['host']['ipv4'], '203.0.113.9')
         self.assertEqual(st['host']['ipv4_state'], 'in_use')
+        self.assertEqual(st['host']['ipv4_counts'],
+                         {'instances': 1, 'peers': 0})
+
+
+class PortUsageTests(unittest.TestCase):
+    """Host-port protocols (Xray) that have no AWG instance row."""
+
+    def _status(self, instances=None, port_usage=None, protocols=None):
+        manager = status_manager(host_info(), instances if instances is not None else [])
+        return manager.get_ip_status(protocols or [], port_usage=port_usage)
+
+    def test_running_xray_marks_ipv4_in_use_without_awg(self):
+        st = self._status(port_usage=[{'running': True, 'clients': 4}])
+        self.assertEqual(st['host']['ipv4_state'], 'in_use')
+        self.assertEqual(st['host']['ipv4_counts'], {'instances': 1, 'peers': 4})
+
+    def test_stopped_xray_does_not_count(self):
+        st = self._status(port_usage=[{'running': False, 'clients': 0}])
+        self.assertEqual(st['host']['ipv4_state'], 'host_only')
+        self.assertEqual(st['host']['ipv4_counts'], {'instances': 0, 'peers': 0})
+
+    def test_xray_clients_join_awg_counts(self):
+        st = self._status(
+            instances=[instance('awg3', peers=2)],
+            port_usage=[{'running': True, 'clients': 4}],
+            protocols=['awg3'])
+        self.assertEqual(st['host']['ipv4_counts'], {'instances': 2, 'peers': 6})
+
+    def test_xray_does_not_claim_ipv6_usage(self):
+        st = self._status(port_usage=[{'running': True, 'clients': 4}])
+        self.assertEqual(st['host']['ipv4_state'], 'in_use')
+        self.assertEqual(st['host']['ipv6_state'], 'host_only')
+
+    def test_omitting_port_usage_keeps_the_awg_only_contract(self):
+        manager = status_manager(host_info(), [instance('awg3', peers=2)])
+        st = manager.get_ip_status(['awg3'])
+        self.assertEqual(st['host']['ipv4_counts'], {'instances': 1, 'peers': 2})
 
 
 class DegradedStatusTests(unittest.TestCase):

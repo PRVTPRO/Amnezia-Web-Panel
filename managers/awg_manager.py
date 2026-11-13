@@ -1071,8 +1071,14 @@ class AWGManager:
             'exit_linked': exit_linked,
         }
 
-    def get_ip_status(self, protocols):
-        """Full IPv4/IPv6 status of a server and its AWG instances."""
+    def get_ip_status(self, protocols, port_usage=None):
+        """Full IPv4/IPv6 status of a server and its AWG instances.
+
+        ``port_usage`` carries the host-port protocols the panel does not
+        manage IPv6 for (Xray today): ``[{'running': bool, 'clients': int}]``.
+        A running port instance uses the host IPv4 just like an AWG subnet
+        does, and its clients join the IPv4 chip counts.
+        """
         host = self._host_ipv6_info()
         docker = self._docker_ipv6_info()
         instances = []
@@ -1085,6 +1091,7 @@ class AWGManager:
                 instances.append({'proto': proto, 'blocked_reason': 'state_unreadable',
                                   'peers': None, 'ipv6_enabled': False,
                                   'can_enable': False, 'can_disable': False})
+        port_usage = [u for u in (port_usage or []) if u.get('running')]
         used = any(i.get('ipv6_enabled') for i in instances)
         peers_v6 = sum(i.get('peers_v6') or 0 for i in instances)
         if host.get('disabled_by_sysctl'):
@@ -1099,7 +1106,7 @@ class AWGManager:
             v6_state = 'enabled_no_peers'
         else:
             v6_state = 'host_only'
-        v4_used = any(i.get('subnet_v4') for i in instances)
+        v4_used = any(i.get('subnet_v4') for i in instances) or bool(port_usage)
         unreadable = any(i.get('peers') is None for i in instances)
         host_readable = host.get('readable') is not False
         if not host_readable:
@@ -1117,6 +1124,12 @@ class AWGManager:
             'host': {'ipv4': host.get('ipv4', ''), 'ipv6': host['address'],
                      'ipv4_state': ('unknown' if not host_readable
                                     else ('in_use' if v4_used else 'host_only')),
+                     'ipv4_counts': {
+                         'instances': (sum(1 for i in instances if i.get('subnet_v4'))
+                                       + len(port_usage)),
+                         'peers': (sum(i.get('peers') or 0 for i in instances)
+                                   + sum(u.get('clients') or 0 for u in port_usage)),
+                     },
                      'ipv6_state': ('unknown' if not host_readable else v6_state),
                      'ipv6_default_route': host['default_route'],
                      'ipv6_disabled_by_sysctl': bool(host.get('disabled_by_sysctl'))},

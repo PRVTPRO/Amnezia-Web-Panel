@@ -191,6 +191,39 @@ class IpStatusTests(Ipv6ApiBase):
             res = self.admin().get('/api/servers/0/ip-status')
         self.assertIs(res.json()['preference']['new_instances'], False)
 
+    def test_xray_connections_are_passed_as_port_usage(self):
+        self.write_data({'servers': [base_server(
+            protocols={'xray': {'installed': True, 'port': 443}})],
+            'users': [{'id': 'admin-id', 'username': 'admin',
+                       'password_hash': panel.hash_password('admin'),
+                       'role': 'admin', 'enabled': True}],
+            'user_connections': []})
+        with mock.patch.object(panel, 'AWGManager') as awg_cls, \
+                mock.patch.object(panel, 'XrayManager') as xray_cls:
+            awg_cls.return_value.get_ip_status.return_value = self._status(True)
+            xray_cls.return_value.get_port_usage.return_value = \
+                {'running': True, 'clients': 4}
+            res = self.admin().get('/api/servers/0/ip-status')
+        self.assertEqual(res.status_code, 200, res.text)
+        self.assertEqual(
+            awg_cls.return_value.get_ip_status.call_args.kwargs['port_usage'],
+            [{'running': True, 'clients': 4}])
+
+    def test_failing_xray_probe_does_not_break_the_payload(self):
+        self.write_data({'servers': [base_server(
+            protocols={'xray': {'installed': True, 'port': 443}})],
+            'users': [{'id': 'admin-id', 'username': 'admin',
+                       'password_hash': panel.hash_password('admin'),
+                       'role': 'admin', 'enabled': True}],
+            'user_connections': []})
+        with mock.patch.object(panel, 'AWGManager') as awg_cls, \
+                mock.patch.object(panel, 'XrayManager') as xray_cls:
+            awg_cls.return_value.get_ip_status.return_value = self._status(True)
+            xray_cls.return_value.get_port_usage.side_effect = RuntimeError('ssh down')
+            res = self.admin().get('/api/servers/0/ip-status')
+        self.assertEqual(res.status_code, 200, res.text)
+        self.assertEqual(res.json()['host']['ipv6_state'], 'in_use')
+
 
 class DockerApplyTests(Ipv6ApiBase):
     def test_confirm_is_required(self):

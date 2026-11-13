@@ -3651,7 +3651,10 @@
         // Older payloads omit ipv4_state: keep the previous green default then.
         const v4 = host.ipv4_state || 'in_use';
         const v4Style = ipHostChipStyle(v4);
-        const v4Counts = {
+        // IPv4 counts come from the server: AWG subnets plus host-port
+        // protocols (Xray) that have no AWG instance row. Older payloads
+        // without the field fall back to the AWG-only numbers.
+        const v4Counts = host.ipv4_counts || {
             instances: instances.filter(item => item.subnet_v4).length,
             peers: instances.reduce((sum, item) => sum + (item.peers || 0), 0),
         };

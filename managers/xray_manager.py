@@ -165,6 +165,15 @@ class XrayManager:
             'port': meta.get('port')
         }
 
+    def get_port_usage(self):
+        """Running state and client count for the server header IP chips.
+
+        A light probe: no stats query and no meta/key reads.
+        """
+        running = self.check_container_running()
+        return {'running': running,
+                'clients': len(self._get_clients_table()) if running else 0}
+
     def _dockerfile_content(self):
         config_dir = self._config_dir()
         return f"""FROM alpine:3.15
