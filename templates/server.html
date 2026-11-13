@@ -674,6 +674,244 @@
     document.addEventListener('DOMContentLoaded', loadSSHTrustStatus);
 </script>
 
+<!-- ===== Copy one AWG instance to another server ===== -->
+<div class="modal-backdrop" id="copyInstanceModal">
+    <div class="modal" style="max-width: 620px;">
+        <div class="modal-header">
+            <h2 class="modal-title">{{ _('copy_instance_title') }}</h2>
+            <button class="modal-close" type="button" onclick="closeCopyInstance()">×</button>
+        </div>
+        <div id="copyInstanceForm">
+            <p class="text-muted" style="margin-top: 0;">{{ _('copy_instance_desc') }}</p>
+            <div class="form-group">
+                <label class="form-label">{{ _('copy_instance_source') }}</label>
+                <div class="form-hint" id="copyInstanceSource"></div>
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="copyInstanceTarget">{{ _('copy_instance_target') }}</label>
+                <select class="form-select" id="copyInstanceTarget" onchange="loadCopyPreview()"></select>
+            </div>
+            <div class="form-hint" id="copyInstancePreview">{{ _('copy_instance_checking') }}</div>
+            <div class="form-hint" style="margin-top: var(--space-sm);">{{ _('copy_instance_key_warning') }}</div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" type="button" onclick="closeCopyInstance()">{{ _('copy_instance_close') }}</button>
+                <button class="btn btn-primary" type="button" id="copyInstanceStart" onclick="startCopyInstance()" disabled>{{ _('copy_instance_start') }}</button>
+            </div>
+        </div>
+        <div id="copyInstanceProgress" class="hidden">
+            <div class="awg-progress">
+                <div class="awg-progress-head">
+                    <span id="copyInstanceStage">{{ _('copy_instance_running') }}</span>
+                    <span class="awg-progress-percent" id="copyInstancePercent">0%</span>
+                </div>
+                <div class="awg-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+                     aria-valuenow="0" id="copyInstanceTrack">
+                    <div class="awg-progress-fill" id="copyInstanceFill"></div>
+                </div>
+            </div>
+            <div class="awg-plugin-stage" id="copyInstanceStep"></div>
+            <details class="awg-plugin-details" id="copyInstanceLogBox">
+                <summary>{{ _('copy_instance_log') }}</summary>
+                <div class="awg-plugin-log" id="copyInstanceLog" aria-live="polite"></div>
+            </details>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" type="button" id="copyInstanceCancel"
+                        onclick="cancelCopyInstance()">{{ _('copy_instance_cancel') }}</button>
+                <button class="btn btn-primary hidden" type="button" id="copyInstanceDone"
+                        onclick="closeCopyInstance()">{{ _('copy_instance_close') }}</button>
+            </div>
+        </div>
+    </div>
+</div>
+<script>
+    const COPY_TARGETS = {{ copy_targets | tojson }};
+    const COPY_LABELS = {{ {
+        'checking': _('copy_instance_checking'),
+        'preview': _('copy_instance_preview'),
+        'port': _('port'),
+        'peers': _('connections'),
+        'port_busy': _('copy_instance_port_busy'),
+        'image': _('copy_instance_image'),
+        'no_targets': _('copy_instance_target_missing'),
+        'running': _('copy_instance_running'),
+        'step': _('copy_instance_step'),
+        'success': _('copy_instance_success'),
+        'failed': _('copy_instance_failed'),
+        'cancelled': _('copy_instance_cancelled'),
+        'connections': _('copy_instance_connections'),
+        'error': _('error')
+    } | tojson }};
+    let copySource = null;
+    let copyPlan = null;
+    let copyOp = null;
+    let copyFinished = null;
+
+    function copyFmt(text, vars) {
+        return String(text || '').replace(/\{(\w+)\}/g, function (match, key) {
+            return vars[key] !== undefined ? vars[key] : match;
+        });
+    }
+
+    function openCopyInstance(proto) {
+        copySource = proto;
+        copyPlan = null;
+        copyFinished = null;
+        const source = document.getElementById('copyInstanceSource');
+        if (source) source.textContent = getProtoTitle(proto);
+        const select = document.getElementById('copyInstanceTarget');
+        const start = document.getElementById('copyInstanceStart');
+        const preview = document.getElementById('copyInstancePreview');
+        document.getElementById('copyInstanceForm').classList.remove('hidden');
+        document.getElementById('copyInstanceProgress').classList.add('hidden');
+        document.getElementById('copyInstanceLog').textContent = '';
+        if (select) {
+            select.innerHTML = (COPY_TARGETS || []).map(function (target) {
+                return '<option value="' + target.id + '">' + escapeHtml(target.name) +
+                    ' — ' + escapeHtml(target.host) + '</option>';
+            }).join('');
+        }
+        if (start) start.disabled = true;
+        if (preview) preview.textContent = COPY_TARGETS.length ? COPY_LABELS.checking : COPY_LABELS.no_targets;
+        openModal('copyInstanceModal');
+        if (COPY_TARGETS.length) loadCopyPreview();
+    }
+
+    async function loadCopyPreview() {
+        const select = document.getElementById('copyInstanceTarget');
+        const preview = document.getElementById('copyInstancePreview');
+        const start = document.getElementById('copyInstanceStart');
+        if (!select || !select.value || !copySource) return;
+        copyPlan = null;
+        if (start) start.disabled = true;
+        if (preview) preview.textContent = COPY_LABELS.checking;
+        try {
+            const plan = await apiCall(`/api/servers/${SERVER_ID}/copy/preflight`, 'POST', {
+                protocol: copySource,
+                target_server_id: Number(select.value),
+            });
+            copyPlan = plan;
+            const parts = [
+                COPY_LABELS.preview + ': ' + plan.target_key + ' · ' + plan.target_container,
+                COPY_LABELS.port + ': ' + plan.port,
+                COPY_LABELS.peers + ': ' + plan.peers,
+            ];
+            const warnings = plan.warnings || [];
+            if (warnings.indexOf('port_in_use') !== -1) {
+                parts.push(copyFmt(COPY_LABELS.port_busy, {port: plan.source_port, new: plan.port}));
+            }
+            if (warnings.indexOf('image_transfer') !== -1) parts.push(COPY_LABELS.image);
+            if (preview) preview.textContent = parts.join(' · ');
+            if (start) start.disabled = false;
+        } catch (error) {
+            if (preview) preview.textContent = COPY_LABELS.error + ': ' + error.message;
+        }
+    }
+
+    async function startCopyInstance() {
+        const select = document.getElementById('copyInstanceTarget');
+        const start = document.getElementById('copyInstanceStart');
+        if (!copySource || !select || !select.value) return;
+        if (start) start.disabled = true;
+        try {
+            const res = await apiCall(`/api/servers/${SERVER_ID}/copy`, 'POST', {
+                protocol: copySource,
+                target_server_id: Number(select.value),
+            });
+            copyOp = {opId: res.operation_id, offset: 0, timer: null};
+            document.getElementById('copyInstanceForm').classList.add('hidden');
+            document.getElementById('copyInstanceProgress').classList.remove('hidden');
+            document.getElementById('copyInstanceDone').classList.add('hidden');
+            const cancel = document.getElementById('copyInstanceCancel');
+            if (cancel) {
+                cancel.disabled = false;
+                cancel.textContent = {{ _('copy_instance_cancel') | tojson }};
+            }
+            pollCopyInstance();
+        } catch (error) {
+            showToast(COPY_LABELS.error + ': ' + error.message, 'error');
+            if (start) start.disabled = false;
+        }
+    }
+
+    async function pollCopyInstance() {
+        const op = copyOp;
+        if (!op) return;
+        try {
+            const data = await apiCall(`/api/servers/${SERVER_ID}/copy/` +
+                encodeURIComponent(op.opId) + '?offset=' + op.offset);
+            op.offset = data.next_offset;
+            const percent = Math.max(0, Math.min(100, data.percent || 0));
+            const fill = document.getElementById('copyInstanceFill');
+            const label = document.getElementById('copyInstancePercent');
+            const track = document.getElementById('copyInstanceTrack');
+            const stepEl = document.getElementById('copyInstanceStep');
+            if (fill) fill.style.width = percent + '%';
+            if (label) label.textContent = percent + '%';
+            if (track) track.setAttribute('aria-valuenow', String(percent));
+            const log = document.getElementById('copyInstanceLog');
+            (data.lines || []).forEach(function (line) {
+                if (log) log.textContent += '[' + line.ts + '] ' + line.text + '\n';
+            });
+            if (log) log.scrollTop = log.scrollHeight;
+            if (data.state === 'running') {
+                if (stepEl) stepEl.textContent = copyFmt(COPY_LABELS.step,
+                    {step: data.step || 0, total: data.total || 8});
+                op.timer = setTimeout(pollCopyInstance, 1000);
+                return;
+            }
+            const cancel = document.getElementById('copyInstanceCancel');
+            if (cancel) cancel.remove();
+            document.getElementById('copyInstanceDone').classList.remove('hidden');
+            if (data.state === 'success') {
+                copyFinished = 'success';
+                if (stepEl) {
+                    stepEl.textContent = copyFmt(COPY_LABELS.success, {name: data.target_key || ''});
+                    stepEl.className = 'awg-plugin-stage awg-plugin-updated';
+                }
+                if (data.result && data.result.connections !== undefined && stepEl) {
+                    stepEl.textContent += ' · ' +
+                        copyFmt(COPY_LABELS.connections, {n: data.result.connections});
+                }
+            } else if (data.state === 'cancelled') {
+                copyFinished = 'cancelled';
+                if (stepEl) stepEl.textContent = COPY_LABELS.cancelled;
+            } else {
+                copyFinished = 'failed';
+                const box = document.getElementById('copyInstanceLogBox');
+                if (box) box.open = true;
+                if (stepEl) {
+                    stepEl.textContent = COPY_LABELS.failed + ': ' +
+                        ((data.error && data.error.message) || '');
+                    stepEl.style.color = 'var(--danger)';
+                }
+            }
+        } catch (error) {
+            op.timer = setTimeout(pollCopyInstance, 2000);
+        }
+    }
+
+    async function cancelCopyInstance() {
+        const op = copyOp;
+        if (!op) return;
+        const button = document.getElementById('copyInstanceCancel');
+        if (button) button.disabled = true;
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/copy/` +
+                encodeURIComponent(op.opId) + '/cancel', 'POST');
+        } catch (error) {
+            if (button) button.disabled = false;
+        }
+    }
+
+    function closeCopyInstance() {
+        if (copyOp && copyOp.timer) clearTimeout(copyOp.timer);
+        copyOp = null;
+        closeModal('copyInstanceModal');
+        const reload = copyFinished === 'success';
+        copyFinished = null;
+        if (reload) location.reload();
+    }
+</script>
 <!-- ===== AmneziaWG plugin updates ===== -->
 <div class="modal-backdrop" id="awgPluginModal">
     <div class="modal" style="max-width: 640px;">
@@ -3003,6 +3241,9 @@
     const WARP_STATUS_TTL = 5000;
 
     const AWG_PROTOCOLS = ['awg', 'awg2', 'awg3', 'awg_legacy'];
+    // Instance copy is AmneziaWG 2.0/3.x only: the legacy client has no
+    // compatible container layout on newer targets.
+    const COPYABLE_PROTOCOLS = ['awg', 'awg2', 'awg3'];
     // Protocols that hand out a client config or link, and therefore have an
     // address a client dials.
     const ENDPOINT_PROTOCOLS = [...AWG_PROTOCOLS, 'wireguard', 'xray', 'telemt'];
@@ -4441,10 +4682,14 @@
                     const endpointBtn = ENDPOINT_PROTOCOLS.includes(protoBase(proto))
                         ? `<button class="btn btn-secondary btn-sm" onclick="openPublicEndpointModal('${proto}')" title="${_('public_endpoint_title')}">🌐${ep ? ' ' + escapeHtml(publicEndpointLabel(ep)) : ''}</button>`
                         : '';
+                    const copyBtn = COPYABLE_PROTOCOLS.includes(protoBase(proto))
+                        ? `<button class="btn btn-secondary btn-sm" onclick="openCopyInstance('${proto}')" title="${_('copy_instance_title')}">${_('copy_instance_btn')}</button>`
+                        : '';
                     ctrlEl.innerHTML = `
                         ${awgBtn}
                         ${exitBtn}
                         ${endpointBtn}
+                        ${copyBtn}
                         <button class="btn btn-secondary btn-sm" onclick="showServerConfig('${proto}')" title="${_('server_config')}">${_('config_btn')}</button>
                         <button class="btn btn-danger btn-sm" onclick="toggleContainer('${proto}', true)" title="${_('stop_container_confirm').replace('{}', '')}">${_('stop_btn')}</button>
                     `;
