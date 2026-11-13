@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import copy as copy_module
 import logging
 import base64
 import hashlib
@@ -63,6 +64,13 @@ from managers.awg_plugin_updater import (
 from managers.xray_manager import XrayManager
 from managers.wireguard_manager import WireGuardManager
 from managers.backup_manager import BackupManager
+from managers.instance_copy import (
+    COPY_STEPS as INSTANCE_COPY_STEPS,
+    CopyCancelled,
+    InstanceCopier,
+    InstanceCopyError,
+    proto_base as instance_copy_base,
+)
 import telegram_bot as tg_bot
 
 from exit_link_service import ExitLinkError, ExitLinkService
@@ -3020,6 +3028,11 @@ class BackupDownloadRequest(BaseModel):
     filename: str
 
 
+class InstanceCopyRequest(BaseModel):
+    protocol: str
+    target_server_id: int
+
+
 class AppearanceSettings(BaseModel):
     title: str = 'Amnezia'
     logo: str = '🛡'
@@ -3876,7 +3889,8 @@ async def server_detail(request: Request, server_id: int):
             save_data(data)
     server = data['servers'][server_id]
     users_list = data.get('users', [])
-    return tpl(request, 'server.html', server=server, server_id=server_id, users=users_list)
+    return tpl(request, 'server.html', server=server, server_id=server_id,
+               users=users_list, copy_targets=_instance_copy_targets(data, server_id))
 
 
 @app.get('/users', response_class=HTMLResponse, tags=["System Templates"])
@@ -9060,6 +9074,383 @@ def api_protocol_backup_delete(request: Request, server_id: int, req: BackupDown
     finally:
         if ssh:
             ssh.disconnect()
+
+
+# ===== Copy one AWG instance to another server =====
+INSTANCE_COPY_TTL = 60 * 60
+INSTANCE_COPY_KEEP = 20
+_inst_copy_ops = {}
+_inst_copy_active = {'op_id': None}
+_inst_copy_loaded = {'done': False}
+
+
+def _instance_copy_store_path():
+    return os.path.join(os.path.dirname(DATA_FILE), 'instance_copy_ops.json')
+
+
+def _instance_copy_save():
+    path = _instance_copy_store_path()
+    tmp = path + '.tmp'
+    try:
+        with open(tmp, 'w', encoding='utf-8') as handle:
+            json.dump(list(_inst_copy_ops.values()), handle, ensure_ascii=False)
+        os.replace(tmp, path)
+    except Exception:
+        logger.warning("Cannot persist instance copy operations", exc_info=True)
+
+
+def _instance_copy_prune():
+    now = datetime.now().timestamp()
+    for op_id, op in list(_inst_copy_ops.items()):
+        if op.get('finished_ts') and now - op['finished_ts'] > INSTANCE_COPY_TTL:
+            _inst_copy_ops.pop(op_id, None)
+    if len(_inst_copy_ops) > INSTANCE_COPY_KEEP:
+        finished = sorted(
+            (op for op in _inst_copy_ops.values() if op.get('finished_ts')),
+            key=lambda op: op['finished_ts'],
+        )
+        for op in finished[:len(_inst_copy_ops) - INSTANCE_COPY_KEEP]:
+            _inst_copy_ops.pop(op['id'], None)
+
+
+def _instance_copy_load():
+    if _inst_copy_loaded['done']:
+        return
+    _inst_copy_loaded['done'] = True
+    try:
+        with open(_instance_copy_store_path(), encoding='utf-8') as handle:
+            stored = json.load(handle)
+    except Exception:
+        return
+    for op in stored if isinstance(stored, list) else []:
+        if not isinstance(op, dict) or not op.get('id'):
+            continue
+        if op.get('state') == 'running':
+            # The process that owned the SSH session is gone.
+            op['state'] = 'failed'
+            op['error'] = {
+                'code': 'interrupted',
+                'message': 'the panel restarted during the copy; check the target server',
+            }
+            op.setdefault('lines', []).append({
+                'ts': datetime.now().isoformat(timespec='seconds'),
+                'stage': 'error',
+                'text': 'panel restarted before the operation finished',
+            })
+            op['finished_at'] = datetime.now().isoformat(timespec='seconds')
+            op['finished_ts'] = datetime.now().timestamp()
+        _inst_copy_ops[op['id']] = op
+    _instance_copy_prune()
+
+
+def _instance_copy_error(exc, status_code=400):
+    return JSONResponse({'error': exc.message, 'code': exc.code}, status_code=status_code)
+
+
+def _instance_copy_targets(data, server_id):
+    return [
+        {'id': index, 'name': server.get('name') or server.get('host'),
+         'host': server.get('host')}
+        for index, server in enumerate(data.get('servers', []))
+        if index != server_id
+    ]
+
+
+def _instance_copy_source(data, server_id, protocol):
+    """(server, protocol_key, panel_entry, container) or raises InstanceCopyError."""
+    if server_id < 0 or server_id >= len(data.get('servers', [])):
+        raise InstanceCopyError('server_not_found', 'Server not found')
+    server = data['servers'][server_id]
+    protocols = server.get('protocols') or {}
+    entry = protocols.get(protocol)
+    if not isinstance(entry, dict):
+        raise InstanceCopyError('protocol_not_found', 'Protocol is not installed on this server')
+    if instance_copy_base(protocol) not in ('awg', 'awg2', 'awg3'):
+        raise InstanceCopyError('unsupported', 'Only AmneziaWG instances can be copied')
+    container = entry.get('container_name') or protocol_container_name(protocol)
+    if not container:
+        raise InstanceCopyError('unsupported', 'Unknown container for this protocol')
+    return server, entry, container
+
+
+def _instance_copy_apply(plan, source_server_id, target_server_id, source_protocol):
+    """Write the copied instance and its user bindings into data.json."""
+    data = load_data()
+    if target_server_id < 0 or target_server_id >= len(data.get('servers', [])):
+        raise InstanceCopyError('server_not_found', 'Target server not found')
+    source_entry = data['servers'][source_server_id]['protocols'][source_protocol]
+    target = data['servers'][target_server_id]
+    protocols = target.setdefault('protocols', {})
+    if plan['target_key'] in protocols:
+        raise InstanceCopyError('name_taken', 'Target instance name is already in use')
+
+    entry = copy_module.deepcopy(source_entry)
+    entry['container_name'] = plan['target_container']
+    entry['instance'] = plan['target_index']
+    entry['port'] = str(plan['port'])
+    params = entry.get('awg_params')
+    if isinstance(params, dict):
+        params['port'] = str(plan['port'])
+    entry['public_host'] = None
+    entry['public_port'] = None
+    entry['installed'] = True
+    display = str(entry.get('display_name') or '').strip()
+    if plan['target_index'] > 1 and '#' not in display:
+        display = ('%s #%d' % (display, plan['target_index'])).strip()
+    entry['display_name'] = display or plan['target_key']
+    protocols[plan['target_key']] = entry
+
+    now = datetime.now().isoformat(timespec='seconds')
+    connections = data.setdefault('user_connections', [])
+    copied = 0
+    for connection in list(connections):
+        if (connection.get('server_id') != source_server_id
+                or connection.get('protocol') != source_protocol):
+            continue
+        connections.append({
+            'id': str(uuid.uuid4()),
+            'user_id': connection.get('user_id'),
+            'server_id': target_server_id,
+            'protocol': plan['target_key'],
+            'client_id': connection.get('client_id'),
+            'name': connection.get('name'),
+            'created_at': connection.get('created_at') or now,
+            # Traffic belongs to the source host; the copy starts at zero.
+            'last_bytes': 0,
+            'last_rx_bytes': 0,
+            'last_tx_bytes': 0,
+        })
+        copied += 1
+    save_data(data)
+    return copied
+
+
+def _instance_copy_rollback_panel(plan, target_server_id):
+    try:
+        data = load_data()
+        target = data['servers'][target_server_id]
+        protocols = target.get('protocols') or {}
+        protocols.pop(plan['target_key'], None)
+        connections = data.get('user_connections') or []
+        data['user_connections'] = [
+            connection for connection in connections
+            if not (connection.get('server_id') == target_server_id
+                    and connection.get('protocol') == plan['target_key'])
+        ]
+        save_data(data)
+    except Exception:
+        logger.warning("instance copy: cannot roll back data.json", exc_info=True)
+
+
+async def _run_instance_copy(op_id):
+    """Worker: SSH work in a thread, panel state on the event loop."""
+    op = _inst_copy_ops[op_id]
+    source_ssh = target_ssh = None
+    plan = None
+    copier = None
+    stage_steps = {
+        'planning': (1, 12), 'inspecting': (2, 25), 'patching': (2, 32),
+        'image': (3, 45), 'creating': (4, 55), 'uploading': (5, 70),
+        'starting': (6, 80), 'verifying': (7, 90), 'tools': (7, 93),
+        'done': (8, 100),
+    }
+
+    def log(stage, text):
+        step, percent = stage_steps.get(stage, (op.get('step', 0), op.get('percent', 0)))
+        op['step'] = max(op.get('step', 0), step)
+        op['percent'] = max(op.get('percent', 0), percent)
+        op['lines'].append({
+            'ts': datetime.now().isoformat(timespec='seconds'),
+            'stage': stage,
+            'text': text,
+        })
+
+    try:
+        data = load_data()
+        source_server, _entry, container = _instance_copy_source(
+            data, op['source_server_id'], op['protocol'])
+        target_server = data['servers'][op['target_server_id']]
+        log('planning', 'connecting to %s and %s' % (
+            source_server.get('name') or source_server['host'],
+            target_server.get('name') or target_server['host']))
+        source_ssh = await asyncio.to_thread(get_ssh, source_server)
+        await asyncio.to_thread(source_ssh.connect)
+        target_ssh = await asyncio.to_thread(get_ssh, target_server)
+        await asyncio.to_thread(target_ssh.connect)
+
+        copier = InstanceCopier(source_ssh, target_ssh)
+        plan = await asyncio.to_thread(
+            copier.plan, op['protocol'], container, target_server.get('protocols') or {})
+        op['target_key'] = plan['target_key']
+        op['target_container'] = plan['target_container']
+        op['port'] = plan['port']
+        log('planning', 'target instance %s, port %d, %d peers' % (
+            plan['target_key'], plan['port'], plan['peers']))
+
+        result = await asyncio.to_thread(
+            copier.execute, plan, log, lambda: bool(op.get('cancel_requested')))
+
+        try:
+            copied = await asyncio.to_thread(
+                _instance_copy_apply, plan, op['source_server_id'],
+                op['target_server_id'], op['protocol'])
+        except Exception:
+            # The container exists but the panel cannot record it: remove it,
+            # otherwise the target keeps an instance nothing knows about.
+            await asyncio.to_thread(copier.destroy, plan)
+            raise
+        result['connections'] = copied
+        op['result'] = result
+        op['state'] = 'success'
+        op['step'] = op['total']
+        op['percent'] = 100
+        log('done', 'instance %s is ready on %s' % (
+            plan['target_key'], target_server.get('name') or target_server['host']))
+    except CopyCancelled:
+        op['state'] = 'cancelled'
+        log('error', 'copy cancelled; the target container was removed')
+    except InstanceCopyError as exc:
+        op['state'] = 'failed'
+        op['error'] = {'code': exc.code, 'message': exc.message}
+        log('error', exc.message)
+    except Exception as exc:
+        logger.exception("Instance copy failed")
+        op['state'] = 'failed'
+        op['error'] = {'code': 'internal_error', 'message': str(exc)}
+        log('error', 'unexpected error: %s' % exc)
+    finally:
+        op['finished_at'] = datetime.now().isoformat(timespec='seconds')
+        op['finished_ts'] = datetime.now().timestamp()
+        _inst_copy_active['op_id'] = None
+        _instance_copy_save()
+        for ssh in (source_ssh, target_ssh):
+            if ssh:
+                try:
+                    ssh.disconnect()
+                except Exception:
+                    logger.debug("instance copy: disconnect failed", exc_info=True)
+
+
+@app.post('/api/servers/{server_id}/copy/preflight', tags=["Protocols"])
+def api_instance_copy_preflight(request: Request, server_id: int, req: InstanceCopyRequest):
+    """Resolve the target instance name, port and warnings. Changes nothing."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if req.target_server_id == server_id:
+        return JSONResponse({'error': 'Choose another server', 'code': 'same_server'},
+                            status_code=400)
+    source_ssh = target_ssh = None
+    try:
+        data = load_data()
+        _server, _entry, container = _instance_copy_source(data, server_id, req.protocol)
+        if req.target_server_id < 0 or req.target_server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Target server not found', 'code': 'server_not_found'},
+                                status_code=404)
+        target = data['servers'][req.target_server_id]
+        source_ssh = get_ssh(data['servers'][server_id])
+        source_ssh.connect()
+        target_ssh = get_ssh(target)
+        target_ssh.connect()
+        plan = InstanceCopier(source_ssh, target_ssh).plan(
+            req.protocol, container, target.get('protocols') or {})
+        payload = dict(plan)
+        payload['status'] = 'ok'
+        payload['protocol'] = req.protocol
+        return payload
+    except InstanceCopyError as e:
+        return _instance_copy_error(e)
+    except Exception as e:
+        logger.exception("Error planning instance copy")
+        return JSONResponse({'error': str(e), 'code': 'internal_error'}, status_code=500)
+    finally:
+        for ssh in (source_ssh, target_ssh):
+            if ssh:
+                ssh.disconnect()
+
+
+@app.post('/api/servers/{server_id}/copy', tags=["Protocols"])
+async def api_instance_copy_start(request: Request, server_id: int, req: InstanceCopyRequest):
+    """Start copying one instance; only one copy runs in the whole panel."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if req.target_server_id == server_id:
+        return JSONResponse({'error': 'Choose another server', 'code': 'same_server'},
+                            status_code=400)
+    _instance_copy_load()
+    _instance_copy_prune()
+    if _inst_copy_active['op_id']:
+        return JSONResponse(
+            {'error': 'Another instance copy is already running', 'code': 'copy_in_progress'},
+            status_code=409)
+    try:
+        data = load_data()
+        _instance_copy_source(data, server_id, req.protocol)
+        if req.target_server_id < 0 or req.target_server_id >= len(data['servers']):
+            raise InstanceCopyError('server_not_found', 'Target server not found')
+    except InstanceCopyError as e:
+        return _instance_copy_error(e)
+
+    op_id = uuid.uuid4().hex
+    op = {
+        'id': op_id,
+        'source_server_id': server_id,
+        'target_server_id': req.target_server_id,
+        'protocol': req.protocol,
+        'state': 'running',
+        'lines': [],
+        'result': None,
+        'error': None,
+        'cancel_requested': False,
+        'step': 0,
+        'total': INSTANCE_COPY_STEPS,
+        'percent': 0,
+        'started_at': datetime.now().isoformat(timespec='seconds'),
+    }
+    _inst_copy_ops[op_id] = op
+    _inst_copy_save()
+    _inst_copy_active['op_id'] = op_id
+    asyncio.create_task(_run_instance_copy(op_id))
+    return {'operation_id': op_id}
+
+
+@app.get('/api/servers/{server_id}/copy/{op_id}', tags=["Protocols"])
+async def api_instance_copy_status(request: Request, server_id: int, op_id: str, offset: int = 0):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    _instance_copy_load()
+    op = _inst_copy_ops.get(op_id)
+    if not op:
+        return JSONResponse({'error': 'Operation not found', 'code': 'not_found'}, status_code=404)
+    lines = op.get('lines') or []
+    offset = max(0, min(int(offset or 0), len(lines)))
+    return {
+        'operation_id': op_id,
+        'state': op.get('state'),
+        'step': op.get('step', 0),
+        'total': op.get('total', INSTANCE_COPY_STEPS),
+        'percent': op.get('percent', 0),
+        'lines': lines[offset:],
+        'next_offset': len(lines),
+        'result': op.get('result'),
+        'error': op.get('error'),
+        'target_key': op.get('target_key'),
+        'target_container': op.get('target_container'),
+        'port': op.get('port'),
+    }
+
+
+@app.post('/api/servers/{server_id}/copy/{op_id}/cancel', tags=["Protocols"])
+async def api_instance_copy_cancel(request: Request, server_id: int, op_id: str):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    _instance_copy_load()
+    op = _inst_copy_ops.get(op_id)
+    if not op:
+        return JSONResponse({'error': 'Operation not found', 'code': 'not_found'}, status_code=404)
+    if op.get('state') == 'running':
+        op['cancel_requested'] = True
+        return {'status': 'cancelling'}
+    return {'status': op.get('state')}
 
 
 @app.post('/api/servers/{server_id}/container/toggle', tags=["Protocols"])
