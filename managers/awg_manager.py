@@ -223,6 +223,35 @@ TRANSIT_PARAM_KEYS = (
     ('transport_packet_magic_header', 'H4'),
 )
 
+# AWG 3.1 keys of a transit link. HeaderProtectionKey makes the kernel demand
+# S1-S4 >= AWG3_MIN_JUNK_SIZE, so S3/S4 come back at the floor (12) - the
+# MTU budget pays for S4, and the entry side must write the same set.
+# H1-H4 stay at the 1..4 compatibility values: with header protection on the
+# custom-header mechanism is off, and ranged headers plus RandomTrailers
+# misclassify transport packets as handshakes (amneziawg-go#186).
+TRANSIT_AWG3_PARAM_KEYS = (
+    ('cookie_reply_packet_junk_size', 'S3'),
+    ('transport_packet_junk_size', 'S4'),
+    ('header_protection_key', 'HeaderProtectionKey'),
+    ('content_padding_addition', 'ContentPaddingAddition'),
+    ('rekey_after_time', 'RekeyAfterTime'),
+    ('rekey_timeout', 'RekeyTimeout'),
+    ('reject_after_time', 'RejectAfterTime'),
+    ('keepalive_timeout', 'KeepaliveTimeout'),
+    ('max_handshake_attempts', 'MaxHandshakeAttempts'),
+    ('random_trailers', 'RandomTrailers'),
+    ('disable_cookies', 'DisableCookies'),
+    ('i1', 'I1'),
+    ('i2', 'I2'),
+    ('i3', 'I3'),
+    ('i4', 'I4'),
+    ('i5', 'I5'),
+)
+
+# Transit 3.1 padding is deliberately narrower than on a client instance: the
+# link is a tunnel inside a tunnel, and every padded byte is lost client MTU.
+TRANSIT_AWG3_PADDING = '8-24'
+
 # Runs inside the awg3 container before awg-quick. Creating a throwaway
 # interface both loads the module (a module present on disk but not yet loaded
 # would otherwise read as absent) and proves the container can reach it.
@@ -527,6 +556,70 @@ def generate_awg_params(use_ranges=False, awg3=False):
         })
 
     return params
+
+
+def is_awg31_params(params):
+    """Whether a transit param dict carries the AWG 3.1 header-protection set."""
+    return bool((params or {}).get('header_protection_key'))
+
+
+def transit_param_lines(params):
+    """Obfuscation lines of a transit config.
+
+    Both ends render from the very same dict: the entry copies it from the exit
+    node record, so header protection keys, padding and timings always match.
+    2.0 links carry TRANSIT_PARAM_KEYS only - S3/S4 pad every transport packet
+    and are left out of that hop; a 3.1 link needs them to satisfy the
+    header-protection floor, so they come back with the rest of that set.
+    """
+    params = params or {}
+    keys = TRANSIT_PARAM_KEYS
+    if is_awg31_params(params):
+        keys = keys + TRANSIT_AWG3_PARAM_KEYS
+    return ''.join(
+        f"{config_key} = {params[param_key]}\n"
+        for param_key, config_key in keys
+        if params.get(param_key)
+    )
+
+
+def transit_mtu(params, link_mtu=DEFAULT_LINK_MTU):
+    """exit0 MTU that still fits the transit obfuscation overhead.
+
+    The contract is the same as safe_client_mtu: size against the *maximum*
+    ContentPaddingAddition/S4, otherwise only the unlucky packets are dropped.
+    Without 3.1 keys the answer is the historic 1420.
+    """
+    try:
+        link = int(link_mtu)
+    except (TypeError, ValueError):
+        link = DEFAULT_LINK_MTU
+    room = (link - transport_overhead(params)) // 8 * 8
+    return max(MIN_CLIENT_MTU, min(EXIT_MTU, room))
+
+
+def generate_transit_params(awg3=False):
+    """Obfuscation parameters of an exit-node transit link.
+
+    `awg3` produces the full 3.1 set: header protection, narrow content
+    padding, the fixed H1-H4 compatibility values, S3/S4 at the module floor
+    and the desktop client's special junk packet (I1).
+    """
+    if not awg3:
+        wanted = {param_key for param_key, _ in TRANSIT_PARAM_KEYS}
+        return {k: v for k, v in generate_awg_params(use_ranges=False).items()
+                if k in wanted}
+
+    wanted = {param_key for param_key, _ in
+              TRANSIT_PARAM_KEYS + TRANSIT_AWG3_PARAM_KEYS}
+    params = generate_awg_params(awg3=True)
+    params.setdefault('i1', AWG_DEFAULT_I1)
+    # HeaderProtectionKey needs S1-S4 >= 12; S3/S4 are the ones a 2.0 link
+    # leaves out, so pin them to the floor instead of the random 12-50.
+    params['cookie_reply_packet_junk_size'] = str(AWG3_MIN_JUNK_SIZE)
+    params['transport_packet_junk_size'] = str(AWG3_MIN_JUNK_SIZE)
+    params['content_padding_addition'] = TRANSIT_AWG3_PADDING
+    return {k: v for k, v in params.items() if k in wanted}
 
 
 class AWGManager:
@@ -3089,13 +3182,12 @@ x_warp_up() {
             f"# DnsViaExit = {'on' if link.get('dns_via_exit') else 'off'}",
             f"PrivateKey = {ENTRY_PRIVATE_KEY_PLACEHOLDER}",
             f"Address = {link['transit_ip']}/{link.get('subnet_cidr', 24)}",
-            f"MTU = {EXIT_MTU}",
+            f"MTU = {link.get('mtu') or transit_mtu(link.get('awg_params'))}",
             'Table = off',
         ]
         if link.get('obfuscation'):
             params = link.get('awg_params') or {}
-            lines += [f"{config_key} = {params[param_key]}"
-                      for param_key, config_key in TRANSIT_PARAM_KEYS if params.get(param_key)]
+            lines += transit_param_lines(params).splitlines()
         lines += [
             '',
             '[Peer]',
@@ -3224,6 +3316,24 @@ x_warp_up() {
         if code != 0:
             raise RuntimeError(f"Failed to restore exit0.conf: {err or out or f'SSH exit code {code}'}")
         return self._exit_apply(protocol_type)
+
+    def _tunnel_backend(self, protocol_type, iface):
+        """Which implementation carries an interface: 'kernel', 'userspace', 'down'.
+
+        amneziawg-go creates a plain TUN device, while the kernel module
+        creates a link of type `amneziawg` - that is the only reliable
+        difference in `ip -d link` output.
+        """
+        out, _, _ = self.ssh.run_sudo_command(
+            f"docker exec {self._container_name(protocol_type)} "
+            f"sh -c 'ip -d link show {iface} 2>/dev/null'")
+        if not (out or '').strip():
+            return 'down'
+        return 'kernel' if 'amneziawg' in out else 'userspace'
+
+    def exit_link_backend(self, protocol_type):
+        """Backend carrying exit0 (see _tunnel_backend)."""
+        return self._tunnel_backend(protocol_type, EXIT_IFACE)
 
     def exit_link_info(self, protocol_type):
         """What the container believes it is linked to, or None. Reads only

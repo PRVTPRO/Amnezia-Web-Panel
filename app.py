@@ -2767,6 +2767,7 @@ class InstallProtocolRequest(BaseModel):
     # Exit node
     exit_subnet: Optional[str] = None       # transit subnet, default 10.9.0.0/24
     exit_obfuscation: Optional[bool] = None  # AmneziaWG obfuscation on the transit link
+    exit_awg3: Optional[bool] = None         # ...and use the AWG 3.1 key set
     # AmneziaWG: values that end up in the generated client configs
     awg_mtu: Optional[str] = None
     awg_dns1: Optional[str] = None
@@ -7169,6 +7170,7 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
                 port=req.port,
                 subnet=req.exit_subnet,
                 obfuscation=bool(req.exit_obfuscation),
+                awg3=bool(req.exit_awg3),
             )
         elif install_base in AWG_PROTOCOLS:
             install_args = (install_protocol,)
@@ -7229,6 +7231,7 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
             proto_record['subnet'] = result.get('subnet')
             proto_record['public_key'] = result.get('public_key')
             proto_record['obfuscation'] = result.get('obfuscation')
+            proto_record['protocol_version'] = result.get('protocol_version')
         proto_record['base_protocol'] = install_base
         proto_record['instance'] = protocol_instance(install_protocol)
         proto_record['display_name'] = protocol_display_name(install_protocol)

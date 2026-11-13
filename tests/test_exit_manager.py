@@ -62,6 +62,8 @@ class FakeSSH:
         self.uploads = {}
         self.sudo_uploads = {}
         self.commands = []
+        self.module_version = '3.1.20260906'
+        self.transit_backend = 'kernel'
 
     def upload_file(self, content, path):
         self.uploads[path] = content
@@ -115,8 +117,16 @@ class FakeSSH:
             self.files[CONF] = body.replace('$(cat wireguard_server_private_key.key)', 'EXITPRIVATEKEY') + '\n'
             self.files[PUB] = 'EXITPUB\n'
             return '', '', 0
+        if 'ip -d link show transit0' in cmd:
+            if self.transit_backend == 'kernel':
+                return ('5: transit0: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1420\n'
+                        '    amneziawg addrgenmode none\n'), '', 0
+            return ('5: transit0: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1420\n'
+                    '    tun type tun\n'), '', 0
         if 'ip link show transit0' in cmd:
             return 'transit0: <POINTOPOINT> mtu 1420', '', 0
+        if '/sys/module/amneziawg/version' in cmd:
+            return (self.module_version + '\n' if self.module_version else ''), '', 0
         if 'awg show all' in cmd:
             return WG_SHOW, '', 0
         if 'syncconf' in cmd:
@@ -189,6 +199,48 @@ class ExitInstallTests(unittest.TestCase):
         self.assertIn('# Obfuscation = on', conf)
         self.assertEqual(set(result['awg_params']), {'junk_packet_count', 'junk_packet_min_size', 'junk_packet_max_size', 'init_packet_junk_size', 'response_packet_junk_size', 'init_packet_magic_header', 'response_packet_magic_header', 'underload_packet_magic_header', 'transport_packet_magic_header'})
 
+    def test_install_with_awg31_writes_the_header_protection_set(self):
+        ssh = FakeSSH()
+        result = ExitManager(ssh).install_protocol('exit', port='55520',
+                                                   obfuscation=True, awg3=True)
+
+        conf = ssh.files[CONF]
+        self.assertEqual(result['status'], 'success')
+        self.assertEqual(result['protocol_version'], '3.1')
+        self.assertEqual(result['backend'], 'kernel')
+        for key in ('HeaderProtectionKey', 'ContentPaddingAddition', 'RandomTrailers',
+                    'DisableCookies', 'S3', 'S4', 'I1'):
+            self.assertRegex(conf, rf'(?m)^{key} = \S')
+        self.assertIn('RandomTrailers = on', conf)
+        self.assertIn('DisableCookies = on', conf)
+        self.assertIn('ContentPaddingAddition = 8-24', conf)
+        # Header protection turns the custom-header mechanism off.
+        for header in ('H1 = 1', 'H2 = 2', 'H3 = 3', 'H4 = 4'):
+            self.assertIn(header, conf)
+        self.assertIn('MTU = 1400', conf)
+        self.assertIn('Transit backend: kernel', result['log'])
+
+    def test_install_awg31_refuses_a_pre_3_module(self):
+        ssh = FakeSSH()
+        ssh.module_version = '1.0.20240301'
+        result = ExitManager(ssh).install_protocol('exit', port='55520',
+                                                   obfuscation=True, awg3=True)
+
+        self.assertEqual(result['status'], 'error')
+        self.assertIn('kernel module 3.0+', result['message'])
+        self.assertFalse(any(c.startswith('docker build') or c.startswith('docker run')
+                             for c in ssh.commands))
+
+    def test_install_awg31_refuses_a_userspace_backend(self):
+        ssh = FakeSSH()
+        ssh.transit_backend = 'userspace'
+        with self.assertRaises(RuntimeError) as ctx:
+            ExitManager(ssh).install_protocol('exit', port='55520',
+                                              obfuscation=True, awg3=True)
+        self.assertIn('userspace', str(ctx.exception))
+        # The half-configured container must not be left running.
+        self.assertTrue(any('docker rm -fv' in c for c in ssh.commands))
+
     def test_install_rejects_non_slash_24_subnet(self):
         ssh = FakeSSH()
         result = ExitManager(ssh).install_protocol('exit', subnet='10.9.0.0/23')
@@ -237,7 +289,8 @@ class ExitPeerTests(unittest.TestCase):
     def test_info_for_entry_nodes(self):
         info = self.manager.get_info()
         self.assertEqual(info, {'public_key': 'EXITPUB', 'port': '55520', 'subnet': '10.9.0.0/24',
-                                'obfuscation': False, 'awg_params': {}})
+                                'obfuscation': False, 'protocol_version': None,
+                                'mtu': 1420, 'awg_params': {}})
 
     def test_list_peers_merges_table_live_data_and_external_blocks(self):
         self.ssh.files[CONF] += "\n[Peer]\nPublicKey = PEER_X\nAllowedIPs = 10.9.0.9/32\n"

@@ -470,6 +470,8 @@
   "exit_obfuscation": "Obfusquer la liaison entre les nœuds (AmneziaWG)",
   "exit_obfuscation_short": "Obfuscation",
   "exit_obfuscation_hint": "Activez cette option lorsque la liaison entre les nœuds traverse un dispositif DPI. Sinon, utilisez WireGuard sans obfuscation. Les nœuds d’entrée AmneziaWG Legacy ne peuvent utiliser qu’un nœud de sortie sans obfuscation.",
+  "exit_awg3": "AmneziaWG 3.1 sur la liaison entre nœuds",
+  "exit_awg3_hint": "Ajoute la protection d’en-tête, les trailers aléatoires et le remplissage de contenu à l’obfuscation (AmneziaWG 3.1). Les nœuds d’entrée doivent être en AmneziaWG 3.x. Le MTU de la liaison passe à 1400 : le MTU client doit être réduit d’autant.",
   "exit_peers": "Pairs",
   "exit_peers_title": "Nœud de sortie — Nœuds d’entrée liés",
   "exit_peer_name": "Nœud d’entrée",

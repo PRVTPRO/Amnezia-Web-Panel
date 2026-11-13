@@ -13,10 +13,12 @@ from datetime import datetime
 
 from managers.awg_manager import (
     AWG_QUICK_FORCE_USERSPACE_PATCH,
-    TRANSIT_PARAM_KEYS,
     AWGManager,
-    generate_awg_params,
     generate_psk,
+    generate_transit_params,
+    is_awg31_params,
+    transit_mtu,
+    transit_param_lines,
 )
 import warp_service as warp_logic
 
@@ -82,9 +84,14 @@ class ExitManager(AWGManager):
         return 'awg-quick'
 
     def _userspace_guard(self, protocol_type=None):
-        # The transit config carries no AWG 3.1 keys, so an old kernel module
-        # accepts it; a missing module is caught by awg-quick's own fallback.
+        # The transit link must run on the kernel module: a userspace
+        # amneziawg-go fallback is refused at install/link time instead of
+        # being silently used (see install_protocol / transit_backend).
         return ''
+
+    def transit_backend(self):
+        """'kernel' / 'userspace' / 'down' for the transit0 interface."""
+        return self._tunnel_backend(self.PROTOCOL, self.INTERFACE)
 
     def _clients_table_path(self):
         return self.PEERS_TABLE
@@ -165,22 +172,25 @@ class ExitManager(AWGManager):
         """transit0.conf. Panel metadata lives inside [Interface] as comments
         (remove_client() splits the file on `[` and would drop anything before
         the first section)."""
-        obfuscation_lines = ''.join(
-            f"{config_key} = {awg_params[param_key]}\n"
-            for param_key, config_key in TRANSIT_PARAM_KEYS
-            if awg_params and awg_params.get(param_key)
-        )
         return (
             "[Interface]\n"
             "# Managed by Amnezia Web Panel - exit node transit endpoint\n"
             f"# Subnet = {net}\n"
             f"# Obfuscation = {'on' if awg_params else 'off'}\n"
+            f"# ProtocolVersion = {self._protocol_version(awg_params) or 'wireguard'}\n"
             "PrivateKey = $(cat wireguard_server_private_key.key)\n"
             f"Address = {self._subnet_gateway(net)}\n"
             f"ListenPort = {port}\n"
-            f"MTU = {EXIT_DEFAULTS['mtu']}\n"
-            f"{obfuscation_lines}"
+            f"MTU = {transit_mtu(awg_params)}\n"
+            f"{transit_param_lines(awg_params) if awg_params else ''}"
         )
+
+    @staticmethod
+    def _protocol_version(awg_params):
+        """'3.1' for a header-protected transit, '2.0' for the legacy set."""
+        if not awg_params:
+            return None
+        return '3.1' if is_awg31_params(awg_params) else '2.0'
 
     def _configure_exit_container(self, port, net, awg_params):
         """Generate the key pair (kept if present) and write transit0.conf.
@@ -215,13 +225,15 @@ fi
             raise RuntimeError(f"Failed to configure the transit endpoint: {err}")
 
     def install_protocol(self, protocol_type='exit', port=None, subnet=None,
-                         obfuscation=False, warp_ctx=None, **_ignored):
+                         obfuscation=False, awg3=False, warp_ctx=None, **_ignored):
         """Install the exit-node container.
 
         `subnet` is the transit subnet shared with the entry nodes (must be an
         IPv4 /24: the peer allocator hands out the last octet); `obfuscation`
         turns the transit link into AmneziaWG with junk/handshake obfuscation,
-        otherwise it speaks plain WireGuard.
+        otherwise it speaks plain WireGuard. `awg3` upgrades that obfuscation
+        to the 3.1 key set (header protection, random trailers, content
+        padding); entry nodes must speak 3.1 to link to such an exit.
         """
         port = str(port or EXIT_DEFAULTS['port']).strip()
         try:
@@ -231,6 +243,17 @@ fi
         if net.version != 4 or net.prefixlen != 24:
             return {'status': 'error',
                     'message': 'Transit subnet must be an IPv4 /24 (peers get the last octet)'}
+
+        if obfuscation and awg3:
+            module = self._host_awg_module_version()
+            if not self._module_supports_awg3(module):
+                return {
+                    'status': 'error',
+                    'message': (
+                        'AmneziaWG 3.1 needs the amneziawg kernel module 3.0+ '
+                        f'(this host has {module or "no amneziawg module"}). '
+                        'The link would fall back to userspace amneziawg-go.'),
+                }
 
         results = []
         if not self.check_docker_installed():
@@ -286,17 +309,26 @@ fi
 
         awg_params = None
         if obfuscation:
-            wanted = {param_key for param_key, _ in TRANSIT_PARAM_KEYS}
-            awg_params = {k: v for k, v in generate_awg_params(use_ranges=False).items() if k in wanted}
+            awg_params = generate_transit_params(awg3=bool(awg3))
 
         try:
             results.append("Configuring transit endpoint...")
             self._configure_exit_container(port, net, awg_params)
-            results.append("Transit endpoint configured ("
-                           + ("AmneziaWG obfuscation on" if awg_params else "plain WireGuard") + ")")
+            if awg_params:
+                label = ("AmneziaWG 3.1" if is_awg31_params(awg_params)
+                         else "AmneziaWG 2.0")
+            else:
+                label = "plain WireGuard"
+            results.append(f"Transit endpoint configured ({label} obfuscation on)")
             results.append("Starting transit service...")
             self._upload_start_script(self.PROTOCOL, warp_ctx=warp_ctx)
             self._verify_interface_up(self.PROTOCOL)
+            backend = self.transit_backend()
+            results.append(f"Transit backend: {backend}")
+            if awg_params and is_awg31_params(awg_params) and backend != 'kernel':
+                raise RuntimeError(
+                    f'transit0 came up on the {backend} backend; AWG 3.1 requires '
+                    'the amneziawg kernel module')
             results.append("Transit service started")
         except RuntimeError:
             # Do not leave a running container with no working interface behind.
@@ -317,6 +349,8 @@ fi
             'subnet': str(net),
             'public_key': self._get_server_public_key(),
             'obfuscation': bool(awg_params),
+            'protocol_version': self._protocol_version(awg_params),
+            'backend': backend,
             'awg_params': awg_params or {},
             'log': results,
         }
@@ -347,6 +381,8 @@ fi
             'port': port,
             'subnet': self._read_config_key(self.PROTOCOL, 'Subnet'),
             'obfuscation': (self._read_config_key(self.PROTOCOL, 'Obfuscation') or 'off') == 'on',
+            'protocol_version': self._protocol_version(params),
+            'mtu': transit_mtu(params),
             'awg_params': params,
         }
 

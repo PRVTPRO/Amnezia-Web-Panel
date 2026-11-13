@@ -470,6 +470,8 @@
   "exit_obfuscation": "混淆节点间链路 (AmneziaWG)",
   "exit_obfuscation_short": "混淆",
   "exit_obfuscation_hint": "节点间的链路经过 DPI 检测时，请启用此选项；否则使用普通 WireGuard。AmneziaWG Legacy 入口节点只能使用未启用混淆的出口节点。",
+  "exit_awg3": "节点间链路使用 AmneziaWG 3.1",
+  "exit_awg3_hint": "在混淆之上启用头部保护、随机尾部与内容填充（AmneziaWG 3.1）。入口节点必须为 AmneziaWG 3.x。该链路 MTU 降至 1400，客户端 MTU 需相应降低。",
   "exit_peers": "对等节点",
   "exit_peers_title": "出口节点 — 已关联的入口节点",
   "exit_peer_name": "入口节点",
