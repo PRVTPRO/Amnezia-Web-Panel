@@ -2134,7 +2134,8 @@ fi
 
     def get_host_tuning(self):
         """Read live network-tuning state for the whole server (host + all
-        AWG containers). Used by the server-level "Host tuning" modal.
+        AWG containers + xray containers with their core version). Used by
+        the server-level "Host tuning" modal.
         """
         script = """
 echo "HOST_CC=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"
@@ -2144,11 +2145,18 @@ echo "HOST_CONNTRACK_COUNT=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/d
 echo "HOST_BACKLOG=$(sysctl -n net.core.netdev_max_backlog 2>/dev/null)"
 echo "HOST_SOMAXCONN=$(sysctl -n net.core.somaxconn 2>/dev/null)"
 echo "HOST_AWG_MODULE=$(modinfo amneziawg 2>/dev/null | awk '/^version:/{print $2; exit}')"
-for c in $(docker ps -a --format '{{.Names}}' | grep -E '^amnezia-(awg|exit)' | sort); do
+for c in $(docker ps -a --format '{{.Names}}' | grep -E '^amnezia-(awg|exit|xray)' | sort); do
   echo "CT_NAME=$c"
   if docker ps --format '{{.Names}}' | grep -qx "$c"; then
     echo "CT_RUNNING=1"
-    docker exec "$c" sh -c 'for p in net.core.rmem_max net.core.wmem_max net.ipv4.tcp_fastopen net.ipv4.tcp_mtu_probing; do echo "CTK_$p=$(sysctl -n $p 2>/dev/null)"; done; echo "CTK_nofile=$(ulimit -n)"' 2>/dev/null
+    case "$c" in
+      amnezia-xray*)
+        echo "CT_VERSION=$(docker exec "$c" /usr/bin/xray version 2>/dev/null | awk '/^Xray /{print $2; exit}')"
+        ;;
+      *)
+        docker exec "$c" sh -c 'for p in net.core.rmem_max net.core.wmem_max net.ipv4.tcp_fastopen net.ipv4.tcp_mtu_probing; do echo "CTK_$p=$(sysctl -n $p 2>/dev/null)"; done; echo "CTK_nofile=$(ulimit -n)"' 2>/dev/null
+        ;;
+    esac
   else
     echo "CT_RUNNING=0"
   fi
@@ -2174,6 +2182,8 @@ done
                 info['containers'].append(current)
             elif key == 'CT_RUNNING' and current is not None:
                 current['running'] = val == '1'
+            elif key == 'CT_VERSION' and current is not None:
+                current['version'] = val
             elif key.startswith('CTK_') and current is not None:
                 current['ct'][key[4:]] = val
         return info
