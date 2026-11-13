@@ -51,7 +51,7 @@ except ImportError:
 from managers.ssh_manager import SSHManager, configure_jump_resolver
 from managers import ssh_trust
 from managers import split_tunnel
-from managers.awg_manager import AWGManager, normalize_special_junk
+from managers.awg_manager import AWGManager, ICMP_ECHO_ALLOW_SCRIPT, normalize_special_junk
 from server_stats import collect_host_stats
 from managers.awg_plugin_updater import (
     COMPONENTS as AWG_PLUGIN_COMPONENTS,
@@ -3379,6 +3379,10 @@ async def startup():
     # One-shot: old RKN installs have no [Install] in the unit and lose their
     # rules at reboot. Runs in the background, never blocks startup.
     asyncio.create_task(rkn_boot_restore_migration())
+    # One-shot: older panels dropped ICMP echo-request on INPUT, which made
+    # hosts unpingable and hid tunnel ICMP. New installs are fixed; this
+    # clears the rule on hosts provisioned before the fix.
+    asyncio.create_task(icmp_echo_unblock_migration())
 
     # Start Telegram bot if enabled
     tg_cfg = data.get('settings', {}).get('telegram', {})
@@ -6458,6 +6462,82 @@ async def _rkn_migration_finish(pending):
     async with DATA_LOCK:
         data = load_data()
         rec = _rkn_migration_record(data)
+        rec['last_attempt_at'] = datetime.now(timezone.utc).isoformat()
+        rec['pending'] = pending
+        if pending == 0:
+            rec['done_at'] = rec['last_attempt_at']
+        save_data(data)
+
+
+# --- one-shot ICMP echo-unblock migration -----------------------------------
+# Older panels added `-p icmp --icmp-type echo-request -j DROP` to INPUT in
+# setup_firewall(). The host itself stopped answering ping, and ICMP that
+# arrived through a tunnel died after decryption, so diagnostics lied. New
+# installs remove the rule instead; this clears it on hosts provisioned by an
+# older panel after a panel upgrade.
+AWP_ICMP_ECHO_MIGRATION = os.environ.get(
+    'AWP_ICMP_ECHO_MIGRATION', '1').lower() not in ('0', 'false', 'no', 'off')
+AWP_ICMP_ECHO_DELAY = 15  # let the panel start serving first; tests patch to 0
+AWP_ICMP_ECHO_TIMEOUT = 120
+AWP_ICMP_ECHO_KEY = 'icmp_echo_unblock_v1'
+
+
+def _icmp_echo_migration_record(data):
+    return (data.setdefault('panel_migrations', {})
+            .setdefault(AWP_ICMP_ECHO_KEY, {}))
+
+
+async def icmp_echo_unblock_migration():
+    """Remove the legacy ICMP echo DROP rule on every host, once.
+
+    Never raises: one unreachable host must not affect the others or the
+    panel. A failed host leaves the migration incomplete, so the next panel
+    restart retries it; the script itself is idempotent, so hosts that are
+    already clean are a no-op.
+    """
+    if not AWP_ICMP_ECHO_MIGRATION:
+        logger.info("ICMP echo migration disabled by AWP_ICMP_ECHO_MIGRATION")
+        return
+    await asyncio.sleep(AWP_ICMP_ECHO_DELAY)
+    try:
+        data = load_data()
+    except Exception as e:
+        logger.warning(f"ICMP echo migration: cannot read data: {e}")
+        return
+    if _icmp_echo_migration_record(data).get('done_at'):
+        return
+    servers = list(data.get('servers') or [])
+    if not servers:
+        await _icmp_echo_migration_finish(0)
+        return
+
+    pending = 0
+    for srv in servers:
+        label = srv.get('name') or srv.get('host') or srv.get('uid')
+        try:
+            err = await _rkn_ssh_run(srv, ICMP_ECHO_ALLOW_SCRIPT,
+                                     AWP_ICMP_ECHO_TIMEOUT)
+            if err is not None:
+                detail = 'unblock failed'
+                try:
+                    detail = json.loads(err.body).get('error', detail)[:500]
+                except Exception:
+                    pass
+                pending += 1
+                logger.warning(f"ICMP echo migration failed on {label}: {detail}")
+                continue
+            logger.info(f"ICMP echo rule cleared on {label}")
+        except Exception as e:
+            pending += 1
+            logger.warning(f"ICMP echo migration failed on {label}: {e}")
+
+    await _icmp_echo_migration_finish(pending)
+
+
+async def _icmp_echo_migration_finish(pending):
+    async with DATA_LOCK:
+        data = load_data()
+        rec = _icmp_echo_migration_record(data)
         rec['last_attempt_at'] = datetime.now(timezone.utc).isoformat()
         rec['pending'] = pending
         if pending == 0:

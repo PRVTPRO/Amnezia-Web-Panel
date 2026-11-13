@@ -51,6 +51,40 @@ AWG_IPV6_ENV = 'AWG_IPV6'
 IPV6_FORCE_OFF = ('off', 'false', '0', 'no', 'disable', 'disabled')
 IPV6_FORCE_ON = ('on', 'true', '1', 'yes', 'force', 'forced')
 
+# The panel used to add `-p icmp --icmp-type echo-request -j DROP` to INPUT in
+# setup_firewall(). That made the host itself unpingable, so ICMP that arrived
+# through a tunnel was dropped after decryption and diagnostics lied. New
+# installs remove the rule instead; app.py reuses the same script to clean up
+# hosts provisioned by an older panel.
+ICMP_ECHO_ALLOW_SCRIPT = """
+ICMP_ECHO_DROP_LEFT=0
+for bin in iptables iptables-legacy; do
+    command -v "$bin" >/dev/null 2>&1 || continue
+    for spec in "-p icmp --icmp-type echo-request" "-p icmp -m icmp --icmp-type echo-request" "-p icmp --icmp-type 8" "-p icmp -m icmp --icmp-type 8"; do
+        while "$bin" -C INPUT $spec -j DROP 2>/dev/null; do
+            "$bin" -D INPUT $spec -j DROP 2>/dev/null || break
+        done
+    done
+done
+if [ -f /etc/iptables/rules.v4 ]; then
+    if grep -E -q '^-A INPUT .*-p icmp .*(--icmp-type (8|echo-request)).*-j DROP' /etc/iptables/rules.v4; then
+        cp -p /etc/iptables/rules.v4 "/etc/iptables/rules.v4.bak.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+        if grep -E -v '^-A INPUT .*-p icmp .*(--icmp-type (8|echo-request)).*-j DROP' /etc/iptables/rules.v4 > /etc/iptables/rules.v4.awp.tmp 2>/dev/null; then
+            mv /etc/iptables/rules.v4.awp.tmp /etc/iptables/rules.v4 || rm -f /etc/iptables/rules.v4.awp.tmp
+        else
+            rm -f /etc/iptables/rules.v4.awp.tmp
+        fi
+    fi
+fi
+for bin in iptables iptables-legacy; do
+    command -v "$bin" >/dev/null 2>&1 || continue
+    n=$("$bin" -S INPUT 2>/dev/null | grep -E -c -- '-p icmp .*--icmp-type (8|echo-request) .*-j DROP' || true)
+    ICMP_ECHO_DROP_LEFT=$((ICMP_ECHO_DROP_LEFT + ${n:-0}))
+done
+echo "ICMP_ECHO_DROP_LEFT=$ICMP_ECHO_DROP_LEFT"
+exit 0
+"""
+
 # Default AWG parameters (from protocols_defs.h)
 AWG_DEFAULTS = {
     'port': '55424',
@@ -1487,11 +1521,14 @@ class AWGManager:
         return parsed[0] if isinstance(parsed, list) and parsed else None
 
     @staticmethod
-    def _run_cmd_from_inspect(info, name, image):
+    def _run_cmd_from_inspect(info, name, image, port_override=None):
         """Rebuild the run command from the container's own inspect data.
 
         Keeps binds, caps, ulimits, ports, restart policy and sysctls, then
         forces the two IPv6 sysctls the old container was missing.
+
+        ``port_override`` republishes every UDP mapping on another port; the
+        instance copy uses it to move a container to a free port on the target.
         """
         if not isinstance(info, dict):
             return None
@@ -1558,10 +1595,17 @@ class AWGManager:
         for port, bindings in (host.get('PortBindings') or {}).items():
             if skip_ports:
                 break
+            protocol = port.partition('/')[2]
+            try:
+                override = int(port_override) if port_override else None
+            except (TypeError, ValueError):
+                override = None
+            container_port = (f'{override}/{protocol}' if protocol else str(override)) if override else port
             for binding in bindings or []:
                 host_ip = binding.get('HostIp') or ''
-                host_port = binding.get('HostPort') or ''
-                mapping = f'{host_ip}:{host_port}:{port}' if host_ip else f'{host_port}:{port}'
+                host_port = str(override) if override else (binding.get('HostPort') or '')
+                mapping = (f'{host_ip}:{host_port}:{container_port}' if host_ip
+                           else f'{host_port}:{container_port}')
                 parts.append(f'-p {shlex.quote(mapping)}')
         parts.append(f'--name {shlex.quote(name)}')
         parts.append(shlex.quote(image))
@@ -2234,10 +2278,9 @@ echo "KERNEL_MODULE: ok: installed {v}"
         users see as random connection freezes. 262144 is a safe value
         for a VPN gateway; persisted via /etc/sysctl.d.
         """
-        script = """
+        script = ICMP_ECHO_ALLOW_SCRIPT + """
 sysctl -w net.ipv4.ip_forward=1
 sysctl -w net.ipv6.conf.all.forwarding=1 2>/dev/null || true
-iptables -C INPUT -p icmp --icmp-type echo-request -j DROP 2>/dev/null || iptables -A INPUT -p icmp --icmp-type echo-request -j DROP
 iptables -C FORWARD -j DOCKER-USER 2>/dev/null || iptables -A FORWARD -j DOCKER-USER 2>/dev/null
 if [ -f /proc/sys/net/netfilter/nf_conntrack_max ]; then
     cur=$(cat /proc/sys/net/netfilter/nf_conntrack_max)
