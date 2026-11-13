@@ -20,6 +20,7 @@ from base64 import b64encode
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 from managers.clients_table import save_clients_table
+from managers.awg_manager import ICMP_ECHO_ALLOW_SCRIPT
 from managers import split_tunnel
 
 logger = logging.getLogger(__name__)
@@ -168,9 +169,8 @@ fi
 
     def setup_firewall(self):
         """Setup host firewall."""
-        script = """
+        script = ICMP_ECHO_ALLOW_SCRIPT + """
 sysctl -w net.ipv4.ip_forward=1
-iptables -C INPUT -p icmp --icmp-type echo-request -j DROP 2>/dev/null || iptables -A INPUT -p icmp --icmp-type echo-request -j DROP
 iptables -C FORWARD -j DOCKER-USER 2>/dev/null || iptables -A FORWARD -j DOCKER-USER 2>/dev/null
 """
         self.ssh.run_sudo_script(script)
