@@ -1429,7 +1429,7 @@ async def wait_for_tunnel_url(provider: str, seconds: int = 20):
     return get_tunnel_status(provider)
 
 
-BASE_PROTOCOLS = ['awg', 'awg2', 'awg3', 'awg_legacy', 'xray', 'telemt', 'dns', 'wireguard', 'socks5', 'adguard', 'nginx', 'exit']
+BASE_PROTOCOLS = ['awg', 'awg2', 'awg3', 'awg_legacy', 'xray', 'telemt', 'dns', 'wireguard', 'socks5', 'adguard', 'nginx', 'haproxy', 'exit']
 MULTI_INSTANCE_PROTOCOLS = {'awg', 'awg2', 'awg3', 'awg_legacy', 'xray', 'telemt', 'socks5'}
 
 
@@ -1513,6 +1513,7 @@ def protocol_container_name(protocol: str) -> Optional[str]:
         'socks5': 'amnezia-socks5proxy',
         'adguard': 'amnezia-adguard',
         'nginx': 'amnezia-nginx',
+        'haproxy': 'amnezia-haproxy',
         'exit': 'amnezia-exit',
     }
     name = base_names.get(base)
@@ -1548,6 +1549,9 @@ def get_protocol_manager(ssh, protocol: str):
     elif base == 'nginx':
         from managers.nginx_manager import NginxManager
         return NginxManager(ssh, protocol)
+    elif base == 'haproxy':
+        from managers.haproxy_manager import HaproxyManager
+        return HaproxyManager(ssh, protocol)
     elif base == 'exit':
         from managers.exit_manager import ExitManager
         return ExitManager(ssh, protocol)
@@ -1708,6 +1712,7 @@ def protocol_short_name(protocol: str, header_protection=False, protocol_version
         'dns': 'DNS',
         'adguard': 'AdGuard',
         'nginx': 'NGINX',
+        'haproxy': 'HAProxy',
         'exit': 'Exit',
     }
     name = names.get(base, base.upper())
@@ -6689,6 +6694,7 @@ INSTALL_PORT_TRANSPORT = {
     'awg': 'udp', 'awg2': 'udp', 'awg3': 'udp', 'awg_legacy': 'udp',
     'wireguard': 'udp', 'exit': 'udp',
     'xray': 'tcp', 'telemt': 'tcp', 'socks5': 'tcp', 'nginx': 'tcp',
+    'haproxy': 'tcp',
 }
 
 
@@ -8703,6 +8709,7 @@ CONTAINER_NAMES = {
     'socks5': 'amnezia-socks5proxy',
     'adguard': 'amnezia-adguard',
     'nginx': 'amnezia-nginx',
+    'haproxy': 'amnezia-haproxy',
 }
 
 
@@ -9038,6 +9045,10 @@ def api_server_config(request: Request, server_id: int, req: ProtocolRequest, se
             from managers.nginx_manager import NginxManager
             mgr = NginxManager(ssh, req.protocol)
             config = mgr._get_server_config(req.protocol)
+        elif protocol_base(req.protocol) == 'haproxy':
+            from managers.haproxy_manager import HaproxyManager
+            mgr = HaproxyManager(ssh, req.protocol)
+            config = mgr._get_server_config(req.protocol)
         else:
             mgr = AWGManager(ssh)
             config = mgr._get_server_config(req.protocol)
@@ -9314,7 +9325,7 @@ async def api_set_protocol_public_endpoint(request: Request, server_id: int, req
 # TCP for the rest. DNS resolvers and the exit node have nothing to publish.
 PUBLIC_FORWARD_L4 = {
     'udp': ('awg', 'awg2', 'awg3', 'awg_legacy', 'wireguard'),
-    'tcp': ('xray', 'telemt', 'socks5', 'nginx'),
+    'tcp': ('xray', 'telemt', 'socks5', 'nginx', 'haproxy'),
 }
 
 # Seconds before the startup re-apply touches SSH, so the panel is serving
@@ -9871,6 +9882,10 @@ def api_server_config_save(request: Request, server_id: int, req: ServerConfigSa
         elif protocol_base(req.protocol) == 'nginx':
             from managers.nginx_manager import NginxManager
             mgr = NginxManager(ssh, req.protocol)
+            mgr.save_server_config(req.protocol, req.config)
+        elif protocol_base(req.protocol) == 'haproxy':
+            from managers.haproxy_manager import HaproxyManager
+            mgr = HaproxyManager(ssh, req.protocol)
             mgr.save_server_config(req.protocol, req.config)
         elif protocol_base(req.protocol) == 'exit':
             # The exit container has its own path/template; AWGManager would

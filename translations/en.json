@@ -1285,5 +1285,7 @@
   "telegram_webapp_auth_desc": "When enabled, users opening the panel inside Telegram are signed in after the server verifies Telegram initData. If the bot token is empty, regular login is shown. The bot's WebApp button requires a public HTTPS panel URL.",
   "telegram_webapp_auth_invalid": "Telegram authorization data is invalid or expired. Please use the regular login form or reopen the app from Telegram.",
   "telegram_webapp_account_not_found": "No panel account is linked to this Telegram account. Contact your administrator or enable automatic user creation.",
-  "telegram_webapp_auth_unavailable": "Telegram WebApp authorization is not configured. Please use regular login."
+  "telegram_webapp_auth_unavailable": "Telegram WebApp authorization is not configured. Please use regular login.",
+  "haproxy_desc": "TCP/HTTP load balancer in a container. Edit haproxy.cfg with the Config button — the config is validated before it is applied and the container restarts to pick it up.",
+  "haproxy_port_hint": "Port of the default HAProxy frontend. Real frontends/backends are configured in haproxy.cfg via the Config button."
 }
