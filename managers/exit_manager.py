@@ -400,6 +400,13 @@ fi
         recreating the interface when the kernel refuses the change.
         """
         info = self.get_info()
+        if ((info.get('protocol_version') == '3.1') == bool(awg3)
+                and bool(info.get('obfuscation')) == bool(obfuscation)):
+            # Уже на запрошенном наборе: новые ключи не генерируем и интерфейс
+            # не трогаем, иначе каждый повторный вызов делал бы лишний rekey.
+            info['applied'] = 'unchanged'
+            info['backend'] = self.transit_backend()
+            return info
         port = info.get('port') or EXIT_DEFAULTS['port']
         subnet = info.get('subnet') or EXIT_DEFAULTS['subnet']
         net = ipaddress.ip_network(subnet, strict=False)
