@@ -11,10 +11,15 @@ class FakeSSH:
 
     def __init__(self):
         self.uploads = []
+        self.scripts = []
 
     def upload_file_sudo(self, content, remote_path):
         self.uploads.append((content, remote_path))
         return True
+
+    def run_sudo_script(self, script, **kwargs):
+        self.scripts.append(script)
+        return ("", "", 0)
 
     def run_sudo_command(self, command, **kwargs):
         return ("", "", 0)
@@ -67,6 +72,14 @@ class XrayVersionTests(unittest.TestCase):
         self.assertTrue(
             any(XRAY_CORE_VERSION in content for content in dockerfile_uploads),
             "Uploaded Dockerfile does not pin XRAY_CORE_VERSION",
+        )
+
+    def test_install_applies_host_bbr_tuning(self):
+        ssh = FakeSSH()
+        XrayManager(ssh).install_protocol(port=443)
+        self.assertTrue(
+            any('tcp_bbr' in script for script in ssh.scripts),
+            "install_protocol must apply the host BBR tuning",
         )
 
 

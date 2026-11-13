@@ -696,6 +696,7 @@
 
     const xrayStageLabels = {{ {
         'start': _('xray_update_stage_start'),
+        'host': _('xray_update_stage_host'),
         'version': _('xray_update_stage_version'),
         'arch': _('xray_update_stage_arch'),
         'build': _('xray_update_stage_build'),
@@ -1068,7 +1069,7 @@
         log.setAttribute('aria-live', 'polite');
         logBox.appendChild(log);
         host.appendChild(logBox);
-        setAwgProgress(component, 0, 8, 0, true);
+        setAwgProgress(component, 0, 9, 0, true);
     }
 
     async function pollXrayUpdate(proto) {

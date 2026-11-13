@@ -6746,9 +6746,9 @@ WARP_INSTALL_STAGES = {'start': 1, 'arch': 2, 'download': 3, 'register': 4,
                        'profile': 5, 'startsh': 6, 'done': 7}
 WARP_INSTALL_TOTAL = 7
 
-XRAY_UPDATE_STAGES = {'start': 1, 'version': 2, 'arch': 3, 'build': 4,
-                      'verify': 5, 'swap': 6, 'check': 7, 'done': 8}
-XRAY_UPDATE_TOTAL = 8
+XRAY_UPDATE_STAGES = {'start': 1, 'host': 2, 'version': 3, 'arch': 4,
+                      'build': 5, 'verify': 6, 'swap': 7, 'check': 8, 'done': 9}
+XRAY_UPDATE_TOTAL = 9
 
 FLOW_STAGES = {
     'protocol': PROTOCOL_INSTALL_STAGES,

@@ -1287,6 +1287,7 @@
   "telegram_webapp_account_not_found": "找不到与此 Telegram 账户关联的面板账户。请联系管理员或启用自动创建用户功能。",
   "telegram_webapp_auth_unavailable": "尚未配置 Telegram WebApp 授权。请使用常规登录。",
   "xray_update_hint": "更新会重新构建镜像并重建容器，活动连接将中断几秒钟。密钥和设置会保留。如果新内核无法启动，面板会回滚到之前的版本。",
+  "xray_update_stage_host": "正在应用主机网络调优",
   "xray_update_stage_start": "开始更新",
   "xray_update_stage_version": "检查版本",
   "xray_update_stage_arch": "检测架构",

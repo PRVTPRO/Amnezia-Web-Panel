@@ -53,6 +53,7 @@ class FakeSSH:
         self.fail_new_start = False
         self.run_count = 0
         self.commands = []
+        self.scripts = []
         self.uploads = []
         self.files = {
             '/opt/amnezia/xray/server.json': json.dumps(SERVER_JSON),
@@ -67,6 +68,10 @@ class FakeSSH:
         self.uploads.append((content, remote_path))
         self.files[remote_path] = content
         return True
+
+    def run_sudo_script(self, script, **kwargs):
+        self.scripts.append(script.strip())
+        return '', '', 0
 
     def run_command(self, command, **kwargs):
         self.commands.append(command.strip())
@@ -122,6 +127,9 @@ class UpdateCoreTests(unittest.TestCase):
         return [c for c in self.ssh.commands
                 if c.startswith('docker') and marker in c]
 
+    def bbr_scripts(self):
+        return [script for script in self.ssh.scripts if 'tcp_bbr' in script]
+
     def test_core_version_is_parsed_from_container_output(self):
         self.assertEqual(self.mgr.get_core_version(), '26.10.31')
 
@@ -150,6 +158,18 @@ class UpdateCoreTests(unittest.TestCase):
         self.assertIn('-v /opt/amnezia/xray:/opt/amnezia/xray', runs[0])
         self.assertIn('--name amnezia-xray', runs[0])
         self.assertIn(self.image, runs[0])
+
+    def test_update_applies_host_bbr_tuning(self):
+        # Installs from before the BBR change never tuned the host: the
+        # update flow closes that gap idempotently.
+        self.update('v26.11.7')
+        self.assertEqual(len(self.bbr_scripts()), 1)
+
+    def test_same_version_still_applies_host_bbr_tuning(self):
+        # Even a no-op update heals a pre-BBR install.
+        result = self.update('v26.10.31')
+        self.assertFalse(result['updated'])
+        self.assertEqual(len(self.bbr_scripts()), 1)
 
     def test_backup_tag_lives_until_the_new_core_is_verified(self):
         self.update('v26.11.7')

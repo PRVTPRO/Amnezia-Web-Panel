@@ -8,6 +8,8 @@ import shlex
 from datetime import datetime
 import urllib.parse
 
+from managers.awg_manager import AWGManager
+
 logger = logging.getLogger(__name__)
 
 XRAY_CORE_VERSION = "v26.10.31"
@@ -197,6 +199,11 @@ class XrayManager:
         def report(stage, message):
             if progress:
                 progress(stage, message)
+
+        # Older installs predate the host-tuning call in install_protocol:
+        # bring the host up to BBR on the way (idempotent, silent fallback).
+        report('host', 'applying host network tuning (BBR)')
+        AWGManager(self.ssh).setup_host_tuning()
 
         current = self.get_core_version()
         report('version', f"current core: {current or 'unknown'}")
@@ -448,6 +455,14 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         # auto-import. Panel installs do not reserve such a client, so we leave it empty.
         self.ssh.upload_file_sudo('\n', "/opt/amnezia/xray/xray_uuid.key")
         self.ssh.upload_file_sudo("[]", "/opt/amnezia/xray/clientsTable")
+
+        # Host-level BBR (same routine as AWG installs): the container's own
+        # start.sh sets congestion control in its network namespace, but that
+        # only works when the tcp_bbr module is loaded on the host — and the
+        # host qdisc stays cubic without this.
+        results.append("Applying host network tuning (BBR)...")
+        AWGManager(self.ssh).setup_host_tuning()
+        results.append("Host network tuning applied")
 
         results.append("Starting container...")
         run_cmd = f"""docker run -d \\

@@ -1287,6 +1287,7 @@
   "telegram_webapp_account_not_found": "Aucun compte du panneau n’est associé à ce compte Telegram. Contactez l’administrateur ou activez la création automatique des utilisateurs.",
   "telegram_webapp_auth_unavailable": "L’autorisation WebApp Telegram n’est pas configurée. Utilisez la connexion habituelle.",
   "xray_update_hint": "La mise à jour reconstruit l’image et recrée le conteneur ; les connexions actives sont interrompues quelques secondes. Les clés et les réglages sont conservés. Si le nouveau noyau ne démarre pas, le panneau revient au précédent.",
+  "xray_update_stage_host": "Réglage réseau de l’hôte",
   "xray_update_stage_start": "Démarrage de la mise à jour",
   "xray_update_stage_version": "Vérification des versions",
   "xray_update_stage_arch": "Détection de l’architecture",
