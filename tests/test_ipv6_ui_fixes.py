@@ -62,6 +62,17 @@ NEW_KEYS = {
 # the names, not translated values: a count alone misses a removed key
 # replaced by an unrelated one. Future additions must be registered here.
 PRE_PANEL_ACCESS_KEYS_SHA256 = 'c70dff505a825b0a8506b2d1ca7d76fca9378e3f9514cc44231f7fd2a847af36'
+# Keys of the "Copy instance" panel: a later addition, declared here so the
+# frozen catalogue hash keeps guarding the original keys.
+COPY_INSTANCE_KEYS = {
+    "copy_instance_btn", "copy_instance_title", "copy_instance_desc",
+    "copy_instance_source", "copy_instance_target", "copy_instance_target_missing",
+    "copy_instance_checking", "copy_instance_preview", "copy_instance_port_busy",
+    "copy_instance_image", "copy_instance_key_warning", "copy_instance_start",
+    "copy_instance_running", "copy_instance_step", "copy_instance_success",
+    "copy_instance_failed", "copy_instance_cancelled", "copy_instance_cancel",
+    "copy_instance_close", "copy_instance_log", "copy_instance_connections",
+}
 PANEL_ACCESS_KEYS = {
     'panel_access_title',
     'panel_access_intro',
@@ -75,6 +86,18 @@ PANEL_ACCESS_KEYS = {
 
 PROTOCOL_UNINSTALL_KEYS = {
     'uninstall_archive_confirm', 'uninstall_archived',
+}
+
+# Keys of later panels that were merged without registering them here; before
+# this set existed the frozen hash failed on an unchanged catalogue.
+LATER_FEATURE_KEYS = {
+    'exit_awg3', 'exit_awg3_hint',
+    'max_connections_per_user_hint', 'max_connections_per_user_label',
+    'telegram_auto_create_users', 'telegram_auto_create_users_desc',
+    'telegram_create_users_disabled', 'telegram_create_users_disabled_desc',
+    'telegram_webapp_account_not_found', 'telegram_webapp_auth',
+    'telegram_webapp_auth_desc', 'telegram_webapp_auth_invalid',
+    'telegram_webapp_auth_unavailable',
 }
 
 
@@ -261,7 +284,8 @@ class TestC6Translations(unittest.TestCase):
         # PANEL_ACCESS_KEYS does. The keys already inside the frozen hash (e.g.
         # the ipv6 set) must NOT be subtracted again.
         previous = '\n'.join(sorted(base - PANEL_ACCESS_KEYS - SECURITY_SETUP_KEYS
-                                    - CHEBURCHECK_KEYS - PROTOCOL_UNINSTALL_KEYS))
+                                    - CHEBURCHECK_KEYS - PROTOCOL_UNINSTALL_KEYS
+                                    - COPY_INSTANCE_KEYS - LATER_FEATURE_KEYS))
         self.assertEqual(hashlib.sha256(previous.encode('utf-8')).hexdigest(),
                          PRE_PANEL_ACCESS_KEYS_SHA256,
                          'Existing catalogue changed outside the declared additions')
