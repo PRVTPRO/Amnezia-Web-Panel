@@ -321,6 +321,16 @@ fi
             'log': results,
         }
 
+    def remove_container(self, protocol_type=None):
+        """Remove the transit container and its build context.
+
+        AWGManager.remove_container already targets exactly
+        /opt/amnezia/<container> (= /opt/amnezia/amnezia-exit). The transit
+        config and peer table live in /opt/amnezia/exit and stay, because a
+        reinstall restores the entry-node links from them.
+        """
+        return super().remove_container(self.PROTOCOL)
+
     # ===================== STATUS / INFO =====================
 
     def get_server_status(self, protocol_type='exit'):

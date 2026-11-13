@@ -1,6 +1,7 @@
 
 import os
 import logging
+from managers import docker_image_cleanup
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,12 @@ COPY forward-records.conf /opt/unbound/etc/unbound/forward-records.conf
             self.ssh.write_file("/opt/amnezia/dns/Dockerfile", dockerfile)
 
             # 4. Build and run
-            self.ssh.run_sudo_command("docker build -t amnezia-dns /opt/amnezia/dns")
+            old_image_id = docker_image_cleanup.image_id(self.ssh, 'amnezia-dns')
+            _out, _err, build_code = self.ssh.run_sudo_command(
+                "docker build -t amnezia-dns /opt/amnezia/dns")
+            if build_code == 0:
+                docker_image_cleanup.drop_replaced_image(
+                    self.ssh, 'amnezia-dns', old_image_id)
             self.ssh.run_sudo_command("docker stop amnezia-dns || true")
             self.ssh.run_sudo_command("docker rm amnezia-dns || true")
             

@@ -6,6 +6,7 @@ import base64
 import shlex
 from datetime import datetime
 import urllib.parse
+from managers import docker_image_cleanup
 
 logger = logging.getLogger(__name__)
 
@@ -230,10 +231,15 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         self.ssh.run_sudo_command(f"mkdir -p {dockerfile_folder}")
         self.ssh.upload_file_sudo(dockerfile_content, f"{dockerfile_folder}/Dockerfile")
         
+        old_image_id = docker_image_cleanup.image_id(self.ssh, self.image_name)
         _, err, code = self.ssh.run_sudo_command(
             f"docker build --no-cache -t {self.image_name} {dockerfile_folder}", timeout=300
         )
         if code != 0: raise RuntimeError(f"Failed to build container: {err}")
+        # The tag now points at the new build; the previous image of this very
+        # instance would otherwise stay behind as <none>:<none>.
+        docker_image_cleanup.drop_replaced_image(
+            self.ssh, self.image_name, old_image_id)
 
         results.append("Generating keys and config...")
         # We generate a base config using a temp container or directly if host has openssl
@@ -347,14 +353,34 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
             (f"docker stop {self.container_name}", 'no such container'),
             (f"docker rm -fv {self.container_name}", 'no such container'),
         )
-        if self.instance <= 1:
-            commands += ((f"docker rmi {self.image_name}", 'no such image'),)
         for command, absent_marker in commands:
             out, err, code = self.ssh.run_sudo_command(command)
             detail = (err or out or '').strip()
             if code != 0 and absent_marker not in detail.lower():
                 raise RuntimeError(f"Xray uninstall failed: {detail or f'exit code {code}'}")
+        # Images are named per instance (amnezia-xray, amnezia-xray-2, ...), so
+        # the image belongs to this instance and must go with it. Re-tagged or
+        # shared images are still safe: never remove one another container uses.
+        if not self._image_in_use():
+            out, err, code = self.ssh.run_sudo_command(f"docker rmi {self.image_name}")
+            detail = (err or out or '').strip().lower()
+            if (code != 0 and 'no such image' not in detail
+                    and 'image is being used' not in detail):
+                raise RuntimeError(
+                    f"Xray uninstall failed: {detail or f'exit code {code}'}")
+        # The build context carries a single generated Dockerfile; the next
+        # install recreates it from scratch (--no-cache --pull). Drop it so an
+        # uninstalled instance leaves no /opt/amnezia/<container> directory.
+        self.ssh.run_sudo_command(f"rm -rf /opt/amnezia/{self.container_name}")
         return True
+
+    def _image_in_use(self):
+        """True when some container on the host still runs/uses our image."""
+        out, _, code = self.ssh.run_sudo_command(
+            "docker ps -a --format '{{.Image}}'")
+        if code != 0:
+            return False
+        return self.image_name in (out or '').split()
 
     # ===================== CLIENT MANAGEMENT =====================
 

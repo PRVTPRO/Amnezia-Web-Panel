@@ -41,6 +41,7 @@ from cryptography.hazmat.primitives import serialization
 from managers.clients_table import save_clients_table
 import warp_service as warp_logic
 from managers import split_tunnel
+from managers import docker_image_cleanup
 
 logger = logging.getLogger(__name__)
 
@@ -2330,6 +2331,7 @@ done
         results.append("Pulling Docker image...")
         flush('build', 40)
         dockerfile_folder = f"/opt/amnezia/{container_name}"
+        old_image_id = docker_image_cleanup.image_id(self.ssh, container_name)
 
         dockerfile_content = self._dockerfile_content(
             docker_image,
@@ -2384,6 +2386,9 @@ done
                 f"no output; full log on the server: {build_log}")
             raise RuntimeError(f"Failed to build container: {detail}")
         results.append("Docker image built successfully")
+        # Building under the same tag leaves the previous image behind as
+        # <none>:<none>; drop exactly the one this build replaced.
+        docker_image_cleanup.drop_replaced_image(self.ssh, container_name, old_image_id)
         flush('build', 75)
 
         # Step 5: Run container
@@ -3353,8 +3358,22 @@ x_warp_up() {
         """Remove AWG container (mirrors remove_container.sh)."""
         container_name = self._container_name(protocol_type)
         self.ssh.run_sudo_command(f"docker stop {container_name}")
-        self.ssh.run_sudo_command(f"docker rm -fv {container_name}")
+        out, err, code = self.ssh.run_sudo_command(f"docker rm -fv {container_name}")
+        detail = ((err or out) or '').strip()
+        container_gone = code == 0 or 'no such container' in detail.lower()
         self.ssh.run_sudo_command(f"docker rmi {container_name}")
+        # The build context holds a single generated Dockerfile and is recreated
+        # by the next install (build uses --no-cache --pull), so a removed
+        # instance must not leave /opt/amnezia/<container> behind. Peer state
+        # lives elsewhere (/opt/amnezia/awg inside the container, rollbacks in
+        # /opt/amnezia/backups) and is untouched. Only drop the directory once
+        # the container is really gone, so a failed removal stays retryable.
+        if container_gone:
+            self.ssh.run_sudo_command(f"rm -rf /opt/amnezia/{container_name}")
+        else:
+            logger.warning(
+                "remove_container: %s still present (%s); keeping /opt/amnezia/%s",
+                container_name, detail or f'exit code {code}', container_name)
         if hasattr(self.ssh, 'docker_ps_invalidate'):
             self.ssh.docker_ps_invalidate()
         return True
