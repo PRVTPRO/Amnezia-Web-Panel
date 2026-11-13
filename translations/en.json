@@ -1252,6 +1252,8 @@
   "cheburcheck_regions_blocked": "regions with TSPU ban",
   "cheburcheck_restrictions": "restrictions (SNI/DNS/CDN)",
   "cheburcheck_remarks_badge": "remarks",
+  "cheburcheck_remarks_only": "no TSPU ban, remarks found",
+  "cheburcheck_remarks_found": "remarks found",
   "cheburcheck_static_hit": "in lists",
   "cheburcheck_static_rkn": "RKN registry",
   "cheburcheck_banned": "Banned",

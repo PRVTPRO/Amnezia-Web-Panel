@@ -7703,13 +7703,19 @@ async function loadCheburcheck() {
         const details = document.getElementById('cheburcheck-details');
         if (!el) return;
         const status = (r && r.status) || 'unknown';
-        const icon = status === 'banned' ? '&#128683;' : (status === 'clean' ? '&#9989;' : '&#128993;');
-        const label = status === 'banned' ? _('cheburcheck_banned')
-            : (status === 'clean' ? _('cheburcheck_clean') : _('cheburcheck_unknown'));
         const br = ((r && r.probe) || {}).blocking_regions || 0;
         const rc = br + (((r && r.probe) || {}).clear_regions || 0);
         const rr = ((r && r.probe) || {}).restricted_regions || 0;
         const remarks = (r && r.remarks) || 0;
+        // "No restrictions detected" must not appear next to "restrictions: 24":
+        // a clean probe with SNI/DNS/CDN hits or list hits is a separate state.
+        const hasRemarks = rr > 0 || remarks > 0 || !!(r && r.static_hit);
+        const icon = status === 'banned' ? '&#128683;'
+            : (status === 'clean' ? (hasRemarks ? '&#9888;&#65039;' : '&#9989;') : '&#128993;');
+        const label = status === 'banned' ? _('cheburcheck_banned')
+            : (status === 'clean'
+                ? (hasRemarks ? _('cheburcheck_remarks_only') : _('cheburcheck_clean'))
+                : _('cheburcheck_unknown'));
         const age = cheburAge(r && r.checked_at);
         // Staleness is a timestamp comparison: locale text never matches.
         const stale = cheburcheckStale(r && r.checked_at);
@@ -7757,19 +7763,23 @@ function cheburcheckStale(checkedAt) {
 
 function cheburcheckTargetRow(target, rec) {
     const status = rec.status || 'unknown';
-    const icon = status === 'banned' ? '&#128683;' : (status === 'clean' ? '&#9989;' : '&#128993;');
-    const label = status === 'banned' ? _('cheburcheck_banned')
-        : (status === 'clean' ? _('cheburcheck_clean') : _('cheburcheck_unknown'));
     const br = (rec.probe || {}).blocking_regions || 0;
     const rc = br + ((rec.probe || {}).clear_regions || 0);
     const rr = (rec.probe || {}).restricted_regions || 0;
+    const staticBits = [];
+    if ((rec.static || {}).blocked) staticBits.push(_('cheburcheck_static_rkn'));
+    if (((rec.static || {}).cdn_providers || []).length) staticBits.push('CDN');
+    const hasRemarks = rr > 0 || staticBits.length > 0;
+    const icon = status === 'banned' ? '&#128683;'
+        : (status === 'clean' ? (hasRemarks ? '&#9888;&#65039;' : '&#9989;') : '&#128993;');
+    const label = status === 'banned' ? _('cheburcheck_banned')
+        : (status === 'clean'
+            ? (hasRemarks ? _('cheburcheck_remarks_found') : _('cheburcheck_clean'))
+            : _('cheburcheck_unknown'));
     const age = cheburAge(rec.checked_at);
     const staleTag = cheburcheckStale(rec.checked_at) ? ' &#9888;&#65039;' : '';
     const partialTag = rec.partial ? ' &middot; ' + _('cheburcheck_partial') : '';
     const restrictTag = rr > 0 ? ` &middot; ${_('cheburcheck_restrictions')}: ${rr}` : '';
-    const staticBits = [];
-    if ((rec.static || {}).blocked) staticBits.push(_('cheburcheck_static_rkn'));
-    if (((rec.static || {}).cdn_providers || []).length) staticBits.push('CDN');
     const staticTag = staticBits.length
         ? ` &middot; ${_('cheburcheck_static_hit')}: ${staticBits.join(', ')}` : '';
     const err = rec.error

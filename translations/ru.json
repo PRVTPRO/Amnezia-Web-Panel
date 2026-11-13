@@ -1252,6 +1252,8 @@
   "cheburcheck_regions_blocked": "регионов с ТСПУ-баном",
   "cheburcheck_restrictions": "ограничений (SNI/DNS/CDN)",
   "cheburcheck_remarks_badge": "замечания",
+  "cheburcheck_remarks_only": "ТСПУ-бана нет, есть замечания",
+  "cheburcheck_remarks_found": "есть замечания",
   "cheburcheck_static_hit": "в списках",
   "cheburcheck_static_rkn": "реестр РКН",
   "cheburcheck_banned": "Забанен",

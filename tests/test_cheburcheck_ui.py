@@ -114,6 +114,21 @@ class CheburcheckRenderTests(unittest.TestCase):
         self.assertIn('cheburcheck_static_hit', text)
         self.assertIn('cheburcheck_static_rkn', text)
 
+    def test_clean_with_remarks_is_not_labelled_no_restrictions(self):
+        """A clean probe with SNI/DNS/CDN hits must not read
+        'Ограничений не обнаружено ... ограничений: 24'."""
+        text = SERVER_TEMPLATE.read_text(encoding='utf-8')
+        self.assertIn('cheburcheck_remarks_only', text)
+        self.assertIn('cheburcheck_remarks_found', text)
+        self.assertRegex(
+            text,
+            r"status === 'clean'\s*\?\s*\(hasRemarks \? _\('cheburcheck_remarks_only'\)",
+        )
+        self.assertRegex(
+            text,
+            r"\(hasRemarks \? _\('cheburcheck_remarks_found'\) : _\('cheburcheck_clean'\)\)",
+        )
+
     def test_staleness_is_timestamp_based(self):
         text = SERVER_TEMPLATE.read_text(encoding='utf-8')
         start = text.index('async function loadCheburcheck')
