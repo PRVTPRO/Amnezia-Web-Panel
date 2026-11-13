@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SETTINGS_TEMPLATE = ROOT / 'templates' / 'settings.html'
 SERVER_TEMPLATE = ROOT / 'templates' / 'server.html'
 INDEX_TEMPLATE = ROOT / 'templates' / 'index.html'
+STYLE = (ROOT / 'static' / 'css' / 'style.css').read_text(encoding='utf-8')
 
 
 def _seed(tmp, settings, servers=None):
@@ -108,7 +109,8 @@ class CheburcheckRenderTests(unittest.TestCase):
 
     def test_modal_is_wider_and_marks_static_lists(self):
         text = SERVER_TEMPLATE.read_text(encoding='utf-8')
-        self.assertIn('#cheburcheckModal .modal { max-width: 720px; }', text)
+        # all panel modals share one width
+        self.assertRegex(STYLE, r'\.modal\s*\{[^}]*max-width:\s*720px')
         self.assertIn('cheburcheck_static_hit', text)
         self.assertIn('cheburcheck_static_rkn', text)
 

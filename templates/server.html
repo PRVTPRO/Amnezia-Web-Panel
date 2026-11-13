@@ -391,7 +391,6 @@
     .srv-header .srv-status-btn .ssh-trust-dot,
     .srv-header .srv-status-btn .awg-plugin-dot { width: 7px; height: 7px; }
     .srv-header .srv-status-btn .cheburcheck-dot { width: 7px; height: 7px; background: var(--text-muted, #888); border-radius: 50%; flex: 0 0 auto; }
-    #cheburcheckModal .modal { max-width: 720px; }
     .srv-header .srv-status-btn.is-danger .cheburcheck-dot { background: var(--danger, #f85149); }
     .srv-header .srv-status-btn.is-warn .cheburcheck-dot { background: var(--warning, #d29922); }
     .srv-header .srv-status-btn.is-ok .cheburcheck-dot { background: var(--success, #3fb950); }
@@ -589,7 +588,7 @@
 {% endif %}
 
 <div class="modal-backdrop" id="sshTrustModal">
-    <div class="modal" style="max-width: 560px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title">{{ _('ssh_trust_title') }}</h2>
             <button class="modal-close" type="button" onclick="closeModal('sshTrustModal')">×</button>
@@ -677,7 +676,7 @@
 
 <!-- ===== AmneziaWG plugin updates ===== -->
 <div class="modal-backdrop" id="awgPluginModal">
-    <div class="modal" style="max-width: 640px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title">{{ _('awg_plugin_title') }}</h2>
             <button class="modal-close" type="button" onclick="closeAwgPluginModal()">×</button>
@@ -1847,7 +1846,7 @@
 
     <!-- ===== Cloudflare WARP terms modal (srv-warp, not panel-warp) ===== -->
     <div class="modal-backdrop" id="warpTosModal">
-        <div class="modal" style="max-width:560px;">
+        <div class="modal">
             <div class="modal-header">
                 <h2 class="modal-title">{{ _('srv_warp_tos_title') }}</h2>
                 <button class="modal-close" onclick="resolveWarpTos(false)">×</button>
@@ -1864,7 +1863,7 @@
 
     <!-- ===== RKN Block scans modal ===== -->
     <div class="modal-backdrop" id="rknScansModal">
-        <div class="modal" style="max-width:720px;">
+        <div class="modal">
             <div class="modal-header">
                 <h2 class="modal-title">{{ _('rkn_scans_title') }}</h2>
                 <button class="modal-close" onclick="closeModal('rknScansModal')">×</button>
@@ -1880,7 +1879,7 @@
 
     <!-- ===== RKN Block options modal (per-direction flags) ===== -->
     <div class="modal-backdrop" id="rknOptionsModal">
-        <div class="modal" style="max-width:520px;">
+        <div class="modal">
             <div class="modal-header">
                 <h2 class="modal-title">{{ _('rknblock_options_title') }}</h2>
                 <button class="modal-close" onclick="closeModal('rknOptionsModal')">×</button>
@@ -2018,7 +2017,7 @@
 <!-- ===== Marketplace Modal ===== -->
 <!-- wg-easy Import Modal -->
 <div class="modal-backdrop" id="wgeasyImportModal">
-    <div class="modal" style="max-width: 640px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title">📥 {{ _('wgeasy_import_title') }}</h2>
             <button class="modal-close" onclick="closeModal('wgeasyImportModal')">×</button>
@@ -2065,7 +2064,7 @@
 
 <!-- Public Endpoint Modal -->
 <div class="modal-backdrop" id="publicEndpointModal">
-    <div class="modal" style="max-width: 460px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title">🌐 {{ _('public_endpoint_title') }}</h2>
             <button class="modal-close" onclick="closeModal('publicEndpointModal')">&times;</button>
@@ -2095,7 +2094,7 @@
 
 <!-- Rename Instance Modal -->
 <div class="modal-backdrop" id="renameProtoModal">
-    <div class="modal" style="max-width: 420px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title">✏️ {{ _('rename_instance') }}</h2>
             <button class="modal-close" onclick="closeModal('renameProtoModal')">×</button>
@@ -2115,7 +2114,7 @@
 </div>
 
 <div class="modal-backdrop" id="marketplaceModal">
-    <div class="modal" style="max-width: 980px;">
+    <div class="modal">
         <div class="modal-header">
             <div>
                 <h2 class="modal-title">🛒 {{ _('marketplace') }}</h2>
@@ -2333,7 +2332,7 @@
 
 <!-- ===== AmneziaWG Settings Modal ===== -->
 <div class="modal-backdrop" id="ipSettingsModal">
-    <div class="modal" style="max-width:720px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title">{{ _('server_ipv6_modal_title') }}</h2>
             <button class="modal-close" onclick="closeIpSettings()">×</button>
@@ -2397,7 +2396,7 @@
 </div>
 
 <div class="modal-backdrop" id="awgSettingsModal">
-    <div class="modal" style="max-width:640px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title" id="awgSettingsTitle">{{ _('awg_settings_title') }}</h2>
             <button class="modal-close" onclick="closeModal('awgSettingsModal')">×</button>
@@ -2470,7 +2469,7 @@
 
 <!-- ===== Exit Node: peers ===== -->
 <div class="modal-backdrop" id="exitPeersModal">
-    <div class="modal" style="max-width:760px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title">{{ _('exit_peers_title') }}</h2>
             <button class="modal-close" onclick="closeModal('exitPeersModal')">×</button>
@@ -2486,7 +2485,7 @@
 
 <!-- ===== Exit Node: link an AWG instance ===== -->
 <div class="modal-backdrop" id="exitLinkModal">
-    <div class="modal" style="max-width:640px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title" id="exitLinkTitle">{{ _('exit_link_title') }}</h2>
             <button class="modal-close" onclick="closeModal('exitLinkModal')">×</button>
@@ -2573,7 +2572,7 @@
 
 <!-- ===== Smart Route Modal ===== -->
 <div class="modal-backdrop" id="smartRouteAckModal">
-    <div class="modal" style="max-width:640px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title">{{ _('smartroute_ack_title') }}</h2>
             <button class="modal-close" onclick="closeSmartRouteAck()">×</button>
@@ -2610,7 +2609,7 @@
 
 
 <div class="modal-backdrop" id="smartRouteModal">
-    <div class="modal" style="max-width:560px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title">{{ _('smartroute_title') }}</h2>
             <button class="modal-close" onclick="closeModal('smartRouteModal')">×</button>
@@ -2688,7 +2687,7 @@
 
 <!-- ===== NGINX Site Modal ===== -->
 <div class="modal-backdrop" id="siteConfigModal">
-    <div class="modal" style="max-width:680px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title" id="siteConfigModalTitle">{{ _('site_editor') }}</h2>
             <button class="modal-close" onclick="closeModal('siteConfigModal')">×</button>
@@ -2720,7 +2719,7 @@
 
 <!-- ===== Protocol Backup Modal ===== -->
 <div class="modal-backdrop" id="backupModal">
-    <div class="modal" style="max-width:720px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title" id="backupModalTitle">{{ _('backups') }}</h2>
             <button class="modal-close" onclick="closeModal('backupModal')">×</button>
@@ -2815,7 +2814,7 @@
 
 <!-- ===== Connection Config Modal (with Tabs) ===== -->
 <div class="modal-backdrop" id="configModal">
-    <div class="modal" style="max-width: 600px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title" id="configModalTitle">{{ _('config') }}</h2>
             <button class="modal-close" onclick="closeModal('configModal')">×</button>
@@ -2878,7 +2877,7 @@
 </div>
 <!-- ===== Server Config Modal ===== -->
 <div class="modal-backdrop" id="serverConfigModal">
-    <div class="modal" style="max-width:680px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title" id="serverConfigModalTitle">{{ _('server_config') }}</h2>
             <button class="modal-close" onclick="closeModal('serverConfigModal')">×</button>
@@ -2910,7 +2909,7 @@
 </div>
 <!-- ===== Host Tuning Modal ===== -->
 <div class="modal-backdrop" id="hostTuningModal">
-    <div class="modal" style="max-width:520px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title">📊 {{ _('host_tuning') }}</h2>
             <button class="modal-close" onclick="closeModal('hostTuningModal')">×</button>
