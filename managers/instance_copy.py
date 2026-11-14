@@ -363,7 +363,11 @@ class InstanceCopier:
             return
         log('image', 'copying docker image %s' % plan['image'])
         token = os.urandom(6).hex()
-        local = os.path.join(tempfile.gettempdir(), 'amnezia-image-%s.tar.gz' % token)
+        # The panel may run on the source host itself: a local /tmp path with the
+        # same name as the remote one would be truncated by sftp.get before it is
+        # read (same file, write handle first). Always stage inside a fresh dir.
+        stage = tempfile.mkdtemp(prefix='amnezia-image-')
+        local = os.path.join(stage, 'image.tar.gz')
         src_tmp = '/tmp/amnezia-image-%s.tar.gz' % token
         dst_tmp = '/tmp/amnezia-image-%s.tar.gz' % token
         try:
@@ -383,11 +387,7 @@ class InstanceCopier:
         finally:
             self._sudo(self.source_ssh, 'rm -f ' + shlex.quote(src_tmp))
             self._sudo(self.target_ssh, 'rm -f ' + shlex.quote(dst_tmp))
-            if os.path.exists(local):
-                try:
-                    os.remove(local)
-                except OSError:
-                    pass
+            self._remove_tree(stage)
 
     def _create_container(self, plan):
         from managers.awg_manager import AWGManager
@@ -478,7 +478,9 @@ class InstanceCopier:
         """Carry /usr/bin/awg* when the target image ships older tools."""
         token = os.urandom(6).hex()
         remote_tmp = '/tmp/amnezia-tools-%s.tar' % token
-        local = os.path.join(tempfile.gettempdir(), 'amnezia-tools-%s.tar' % token)
+        # Same-host copies: never reuse the remote name for the local staging file.
+        stage = tempfile.mkdtemp(prefix='amnezia-tools-')
+        local = os.path.join(stage, 'tools.tar')
         inner = 'docker exec %s tar -C /usr/bin -cf - awg awg-quick > %s' % (
             shlex.quote(plan['source_container']), shlex.quote(remote_tmp))
         out, err, code = self._sudo(self.source_ssh, 'sh -c %s' % shlex.quote(inner), timeout=120)
@@ -508,11 +510,7 @@ class InstanceCopier:
                 self._sudo(self.target_ssh, 'rm -f ' + shlex.quote(target_tmp))
         finally:
             self._sudo(self.source_ssh, 'rm -f ' + shlex.quote(remote_tmp))
-            if os.path.exists(local):
-                try:
-                    os.remove(local)
-                except OSError:
-                    pass
+            self._remove_tree(stage)
 
 
 def _count_ok(text):

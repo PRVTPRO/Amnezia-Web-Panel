@@ -164,6 +164,37 @@ class CopyArchiveTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 'name_taken')
 
 
+class CopyStagingTests(unittest.TestCase):
+    """The panel can run on the source host: local staging must not collide."""
+
+    def test_image_staging_never_reuses_the_remote_temp_name(self):
+        copier = InstanceCopier(FakeSSH(), FakeSSH())
+        seen = {}
+        copier._sudo = lambda ssh, command, timeout=120: ('', '', 0)
+        copier._sftp_get = lambda ssh, remote, local: seen.update(remote=remote, local=local)
+        copier._sftp_put = lambda ssh, local, remote: None
+
+        copier._ensure_image({'image': 'img', 'image_present': False},
+                             lambda stage, text: None)
+
+        self.assertTrue(seen)
+        self.assertNotEqual(seen['remote'], seen['local'])
+        self.assertFalse(os.path.exists(os.path.dirname(seen['local'])))
+
+    def test_tools_staging_never_reuses_the_remote_temp_name(self):
+        copier = InstanceCopier(FakeSSH(), FakeSSH())
+        seen = {}
+        copier._sudo = lambda ssh, command, timeout=120: ('', '', 0)
+        copier._sftp_get = lambda ssh, remote, local: seen.update(remote=remote, local=local)
+        copier._sftp_put = lambda ssh, local, remote: None
+
+        copier._copy_tools({'source_container': 'src', 'target_container': 'dst'})
+
+        self.assertTrue(seen)
+        self.assertNotEqual(seen['remote'], seen['local'])
+        self.assertFalse(os.path.exists(os.path.dirname(seen['local'])))
+
+
 class CopyRollbackTests(unittest.TestCase):
     def plan(self):
         return {
