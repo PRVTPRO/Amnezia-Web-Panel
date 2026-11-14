@@ -8245,7 +8245,13 @@ def api_xray_fingerprint_save(request: Request, server_id: int, req: XrayFingerp
         if server_id < 0 or server_id >= len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
-        record = server.setdefault('protocols', {}).setdefault(req.protocol, {})
+        # Never mint a protocol record from this endpoint: saving a
+        # fingerprint for an uninstalled instance would leave a phantom
+        # "installed but stopped" entry (multi-instance records survive
+        # /check pruning).
+        if req.protocol not in server.get('protocols', {}):
+            return JSONResponse({'error': 'Protocol not found'}, status_code=404)
+        record = server['protocols'][req.protocol]
         if fp is None:
             record.pop('fingerprint', None)
         else:
