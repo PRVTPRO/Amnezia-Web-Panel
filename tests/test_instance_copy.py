@@ -4,6 +4,7 @@ Covers the pure helpers, archive patching, the rollback contract and the
 panel-side merge into data.json. SSH is always faked: these tests must not
 touch a real host.
 """
+import asyncio
 import io
 import json
 import os
@@ -333,6 +334,70 @@ class PanelMergeTests(unittest.TestCase):
                           if c['server_id'] == 1 and c['protocol'] == 'awg3__2'])
         # The source bindings and the awg2 binding are untouched.
         self.assertEqual(len(data['user_connections']), 3)
+
+
+class CopyEndpointTests(unittest.IsolatedAsyncioTestCase):
+    """The HTTP layer: the start handler must create a journal entry, not blow up."""
+
+    def setUp(self):
+        import app
+        self.app = app
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.patches = [
+            patch.object(app, '_check_admin', return_value=True),
+            patch.object(app, '_instance_copy_store_path',
+                         return_value=os.path.join(self.tmp.name, 'ops.json')),
+            patch.object(app, '_instance_copy_source',
+                         return_value=({'name': 'SRC'}, {}, 'amnezia-awg3')),
+            patch.object(app, '_run_instance_copy', new=self._worker),
+        ]
+        for patcher in self.patches:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        app._inst_copy_ops.clear()
+        app._inst_copy_active['op_id'] = None
+        app._inst_copy_loaded['done'] = False
+        self.addCleanup(app._inst_copy_ops.clear)
+        self.addCleanup(lambda: app._inst_copy_active.__setitem__('op_id', None))
+        self.addCleanup(lambda: app._inst_copy_loaded.__setitem__('done', False))
+
+    async def _worker(self, op_id):
+        return None
+
+    async def test_start_creates_an_operation_and_rejects_a_second_one(self):
+        request = self.app.InstanceCopyRequest(protocol='awg3', target_server_id=1)
+        first = await self.app.api_instance_copy_start(object(), 0, request)
+        self.assertIn('operation_id', first)
+        op_id = first['operation_id']
+        self.assertEqual(self.app._inst_copy_active['op_id'], op_id)
+        self.assertIn(op_id, self.app._inst_copy_ops)
+        self.assertTrue(os.path.exists(os.path.join(self.tmp.name, 'ops.json')))
+
+        second = await self.app.api_instance_copy_start(object(), 0, request)
+        self.assertEqual(getattr(second, 'status_code', None), 409)
+        await asyncio.sleep(0)
+
+    async def test_start_refuses_the_same_server(self):
+        request = self.app.InstanceCopyRequest(protocol='awg3', target_server_id=0)
+        response = await self.app.api_instance_copy_start(object(), 0, request)
+        self.assertEqual(getattr(response, 'status_code', None), 400)
+
+    async def test_status_returns_lines_after_the_offset_and_cancel_flags_it(self):
+        op_id = 'op-under-test'
+        self.app._inst_copy_ops[op_id] = {
+            'id': op_id, 'state': 'running', 'step': 2, 'total': 8, 'percent': 25,
+            'lines': [{'ts': 't1', 'stage': 'a', 'text': 'one'},
+                      {'ts': 't2', 'stage': 'b', 'text': 'two'}],
+            'cancel_requested': False, 'result': None, 'error': None,
+        }
+        status = await self.app.api_instance_copy_status(object(), 0, op_id, 1)
+        self.assertEqual(status['next_offset'], 2)
+        self.assertEqual([line['text'] for line in status['lines']], ['two'])
+
+        cancelled = await self.app.api_instance_copy_cancel(object(), 0, op_id)
+        self.assertEqual(cancelled['status'], 'cancelling')
+        self.assertTrue(self.app._inst_copy_ops[op_id]['cancel_requested'])
 
 
 class CopyTranslationTests(unittest.TestCase):

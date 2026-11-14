@@ -9291,9 +9291,13 @@ async def _run_instance_copy(op_id):
             copier.execute, plan, log, lambda: bool(op.get('cancel_requested')))
 
         try:
-            copied = await asyncio.to_thread(
-                _instance_copy_apply, plan, op['source_server_id'],
-                op['target_server_id'], op['protocol'])
+            # Hold the panel write lock across load_data/save_data: a traffic
+            # update landing in between would otherwise be overwritten by the
+            # copy snapshot.
+            async with DATA_LOCK:
+                copied = await asyncio.to_thread(
+                    _instance_copy_apply, plan, op['source_server_id'],
+                    op['target_server_id'], op['protocol'])
         except Exception:
             # The container exists but the panel cannot record it: remove it,
             # otherwise the target keeps an instance nothing knows about.
@@ -9407,7 +9411,7 @@ async def api_instance_copy_start(request: Request, server_id: int, req: Instanc
         'started_at': datetime.now().isoformat(timespec='seconds'),
     }
     _inst_copy_ops[op_id] = op
-    _inst_copy_save()
+    _instance_copy_save()
     _inst_copy_active['op_id'] = op_id
     asyncio.create_task(_run_instance_copy(op_id))
     return {'operation_id': op_id}
