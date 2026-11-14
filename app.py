@@ -3784,7 +3784,19 @@ async def _run_cheburcheck_one(srv, target, targets=None):
             error = e.user_message
         except Exception as e:
             error = f"probe failed: {e}"
+    # Режим проверки: без проб (нет токена, 429, сеть) доступны только списки.
+    online = (probe or {}).get('online_probes')
+    answered = int((probe or {}).get('response_count') or 0)
+    if static is None:
+        scan_mode = 'failed'
+    elif probe is None:
+        scan_mode = 'static_only'
+    elif online and answered < int(online):
+        scan_mode = 'partial'
+    else:
+        scan_mode = 'full'
     summary = cheburcheck.build_summary(target, static, probe, error=error)
+    summary['scan_mode'] = scan_mode
     async with CHEBURCHECK_CACHE_LOCK:
         CHEBURCHECK_CACHE.setdefault(uid, {})[target] = summary
     logger.info(f"cheburcheck: {target} for {srv.get('name')} finished "
@@ -3858,6 +3870,8 @@ def _cheburcheck_synthetic(target, error):
                   'restricted_regions': 0, 'static_hit': False,
                   'clear_regions': 0},
         'partial': False,
+        # Записи ещё нет: режим проверки неизвестен (UI не показывает бейдж).
+        'scan_mode': None,
     }
 
 
@@ -4009,11 +4023,22 @@ def _cheburcheck_aggregate(records):
         bool((record.get('static') or {}).get('blocked'))
         or bool((record.get('static') or {}).get('cdn_providers'))
         for record in records.values())
+    # Режим агрегата: полный отчёт только если пробы отработали у всех целей.
+    modes = [record.get('scan_mode') or 'failed' for record in records.values()]
+    if all(mode == 'full' for mode in modes):
+        scan_mode = 'full'
+    elif all(mode == 'static_only' for mode in modes):
+        scan_mode = 'static_only'
+    elif all(mode == 'failed' for mode in modes):
+        scan_mode = 'failed'
+    else:
+        scan_mode = 'partial'
     return {
         'checked_at': max(checked) if checked else None,
         'status': status,
         'target': worst[0],
         'static_hit': static_hit,
+        'scan_mode': scan_mode,
         # A static list hit counts as one more remark beside the probe
         # restrictions, so the card can show "замечания (N)".
         'remarks': restricted + (1 if static_hit else 0),
@@ -6538,6 +6563,7 @@ async def api_cheburcheck_flags(request: Request):
                        'probe': summary['probe'],
                        'remarks': summary['remarks'],
                        'static_hit': summary['static_hit'],
+                       'scan_mode': summary['scan_mode'],
                        'enabled': True}
     return {'enabled': enabled,
             'running': bool(_CHEBURCHECK_TASK is not None and not _CHEBURCHECK_TASK.done()),
@@ -6570,6 +6596,7 @@ async def api_cheburcheck_get(request: Request, server_id: int):
         'probe': summary['probe'],
         'remarks': summary['remarks'],
         'static_hit': summary['static_hit'],
+        'scan_mode': summary['scan_mode'],
         'error': summary['error'],
         'targets': records,
     }

@@ -981,6 +981,12 @@
                     el.innerHTML = `<button class="btn btn-secondary btn-sm" style="width:100%;"
                         onclick="location.href='/server/${id}'">⚠️ ${_('cheburcheck_remarks_badge')} (${remarks})</button>`;
                     el.style.display = '';
+                } else if (f.scan_mode === 'static_only') {
+                    // Без API-токена пробы не идут: честно называем режим,
+                    // вместо жёлтого «Неизвестно» (это не поломка).
+                    el.innerHTML = `<button class="btn btn-secondary btn-sm" style="width:100%;"
+                        onclick="location.href='/server/${id}'">ℹ️ ${_('cheburcheck_static_only')}</button>`;
+                    el.style.display = '';
                 }
             }
         } catch (e) {

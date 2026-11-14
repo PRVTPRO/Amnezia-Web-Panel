@@ -801,7 +801,10 @@
                     {% set cb_token = settings.get('cheburcheck', {}).get('api_token') or '' %}
                     <span id="cb_token_state">{% if cb_token %}{{ _('cheburcheck_token_set') }} (••••{{ cb_token[-4:] }}){% else %}{{ _('cheburcheck_token_not_set') }}{% endif %}</span>
                     &middot; {{ _('cheburcheck_token_hint') }}
-                    <a href="https://cheburcheck.ru/kb/api#authorization" target="_blank" rel="noopener">cheburcheck.ru/kb/api</a>
+                </p>
+                <p class="form-hint" style="margin-top:4px;">
+                    {{ _('cheburcheck_token_basic_only') }}
+                    <a href="https://cheburcheck.ru/kb/api#authorization" target="_blank" rel="noopener">{{ _('cheburcheck_token_docs_link') }}</a>
                 </p>
                 <button type="button" class="btn btn-secondary btn-sm" onclick="checkCheburcheckToken()">{{ _('cheburcheck_token_check') }}</button>
             </div>

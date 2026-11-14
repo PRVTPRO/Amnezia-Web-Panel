@@ -7732,12 +7732,18 @@ async function loadCheburcheck() {
         // "No restrictions detected" must not appear next to "restrictions: 24":
         // a clean probe with SNI/DNS/CDN hits or list hits is a separate state.
         const hasRemarks = rr > 0 || remarks > 0 || !!(r && r.static_hit);
-        const icon = status === 'banned' ? '&#128683;'
-            : (status === 'clean' ? (hasRemarks ? '&#9888;&#65039;' : '&#9989;') : '&#128993;');
-        const label = status === 'banned' ? _('cheburcheck_banned')
+        // scan_mode = static_only: пробы не запускались (нет API-токена или
+        // сервис их не дал). Это не «сломалось» и не «чисто» — только списки.
+        const scanMode = (r && r.scan_mode) || 'full';
+        const staticOnly = scanMode === 'static_only';
+        const icon = staticOnly ? '&#8505;&#65039;'
+            : (status === 'banned' ? '&#128683;'
+            : (status === 'clean' ? (hasRemarks ? '&#9888;&#65039;' : '&#9989;') : '&#128993;'));
+        const label = staticOnly ? _('cheburcheck_static_only')
+            : (status === 'banned' ? _('cheburcheck_banned')
             : (status === 'clean'
                 ? (hasRemarks ? _('cheburcheck_remarks_only') : _('cheburcheck_clean'))
-                : _('cheburcheck_unknown'));
+                : _('cheburcheck_unknown')));
         const age = cheburAge(r && r.checked_at);
         // Staleness is a timestamp comparison: locale text never matches.
         const stale = cheburcheckStale(r && r.checked_at);
@@ -7746,8 +7752,14 @@ async function loadCheburcheck() {
         const restrictTag = rr > 0 ? ` &middot; ${_('cheburcheck_restrictions')}: ${rr}` : '';
         const listTag = (r && r.static_hit) ? ` &middot; ${_('cheburcheck_static_hit')}` : '';
         const remarksTag = remarks > 0 && rr === 0 ? ` &middot; ${_('cheburcheck_remarks_badge')}: ${remarks}` : '';
-        el.innerHTML = `${icon} <b>${label}</b> &middot; ${_('cheburcheck_regions_blocked')}: ${br}/${rc}`
-            + restrictTag + listTag + remarksTag
+        // В режиме «только списки» счётчик регионов бессмысленен: проб не было.
+        const regionsTag = staticOnly ? ''
+            : ` &middot; ${_('cheburcheck_regions_blocked')}: ${br}/${rc}`;
+        const basicTag = staticOnly
+            ? ` &middot; <span class="text-muted">${escapeHtml(_('cheburcheck_static_only_note'))}</span>`
+            : '';
+        el.innerHTML = `${icon} <b>${label}</b>${regionsTag}`
+            + restrictTag + listTag + remarksTag + basicTag
             + (age ? ` &middot; ${_('cheburcheck_checked_at')}: ${age}${staleTag}` : '')
             + errTag;
         const targets = (r && r.targets) || {};
@@ -7768,7 +7780,7 @@ async function loadCheburcheck() {
                 details.classList.add('hidden');
             }
         }
-        cheburcheckButtonState(status);
+        cheburcheckButtonState(staticOnly ? 'static_only' : status);
     } catch (e) {
         const el = document.getElementById('cheburcheck-summary');
         if (el) el.textContent = _('cheburcheck_error') + ': ' + (e.message || e);
@@ -7847,7 +7859,9 @@ function cheburcheckButtonState(status) {
     btn.classList.remove('is-danger', 'is-warn', 'is-ok');
     btn.removeAttribute('data-state');
     if (status === 'banned') { btn.classList.add('is-danger'); btn.dataset.state = 'banned'; }
-    else if (status === 'unknown') { btn.classList.add('is-warn'); btn.dataset.state = 'unknown'; }
+    else if (status === 'unknown' || status === 'static_only') {
+        btn.classList.add('is-warn'); btn.dataset.state = status === 'static_only' ? 'static_only' : 'unknown';
+    }
     else { btn.classList.add('is-ok'); btn.dataset.state = 'clean'; }
 }
 
