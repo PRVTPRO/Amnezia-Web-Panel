@@ -6905,9 +6905,24 @@ def op_finish(op, state, result=None, error=None):
 
 
 def _install_op_for_protocol(server_id, protocol):
-    """Newest operation of one protocol instance on one server."""
+    """Newest operation of a protocol on one server.
+
+    A concrete instance key ("awg3__2") matches only itself. A base request
+    ("awg3") also matches instances derived from it: a new instance is
+    polled by the base name, because the panel only learns its key
+    ("awg3__6") from the install response, not from the request.
+    """
+    allow_base = '__' not in str(protocol or '')
+    base = protocol_base(protocol)
     for op in reversed(list(_INSTALL_OPS.values())):
-        if op.get('server_id') == server_id and op.get('protocol') == protocol:
+        if op.get('server_id') != server_id:
+            continue
+        op_protocol = op.get('protocol')
+        if not op_protocol:
+            continue
+        if op_protocol == protocol:
+            return op
+        if allow_base and protocol_base(op_protocol) == base:
             return op
     return None
 
