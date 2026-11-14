@@ -29,6 +29,9 @@ CONFIG_DIR = '/opt/amnezia/awg'
 START_SCRIPT = '/opt/amnezia/start.sh'
 MIN_PORT = 1024
 MAX_PORT = 65535
+# `docker load` expands the image, while `docker save` streams it compressed.
+# Keep a margin so the disk does not fill up mid-restore.
+IMAGE_DISK_HEADROOM = 256 * 1024 * 1024
 
 # (step number, stage name) for the progress bar. The UI shows "step N of M".
 COPY_STEPS = 8
@@ -247,8 +250,14 @@ class InstanceCopier:
         warnings = []
         if port != source_port:
             warnings.append('port_in_use')
+        disk_free_mb = self.disk_free_mb()
         if not image_present:
             warnings.append('image_transfer')
+            # The transfer is compressed but `docker load` expands the image,
+            # so compare the free space with the uncompressed size + margin.
+            if (image_bytes and disk_free_mb is not None
+                    and disk_free_mb * 1024 * 1024 < image_bytes + IMAGE_DISK_HEADROOM):
+                warnings.append('disk_low')
         return {
             'base': base,
             'source_key': source_key,
@@ -262,7 +271,7 @@ class InstanceCopier:
             'image': image,
             'image_present': image_present,
             'image_bytes': image_bytes,
-            'disk_free_mb': self.disk_free_mb(),
+            'disk_free_mb': disk_free_mb,
             'warnings': warnings,
         }
 
@@ -317,6 +326,13 @@ class InstanceCopier:
                     # A dead target must not hide the error that caused the
                     # rollback: report it and leave the container to the admin.
                     logger.warning('instance copy: rollback failed', exc_info=True)
+                    try:
+                        log('error', 'the copy failed and %s could not be removed;'
+                                     ' check it on the target manually'
+                            % plan['target_container'])
+                    except Exception:
+                        logger.debug('instance copy: cannot log rollback failure',
+                                     exc_info=True)
             raise
         finally:
             self._remove_tree(workdir)

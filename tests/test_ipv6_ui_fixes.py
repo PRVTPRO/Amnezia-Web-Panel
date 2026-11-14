@@ -72,6 +72,7 @@ COPY_INSTANCE_KEYS = {
     "copy_instance_running", "copy_instance_step", "copy_instance_success",
     "copy_instance_failed", "copy_instance_cancelled", "copy_instance_cancel",
     "copy_instance_close", "copy_instance_log", "copy_instance_connections",
+    "copy_instance_disk_low",
 }
 PANEL_ACCESS_KEYS = {
     'panel_access_title',

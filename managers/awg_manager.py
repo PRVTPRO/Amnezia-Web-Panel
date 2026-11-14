@@ -1339,11 +1339,14 @@ class AWGManager:
         return parsed[0] if isinstance(parsed, list) and parsed else None
 
     @staticmethod
-    def _run_cmd_from_inspect(info, name, image):
+    def _run_cmd_from_inspect(info, name, image, port_override=None):
         """Rebuild the run command from the container's own inspect data.
 
         Keeps binds, caps, ulimits, ports, restart policy and sysctls, then
         forces the two IPv6 sysctls the old container was missing.
+
+        ``port_override`` republishes every UDP mapping on another port; the
+        instance copy uses it to move a container to a free port on the target.
         """
         if not isinstance(info, dict):
             return None
@@ -1410,10 +1413,17 @@ class AWGManager:
         for port, bindings in (host.get('PortBindings') or {}).items():
             if skip_ports:
                 break
+            protocol = port.partition('/')[2]
+            try:
+                override = int(port_override) if port_override else None
+            except (TypeError, ValueError):
+                override = None
+            container_port = (f'{override}/{protocol}' if protocol else str(override)) if override else port
             for binding in bindings or []:
                 host_ip = binding.get('HostIp') or ''
-                host_port = binding.get('HostPort') or ''
-                mapping = f'{host_ip}:{host_port}:{port}' if host_ip else f'{host_port}:{port}'
+                host_port = str(override) if override else (binding.get('HostPort') or '')
+                mapping = (f'{host_ip}:{host_port}:{container_port}' if host_ip
+                           else f'{host_port}:{container_port}')
                 parts.append(f'-p {shlex.quote(mapping)}')
         parts.append(f'--name {shlex.quote(name)}')
         parts.append(shlex.quote(image))

@@ -1306,5 +1306,6 @@
   "copy_instance_cancel": "لغو",
   "copy_instance_close": "بستن",
   "copy_instance_log": "ژورنال",
-  "copy_instance_connections": "پیوندهای کاربر کپی‌شده: {n}"
+  "copy_instance_connections": "پیوندهای کاربر کپی‌شده: {n}",
+  "copy_instance_disk_low": "کپی: {free} مگابایت فضای آزاد روی مقصد، تصویر به حدود {need} مگابایت نیاز دارد"
 }

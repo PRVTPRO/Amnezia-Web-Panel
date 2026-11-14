@@ -662,7 +662,8 @@
         } catch (error) {
             setSSHTrustButton('urgent');
         }
-    }    async function inspectSSHTrust() {
+    }
+    async function inspectSSHTrust() {
         sshTrustToken = null;
         document.getElementById('ssh-trust-confirmation').hidden = true;
         document.getElementById('ssh-trust-verified').checked = false;
@@ -693,6 +694,7 @@
             document.getElementById('ssh-trust-details').textContent = error.message;
         } finally { button.disabled = false; }
     }
+    document.addEventListener('DOMContentLoaded', loadSSHTrustStatus);
 </script>
 
 <!-- ===== Copy one AWG instance to another server ===== -->
@@ -753,6 +755,7 @@
         'peers': _('connections'),
         'port_busy': _('copy_instance_port_busy'),
         'image': _('copy_instance_image'),
+        'disk_low': _('copy_instance_disk_low'),
         'no_targets': _('copy_instance_target_missing'),
         'running': _('copy_instance_running'),
         'step': _('copy_instance_step'),
@@ -823,6 +826,12 @@
                 parts.push(copyFmt(COPY_LABELS.port_busy, {port: plan.source_port, new: plan.port}));
             }
             if (warnings.indexOf('image_transfer') !== -1) parts.push(COPY_LABELS.image);
+            if (warnings.indexOf('disk_low') !== -1) {
+                parts.push(copyFmt(COPY_LABELS.disk_low, {
+                    free: plan.disk_free_mb,
+                    need: Math.ceil((plan.image_bytes || 0) / 1048576),
+                }));
+            }
             if (preview) preview.textContent = parts.join(' · ');
             if (start) start.disabled = false;
         } catch (error) {
@@ -1592,6 +1601,8 @@
             installOp.timer = setTimeout(pollInstallOp, 3000);
         }
     }
+
+    document.addEventListener('DOMContentLoaded', loadAwgPluginStatus);
 </script>
 {% endif %}
 <a href="/" class="back-link page-back-link">{{ _('back_to_servers') }}</a>
@@ -8057,5 +8068,7 @@ function openCheburcheckModal() {
     openModal('cheburcheckModal');
     loadCheburcheck();
 }
+
+document.addEventListener('DOMContentLoaded', loadCheburcheck);
 </script>
 {% endblock %}

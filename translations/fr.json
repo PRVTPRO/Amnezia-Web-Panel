@@ -1306,5 +1306,6 @@
   "copy_instance_cancel": "Annuler",
   "copy_instance_close": "Fermer",
   "copy_instance_log": "Journal",
-  "copy_instance_connections": "Liaisons utilisateur copiées : {n}"
+  "copy_instance_connections": "Liaisons utilisateur copiées : {n}",
+  "copy_instance_disk_low": "Copie : {free} Mo libres sur la cible, l’image nécessite ~{need} Mo"
 }

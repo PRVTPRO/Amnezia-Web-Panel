@@ -9170,6 +9170,10 @@ async def _run_instance_copy(op_id):
         data = load_data()
         source_server, _entry, container = _instance_copy_source(
             data, op['source_server_id'], op['protocol'])
+        if op['target_server_id'] < 0 or op['target_server_id'] >= len(data.get('servers') or []):
+            # The panel state may change between the start request and the
+            # worker (a server removed in between must not crash the task).
+            raise InstanceCopyError('server_not_found', 'Target server not found')
         target_server = data['servers'][op['target_server_id']]
         log('planning', 'connecting to %s and %s' % (
             source_server.get('name') or source_server['host'],
@@ -9200,8 +9204,11 @@ async def _run_instance_copy(op_id):
                     _instance_copy_apply, plan, op['source_server_id'],
                     op['target_server_id'], op['protocol'])
         except Exception:
-            # The container exists but the panel cannot record it: remove it,
-            # otherwise the target keeps an instance nothing knows about.
+            # The container exists but the panel cannot record it: drop the
+            # partial panel entry first, then remove the container, otherwise
+            # the target keeps an instance nothing knows about.
+            await asyncio.to_thread(
+                _instance_copy_rollback_panel, plan, op['target_server_id'])
             await asyncio.to_thread(copier.destroy, plan)
             raise
         result['connections'] = copied

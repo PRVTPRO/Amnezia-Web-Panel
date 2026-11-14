@@ -43,6 +43,17 @@ PublicKey = peer2=
 AllowedIPs = 10.8.1.3/32
 """
 
+# The repository data.json is a fixture with a single server; the worker needs
+# a target server to exist, so the tests supply their own panel state instead of
+# depending on whatever data.json happens to contain (CI has one server).
+COPY_PANEL_DATA = {
+    'servers': [
+        {'name': 'SRC', 'host': '192.0.2.1'},
+        {'name': 'DST', 'host': '192.0.2.2'},
+    ],
+    'user_connections': [],
+}
+
 
 class FakeSSH:
     """Records sudo commands and answers with a scripted handler."""
@@ -206,6 +217,39 @@ class CopyArchiveTests(unittest.TestCase):
             copier.plan('awg3', 'amnezia-awg3', {})
         self.assertEqual(caught.exception.code, 'name_taken')
 
+
+    def test_plan_warns_when_the_image_does_not_fit(self):
+        inspect_json = json.dumps([{
+            'State': {'Running': True},
+            'Config': {'Image': 'amnezia-awg3'},
+            'HostConfig': {},
+        }])
+
+        def source_handler(command):
+            if 'docker inspect --type container' in command:
+                return (inspect_json, '', 0)
+            if 'docker exec' in command and 'cat' in command:
+                return (SERVER_CONFIG, '', 0)
+            if 'grep -c' in command:
+                return ('2', '', 0)
+            if '{{.Size}}' in command:
+                return ('536870912', '', 0)  # 512 MB uncompressed
+            return ('', '', 0)
+
+        def target_handler(command):
+            if 'docker inspect --type container' in command:
+                return ('', '', 1)
+            if 'docker image inspect' in command:
+                return ('', '', 1)
+            if 'df -Pm' in command:
+                return ('overlay 10000 9000 100 10% /var/lib/docker\n', '', 0)
+            return ('', '', 0)
+
+        copier = InstanceCopier(FakeSSH(source_handler), FakeSSH(target_handler))
+        plan = copier.plan('awg3', 'amnezia-awg3', {})
+        self.assertIn('image_transfer', plan['warnings'])
+        self.assertIn('disk_low', plan['warnings'])
+        self.assertEqual(plan['disk_free_mb'], 100)
 
     def test_inspect_container_is_limited_to_containers(self):
         """An image with the same name must not look like a container."""
@@ -508,6 +552,7 @@ class CopyEndpointTests(unittest.IsolatedAsyncioTestCase):
             patch.object(app, '_check_admin', return_value=True),
             patch.object(app, '_instance_copy_store_path',
                          return_value=os.path.join(self.tmp.name, 'ops.json')),
+            patch.object(app, 'load_data', return_value=COPY_PANEL_DATA),
             patch.object(app, '_instance_copy_source',
                          return_value=({'name': 'SRC'}, {}, 'amnezia-awg3')),
             patch.object(app, '_run_instance_copy', new=self._worker),
@@ -602,11 +647,13 @@ class CopyWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.patches = [
             patch.object(app, '_instance_copy_store_path',
                          return_value=os.path.join(self.tmp.name, 'ops.json')),
+            patch.object(app, 'load_data', return_value=COPY_PANEL_DATA),
             patch.object(app, '_instance_copy_source',
                          return_value=({'name': 'SRC'}, {}, 'amnezia-awg3')),
             patch.object(app, 'get_ssh', side_effect=lambda server: self.FakeSSH()),
             patch.object(app, 'InstanceCopier', new=self.FakeCopier),
             patch.object(app, '_instance_copy_apply', return_value=2),
+            patch.object(app, 'save_data'),
         ]
         for patcher in self.patches:
             patcher.start()
@@ -654,10 +701,20 @@ class CopyWorkerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_panel_write_failure_removes_the_container(self):
         with patch.object(self.app, '_instance_copy_apply',
-                          side_effect=InstanceCopyError('state_busy', 'cannot save')):
+                          side_effect=InstanceCopyError('state_busy', 'cannot save')), \
+                patch.object(self.app, '_instance_copy_rollback_panel') as rollback:
             op = await self.run_worker()
         self.assertEqual(op['state'], 'failed')
         self.assertEqual(self.FakeCopier.destroyed, ['amnezia-awg3-2'])
+        rollback.assert_called_once()
+
+    async def test_missing_target_server_is_reported_with_a_code(self):
+        """A server removed after start must not crash the worker."""
+        with patch.object(self.app, 'load_data',
+                          return_value={'servers': [{'name': 'SRC', 'host': 'src'}]}):
+            op = await self.run_worker()
+        self.assertEqual(op['state'], 'failed')
+        self.assertEqual(op['error']['code'], 'server_not_found')
 
 
 class CopyAccountingOwnershipTests(unittest.TestCase):

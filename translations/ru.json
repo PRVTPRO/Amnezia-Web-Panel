@@ -1306,5 +1306,6 @@
   "copy_instance_cancel": "Отмена",
   "copy_instance_close": "Закрыть",
   "copy_instance_log": "Журнал",
-  "copy_instance_connections": "Скопировано привязок: {n}"
+  "copy_instance_connections": "Скопировано привязок: {n}",
+  "copy_instance_disk_low": "Копия: свободно {free} МБ на цели, для образа нужно ~{need} МБ"
 }

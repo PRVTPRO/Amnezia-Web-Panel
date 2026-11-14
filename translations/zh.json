@@ -1306,5 +1306,6 @@
   "copy_instance_cancel": "取消",
   "copy_instance_close": "关闭",
   "copy_instance_log": "日志",
-  "copy_instance_connections": "已复制用户绑定：{n}"
+  "copy_instance_connections": "已复制用户绑定：{n}",
+  "copy_instance_disk_low": "复制：目标剩余 {free} MB，镜像约需 {need} MB"
 }
