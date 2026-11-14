@@ -47,10 +47,15 @@ AllowedIPs = 10.8.1.3/32
 class FakeSSH:
     """Records sudo commands and answers with a scripted handler."""
 
+    username = 'root'
+
     def __init__(self, handler=None):
         self.commands = []
         self.handler = handler or (lambda command: ('', '', 0))
         self.client = None
+
+    def _make_private_temp_dir(self):
+        return '/tmp/amnezia-private.test'
 
     def run_sudo_command(self, command, timeout=60):
         self.commands.append(command)
@@ -274,15 +279,15 @@ class CopyRollbackTests(unittest.TestCase):
     def test_failure_removes_the_container_created_by_this_operation(self):
         target = FakeSSH()
         copier = InstanceCopier(FakeSSH(), target)
-        copier._export_state = lambda plan, path: Path(path).write_bytes(b'x')
+        copier._export_state = lambda plan, path, check=None: Path(path).write_bytes(b'x')
         copier._patch_archive = lambda path, port, workdir: None
-        copier._ensure_image = lambda plan, log: None
+        copier._ensure_image = lambda plan, log, check=None: None
         copier._create_container = lambda plan: None
 
         def explode(plan, path):
             raise InstanceCopyError('upload_failed', 'boom')
 
-        copier._push_state = explode
+        copier._push_state = lambda plan, path, check=None: explode(plan, path)
         with self.assertRaises(InstanceCopyError):
             copier.execute(self.plan(), lambda stage, text: None)
 
@@ -333,6 +338,69 @@ class CopyRollbackTests(unittest.TestCase):
             with self.assertRaises(InstanceCopyError) as caught:
                 copier._verify(self.plan(), lambda stage, text: None, lambda: False)
         self.assertEqual(caught.exception.code, 'peer_mismatch')
+
+    def test_state_is_applied_by_a_restart_after_the_upload(self):
+        """docker run -d starts the container; only a restart loads the copy."""
+        copier = InstanceCopier(FakeSSH(), FakeSSH())
+        order = []
+
+        def export(plan, path, check=None):
+            Path(path).write_bytes(b'x')
+            order.append('export')
+
+        copier._export_state = export
+        copier._patch_archive = lambda path, port, workdir: order.append('patch')
+        copier._ensure_image = lambda plan, log, check=None: order.append('image')
+        copier._create_container = lambda plan: order.append('create')
+        copier._push_state = lambda plan, path, check=None: order.append('push')
+        copier._restart_container = lambda plan: order.append('restart')
+        copier._verify = lambda plan, log, check: order.append('verify')
+
+        copier.execute(self.plan(), lambda stage, text: None)
+
+        self.assertEqual(order, ['export', 'patch', 'image', 'create', 'push',
+                                 'restart', 'verify'])
+
+    def test_zero_peers_is_a_valid_count(self):
+        """`grep -c` prints 0 and exits 1 on a fresh instance without peers."""
+        ssh = FakeSSH(lambda command: ('0', '', 1))
+        copier = InstanceCopier(ssh, ssh)
+        self.assertEqual(copier.count_peers(ssh, 'amnezia-awg3'), 0)
+
+    def test_listening_port_is_read_from_the_interface(self):
+        def handler(command):
+            if 'awg show' in command:
+                return ('interface: awg0\n  listening port: 6000\n', '', 0)
+            if 'grep -c' in command:
+                return ('2', '', 0)
+            if 'ss -lun' in command:
+                return ('0', '', 1)
+            return ('', '', 0)
+
+        copier = InstanceCopier(FakeSSH(handler), FakeSSH(handler))
+        interface_up, listening, peers = copier._tunnel_state(self.plan())
+        self.assertTrue(interface_up)
+        self.assertTrue(listening)
+        self.assertEqual(peers, 2)
+
+    def test_export_hands_the_archive_to_the_ssh_user(self):
+        """A non-root sudo account must be able to read the exported tar."""
+        source = FakeSSH()
+        source.username = 'deploy'
+        copier = InstanceCopier(source, FakeSSH())
+        commands = []
+        copier._sudo = lambda ssh, command, timeout=120: (
+            commands.append(command) or ('', '', 0))
+        copier._sftp_get = lambda ssh, remote, local: Path(local).write_bytes(b'x')
+
+        with tempfile.TemporaryDirectory() as tmp:
+            copier._export_state(
+                {'source_container': 'amnezia-awg3'}, os.path.join(tmp, 'state.tar'))
+
+        self.assertTrue(any('chown' in command and 'deploy' in command
+                            for command in commands), commands)
+        self.assertTrue(any(command.startswith('rm -rf ')
+                            for command in commands), commands)
 
 
 class PanelMergeTests(unittest.TestCase):

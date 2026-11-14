@@ -8,6 +8,7 @@ archive is tied to its protocol key (``Backup protocol mismatch``) and would
 leave an extra archive on the target. Here the container state is streamed
 directly, patched on the panel and pushed into a fresh container.
 """
+import logging
 import os
 import re
 import shlex
@@ -15,7 +16,10 @@ import tarfile
 import tempfile
 import time
 
+logger = logging.getLogger(__name__)
+
 AWG_BASES = ('awg', 'awg2', 'awg3')
+AWG_IFACE = 'awg0'
 CONTAINER_NAMES = {
     'awg': 'amnezia-awg',
     'awg2': 'amnezia-awg2',
@@ -85,10 +89,14 @@ def patch_listen_port(config_text, port):
 
 
 def parse_used_ports(*outputs):
-    """UDP ports mentioned by `ss -lun` / `docker ps` output."""
+    """UDP ports mentioned by `ss -lun` / `docker ps` output.
+
+    ``docker ps`` prints published ports as ``0.0.0.0:50808->50808/udp``, so the
+    port may be followed by an arrow, not only by whitespace.
+    """
     ports = set()
     for output in outputs:
-        for match in re.finditer(r':(\d{2,5})\s', (output or '') + ' '):
+        for match in re.finditer(r':(\d{2,5})(?!\d)', (output or '') + ' '):
             port = int(match.group(1))
             if MIN_PORT <= port <= MAX_PORT:
                 ports.add(port)
@@ -166,11 +174,13 @@ class InstanceCopier:
             % (shlex.quote(container),
                shlex.quote('grep -c "^\\[Peer\\]" %s/awg0.conf' % CONFIG_DIR)),
         )
-        if code != 0:
+        # `grep -c` prints 0 and exits 1 when there is no match: a fresh
+        # instance without peers is valid, not unreadable.
+        if code not in (0, 1):
             return None
         try:
-            return int((out or '').strip())
-        except ValueError:
+            return int((out or '').strip().splitlines()[-1])
+        except (ValueError, IndexError):
             return None
 
     def disk_free_mb(self):
@@ -270,14 +280,14 @@ class InstanceCopier:
             check()
             log('inspecting', 'reading the source container state')
             artifact = os.path.join(workdir, 'state.tar')
-            self._export_state(plan, artifact)
+            self._export_state(plan, artifact, check)
 
             check()
             log('patching', 'setting ListenPort = %d' % plan['port'])
             self._patch_archive(artifact, plan['port'], workdir)
 
             check()
-            self._ensure_image(plan, log)
+            self._ensure_image(plan, log, check)
 
             check()
             log('creating', 'creating %s' % plan['target_container'])
@@ -286,10 +296,10 @@ class InstanceCopier:
 
             check()
             log('uploading', 'uploading the server state')
-            self._push_state(plan, artifact)
+            self._push_state(plan, artifact, check)
 
-            log('starting', 'starting %s' % plan['target_container'])
-            self._start_container(plan)
+            log('starting', 'restarting %s to apply the copied state' % plan['target_container'])
+            self._restart_container(plan)
 
             log('verifying', 'checking the tunnel and peers')
             self._verify(plan, log, check)
@@ -301,7 +311,12 @@ class InstanceCopier:
             }
         except BaseException:
             if created:
-                self.destroy(plan)
+                try:
+                    self.destroy(plan)
+                except Exception:
+                    # A dead target must not hide the error that caused the
+                    # rollback: report it and leave the container to the admin.
+                    logger.warning('instance copy: rollback failed', exc_info=True)
             raise
         finally:
             self._remove_tree(workdir)
@@ -318,28 +333,36 @@ class InstanceCopier:
             'docker rm -f %s >/dev/null 2>&1; true' % shlex.quote(plan['target_container']),
         )
 
-    def _export_state(self, plan, local_path):
+    def _export_state(self, plan, local_path, check=None):
         token = os.urandom(6).hex()
-        remote_tmp = '/tmp/amnezia-copy-%s.tar' % token
+        # The tar is written as root but downloaded over SFTP as the SSH user.
+        # A private staging directory plus chown keeps the archive unreadable to
+        # other local users and still readable for a non-root sudo account.
+        stage = self.source_ssh._make_private_temp_dir()
+        remote_tmp = stage + '/state.tar'
+        quoted_tmp = shlex.quote(remote_tmp)
         exclude = (
             "--exclude='awg0.conf.bak.*' --exclude='awg/warp' "
             "--exclude='awg/warp-link-*'"
         )
         inner = (
             'docker exec %s tar -C /opt/amnezia %s -cf - awg start.sh > %s'
-            % (shlex.quote(plan['source_container']), exclude, shlex.quote(remote_tmp))
+            % (shlex.quote(plan['source_container']), exclude, quoted_tmp)
         )
-        out, err, code = self._sudo(
-            self.source_ssh,
-            'sh -c %s' % shlex.quote(inner + ' && chmod 640 ' + shlex.quote(remote_tmp)),
-            timeout=180,
-        )
-        if code != 0:
-            raise InstanceCopyError('export_failed', err or out or 'Cannot export the container state')
+        if check:
+            check()
         try:
+            out, err, code = self._sudo(
+                self.source_ssh, 'sh -c %s' % shlex.quote(inner), timeout=180)
+            if code != 0:
+                raise InstanceCopyError(
+                    'export_failed', err or out or 'Cannot export the container state')
+            user = shlex.quote(str(getattr(self.source_ssh, 'username', '') or 'root'))
+            self._sudo(self.source_ssh,
+                       'chown %s %s && chmod 0600 %s' % (user, quoted_tmp, quoted_tmp))
             self._sftp_get(self.source_ssh, remote_tmp, local_path)
         finally:
-            self._sudo(self.source_ssh, 'rm -f ' + shlex.quote(remote_tmp))
+            self._sudo(self.source_ssh, 'rm -rf ' + shlex.quote(stage))
         if not os.path.getsize(local_path):
             raise InstanceCopyError('export_failed', 'The exported state is empty')
 
@@ -361,9 +384,11 @@ class InstanceCopier:
                 archive.add(os.path.join(extract_dir, name), arcname=name)
         os.replace(patched_tar, archive_path)
 
-    def _ensure_image(self, plan, log):
+    def _ensure_image(self, plan, log, check=None):
         if plan.get('image_present'):
             return
+        if check:
+            check()
         log('image', 'copying docker image %s' % plan['image'])
         token = os.urandom(6).hex()
         # The panel may run on the source host itself: a local /tmp path with the
@@ -405,7 +430,9 @@ class InstanceCopier:
         if code != 0:
             raise InstanceCopyError('create_failed', err or out or 'docker run failed')
 
-    def _push_state(self, plan, archive_path):
+    def _push_state(self, plan, archive_path, check=None):
+        if check:
+            check()
         token = os.urandom(6).hex()
         remote_tar = '/tmp/amnezia-copy-%s.tar' % token
         self._sftp_put(self.target_ssh, archive_path, remote_tar)
@@ -429,23 +456,39 @@ class InstanceCopier:
         finally:
             self._sudo(self.target_ssh, 'rm -f ' + shlex.quote(remote_tar))
 
-    def _start_container(self, plan):
+    def _restart_container(self, plan):
+        # The container was created with `docker run -d` and its start script
+        # already ran against the image config. The copied state only becomes
+        # live after a restart, so `docker start` (a no-op for a running
+        # container) is not enough.
         out, err, code = self._sudo(
-            self.target_ssh, 'docker start %s' % shlex.quote(plan['target_container']), timeout=120)
+            self.target_ssh,
+            'docker restart %s' % shlex.quote(plan['target_container']),
+            timeout=120,
+        )
         if code != 0:
-            raise InstanceCopyError('start_failed', err or out or 'docker start failed')
+            raise InstanceCopyError('start_failed', err or out or 'docker restart failed')
 
     def _tunnel_state(self, plan):
         """(interface_up, listening, peers) of the target container."""
         container = shlex.quote(plan['target_container'])
-        iface_out, _, _ = self._sudo(
-            self.target_ssh, 'docker exec %s awg show interfaces' % container)
+        show_out, _, _ = self._sudo(
+            self.target_ssh, 'docker exec %s awg show %s' % (container, AWG_IFACE))
         peers = self.count_peers(self.target_ssh, plan['target_container'])
-        listen_out, _, _ = self._sudo(
-            self.target_ssh,
-            'sh -c %s' % shlex.quote("ss -lun 2>/dev/null | grep -c ':%d '" % plan['port']),
-        )
-        return ('awg0' in (iface_out or '')), _count_ok(listen_out), peers
+        interface_up = AWG_IFACE in (show_out or '')
+        listening = False
+        match = re.search(r'listening port:\s*(\d+)', show_out or '')
+        if match:
+            # Authoritative: taken from the interface itself, works without a
+            # host userland proxy (hardened bridges often disable it).
+            listening = int(match.group(1)) == int(plan['port'])
+        else:
+            listen_out, _, _ = self._sudo(
+                self.target_ssh,
+                'sh -c %s' % shlex.quote("ss -lun 2>/dev/null | grep -c ':%d '" % plan['port']),
+            )
+            listening = _count_ok(listen_out)
+        return interface_up, listening, peers
 
     def _verify(self, plan, log, check):
         last = None
