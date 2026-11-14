@@ -83,6 +83,10 @@ NEW_KEYS = {
     "cheburcheck_token_required",
     "cheburcheck_token_open_settings",
     "cheburcheck_token_docs",
+    "cheburcheck_token_basic_only",
+    "cheburcheck_token_docs_link",
+    "cheburcheck_static_only",
+    "cheburcheck_static_only_note",
 }
 
 # The catalogue had 1218 key names right before panel access (#305). Freeze
@@ -158,6 +162,8 @@ CHEBURCHECK_KEYS = {
     'cheburcheck_token_ok', 'cheburcheck_token_failed',
     'cheburcheck_token_required', 'cheburcheck_token_open_settings',
     'cheburcheck_token_docs',
+    'cheburcheck_token_basic_only', 'cheburcheck_token_docs_link',
+    'cheburcheck_static_only', 'cheburcheck_static_only_note',
 }
 
 
