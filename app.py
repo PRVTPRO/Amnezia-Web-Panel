@@ -9090,7 +9090,9 @@ def _instance_copy_store_path():
 
 def _instance_copy_save():
     path = _instance_copy_store_path()
-    tmp = path + '.tmp'
+    # Unique temp name: the worker (event loop) and the start handler
+    # (threadpool) can save at the same time and must not overwrite each other.
+    tmp = '%s.%s.tmp' % (path, uuid.uuid4().hex)
     try:
         with open(tmp, 'w', encoding='utf-8') as handle:
             json.dump(list(_inst_copy_ops.values()), handle, ensure_ascii=False)

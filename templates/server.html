@@ -301,6 +301,28 @@
     @media (prefers-reduced-motion: reduce) {
         .server-stats-skel { animation: none; }
     }
+    /* Загрузка шапки: страница рисуется сразу, пробы догоняют её фоном.
+       Пульсируют только точки уже существующих кнопок, скелетоны — блоки. */
+    .srv-header .srv-status-btn[data-state="loading"] .ssh-trust-dot,
+    .srv-header .srv-status-btn[data-state="loading"] .awg-plugin-dot,
+    .srv-header .srv-status-btn[data-state="loading"] .cheburcheck-dot {
+        background: var(--text-muted);
+        animation: serverStatsPulse 1.2s ease-in-out infinite;
+    }
+    .srv-header .badge.is-skeleton,
+    .srv-header .ip-chip.is-skeleton {
+        color: transparent;
+        background: var(--bg-secondary);
+        border-color: var(--border-color);
+        animation: serverStatsPulse 1.2s ease-in-out infinite;
+    }
+    @media (prefers-reduced-motion: reduce) {
+        .srv-header .srv-status-btn[data-state="loading"] .ssh-trust-dot,
+        .srv-header .srv-status-btn[data-state="loading"] .awg-plugin-dot,
+        .srv-header .srv-status-btn[data-state="loading"] .cheburcheck-dot,
+        .srv-header .badge.is-skeleton,
+        .srv-header .ip-chip.is-skeleton { animation: none; }
+    }
     @media (max-width: 520px) {
         .server-stats-popover {
             position: fixed;
@@ -611,6 +633,7 @@
         const text = document.getElementById('sshTrustBtnText');
         const dot = document.getElementById('sshTrustDot');
         if (!btn || !text || !dot) return;
+        btn.removeAttribute('aria-busy');
         btn.classList.remove('is-urgent', 'is-danger', 'is-ok');
         dot.classList.remove('is-urgent', 'is-danger', 'is-ok');
         if (state === 'changed') {
@@ -639,8 +662,7 @@
         } catch (error) {
             setSSHTrustButton('urgent');
         }
-    }
-    async function inspectSSHTrust() {
+    }    async function inspectSSHTrust() {
         sshTrustToken = null;
         document.getElementById('ssh-trust-confirmation').hidden = true;
         document.getElementById('ssh-trust-verified').checked = false;
@@ -671,7 +693,6 @@
             document.getElementById('ssh-trust-details').textContent = error.message;
         } finally { button.disabled = false; }
     }
-    document.addEventListener('DOMContentLoaded', loadSSHTrustStatus);
 </script>
 
 <!-- ===== Copy one AWG instance to another server ===== -->
@@ -753,6 +774,8 @@
     }
 
     function openCopyInstance(proto) {
+        if (copyOp && copyOp.timer) clearTimeout(copyOp.timer);
+        copyOp = null;
         copySource = proto;
         copyPlan = null;
         copyFinished = null;
@@ -886,6 +909,20 @@
                 }
             }
         } catch (error) {
+            // A dropped poll must not spin forever: after ten misses show the
+            // reason and stop, the operation keeps running on the server.
+            op.failures = (op.failures || 0) + 1;
+            if (op.failures > 10) {
+                const stepEl = document.getElementById('copyInstanceStep');
+                if (stepEl) {
+                    stepEl.textContent = COPY_LABELS.error + ': ' + error.message;
+                    stepEl.style.color = 'var(--danger)';
+                }
+                const cancel = document.getElementById('copyInstanceCancel');
+                if (cancel) cancel.remove();
+                document.getElementById('copyInstanceDone').classList.remove('hidden');
+                return;
+            }
             op.timer = setTimeout(pollCopyInstance, 2000);
         }
     }
@@ -967,6 +1004,7 @@
         const btn = document.getElementById('awgPluginBtn');
         const text = document.getElementById('awgPluginBtnText');
         if (!btn || !text) return;
+        btn.removeAttribute('aria-busy');
         btn.classList.remove('is-update');
         btn.dataset.state = state;
         const labels = awgPluginLabel();
@@ -1554,8 +1592,6 @@
             installOp.timer = setTimeout(pollInstallOp, 3000);
         }
     }
-
-    document.addEventListener('DOMContentLoaded', loadAwgPluginStatus);
 </script>
 {% endif %}
 <a href="/" class="back-link page-back-link">{{ _('back_to_servers') }}</a>
@@ -1599,20 +1635,20 @@
                 </div>
                 {% if current_user and current_user.role == 'admin' %}
                 <button class="btn btn-sm ssh-trust-btn srv-status-btn" type="button" id="sshTrustBtn"
-                        onclick="openSSHTrustModal()">
+                        onclick="openSSHTrustModal()" data-state="loading">
                     <span class="ssh-trust-dot" id="sshTrustDot"></span>
                     {{ ui_icon('key', 14) }}
                     <span id="sshTrustBtnText">{{ _('ssh_trust_button') }}</span>
                 </button>
                 <button class="btn btn-sm awg-plugin-btn srv-status-btn" type="button" id="awgPluginBtn"
-                        onclick="openAwgPluginModal()" data-state="unknown">
+                        onclick="openAwgPluginModal()" data-state="loading">
                     <span class="awg-plugin-dot" id="awgPluginDot"></span>
                     {{ ui_icon('plug', 14) }}
                     <span id="awgPluginBtnText">{{ _('awg_plugin_button') }}</span>
                 </button>
                 {% if cheburcheck_enabled %}
                 <button class="btn btn-sm srv-status-btn" type="button" id="cheburcheckBtn"
-                        onclick="openCheburcheckModal()" data-state="unknown">
+                        onclick="openCheburcheckModal()" data-state="loading">
                     <span class="cheburcheck-dot" id="cheburcheckDot"></span>
                     {{ ui_icon('shield', 14) }}
                     <span id="cheburcheckBtnText">{{ _('cheburcheck_button') }}</span>
@@ -1630,13 +1666,13 @@
         </button>
     </div>
 
-    <div id="serverStatus" class="srv-header__status hidden">
+    <div id="serverStatus" class="srv-header__status">
         <div class="srv-header__badges" id="statusBadges"></div>
         <div class="srv-header__actions">
-            <button class="btn btn-primary btn-sm srv-action" onclick="openMarketplaceModal()" id="marketplaceBtn">
+            <button class="btn btn-primary btn-sm srv-action" onclick="openMarketplaceModal()" id="marketplaceBtn" disabled>
                 {{ ui_icon('store', 15) }} <span>{{ _('marketplace') }}</span>
             </button>
-            <button class="btn btn-secondary btn-sm srv-action" onclick="openServerManagement()" id="managementBtn">
+            <button class="btn btn-secondary btn-sm srv-action" onclick="openServerManagement()" id="managementBtn" disabled>
                 {{ ui_icon('sliders', 15) }} <span>{{ _('management') }}</span>
             </button>
             <button class="btn btn-secondary btn-sm srv-action" onclick="openHostTuning()" id="hostTuningBtn">
@@ -4036,20 +4072,31 @@
             : `<tr><td colspan="5">${_('server_ipv6_state_unknown')}</td></tr>`;
     }
 
-    async function loadIpStatus() {
-        try {
-            const data = await apiCall(`/api/servers/${SERVER_ID}/ip-status`, 'GET');
-            ipStatusCache = data;
-            renderIpChips(data);
-            if (document.getElementById('ipSettingsModal').classList.contains('active')) {
-                renderIpSettings(data);
+    let ipStatusInFlight = null;
+
+    // Одна проба на страницу: очередь, поллер и visibilitychange не должны
+    // ставить в SSH-соединение сервера второй такой же запрос.
+    function loadIpStatus() {
+        if (ipStatusInFlight) return ipStatusInFlight;
+        ipStatusInFlight = (async () => {
+            try {
+                const data = await apiCall(`/api/servers/${SERVER_ID}/ip-status`, 'GET');
+                ipStatusCache = data;
+                renderIpChips(data);
+                if (document.getElementById('ipSettingsModal').classList.contains('active')) {
+                    renderIpSettings(data);
+                }
+                if (document.getElementById('installModal').classList.contains('active')) {
+                    renderInstallIpv6Note();
+                }
+            } catch (err) {
+                console.warn('IP status failed:', err);
+                markIpChipsError();
+            } finally {
+                ipStatusInFlight = null;
             }
-            if (document.getElementById('installModal').classList.contains('active')) {
-                renderInstallIpv6Note();
-            }
-        } catch (err) {
-            console.warn('IP status failed:', err);
-        }
+        })();
+        return ipStatusInFlight;
     }
 
     async function openIpSettings() {
@@ -8017,7 +8064,5 @@ function openCheburcheckModal() {
     openModal('cheburcheckModal');
     loadCheburcheck();
 }
-
-document.addEventListener('DOMContentLoaded', loadCheburcheck);
 </script>
 {% endblock %}
