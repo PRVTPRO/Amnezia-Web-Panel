@@ -7696,6 +7696,28 @@ function cheburAge(checkedAt) {
     return Math.floor(h / 24) + ' ' + _('cheburcheck_days_ago');
 }
 
+// Ошибка cheburcheck для интерфейса. Технические строки API («probe returned
+// no verdicts») пользователю ничего не объясняют, а признак токена — объясняет:
+// показываем блок со ссылкой на настройки и документацию.
+function cheburcheckErrorHtml(message) {
+    const text = String(message == null ? '' : message);
+    if (!text) return '';
+    if (/api-токен|api token|unauthorized|http 403|\b403\b/i.test(text)) {
+        return ' &middot; <span class="badge badge-warn">&#128274; '
+            + escapeHtml(_('cheburcheck_token_required')) + '</span>'
+            + ' <a href="/settings#settings-cheburcheck">'
+            + escapeHtml(_('cheburcheck_token_open_settings')) + '</a>'
+            + ' &middot; <a href="https://cheburcheck.ru/kb/api#authorization"'
+            + ' target="_blank" rel="noopener">'
+            + escapeHtml(_('cheburcheck_token_docs')) + '</a>';
+    }
+    if (/probe returned no verdicts|probe undecided/i.test(text)) {
+        return ' &middot; ' + _('cheburcheck_error') + ': '
+            + escapeHtml(_('cheburcheck_probe_no_data'));
+    }
+    return ' &middot; ' + _('cheburcheck_error') + ': ' + escapeHtml(text);
+}
+
 async function loadCheburcheck() {
     try {
         const r = await apiCall(`/api/servers/${SERVER_ID}/cheburcheck`, 'GET');
@@ -7720,8 +7742,7 @@ async function loadCheburcheck() {
         // Staleness is a timestamp comparison: locale text never matches.
         const stale = cheburcheckStale(r && r.checked_at);
         const staleTag = stale ? ' &#9888;&#65039; ' + _('cheburcheck_stale') : '';
-        const errTag = (r && r.error)
-            ? ' &middot; ' + _('cheburcheck_error') + ': ' + escapeHtml(String(r.error)) : '';
+        const errTag = cheburcheckErrorHtml(r && r.error);
         const restrictTag = rr > 0 ? ` &middot; ${_('cheburcheck_restrictions')}: ${rr}` : '';
         const listTag = (r && r.static_hit) ? ` &middot; ${_('cheburcheck_static_hit')}` : '';
         const remarksTag = remarks > 0 && rr === 0 ? ` &middot; ${_('cheburcheck_remarks_badge')}: ${remarks}` : '';
@@ -7782,8 +7803,7 @@ function cheburcheckTargetRow(target, rec) {
     const restrictTag = rr > 0 ? ` &middot; ${_('cheburcheck_restrictions')}: ${rr}` : '';
     const staticTag = staticBits.length
         ? ` &middot; ${_('cheburcheck_static_hit')}: ${staticBits.join(', ')}` : '';
-    const err = rec.error
-        ? ' &middot; ' + _('cheburcheck_error') + ': ' + escapeHtml(String(rec.error)) : '';
+    const err = cheburcheckErrorHtml(rec.error);
     const border = 'padding:4px 8px;border-top:1px solid var(--border,#333);';
     return `<tr><td style="${border}">${escapeHtml(String(target))}</td>`
         + `<td style="${border}">${icon} <b>${label}</b>${partialTag}${restrictTag}${staticTag}</td>`

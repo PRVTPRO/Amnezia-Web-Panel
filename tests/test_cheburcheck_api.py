@@ -100,6 +100,69 @@ class CheburcheckApiTests(unittest.TestCase):
         self.assertEqual(saved['settings']['cheburcheck']['servers'],
                          {'u1': False, 'u2': False})
 
+    # --- API-токен ----------------------------------------------------------
+    def test_settings_get_never_returns_token(self):
+        self.client.post('/api/settings/cheburcheck',
+                         json={'api_token': 'secret-token-1'})
+        body = self.client.get('/api/settings/cheburcheck').json()
+        self.assertNotIn('api_token', body)
+        self.assertTrue(body['api_token_set'])
+        self.assertEqual(body['api_token_hint'], '••••en-1')
+        self.assertNotIn('secret-token-1', json.dumps(body))
+
+    def test_settings_get_reports_missing_token(self):
+        body = self.client.get('/api/settings/cheburcheck').json()
+        self.assertFalse(body['api_token_set'])
+        self.assertEqual(body['api_token_hint'], '')
+
+    def test_post_sets_and_clears_token(self):
+        r = self.client.post('/api/settings/cheburcheck',
+                             json={'api_token': ' token-12345678 '})
+        self.assertEqual(r.status_code, 200, r.text)
+        saved = json.loads(self.df.read_text(encoding='utf-8'))
+        self.assertEqual(saved['settings']['cheburcheck']['api_token'],
+                         'token-12345678')          # strip
+        self.assertEqual(cheburcheck.get_api_token(), 'token-12345678')
+        r = self.client.post('/api/settings/cheburcheck',
+                             json={'api_token': ''})
+        self.assertEqual(r.status_code, 200, r.text)
+        saved = json.loads(self.df.read_text(encoding='utf-8'))
+        self.assertNotIn('api_token', saved['settings']['cheburcheck'])
+        self.assertIsNone(cheburcheck.get_api_token())
+
+    def test_post_without_token_field_keeps_token(self):
+        self.client.post('/api/settings/cheburcheck',
+                         json={'api_token': 'keep-me-123456'})
+        self.client.post('/api/settings/cheburcheck', json={'enabled': True})
+        saved = json.loads(self.df.read_text(encoding='utf-8'))
+        self.assertEqual(saved['settings']['cheburcheck']['api_token'],
+                         'keep-me-123456')
+
+    def test_post_null_token_keeps_token(self):
+        self.client.post('/api/settings/cheburcheck',
+                         json={'api_token': 'keep-me-123456'})
+        r = self.client.post('/api/settings/cheburcheck',
+                             json={'api_token': None})
+        self.assertEqual(r.status_code, 200, r.text)
+        saved = json.loads(self.df.read_text(encoding='utf-8'))
+        self.assertEqual(saved['settings']['cheburcheck']['api_token'],
+                         'keep-me-123456')
+
+    def test_post_rejects_bad_token_length(self):
+        before = self.df.read_text(encoding='utf-8')
+        for value in ('short', 'x' * 513):
+            r = self.client.post('/api/settings/cheburcheck',
+                                 json={'api_token': value})
+            self.assertEqual(r.status_code, 400, (len(value), r.text))
+        self.assertEqual(self.df.read_text(encoding='utf-8'), before)
+
+    def test_general_settings_api_hides_token(self):
+        self.client.post('/api/settings/cheburcheck',
+                         json={'api_token': 'secret-token-1'})
+        body = self.client.get('/api/settings').json()
+        self.assertNotIn('api_token', body.get('cheburcheck') or {})
+        self.assertNotIn('secret-token-1', json.dumps(body))
+
     def test_server_page_sees_uid_flag(self):
         r = self.client.get('/api/servers/0/cheburcheck')
         self.assertEqual(r.status_code, 200)
@@ -284,6 +347,53 @@ class RunOneTests(unittest.TestCase):
         asyncio.run(go())
         self.assertNotIn('', self.app.CHEBURCHECK_CACHE.get('u1', {}))
 
+    def test_token_error_uses_user_message_and_keeps_static(self):
+        """401/403 от API: в error — русский текст, статус unknown, статика цела."""
+        import asyncio
+
+        async def fake_probe(check_id):
+            raise cheburcheck.CheburcheckApiError(
+                code=403,
+                info='Для запуска сканеров необходим API-токен.',
+                documentation_url='https://cheburcheck.ru/kb/api#authorization',
+                user_message='API-токен cheburcheck не принят (403): нужен токен')
+
+        async def go():
+            with patch.object(cheburcheck, 'fetch_check', new=_fake_check), \
+                 patch.object(cheburcheck, 'fetch_probe', new=fake_probe):
+                srv = {'uid': 'u1', 'name': 'FINN', 'host': '95.81.126.149',
+                       'protocols': {'awg': {}}}
+                await self.app._run_cheburcheck_one(srv, '95.81.126.149')
+
+        asyncio.run(go())
+        rec = self._record('u1', '95.81.126.149')
+        self.assertEqual(rec['status'], 'unknown')
+        self.assertIn('API-токен', rec['error'])
+        self.assertNotIn('probe returned no verdicts', rec['error'])
+        self.assertEqual(rec['static']['geo']['asn'], 'AS207569')
+
+    def test_probe_receives_token_from_settings(self):
+        """Токен из settings.cheburcheck попадает в модуль перед пробой."""
+        import asyncio
+        data = json.loads(self.df.read_text(encoding='utf-8'))
+        data.setdefault('settings', {})['cheburcheck'] = {
+            'api_token': 'settings-token-1'}
+        self.df.write_text(json.dumps(data), encoding='utf-8')
+        seen = {}
+
+        async def fake_probe(check_id):
+            seen['token'] = cheburcheck.get_api_token()
+            return None
+
+        async def go():
+            with patch.object(cheburcheck, 'fetch_check', new=_fake_check), \
+                 patch.object(cheburcheck, 'fetch_probe', new=fake_probe):
+                srv = {'uid': 'u1', 'name': 'FINN', 'host': '95.81.126.149'}
+                await self.app._run_cheburcheck_one(srv, '95.81.126.149')
+
+        asyncio.run(go())
+        self.assertEqual(seen['token'], 'settings-token-1')
+
     def test_logs_started_and_finished(self):
         import asyncio
 
@@ -453,6 +563,75 @@ class SettingsTargetsTests(CheburcheckApiTests):
                          json={'targets': {'u1': ['vpn.example.com'],
                                            'ghost': ['evil.example']}})
         self.assertEqual(self._saved_targets(), {'u1': ['vpn.example.com']})
+
+
+class TokenCheckTests(CheburcheckApiTests):
+    """POST /api/settings/cheburcheck/token_check: кредиты или текст ошибки."""
+
+    URL = '/api/settings/cheburcheck/token_check'
+
+    def test_without_token_reports_it(self):
+        r = self.client.post(self.URL, json={})
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertFalse(body['ok'])
+        self.assertIn('API-токен', body['error'])
+
+    def test_success_returns_credits(self):
+        self.client.post('/api/settings/cheburcheck',
+                         json={'api_token': 'token-12345678'})
+
+        async def fake(token=None, timeout=20):
+            return 250
+
+        with patch.object(cheburcheck, 'fetch_credits', fake):
+            r = self.client.post(self.URL, json={})
+        self.assertEqual(r.json(), {'ok': True, 'credits': 250})
+        self.assertNotIn('token-12345678', r.text)
+
+    def test_body_token_is_used_but_not_echoed(self):
+        seen = {}
+
+        async def fake(token=None, timeout=20):
+            seen['token'] = token
+            return 7
+
+        with patch.object(cheburcheck, 'fetch_credits', fake):
+            r = self.client.post(self.URL, json={'api_token': 'body-token-123'})
+        self.assertEqual(seen['token'], 'body-token-123')
+        self.assertEqual(r.json(), {'ok': True, 'credits': 7})
+        self.assertNotIn('body-token-123', r.text)
+
+    def test_provider_error_is_reported(self):
+        self.client.post('/api/settings/cheburcheck',
+                         json={'api_token': 'token-12345678'})
+
+        async def fake(token=None, timeout=20):
+            raise cheburcheck.CheburcheckApiError(
+                code=401, info='Unauthorized',
+                documentation_url='https://cheburcheck.ru/kb/api#authorization',
+                user_message='API-токен cheburcheck не принят (401): Unauthorized')
+
+        with patch.object(cheburcheck, 'fetch_credits', fake):
+            r = self.client.post(self.URL, json={})
+        body = r.json()
+        self.assertFalse(body['ok'])
+        self.assertIn('401', body['error'])
+        self.assertNotIn('token-12345678', r.text)
+
+    def test_unexpected_failure_does_not_crash_panel(self):
+        self.client.post('/api/settings/cheburcheck',
+                         json={'api_token': 'token-12345678'})
+
+        async def fake(token=None, timeout=20):
+            raise RuntimeError('boom')
+
+        with patch.object(cheburcheck, 'fetch_credits', fake):
+            r = self.client.post(self.URL, json={})
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertFalse(body['ok'])
+        self.assertIn('boom', body['error'])
 
 
 class SingleRunTests(CheburcheckApiTests):

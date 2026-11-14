@@ -3774,7 +3774,14 @@ async def _run_cheburcheck_one(srv, target, targets=None):
     probe = None
     if static and static.get('id'):
         try:
+            # Сканеры cheburcheck требуют API-токен: берём его из настроек
+            # (в памяти процесса, не в логах) и передаём в модуль.
+            cfg = (load_data().get('settings') or {}).get('cheburcheck') or {}
+            cheburcheck.set_api_token(cfg.get('api_token'))
             probe = await cheburcheck.fetch_probe(static['id'])
+        except cheburcheck.CheburcheckApiError as e:
+            # Человекочитаемый текст вместо «probe failed: HTTP 403».
+            error = e.user_message
         except Exception as e:
             error = f"probe failed: {e}"
     summary = cheburcheck.build_summary(target, static, probe, error=error)
@@ -3820,6 +3827,10 @@ def _cheburcheck_startup_cache(data):
     a restart before the next check would lose the cache.
     """
     had_legacy = os.path.exists(_cheburcheck_legacy_path())
+    # API-токен для сканеров: кладём в память модуля при старте, чтобы
+    # фоновый цикл и ручной запуск работали без открытия настроек.
+    cheburcheck.set_api_token(
+        ((data.get('settings') or {}).get('cheburcheck') or {}).get('api_token'))
     loaded = _cheburcheck_load_cache()
     uids = {s.get('uid') for s in data.get('servers', []) if s.get('uid')}
     clean = {uid: records for uid, records in loaded.items()
@@ -6614,6 +6625,7 @@ async def api_cheburcheck_settings_get(request: Request):
     targets = {uid: list(values)
                for uid, values in (cfg.get('targets') or {}).items()
                if uid in known and values}
+    token = str(cfg.get('api_token') or '')
     return {
         'enabled': bool(cfg.get('enabled')),
         'interval_hours': int(cfg.get('interval_hours') or 1),
@@ -6623,6 +6635,9 @@ async def api_cheburcheck_settings_get(request: Request):
         'servers': srv_map,
         'targets': targets,
         'targets_resolved': resolved,
+        # Только признак и хвост токена: сам токен не отдаём ни в каком виде.
+        'api_token_set': bool(token),
+        'api_token_hint': ('••••' + token[-4:]) if token else '',
     }
 
 
@@ -6634,6 +6649,12 @@ class CheburcheckSettingsRequest(BaseModel):
     quiet_end: Optional[int] = None
     servers: Optional[dict] = None
     targets: Optional[object] = None
+    # None / отсутствие поля — «не менять»; "" — удалить; иначе — сохранить.
+    api_token: Optional[str] = None
+
+
+class CheburcheckTokenCheckRequest(BaseModel):
+    api_token: Optional[str] = None
 
 
 @app.post('/api/settings/cheburcheck', tags=["Settings"])
@@ -6666,6 +6687,17 @@ async def api_cheburcheck_settings_set(request: Request, req: CheburcheckSetting
         except (TypeError, ValueError) as exc:
             return JSONResponse({'error': f'invalid targets: {exc}'},
                                 status_code=400)
+    # API-токен: None/отсутствие поля — «не менять», "" — «удалить»,
+    # непустая строка — сохранить. Длина проверяется до любых изменений.
+    token_supplied = ('api_token' in getattr(req, 'model_fields_set', set())
+                      and req.api_token is not None)
+    new_token = None
+    if token_supplied:
+        candidate = str(req.api_token).strip()
+        if candidate and not (8 <= len(candidate) <= 512):
+            return JSONResponse({'error': 'api_token must be 8..512 characters'},
+                                status_code=400)
+        new_token = candidate or None
     if req.enabled is not None:
         cfg['enabled'] = bool(req.enabled)
     if req.interval_hours is not None:
@@ -6701,8 +6733,45 @@ async def api_cheburcheck_settings_set(request: Request, req: CheburcheckSetting
             if key in known and isinstance(values, list) and not values:
                 merged.pop(key, None)       # explicit [] removes the override
         cfg['targets'] = merged
+    if token_supplied:
+        if new_token:
+            cfg['api_token'] = new_token
+        else:
+            cfg.pop('api_token', None)
     save_data(data)
+    # Применяем сразу, без рестарта: следующий прогон уже видит новый токен.
+    cheburcheck.set_api_token(cfg.get('api_token'))
     return {'ok': True}
+
+
+@app.post('/api/settings/cheburcheck/token_check', tags=["Settings"])
+async def api_cheburcheck_token_check(request: Request,
+                                      req: Optional[CheburcheckTokenCheckRequest] = None):
+    """Проверить API-токен через GET /api/v1/credits (только админ).
+
+    Токен из тела запроса не сохраняется и в ответ не попадает: наружу уходит
+    только остаток кредитов либо текст ошибки сервиса.
+    """
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    cfg = (load_data().get('settings') or {}).get('cheburcheck') or {}
+    token = None
+    if req is not None and req.api_token is not None:
+        token = str(req.api_token).strip() or None
+    if not token:
+        token = str(cfg.get('api_token') or '').strip() or None
+    if not token:
+        return {'ok': False, 'error': cheburcheck.NO_TOKEN_MESSAGE}
+    try:
+        credits = await cheburcheck.fetch_credits(token)
+    except cheburcheck.CheburcheckApiError as exc:
+        return {'ok': False, 'error': exc.user_message}
+    except Exception as exc:
+        # Сетевой сбой или неожиданный ответ: панель не роняем.
+        logger.warning('cheburcheck token_check failed: %s', exc)
+        return {'ok': False,
+                'error': 'не удалось проверить токен: {}'.format(exc)[:300]}
+    return {'ok': True, 'credits': credits}
 
 
 # --- one-shot boot-restore migration ----------------------------------------
@@ -11706,7 +11775,14 @@ def api_get_settings(request: Request):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     data = load_data()
-    return data.get('settings', {})
+    settings = dict(data.get('settings', {}))
+    # API-токен cheburcheck — только на запись: из общего ответа настроек он
+    # вырезается, иначе утекает в каждый GET /api/settings.
+    cb = settings.get('cheburcheck')
+    if isinstance(cb, dict) and 'api_token' in cb:
+        settings['cheburcheck'] = {k: v for k, v in cb.items()
+                                   if k != 'api_token'}
+    return settings
 
 
 @app.get('/api/settings/tunnels/status', tags=["Settings"])

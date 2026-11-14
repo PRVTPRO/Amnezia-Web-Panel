@@ -43,6 +43,12 @@ class FakeStream:
         for line in self._text.split("\n"):
             yield line
 
+    async def aread(self):
+        return self._text.encode("utf-8")
+
+    def json(self):
+        return json.loads(self._text)
+
 
 class FakeClient:
     """AsyncClient stand-in yielding a scripted sequence of streams."""
@@ -64,6 +70,12 @@ class FakeClient:
 
 
 class TestSSEParserWithMock(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        cheburcheck.set_api_token("test-token")
+
+    def tearDown(self):
+        cheburcheck.set_api_token(None)
+
     async def test_parses_fixture_and_counts_verdicts(self):
         with patch.object(cheburcheck.httpx, "AsyncClient", lambda **kw: FakeClient([FakeStream(200, SSE_FIXTURE)])):
             probe = await cheburcheck.fetch_probe("token", timeout=5)
@@ -354,3 +366,166 @@ class TestQuietHours(unittest.TestCase):
     def test_empty_cfg_is_not_quiet(self):
         self.assertFalse(cheburcheck.in_quiet_hours({}, self._at(3)))
         self.assertFalse(cheburcheck.in_quiet_hours(None, self._at(3)))
+
+
+class TestApiToken(unittest.IsolatedAsyncioTestCase):
+    """API-токен: заголовок Bearer, отказ без токена и разбор ошибок 401/403."""
+
+    def setUp(self):
+        cheburcheck.set_api_token(None)
+
+    def tearDown(self):
+        cheburcheck.set_api_token(None)
+
+    async def test_token_is_stored_and_stripped(self):
+        cheburcheck.set_api_token("  abc12345  ")
+        self.assertEqual(cheburcheck.get_api_token(), "abc12345")
+        cheburcheck.set_api_token("")
+        self.assertIsNone(cheburcheck.get_api_token())
+
+    async def test_probe_sends_bearer_header(self):
+        seen = {}
+
+        def factory(**kwargs):
+            seen.update(kwargs)
+            return FakeClient([FakeStream(200, SSE_FIXTURE)])
+
+        cheburcheck.set_api_token("test-token")
+        with patch.object(cheburcheck.httpx, "AsyncClient", factory):
+            await cheburcheck.fetch_probe("c1", timeout=5)
+        self.assertEqual(seen.get("headers", {}).get("Authorization"),
+                         "Bearer test-token")
+
+    async def test_probe_without_token_makes_no_request(self):
+        calls = []
+
+        def factory(**kwargs):
+            calls.append(kwargs)
+            return FakeClient([FakeStream(200, SSE_FIXTURE)])
+
+        with patch.object(cheburcheck.httpx, "AsyncClient", factory):
+            with self.assertRaises(cheburcheck.CheburcheckApiError) as ctx:
+                await cheburcheck.fetch_probe("c1", timeout=5)
+        self.assertEqual(calls, [])            # лимит 5 проб/мин не тратится
+        self.assertIn("API-токен", ctx.exception.user_message)
+
+    async def test_403_raises_with_payload_and_is_not_retried(self):
+        body = json.dumps({
+            "code": 403,
+            "documentation_url": "https://cheburcheck.ru/kb/api#authorization",
+            "info": "Для запуска сканеров необходим API-токен."})
+        created = []
+
+        def factory(**kwargs):
+            created.append(kwargs)
+            return FakeClient([FakeStream(403, body)])
+
+        cheburcheck.set_api_token("test-token")
+        with patch.object(cheburcheck.httpx, "AsyncClient", factory), \
+             patch.object(cheburcheck.asyncio, "sleep", new=self._noop):
+            with self.assertRaises(cheburcheck.CheburcheckApiError) as ctx:
+                await cheburcheck.fetch_probe("c1", timeout=5)
+        err = ctx.exception
+        self.assertEqual(err.code, 403)
+        self.assertIn("API-токен", err.info)
+        self.assertIn("authorization", err.documentation_url)
+        self.assertIn("API-токен", err.user_message)
+        self.assertEqual(len(created), 1)      # 403 не ретраится
+        self.assertNotIn("test-token", err.user_message)
+
+    async def test_401_raises_api_error(self):
+        body = json.dumps({"code": 401, "info": "Unauthorized"})
+        cheburcheck.set_api_token("test-token")
+        with patch.object(cheburcheck.httpx, "AsyncClient",
+                          lambda **kw: FakeClient([FakeStream(401, body)])):
+            with self.assertRaises(cheburcheck.CheburcheckApiError) as ctx:
+                await cheburcheck.fetch_probe("c1", timeout=5)
+        self.assertEqual(ctx.exception.code, 401)
+
+    async def test_429_is_retried(self):
+        streams = [FakeStream(429, ""), FakeStream(200, SSE_FIXTURE)]
+        created = []
+
+        class SharedClient(FakeClient):
+            """Один общий поток стримов: каждый повтор берёт следующий."""
+
+            def __init__(self, **kwargs):
+                created.append(kwargs)
+                super().__init__([])
+
+            def stream(self, method, url, timeout=None):
+                self.calls += 1
+                return streams.pop(0) if streams else FakeStream(200, "")
+
+        cheburcheck.set_api_token("test-token")
+        with patch.object(cheburcheck.httpx, "AsyncClient", SharedClient), \
+             patch.object(cheburcheck.asyncio, "sleep", new=self._noop):
+            probe = await cheburcheck.fetch_probe("c1", timeout=5)
+        self.assertIsNotNone(probe)
+        self.assertEqual(len(created), 2)
+
+    async def test_credits_requires_token(self):
+        with self.assertRaises(cheburcheck.CheburcheckApiError):
+            await cheburcheck.fetch_credits()
+
+    async def test_credits_returns_number(self):
+        class Resp:
+            status_code = 200
+            request = object()
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"credits": 42}
+
+        class Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def get(self, url, timeout=None):
+                return Resp()
+
+        with patch.object(cheburcheck.httpx, "AsyncClient",
+                          lambda **kw: Client()), \
+             patch.object(cheburcheck, "_respect_spacing", new=self._noop):
+            self.assertEqual(await cheburcheck.fetch_credits("test-token"), 42)
+
+    async def test_credits_reports_401(self):
+        import httpx as httpx_module
+
+        class Resp:
+            status_code = 401
+            request = object()
+
+            def raise_for_status(self):
+                raise httpx_module.HTTPStatusError(
+                    "401", request=self.request, response=self)
+
+            def json(self):
+                return {"code": 401, "info": "Unauthorized"}
+
+        class Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def get(self, url, timeout=None):
+                return Resp()
+
+        with patch.object(cheburcheck.httpx, "AsyncClient",
+                          lambda **kw: Client()), \
+             patch.object(cheburcheck, "_respect_spacing", new=self._noop):
+            with self.assertRaises(cheburcheck.CheburcheckApiError) as ctx:
+                await cheburcheck.fetch_credits("test-token")
+        self.assertEqual(ctx.exception.code, 401)
+
+    @staticmethod
+    async def _noop(*a, **kw):
+        return None
+

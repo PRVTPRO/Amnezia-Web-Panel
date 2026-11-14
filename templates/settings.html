@@ -794,6 +794,18 @@
                 </div>
             </div>
             <div class="form-group">
+                <label class="form-label" for="cb_api_token">{{ _('cheburcheck_token_label') }}</label>
+                <input type="password" class="form-input" id="cb_api_token" autocomplete="off"
+                       spellcheck="false" placeholder="{{ _('cheburcheck_token_placeholder') }}">
+                <p class="form-hint" style="margin-top:6px;">
+                    {% set cb_token = settings.get('cheburcheck', {}).get('api_token') or '' %}
+                    <span id="cb_token_state">{% if cb_token %}{{ _('cheburcheck_token_set') }} (••••{{ cb_token[-4:] }}){% else %}{{ _('cheburcheck_token_not_set') }}{% endif %}</span>
+                    &middot; {{ _('cheburcheck_token_hint') }}
+                    <a href="https://cheburcheck.ru/kb/api#authorization" target="_blank" rel="noopener">cheburcheck.ru/kb/api</a>
+                </p>
+                <button type="button" class="btn btn-secondary btn-sm" onclick="checkCheburcheckToken()">{{ _('cheburcheck_token_check') }}</button>
+            </div>
+            <div class="form-group">
                 <label class="form-label">{{ _('cheburcheck_servers_label') }}</label>
                 <div id="cb_servers_list" style="display:flex; flex-direction:column; gap:10px; margin-top:6px;">
                     {% for server in servers %}
@@ -1866,7 +1878,7 @@ function collectCheburcheckSettings() {
             targets[uid] = [];              // override was switched off
         }
     });
-    return {
+    const payload = {
         enabled: document.getElementById('cb_enabled').checked,
         interval_hours: parseInt(document.getElementById('cb_interval').value || '1', 10),
         servers,
@@ -1875,13 +1887,52 @@ function collectCheburcheckSettings() {
         quiet_start: parseInt(document.getElementById('cb_quiet_start').value || '0', 10),
         quiet_end: parseInt(document.getElementById('cb_quiet_end').value || '0', 10),
     };
+    // Токен отправляем только когда поле заполнено: обычное «Сохранить» не
+    // должно затирать уже сохранённый токен.
+    const tokenInput = document.getElementById('cb_api_token');
+    if (tokenInput && tokenInput.value.trim()) payload.api_token = tokenInput.value.trim();
+    return payload;
+}
+
+// Проверка токена: сервер дергает /api/v1/credits с Bearer и возвращает
+// только остаток кредитов либо текст ошибки. Сам токен в ответ не попадает.
+async function checkCheburcheckToken() {
+    const st = document.getElementById('cb_status');
+    const input = document.getElementById('cb_api_token');
+    const body = {};
+    if (input && input.value.trim()) body.api_token = input.value.trim();
+    if (st) st.textContent = '…';
+    try {
+        const res = await apiCall('/api/settings/cheburcheck/token_check', 'POST', body);
+        if (!st) return;
+        if (res && res.ok) {
+            const tpl = window._('cheburcheck_token_ok') || 'token accepted, credits: {n}';
+            st.textContent = '✓ ' + tpl.replace('{n}', String(res.credits));
+        } else {
+            st.textContent = '✗ ' + ((res && res.error) || window._('cheburcheck_token_failed') || 'token rejected');
+        }
+    } catch (e) {
+        if (st) st.textContent = '✗ ' + (e.message || e);
+    }
 }
 
 async function saveCheburcheckSettings() {
     const st = document.getElementById('cb_status');
+    const payload = collectCheburcheckSettings();
     try {
-        await apiCall('/api/settings/cheburcheck', 'POST', collectCheburcheckSettings());
+        await apiCall('/api/settings/cheburcheck', 'POST', payload);
         if (st) st.textContent = '✓ ' + (window._('saved') || 'saved');
+        if (payload.api_token) {
+            // Поле очищаем и показываем только хвост: полный токен на странице
+            // не остаётся ни в value, ни в тексте.
+            const state = document.getElementById('cb_token_state');
+            if (state) {
+                state.textContent = (window._('cheburcheck_token_set') || 'token set')
+                    + ' (••••' + payload.api_token.slice(-4) + ')';
+            }
+            const input = document.getElementById('cb_api_token');
+            if (input) input.value = '';
+        }
         renderCheburcheckTargets();
     } catch (e) {
         if (st) st.textContent = '✗ ' + (e.message || e);
