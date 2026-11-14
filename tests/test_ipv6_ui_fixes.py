@@ -56,6 +56,37 @@ NEW_KEYS = {
     "cheburcheck_none_enabled",
     "cheburcheck_running_all",
     "cheburcheck_banned_count",
+    "cheburcheck_target",
+    "cheburcheck_status",
+    "cheburcheck_regions_short",
+    "cheburcheck_partial",
+    "cheburcheck_no_targets",
+    "cheburcheck_targets_intro",
+    "cheburcheck_targets_show",
+    "cheburcheck_restrictions",
+    "cheburcheck_remarks_badge",
+    "cheburcheck_remarks_only",
+    "cheburcheck_remarks_found",
+    "cheburcheck_static_hit",
+    "cheburcheck_static_rkn",
+    "cheburcheck_override_toggle",
+    "cheburcheck_override_placeholder",
+    "cheburcheck_probe_no_data",
+    "cheburcheck_token_label",
+    "cheburcheck_token_placeholder",
+    "cheburcheck_token_set",
+    "cheburcheck_token_not_set",
+    "cheburcheck_token_hint",
+    "cheburcheck_token_check",
+    "cheburcheck_token_ok",
+    "cheburcheck_token_failed",
+    "cheburcheck_token_required",
+    "cheburcheck_token_open_settings",
+    "cheburcheck_token_docs",
+    "cheburcheck_token_basic_only",
+    "cheburcheck_token_docs_link",
+    "cheburcheck_static_only",
+    "cheburcheck_static_only_note",
 }
 
 # The catalogue had 1218 key names right before panel access (#305). Freeze
@@ -75,6 +106,17 @@ PANEL_ACCESS_KEYS = {
 
 PROTOCOL_UNINSTALL_KEYS = {
     'uninstall_archive_confirm', 'uninstall_archived',
+}
+
+# Added by the v1.8.11 release (max connections per user + Telegram WebApp auth).
+# Registered here so the frozen catalogue hash keeps checking the older keys.
+RELEASE_1811_KEYS = {
+    'max_connections_per_user_label', 'max_connections_per_user_hint',
+    'telegram_auto_create_users', 'telegram_auto_create_users_desc',
+    'telegram_create_users_disabled', 'telegram_create_users_disabled_desc',
+    'telegram_webapp_account_not_found', 'telegram_webapp_auth',
+    'telegram_webapp_auth_desc', 'telegram_webapp_auth_invalid',
+    'telegram_webapp_auth_unavailable',
 }
 
 
@@ -102,6 +144,26 @@ CHEBURCHECK_KEYS = {
     'cheburcheck_still_running',
     'cheburcheck_button', 'cheburcheck_quiet_enable', 'cheburcheck_quiet_hint',
     'cheburcheck_quiet_from', 'cheburcheck_quiet_to',
+    'cheburcheck_target', 'cheburcheck_status', 'cheburcheck_regions_short',
+    'cheburcheck_partial', 'cheburcheck_no_targets', 'cheburcheck_targets_intro',
+    'cheburcheck_targets_show',
+    'cheburcheck_restrictions',
+    'cheburcheck_remarks_badge',
+    'cheburcheck_remarks_only',
+    'cheburcheck_remarks_found',
+    'cheburcheck_static_hit',
+    'cheburcheck_static_rkn',
+    'cheburcheck_override_toggle',
+    'cheburcheck_override_placeholder',
+    'cheburcheck_probe_no_data',
+    'cheburcheck_token_label', 'cheburcheck_token_placeholder',
+    'cheburcheck_token_set', 'cheburcheck_token_not_set',
+    'cheburcheck_token_hint', 'cheburcheck_token_check',
+    'cheburcheck_token_ok', 'cheburcheck_token_failed',
+    'cheburcheck_token_required', 'cheburcheck_token_open_settings',
+    'cheburcheck_token_docs',
+    'cheburcheck_token_basic_only', 'cheburcheck_token_docs_link',
+    'cheburcheck_static_only', 'cheburcheck_static_only_note',
 }
 
 
@@ -261,7 +323,8 @@ class TestC6Translations(unittest.TestCase):
         # PANEL_ACCESS_KEYS does. The keys already inside the frozen hash (e.g.
         # the ipv6 set) must NOT be subtracted again.
         previous = '\n'.join(sorted(base - PANEL_ACCESS_KEYS - SECURITY_SETUP_KEYS
-                                    - CHEBURCHECK_KEYS - PROTOCOL_UNINSTALL_KEYS))
+                                    - CHEBURCHECK_KEYS - PROTOCOL_UNINSTALL_KEYS
+                                    - RELEASE_1811_KEYS))
         self.assertEqual(hashlib.sha256(previous.encode('utf-8')).hexdigest(),
                          PRE_PANEL_ACCESS_KEYS_SHA256,
                          'Existing catalogue changed outside the declared additions')

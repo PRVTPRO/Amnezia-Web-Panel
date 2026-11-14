@@ -43,6 +43,12 @@ class FakeStream:
         for line in self._text.split("\n"):
             yield line
 
+    async def aread(self):
+        return self._text.encode("utf-8")
+
+    def json(self):
+        return json.loads(self._text)
+
 
 class FakeClient:
     """AsyncClient stand-in yielding a scripted sequence of streams."""
@@ -64,6 +70,12 @@ class FakeClient:
 
 
 class TestSSEParserWithMock(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        cheburcheck.set_api_token("test-token")
+
+    def tearDown(self):
+        cheburcheck.set_api_token(None)
+
     async def test_parses_fixture_and_counts_verdicts(self):
         with patch.object(cheburcheck.httpx, "AsyncClient", lambda **kw: FakeClient([FakeStream(200, SSE_FIXTURE)])):
             probe = await cheburcheck.fetch_probe("token", timeout=5)
@@ -185,12 +197,28 @@ class TestBuildSummaryFailurePaths(unittest.TestCase):
         self.assertEqual(s["status"], "unknown")
         self.assertIn("no verdicts", s["error"])
 
-    def test_banned_wins_over_error(self):
+    def test_static_hit_without_tspu_is_not_a_ban(self):
+        """A CDN/RKN list hit alone must not flip the status to banned."""
         s = cheburcheck.build_summary("1.2.3.4",
                                       {"blocked": True, "blocked_subnets": ["1.2.3.0/24"]},
                                       None, error="probe failed")
-        self.assertEqual(s["status"], "banned")
+        self.assertEqual(s["status"], "unknown")
+        self.assertTrue(s["static"]["blocked"])
         self.assertEqual(s["error"], "probe failed")
+
+    def test_static_hit_with_tspu_is_a_ban(self):
+        probe = {"regions": [{"region": "r", "verdicts": ["tspu_block"]}],
+                 "response_count": 1, "verdicts": ["tspu_block"],
+                 "verdict_counts": {"tspu_block": 1}}
+        s = cheburcheck.build_summary("1.2.3.4", {"blocked": True}, probe)
+        self.assertEqual(s["status"], "banned")
+
+    def test_static_hit_with_clean_probe_is_clean(self):
+        probe = {"regions": [{"region": "r", "verdicts": ["ok"]}],
+                 "response_count": 1, "verdicts": ["ok"],
+                 "verdict_counts": {"ok": 1}}
+        s = cheburcheck.build_summary("1.2.3.4", {"blocked": True}, probe)
+        self.assertEqual(s["status"], "clean")
 
     def test_record_has_no_regions_payload(self):
         static = {"blocked": False, "geo": {}}
@@ -199,6 +227,101 @@ class TestBuildSummaryFailurePaths(unittest.TestCase):
         s = cheburcheck.build_summary("1.2.3.4", static, probe)
         self.assertNotIn("regions", s["probe"])
         self.assertEqual(s["probe"]["blocking_regions"], 0)
+
+
+class TestCdnAndVerdictVoting(unittest.TestCase):
+    """Only the TSPU verdict is a ban; SNI/DNS/CDN are restrictions."""
+
+    def test_sni_and_cdn_are_not_bans(self):
+        self.assertEqual(cheburcheck.classify(False, ["sni_block"], 5), "clean")
+        self.assertEqual(cheburcheck.classify(False, ["cdn_block"], 5), "clean")
+        self.assertEqual(cheburcheck.classify(False, ["dns_spoofing"], 5), "clean")
+        self.assertEqual(cheburcheck.classify(False, ["tspu_block"], 5), "banned")
+        # A static CDN/RKN hit alone is not a ban either.
+        self.assertEqual(cheburcheck.classify(True, ["ok"], 5), "clean")
+
+    def test_ok_turns_into_cdn_block_for_static_cdn_without_unblocked_hosts(self):
+        verdicts = cheburcheck.normalize_verdicts(
+            ["ok"], True, cdn_unblocked=False, host_results=3)
+        self.assertEqual(verdicts, ["cdn_block"])
+        verdicts = cheburcheck.normalize_verdicts(
+            ["ok"], True, cdn_unblocked=True, host_results=3)
+        self.assertEqual(verdicts, ["ok"])
+
+    def test_display_counts_and_status_for_a_non_cdn_target(self):
+        # 24 raw cdn_block + 10 ok -> 34 "Доступен", one SNI block, 5 whitelist.
+        regions = ([{"region": f"r{i}", "verdicts": ["cdn_block"],
+                     "cdn_unblocked": False, "host_results": 2} for i in range(24)]
+                   + [{"region": f"o{i}", "verdicts": ["ok"],
+                       "cdn_unblocked": False, "host_results": 2} for i in range(10)]
+                   + [{"region": "s", "verdicts": ["sni_block"],
+                       "cdn_unblocked": False, "host_results": 2}]
+                   + [{"region": f"w{i}", "verdicts": ["whitelist"],
+                       "cdn_unblocked": False, "host_results": 2} for i in range(5)]
+                   + [{"region": "u", "verdicts": ["uncertain"],
+                       "cdn_unblocked": False, "host_results": 2}])
+        probe = {"regions": regions, "response_count": 41,
+                 "verdicts": ["cdn_block"] * 24 + ["ok"] * 10 + ["sni_block",
+                                                                 "uncertain"]
+                 + ["whitelist"] * 5,
+                 "verdict_counts": {"cdn_block": 24, "ok": 10, "sni_block": 1,
+                                    "whitelist": 5, "uncertain": 1}}
+        rec = cheburcheck.build_summary("lamanama.duckdns.org", {}, probe)
+        self.assertEqual(rec["status"], "clean")
+        self.assertEqual(rec["probe"]["verdict"], "ok")
+        self.assertEqual(rec["probe"]["verdict_counts"],
+                         {"ok": 34, "sni_block": 1, "whitelist": 5,
+                          "uncertain": 1})
+        # No TSPU verdict -> nothing banned, but the SNI hit is a restriction.
+        self.assertEqual(rec["probe"]["ban_regions"], 0)
+        self.assertEqual(rec["probe"]["blocking_regions"], 0)
+        self.assertEqual(rec["probe"]["restricted_regions"], 1)
+        self.assertEqual(rec["probe"]["clear_regions"], 41)
+        self.assertFalse(rec["probe"]["static_cdn"])
+
+    def test_tspu_verdict_bans(self):
+        probe = {"regions": [{"region": "r", "verdicts": ["tspu_block"],
+                              "cdn_unblocked": False, "host_results": 2}],
+                 "response_count": 1, "verdicts": ["tspu_block"],
+                 "verdict_counts": {"tspu_block": 1}}
+        rec = cheburcheck.build_summary("1.2.3.4", {}, probe)
+        self.assertEqual(rec["status"], "banned")
+        self.assertEqual(rec["probe"]["ban_regions"], 1)
+        self.assertEqual(rec["probe"]["restricted_regions"], 0)
+
+    def test_cdn_target_reports_restriction_not_ban(self):
+        probe = {"regions": [{"region": "r", "verdicts": ["cdn_block"],
+                              "cdn_unblocked": False, "host_results": 2}],
+                 "response_count": 1, "verdicts": ["cdn_block"],
+                 "verdict_counts": {"cdn_block": 1}}
+        static = {"cdn_providers": {"Cloudflare": [{"subnet": "1.2.3.0/24"}]}}
+        rec = cheburcheck.build_summary("cdn.example", static, probe)
+        self.assertEqual(rec["status"], "clean")
+        self.assertEqual(rec["probe"]["restricted_regions"], 1)
+        self.assertTrue(rec["probe"]["static_cdn"])
+
+    def test_raw_soft_verdicts_remain_visible_as_remarks(self):
+        """cdn_block for a non-CDN target becomes ok on the site, but the panel
+        still reports it as a remark instead of hiding it."""
+        probe = {"regions": [{"region": f"r{i}", "verdicts": ["cdn_block"],
+                              "host_results": 2} for i in range(4)],
+                 "response_count": 10, "verdicts": ["cdn_block"] * 4,
+                 "verdict_counts": {"cdn_block": 4, "ok": 6}}
+        rec = cheburcheck.build_summary("wokoko.duckdns.org", {}, probe)
+        self.assertEqual(rec["status"], "clean")
+        self.assertEqual(rec["probe"]["verdict"], "ok")
+        self.assertEqual(rec["probe"]["ban_regions"], 0)
+        self.assertEqual(rec["probe"]["restricted_regions"], 4)
+
+    def test_majority_vote_and_restriction_counters(self):
+        regions = [{"region": "s", "verdicts": ["sni_block"],
+                    "cdn_unblocked": False, "host_results": 2}]
+        regions += [{"region": f"o{i}", "verdicts": ["ok"],
+                     "cdn_unblocked": False, "host_results": 2}
+                    for i in range(34)]
+        self.assertEqual(cheburcheck.select_verdict(regions, False), "ok")
+        self.assertEqual(len(cheburcheck.ban_regions(regions, False)), 0)
+        self.assertEqual(len(cheburcheck.restricted_regions(regions, False)), 1)
 
 
 class TestQuietHours(unittest.TestCase):
@@ -243,3 +366,166 @@ class TestQuietHours(unittest.TestCase):
     def test_empty_cfg_is_not_quiet(self):
         self.assertFalse(cheburcheck.in_quiet_hours({}, self._at(3)))
         self.assertFalse(cheburcheck.in_quiet_hours(None, self._at(3)))
+
+
+class TestApiToken(unittest.IsolatedAsyncioTestCase):
+    """API-токен: заголовок Bearer, отказ без токена и разбор ошибок 401/403."""
+
+    def setUp(self):
+        cheburcheck.set_api_token(None)
+
+    def tearDown(self):
+        cheburcheck.set_api_token(None)
+
+    async def test_token_is_stored_and_stripped(self):
+        cheburcheck.set_api_token("  abc12345  ")
+        self.assertEqual(cheburcheck.get_api_token(), "abc12345")
+        cheburcheck.set_api_token("")
+        self.assertIsNone(cheburcheck.get_api_token())
+
+    async def test_probe_sends_bearer_header(self):
+        seen = {}
+
+        def factory(**kwargs):
+            seen.update(kwargs)
+            return FakeClient([FakeStream(200, SSE_FIXTURE)])
+
+        cheburcheck.set_api_token("test-token")
+        with patch.object(cheburcheck.httpx, "AsyncClient", factory):
+            await cheburcheck.fetch_probe("c1", timeout=5)
+        self.assertEqual(seen.get("headers", {}).get("Authorization"),
+                         "Bearer test-token")
+
+    async def test_probe_without_token_makes_no_request(self):
+        calls = []
+
+        def factory(**kwargs):
+            calls.append(kwargs)
+            return FakeClient([FakeStream(200, SSE_FIXTURE)])
+
+        with patch.object(cheburcheck.httpx, "AsyncClient", factory):
+            with self.assertRaises(cheburcheck.CheburcheckApiError) as ctx:
+                await cheburcheck.fetch_probe("c1", timeout=5)
+        self.assertEqual(calls, [])            # лимит 5 проб/мин не тратится
+        self.assertIn("API-токен", ctx.exception.user_message)
+
+    async def test_403_raises_with_payload_and_is_not_retried(self):
+        body = json.dumps({
+            "code": 403,
+            "documentation_url": "https://cheburcheck.ru/kb/api#authorization",
+            "info": "Для запуска сканеров необходим API-токен."})
+        created = []
+
+        def factory(**kwargs):
+            created.append(kwargs)
+            return FakeClient([FakeStream(403, body)])
+
+        cheburcheck.set_api_token("test-token")
+        with patch.object(cheburcheck.httpx, "AsyncClient", factory), \
+             patch.object(cheburcheck.asyncio, "sleep", new=self._noop):
+            with self.assertRaises(cheburcheck.CheburcheckApiError) as ctx:
+                await cheburcheck.fetch_probe("c1", timeout=5)
+        err = ctx.exception
+        self.assertEqual(err.code, 403)
+        self.assertIn("API-токен", err.info)
+        self.assertIn("authorization", err.documentation_url)
+        self.assertIn("API-токен", err.user_message)
+        self.assertEqual(len(created), 1)      # 403 не ретраится
+        self.assertNotIn("test-token", err.user_message)
+
+    async def test_401_raises_api_error(self):
+        body = json.dumps({"code": 401, "info": "Unauthorized"})
+        cheburcheck.set_api_token("test-token")
+        with patch.object(cheburcheck.httpx, "AsyncClient",
+                          lambda **kw: FakeClient([FakeStream(401, body)])):
+            with self.assertRaises(cheburcheck.CheburcheckApiError) as ctx:
+                await cheburcheck.fetch_probe("c1", timeout=5)
+        self.assertEqual(ctx.exception.code, 401)
+
+    async def test_429_is_retried(self):
+        streams = [FakeStream(429, ""), FakeStream(200, SSE_FIXTURE)]
+        created = []
+
+        class SharedClient(FakeClient):
+            """Один общий поток стримов: каждый повтор берёт следующий."""
+
+            def __init__(self, **kwargs):
+                created.append(kwargs)
+                super().__init__([])
+
+            def stream(self, method, url, timeout=None):
+                self.calls += 1
+                return streams.pop(0) if streams else FakeStream(200, "")
+
+        cheburcheck.set_api_token("test-token")
+        with patch.object(cheburcheck.httpx, "AsyncClient", SharedClient), \
+             patch.object(cheburcheck.asyncio, "sleep", new=self._noop):
+            probe = await cheburcheck.fetch_probe("c1", timeout=5)
+        self.assertIsNotNone(probe)
+        self.assertEqual(len(created), 2)
+
+    async def test_credits_requires_token(self):
+        with self.assertRaises(cheburcheck.CheburcheckApiError):
+            await cheburcheck.fetch_credits()
+
+    async def test_credits_returns_number(self):
+        class Resp:
+            status_code = 200
+            request = object()
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"credits": 42}
+
+        class Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def get(self, url, timeout=None):
+                return Resp()
+
+        with patch.object(cheburcheck.httpx, "AsyncClient",
+                          lambda **kw: Client()), \
+             patch.object(cheburcheck, "_respect_spacing", new=self._noop):
+            self.assertEqual(await cheburcheck.fetch_credits("test-token"), 42)
+
+    async def test_credits_reports_401(self):
+        import httpx as httpx_module
+
+        class Resp:
+            status_code = 401
+            request = object()
+
+            def raise_for_status(self):
+                raise httpx_module.HTTPStatusError(
+                    "401", request=self.request, response=self)
+
+            def json(self):
+                return {"code": 401, "info": "Unauthorized"}
+
+        class Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def get(self, url, timeout=None):
+                return Resp()
+
+        with patch.object(cheburcheck.httpx, "AsyncClient",
+                          lambda **kw: Client()), \
+             patch.object(cheburcheck, "_respect_spacing", new=self._noop):
+            with self.assertRaises(cheburcheck.CheburcheckApiError) as ctx:
+                await cheburcheck.fetch_credits("test-token")
+        self.assertEqual(ctx.exception.code, 401)
+
+    @staticmethod
+    async def _noop(*a, **kw):
+        return None
+

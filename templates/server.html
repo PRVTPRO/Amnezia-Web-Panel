@@ -588,7 +588,7 @@
 {% endif %}
 
 <div class="modal-backdrop" id="sshTrustModal">
-    <div class="modal" style="max-width: 560px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title">{{ _('ssh_trust_title') }}</h2>
             <button class="modal-close" type="button" onclick="closeModal('sshTrustModal')">×</button>
@@ -676,7 +676,7 @@
 
 <!-- ===== AmneziaWG plugin updates ===== -->
 <div class="modal-backdrop" id="awgPluginModal">
-    <div class="modal" style="max-width: 640px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title">{{ _('awg_plugin_title') }}</h2>
             <button class="modal-close" type="button" onclick="closeAwgPluginModal()">×</button>
@@ -1846,7 +1846,7 @@
 
     <!-- ===== Cloudflare WARP terms modal (srv-warp, not panel-warp) ===== -->
     <div class="modal-backdrop" id="warpTosModal">
-        <div class="modal" style="max-width:560px;">
+        <div class="modal">
             <div class="modal-header">
                 <h2 class="modal-title">{{ _('srv_warp_tos_title') }}</h2>
                 <button class="modal-close" onclick="resolveWarpTos(false)">×</button>
@@ -1863,7 +1863,7 @@
 
     <!-- ===== RKN Block scans modal ===== -->
     <div class="modal-backdrop" id="rknScansModal">
-        <div class="modal" style="max-width:720px;">
+        <div class="modal">
             <div class="modal-header">
                 <h2 class="modal-title">{{ _('rkn_scans_title') }}</h2>
                 <button class="modal-close" onclick="closeModal('rknScansModal')">×</button>
@@ -1879,7 +1879,7 @@
 
     <!-- ===== RKN Block options modal (per-direction flags) ===== -->
     <div class="modal-backdrop" id="rknOptionsModal">
-        <div class="modal" style="max-width:520px;">
+        <div class="modal">
             <div class="modal-header">
                 <h2 class="modal-title">{{ _('rknblock_options_title') }}</h2>
                 <button class="modal-close" onclick="closeModal('rknOptionsModal')">×</button>
@@ -2017,7 +2017,7 @@
 <!-- ===== Marketplace Modal ===== -->
 <!-- wg-easy Import Modal -->
 <div class="modal-backdrop" id="wgeasyImportModal">
-    <div class="modal" style="max-width: 640px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title">📥 {{ _('wgeasy_import_title') }}</h2>
             <button class="modal-close" onclick="closeModal('wgeasyImportModal')">×</button>
@@ -2064,7 +2064,7 @@
 
 <!-- Public Endpoint Modal -->
 <div class="modal-backdrop" id="publicEndpointModal">
-    <div class="modal" style="max-width: 460px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title">🌐 {{ _('public_endpoint_title') }}</h2>
             <button class="modal-close" onclick="closeModal('publicEndpointModal')">&times;</button>
@@ -2094,7 +2094,7 @@
 
 <!-- Rename Instance Modal -->
 <div class="modal-backdrop" id="renameProtoModal">
-    <div class="modal" style="max-width: 420px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title">✏️ {{ _('rename_instance') }}</h2>
             <button class="modal-close" onclick="closeModal('renameProtoModal')">×</button>
@@ -2114,7 +2114,7 @@
 </div>
 
 <div class="modal-backdrop" id="marketplaceModal">
-    <div class="modal" style="max-width: 980px;">
+    <div class="modal">
         <div class="modal-header">
             <div>
                 <h2 class="modal-title">🛒 {{ _('marketplace') }}</h2>
@@ -2332,7 +2332,7 @@
 
 <!-- ===== AmneziaWG Settings Modal ===== -->
 <div class="modal-backdrop" id="ipSettingsModal">
-    <div class="modal" style="max-width:720px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title">{{ _('server_ipv6_modal_title') }}</h2>
             <button class="modal-close" onclick="closeIpSettings()">×</button>
@@ -2396,7 +2396,7 @@
 </div>
 
 <div class="modal-backdrop" id="awgSettingsModal">
-    <div class="modal" style="max-width:640px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title" id="awgSettingsTitle">{{ _('awg_settings_title') }}</h2>
             <button class="modal-close" onclick="closeModal('awgSettingsModal')">×</button>
@@ -2469,7 +2469,7 @@
 
 <!-- ===== Exit Node: peers ===== -->
 <div class="modal-backdrop" id="exitPeersModal">
-    <div class="modal" style="max-width:760px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title">{{ _('exit_peers_title') }}</h2>
             <button class="modal-close" onclick="closeModal('exitPeersModal')">×</button>
@@ -2485,7 +2485,7 @@
 
 <!-- ===== Exit Node: link an AWG instance ===== -->
 <div class="modal-backdrop" id="exitLinkModal">
-    <div class="modal" style="max-width:640px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title" id="exitLinkTitle">{{ _('exit_link_title') }}</h2>
             <button class="modal-close" onclick="closeModal('exitLinkModal')">×</button>
@@ -2572,7 +2572,7 @@
 
 <!-- ===== Smart Route Modal ===== -->
 <div class="modal-backdrop" id="smartRouteAckModal">
-    <div class="modal" style="max-width:640px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title">{{ _('smartroute_ack_title') }}</h2>
             <button class="modal-close" onclick="closeSmartRouteAck()">×</button>
@@ -2609,7 +2609,7 @@
 
 
 <div class="modal-backdrop" id="smartRouteModal">
-    <div class="modal" style="max-width:560px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title">{{ _('smartroute_title') }}</h2>
             <button class="modal-close" onclick="closeModal('smartRouteModal')">×</button>
@@ -2687,7 +2687,7 @@
 
 <!-- ===== NGINX Site Modal ===== -->
 <div class="modal-backdrop" id="siteConfigModal">
-    <div class="modal" style="max-width:680px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title" id="siteConfigModalTitle">{{ _('site_editor') }}</h2>
             <button class="modal-close" onclick="closeModal('siteConfigModal')">×</button>
@@ -2719,7 +2719,7 @@
 
 <!-- ===== Protocol Backup Modal ===== -->
 <div class="modal-backdrop" id="backupModal">
-    <div class="modal" style="max-width:720px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title" id="backupModalTitle">{{ _('backups') }}</h2>
             <button class="modal-close" onclick="closeModal('backupModal')">×</button>
@@ -2814,7 +2814,7 @@
 
 <!-- ===== Connection Config Modal (with Tabs) ===== -->
 <div class="modal-backdrop" id="configModal">
-    <div class="modal" style="max-width: 600px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title" id="configModalTitle">{{ _('config') }}</h2>
             <button class="modal-close" onclick="closeModal('configModal')">×</button>
@@ -2877,7 +2877,7 @@
 </div>
 <!-- ===== Server Config Modal ===== -->
 <div class="modal-backdrop" id="serverConfigModal">
-    <div class="modal" style="max-width:680px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title" id="serverConfigModalTitle">{{ _('server_config') }}</h2>
             <button class="modal-close" onclick="closeModal('serverConfigModal')">×</button>
@@ -2909,7 +2909,7 @@
 </div>
 <!-- ===== Host Tuning Modal ===== -->
 <div class="modal-backdrop" id="hostTuningModal">
-    <div class="modal" style="max-width:520px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title">📊 {{ _('host_tuning') }}</h2>
             <button class="modal-close" onclick="closeModal('hostTuningModal')">×</button>
@@ -7696,33 +7696,132 @@ function cheburAge(checkedAt) {
     return Math.floor(h / 24) + ' ' + _('cheburcheck_days_ago');
 }
 
+// Ошибка cheburcheck для интерфейса. Технические строки API («probe returned
+// no verdicts») пользователю ничего не объясняют, а признак токена — объясняет:
+// показываем блок со ссылкой на настройки и документацию.
+function cheburcheckErrorHtml(message) {
+    const text = String(message == null ? '' : message);
+    if (!text) return '';
+    if (/api-токен|api token|unauthorized|http 403|\b403\b/i.test(text)) {
+        return ' &middot; <span class="badge badge-warn">&#128274; '
+            + escapeHtml(_('cheburcheck_token_required')) + '</span>'
+            + ' <a href="/settings#settings-cheburcheck">'
+            + escapeHtml(_('cheburcheck_token_open_settings')) + '</a>'
+            + ' &middot; <a href="https://cheburcheck.ru/kb/api#authorization"'
+            + ' target="_blank" rel="noopener">'
+            + escapeHtml(_('cheburcheck_token_docs')) + '</a>';
+    }
+    if (/probe returned no verdicts|probe undecided/i.test(text)) {
+        return ' &middot; ' + _('cheburcheck_error') + ': '
+            + escapeHtml(_('cheburcheck_probe_no_data'));
+    }
+    return ' &middot; ' + _('cheburcheck_error') + ': ' + escapeHtml(text);
+}
+
 async function loadCheburcheck() {
     try {
         const r = await apiCall(`/api/servers/${SERVER_ID}/cheburcheck`, 'GET');
-        const d = r && r.data;
         const el = document.getElementById('cheburcheck-summary');
+        const details = document.getElementById('cheburcheck-details');
         if (!el) return;
-        if (!d) { el.textContent = _('cheburcheck_no_data'); return; }
-        const status = d.status || 'unknown';
-        const icon = status === 'banned' ? '&#128683;' : (status === 'clean' ? '&#9989;' : '&#128993;');
-        const label = status === 'banned' ? _('cheburcheck_banned')
-            : (status === 'clean' ? _('cheburcheck_clean') : _('cheburcheck_unknown'));
-        const br = (d.probe || {}).blocking_regions || 0;
-        const rc = (d.probe || {}).response_count || 0;
-        const age = cheburAge(d.checked_at);
-        // A stale verdict is not a current one: mark it instead of letting an
-        // old "clean" read as today's answer.
-        const stale = age && age.indexOf(_('cheburcheck_days_ago')) === 0;
+        const status = (r && r.status) || 'unknown';
+        const br = ((r && r.probe) || {}).blocking_regions || 0;
+        const rc = br + (((r && r.probe) || {}).clear_regions || 0);
+        const rr = ((r && r.probe) || {}).restricted_regions || 0;
+        const remarks = (r && r.remarks) || 0;
+        // "No restrictions detected" must not appear next to "restrictions: 24":
+        // a clean probe with SNI/DNS/CDN hits or list hits is a separate state.
+        const hasRemarks = rr > 0 || remarks > 0 || !!(r && r.static_hit);
+        // scan_mode = static_only: пробы не запускались (нет API-токена или
+        // сервис их не дал). Это не «сломалось» и не «чисто» — только списки.
+        const scanMode = (r && r.scan_mode) || 'full';
+        const staticOnly = scanMode === 'static_only';
+        const icon = staticOnly ? '&#8505;&#65039;'
+            : (status === 'banned' ? '&#128683;'
+            : (status === 'clean' ? (hasRemarks ? '&#9888;&#65039;' : '&#9989;') : '&#128993;'));
+        const label = staticOnly ? _('cheburcheck_static_only')
+            : (status === 'banned' ? _('cheburcheck_banned')
+            : (status === 'clean'
+                ? (hasRemarks ? _('cheburcheck_remarks_only') : _('cheburcheck_clean'))
+                : _('cheburcheck_unknown')));
+        const age = cheburAge(r && r.checked_at);
+        // Staleness is a timestamp comparison: locale text never matches.
+        const stale = cheburcheckStale(r && r.checked_at);
         const staleTag = stale ? ' &#9888;&#65039; ' + _('cheburcheck_stale') : '';
-        const errTag = d.error ? ' &middot; ' + _('cheburcheck_error') + ': ' + escapeHtml(String(d.error)) : '';
-        el.innerHTML = `${icon} <b>${label}</b> &middot; ${_('cheburcheck_regions_blocked')}: ${br}/${rc}`
+        const errTag = cheburcheckErrorHtml(r && r.error);
+        const restrictTag = rr > 0 ? ` &middot; ${_('cheburcheck_restrictions')}: ${rr}` : '';
+        const listTag = (r && r.static_hit) ? ` &middot; ${_('cheburcheck_static_hit')}` : '';
+        const remarksTag = remarks > 0 && rr === 0 ? ` &middot; ${_('cheburcheck_remarks_badge')}: ${remarks}` : '';
+        // В режиме «только списки» счётчик регионов бессмысленен: проб не было.
+        const regionsTag = staticOnly ? ''
+            : ` &middot; ${_('cheburcheck_regions_blocked')}: ${br}/${rc}`;
+        const basicTag = staticOnly
+            ? ` &middot; <span class="text-muted">${escapeHtml(_('cheburcheck_static_only_note'))}</span>`
+            : '';
+        el.innerHTML = `${icon} <b>${label}</b>${regionsTag}`
+            + restrictTag + listTag + remarksTag + basicTag
             + (age ? ` &middot; ${_('cheburcheck_checked_at')}: ${age}${staleTag}` : '')
             + errTag;
-        cheburcheckButtonState(status);
+        const targets = (r && r.targets) || {};
+        if (details) {
+            const keys = Object.keys(targets).sort();
+            if (keys.length) {
+                const head = `<tr><th style="text-align:left;padding:4px 8px;">${_('cheburcheck_target')}</th>`
+                    + `<th style="text-align:left;padding:4px 8px;">${_('cheburcheck_status')}</th>`
+                    + `<th style="text-align:left;padding:4px 8px;">${_('cheburcheck_regions_short')}</th>`
+                    + `<th style="text-align:left;padding:4px 8px;">${_('cheburcheck_checked_at')}</th>`
+                    + `<th style="text-align:left;padding:4px 8px;">${_('cheburcheck_error')}</th></tr>`;
+                const rows = keys.map(target => cheburcheckTargetRow(target, targets[target] || {})).join('');
+                details.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:0.9em;">`
+                    + `<thead>${head}</thead><tbody>${rows}</tbody></table>`;
+                details.classList.remove('hidden');
+            } else {
+                details.innerHTML = '';
+                details.classList.add('hidden');
+            }
+        }
+        cheburcheckButtonState(staticOnly ? 'static_only' : status);
     } catch (e) {
         const el = document.getElementById('cheburcheck-summary');
         if (el) el.textContent = _('cheburcheck_error') + ': ' + (e.message || e);
     }
+}
+
+function cheburcheckStale(checkedAt) {
+    if (!checkedAt) return false;                 // new Date(null) is 0, not NaN
+    const ts = new Date(checkedAt).getTime();
+    if (isNaN(ts)) return false;
+    return Date.now() - ts >= 24 * 3600 * 1000;
+}
+
+function cheburcheckTargetRow(target, rec) {
+    const status = rec.status || 'unknown';
+    const br = (rec.probe || {}).blocking_regions || 0;
+    const rc = br + ((rec.probe || {}).clear_regions || 0);
+    const rr = (rec.probe || {}).restricted_regions || 0;
+    const staticBits = [];
+    if ((rec.static || {}).blocked) staticBits.push(_('cheburcheck_static_rkn'));
+    if (((rec.static || {}).cdn_providers || []).length) staticBits.push('CDN');
+    const hasRemarks = rr > 0 || staticBits.length > 0;
+    const icon = status === 'banned' ? '&#128683;'
+        : (status === 'clean' ? (hasRemarks ? '&#9888;&#65039;' : '&#9989;') : '&#128993;');
+    const label = status === 'banned' ? _('cheburcheck_banned')
+        : (status === 'clean'
+            ? (hasRemarks ? _('cheburcheck_remarks_found') : _('cheburcheck_clean'))
+            : _('cheburcheck_unknown'));
+    const age = cheburAge(rec.checked_at);
+    const staleTag = cheburcheckStale(rec.checked_at) ? ' &#9888;&#65039;' : '';
+    const partialTag = rec.partial ? ' &middot; ' + _('cheburcheck_partial') : '';
+    const restrictTag = rr > 0 ? ` &middot; ${_('cheburcheck_restrictions')}: ${rr}` : '';
+    const staticTag = staticBits.length
+        ? ` &middot; ${_('cheburcheck_static_hit')}: ${staticBits.join(', ')}` : '';
+    const err = cheburcheckErrorHtml(rec.error);
+    const border = 'padding:4px 8px;border-top:1px solid var(--border,#333);';
+    return `<tr><td style="${border}">${escapeHtml(String(target))}</td>`
+        + `<td style="${border}">${icon} <b>${label}</b>${partialTag}${restrictTag}${staticTag}</td>`
+        + `<td style="${border}">${br}/${rc}</td>`
+        + `<td style="${border}">${age ? escapeHtml(age) + staleTag : '&mdash;'}</td>`
+        + `<td style="${border}">${err}</td></tr>`;
 }
 
 // The check takes 15-60s, so it runs in the background and this polls instead
@@ -7734,7 +7833,10 @@ async function runCheburcheckNow() {
     if (sp) sp.style.display = '';
     try {
         const r = await apiCall(`/api/servers/${SERVER_ID}/cheburcheck/run`, 'POST', {});
-        if (r && r.started === 0) { showToast(_('cheburcheck_master_off'), 'error'); return; }
+        if (r && r.reason === 'disabled') { showToast(_('cheburcheck_master_off'), 'error'); return; }
+        if (r && r.reason === 'no_targets') { showToast(_('cheburcheck_no_targets'), 'error'); return; }
+        if (r && r.already_running) { showToast(_('cheburcheck_still_running'), 'info'); return; }
+        if (!r || r.started === 0) return;
         const startedAt = Date.now();
         for (let i = 0; i < 40; i++) {
             await new Promise(res => setTimeout(res, 2000));
@@ -7757,7 +7859,9 @@ function cheburcheckButtonState(status) {
     btn.classList.remove('is-danger', 'is-warn', 'is-ok');
     btn.removeAttribute('data-state');
     if (status === 'banned') { btn.classList.add('is-danger'); btn.dataset.state = 'banned'; }
-    else if (status === 'unknown') { btn.classList.add('is-warn'); btn.dataset.state = 'unknown'; }
+    else if (status === 'unknown' || status === 'static_only') {
+        btn.classList.add('is-warn'); btn.dataset.state = status === 'static_only' ? 'static_only' : 'unknown';
+    }
     else { btn.classList.add('is-ok'); btn.dataset.state = 'clean'; }
 }
 

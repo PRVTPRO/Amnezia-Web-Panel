@@ -3353,19 +3353,9 @@ async def startup():
 
     # Start periodic background tasks
     try:
-        _loaded = _cheburcheck_load_cache()
-        # Drop keys that no longer match a server uid: records used to be keyed
-        # by name, and orphans would otherwise accumulate forever.
-        _uids = {s.get('uid') for s in data.get('servers', []) if s.get('uid')}
-        _clean = {k: v for k, v in _loaded.items() if k in _uids}
-        if len(_clean) != len(_loaded):
-            logger.info('Cheburcheck: dropped %d orphaned cache records' %
-                        (len(_loaded) - len(_clean)))
-        CHEBURCHECK_CACHE.update(_clean)
-        if len(_clean) != len(_loaded):
-            _cheburcheck_persist()
+        _cheburcheck_startup_cache(data)
     except Exception:
-        pass
+        logger.warning('Cheburcheck: cache load/migration failed', exc_info=True)
     asyncio.create_task(periodic_background_tasks())
     asyncio.create_task(exit_failover_background_loop())
     asyncio.create_task(cheburcheck_background_loop())
@@ -3585,18 +3575,87 @@ async def sync_user_traffic_and_state():
             await asyncio.gather(*(perform_toggle_user({}, uid, False) for uid in pending))
 
 
-CHEBURCHECK_CACHE = {}
+CHEBURCHECK_CACHE = {}                  # uid -> {target: record}
 CHEBURCHECK_CACHE_LOCK = asyncio.Lock()
 _CHEBURCHECK_TASK = None
 # server uid -> asyncio.Task for one-shot runs started from the UI
 _CHEBURCHECK_RUNNING = {}
+_CHEBURCHECK_SPACING = 13               # seconds between any two checks
+
+# Client-facing protocols whose public endpoints are worth checking. Infrastructure
+# protocols (nginx/adguard/dns/exit, ...) never enter the automatic resolution.
+CHEBURCHECK_CLIENT_PROTOCOLS = ('awg', 'awg2', 'awg3', 'awg_legacy', 'xray',
+                                'wireguard', 'telemt', 'socks5')
+
+
+def _cheburcheck_cache_path():
+    # Resolved at call time: tests and operators repoint DATA_FILE.
+    return DATA_FILE + '.cheburcheck_cache.json'
+
+
+def _cheburcheck_legacy_path():
+    return os.path.join(os.path.dirname(DATA_FILE), 'state', 'cheburcheck.json')
+
+
+def _cheburcheck_normalize_targets(values):
+    """Validated, deduplicated, sorted target list. Raises ValueError."""
+    out = set()
+    for value in values:
+        host = normalize_public_host(value)
+        if not host:
+            raise ValueError('empty target')
+        out.add(host)
+    return sorted(out)
+
+
+def _cheburcheck_override(cfg, uid):
+    if uid is None:
+        return None
+    override = (cfg.get('targets') or {}).get(uid)
+    return list(override) if override else None
+
+
+def cheburcheck_targets(server, cfg=None):
+    """Addresses to check for one server.
+
+    Always includes the server's own (SSH) address and the public endpoint of
+    every installed client protocol instance. A per-server extra list adds
+    domains on top of that set; it does not replace it.
+    """
+    if cfg is None:
+        cfg = (load_data().get('settings') or {}).get('cheburcheck') or {}
+    out = set()
+    host = str(server.get('host') or '').strip()
+    if host:
+        out.add(host)
+    protocols = server.get('protocols')
+    if isinstance(protocols, dict):
+        for proto, record in protocols.items():
+            if not isinstance(record, dict):
+                continue
+            if not record.get('installed', True):
+                continue
+            if protocol_base(str(proto)) not in CHEBURCHECK_CLIENT_PROTOCOLS:
+                continue
+            target, _port = protocol_public_endpoint(server, proto)
+            target = str(target or '').strip()
+            if target:
+                out.add(target)
+    override = _cheburcheck_override(cfg, server.get('uid'))
+    if override:
+        try:
+            out.update(_cheburcheck_normalize_targets(override))
+        except ValueError as exc:
+            # A hand-edited data.json must not break the whole page/API.
+            logger.warning("Cheburcheck: ignoring invalid extra addresses for %s: %s",
+                           server.get('uid'), exc)
+    return sorted(out)
 
 
 def _cheburcheck_enabled_servers(cfg=None, require_master=True):
-    """Servers whose cheburcheck checkbox is on.
+    """Server dicts whose cheburcheck checkbox is on.
 
     Keyed by server uid: renaming a server must not lose its setting.
-    Returns a list of (uid, name, host) tuples.
     """
     data = load_data()
     if cfg is None:
@@ -3607,11 +3666,24 @@ def _cheburcheck_enabled_servers(cfg=None, require_master=True):
     out = []
     for srv in data.get('servers', []):
         uid = srv.get('uid')
-        if uid is None:
-            continue
-        if flags.get(uid) or flags.get(srv.get('name')):
-            out.append((uid, srv.get('name'), srv.get('host')))
+        if uid is not None and flags.get(uid):
+            out.append(srv)
     return out
+
+
+def _cheburcheck_reserve(uid):
+    """Atomically claim a server. Must run synchronously before create_task."""
+    if uid is None:
+        return True
+    if uid in _CHEBURCHECK_RUNNING:
+        return False
+    _CHEBURCHECK_RUNNING[uid] = None
+    return True
+
+
+def _cheburcheck_release(uid):
+    if uid is not None:
+        _CHEBURCHECK_RUNNING.pop(uid, None)
 
 
 async def _cheburcheck_wait_out_quiet_hours():
@@ -3643,60 +3715,96 @@ async def cheburcheck_background_loop():
             interval = max(1, int(cfg.get('interval_hours') or 1)) * 3600
             if await _cheburcheck_wait_out_quiet_hours():
                 continue        # the window just changed; re-read settings
-            by_uid = {s.get('uid'): s for s in data.get('servers', [])}
-            targets = [by_uid[uid] for uid, name, host in _cheburcheck_enabled_servers(cfg)
-                       if uid in by_uid]
-            for srv in targets:
-                uid = srv.get('uid')
-                if uid in _CHEBURCHECK_RUNNING:
+            for srv in _cheburcheck_enabled_servers(cfg):
+                targets = cheburcheck_targets(srv, cfg)
+                if not targets:
                     continue
-                try:
-                    await _run_cheburcheck_one(srv)
-                except Exception as e:
-                    logger.error(f"Cheburcheck run failed for {srv.get('name')}: {e}")
-                await asyncio.sleep(13)
+                if not _cheburcheck_reserve(srv.get('uid')):
+                    continue
+                await _cheburcheck_run_server(srv, targets)
+                await asyncio.sleep(_CHEBURCHECK_SPACING)
             await asyncio.sleep(interval)
         except Exception as e:
             logger.error(f"cheburcheck_background_loop error: {e}")
             await asyncio.sleep(300)
 
 
-async def _run_cheburcheck_one(srv):
-    """Check one server and always store a record, even when the check fails.
+async def _cheburcheck_run_server(srv, targets):
+    """Check every target of one server sequentially.
+
+    The caller reserved the uid synchronously before starting this coroutine;
+    it only releases the reservation, so two tasks can never race for a server.
+    """
+    uid = srv.get('uid')
+    try:
+        for index, target in enumerate(targets):
+            try:
+                await _run_cheburcheck_one(srv, target, targets)
+            except Exception as e:
+                logger.error(f"Cheburcheck run failed for {srv.get('name')} "
+                             f"({target}): {e}")
+            if index < len(targets) - 1:
+                await asyncio.sleep(_CHEBURCHECK_SPACING)
+    finally:
+        _cheburcheck_release(uid)
+
+
+async def _run_cheburcheck_one(srv, target, targets=None):
+    """Check one target and always store a record, even when the check fails.
 
     Without this a transient 429 leaves yesterday's verdict on screen and the
-    UI cannot tell "clean" from "check broken".
+    UI cannot tell "clean" from "check broken". `targets` is the server's full
+    resolved list as of the run start; it is passed to the persister so a
+    settings change mid-run cannot prune targets that are still being checked.
     """
-    host = srv.get('host')
-    if not host:
-        return
     uid = srv.get('uid')
-    task = asyncio.current_task()
-    if uid is not None:
-        _CHEBURCHECK_RUNNING[uid] = task
+    target = str(target or '').strip()
+    if not target:
+        # Runners never pass an empty target; readers synthesise the "" record
+        # (C2). The cache itself must not keep the service key (A4).
+        logger.warning("Cheburcheck: empty target for %s skipped", srv.get('name'))
+        return
+    logger.info(f"cheburcheck: {target} for {srv.get('name')} started")
+    error = None
+    static = None
     try:
-        error = None
-        static = None
+        static = await cheburcheck.fetch_check(target)
+    except Exception as e:
+        error = f"check failed: {e}"
+    probe = None
+    if static and static.get('id'):
         try:
-            static = await cheburcheck.fetch_check(host)
+            # Сканеры cheburcheck требуют API-токен: берём его из настроек
+            # (в памяти процесса, не в логах) и передаём в модуль.
+            cfg = (load_data().get('settings') or {}).get('cheburcheck') or {}
+            cheburcheck.set_api_token(cfg.get('api_token'))
+            probe = await cheburcheck.fetch_probe(static['id'])
+        except cheburcheck.CheburcheckApiError as e:
+            # Человекочитаемый текст вместо «probe failed: HTTP 403».
+            error = e.user_message
         except Exception as e:
-            error = f"check failed: {e}"
-        probe = None
-        if static and static.get('id'):
-            try:
-                probe = await cheburcheck.fetch_probe(static['id'])
-            except Exception as e:
-                error = f"probe failed: {e}"
-        summary = cheburcheck.build_summary(host, static, probe, error=error)
-        async with CHEBURCHECK_CACHE_LOCK:
-            CHEBURCHECK_CACHE[uid] = summary
-        try:
-            _cheburcheck_persist()
-        except Exception as e:
-            logger.warning(f"Cheburcheck persist failed: {e}")
-    finally:
-        if uid is not None and _CHEBURCHECK_RUNNING.get(uid) is task:
-            _CHEBURCHECK_RUNNING.pop(uid, None)
+            error = f"probe failed: {e}"
+    # Режим проверки: без проб (нет токена, 429, сеть) доступны только списки.
+    online = (probe or {}).get('online_probes')
+    answered = int((probe or {}).get('response_count') or 0)
+    if static is None:
+        scan_mode = 'failed'
+    elif probe is None:
+        scan_mode = 'static_only'
+    elif online and answered < int(online):
+        scan_mode = 'partial'
+    else:
+        scan_mode = 'full'
+    summary = cheburcheck.build_summary(target, static, probe, error=error)
+    summary['scan_mode'] = scan_mode
+    async with CHEBURCHECK_CACHE_LOCK:
+        CHEBURCHECK_CACHE.setdefault(uid, {})[target] = summary
+    logger.info(f"cheburcheck: {target} for {srv.get('name')} finished "
+                f"({summary.get('status')})")
+    try:
+        _cheburcheck_persist(uid, targets)
+    except Exception as e:
+        logger.warning(f"Cheburcheck persist failed: {e}")
 
 
 def _cheburcheck_migrate_settings(data):
@@ -3722,24 +3830,224 @@ def _cheburcheck_migrate_settings(data):
     return changed
 
 
-def _cheburcheck_persist():
-    import json as _j, os as _o
-    path = os.path.join(os.path.dirname(DATA_FILE), 'state', 'cheburcheck.json')
-    _o.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, 'w', encoding='utf-8') as f:
-        _j.dump(CHEBURCHECK_CACHE, f, ensure_ascii=False, indent=2)
+def _cheburcheck_startup_cache(data):
+    """Load the persisted cache at startup and migrate the legacy layout.
+
+    Records whose target changed stay until the next real check for that uid,
+    so the reader can still tell "target changed" from "not checked yet". A
+    consumed legacy file is always written back to the sibling path, otherwise
+    a restart before the next check would lose the cache.
+    """
+    had_legacy = os.path.exists(_cheburcheck_legacy_path())
+    # API-токен для сканеров: кладём в память модуля при старте, чтобы
+    # фоновый цикл и ручной запуск работали без открытия настроек.
+    cheburcheck.set_api_token(
+        ((data.get('settings') or {}).get('cheburcheck') or {}).get('api_token'))
+    loaded = _cheburcheck_load_cache()
+    uids = {s.get('uid') for s in data.get('servers', []) if s.get('uid')}
+    clean = {uid: records for uid, records in loaded.items()
+             if uid in uids and isinstance(records, dict)}
+    if len(clean) != len(loaded):
+        logger.info('Cheburcheck: dropped %d orphaned cache records' %
+                    (len(loaded) - len(clean)))
+    CHEBURCHECK_CACHE.update(clean)
+    if clean != loaded or had_legacy:
+        _cheburcheck_persist()
+
+
+def _cheburcheck_synthetic(target, error):
+    """Unsaved placeholder for a target that has no record yet (C2)."""
+    return {
+        'target': target,
+        'status': 'unknown',
+        'checked_at': None,
+        'error': error,
+        'static': {'blocked': False, 'blocked_subnets': [], 'cdn_providers': [],
+                   'geo': {}, 'whitelist': None, 'complaints_14d': 0,
+                   'reverse_lookup': []},
+        'probe': {'online_probes': None, 'response_count': 0,
+                  'verdict_counts': {}, 'blocking_regions': 0,
+                  'restricted_regions': 0, 'static_hit': False,
+                  'clear_regions': 0},
+        'partial': False,
+        # Записи ещё нет: режим проверки неизвестен (UI не показывает бейдж).
+        'scan_mode': None,
+    }
+
+
+def _cheburcheck_persist(uid=None, targets=None):
+    """Persist the cache atomically; prune targets outside `targets` for `uid`.
+
+    Pruning happens only when both the uid and its resolved targets are given,
+    so the startup write (no arguments) never drops records that C2 still
+    needs to tell "target changed" from "not checked yet".
+    """
+    if uid is not None and targets is not None:
+        entries = CHEBURCHECK_CACHE.get(uid)
+        if isinstance(entries, dict):
+            keep = set(targets)
+            for stale in [t for t in entries if t not in keep]:
+                entries.pop(stale, None)
+    tmp = _cheburcheck_cache_path() + '.tmp'
+    os.makedirs(os.path.dirname(_cheburcheck_cache_path()), exist_ok=True)
+    try:
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(CHEBURCHECK_CACHE, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, _cheburcheck_cache_path())
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
 
 def _cheburcheck_load_cache():
-    import json as _j, os as _o
-    path = os.path.join(os.path.dirname(DATA_FILE), 'state', 'cheburcheck.json')
-    if os.path.exists(path):
+    """Read the cache from the sibling file, migrating legacy layouts.
+
+    New file wins over `<data dir>/state/cheburcheck.json`. Both the legacy
+    flat ``{uid: record}`` shape and the nested one are accepted; a record
+    without a target is dropped (it cannot be matched to a resolved target).
+    """
+    source = None
+    cache_path = _cheburcheck_cache_path()
+    legacy_path = _cheburcheck_legacy_path()
+    raw = None
+    if os.path.exists(cache_path):
         try:
-            with open(path, encoding='utf-8') as f:
-                return _j.load(f)
+            with open(cache_path, encoding='utf-8') as f:
+                raw = json.load(f)
         except Exception:
+            logger.warning('Cheburcheck: sibling cache is corrupt, trying legacy',
+                           exc_info=True)
+            raw = None
+        if raw is not None:
+            source = cache_path
+    if raw is None and os.path.exists(legacy_path):
+        try:
+            with open(legacy_path, encoding='utf-8') as f:
+                raw = json.load(f)
+            source = legacy_path
+        except Exception:
+            logger.warning('Cheburcheck: legacy cache is corrupt, starting empty',
+                           exc_info=True)
             return {}
-    return {}
+    if raw is None or not isinstance(raw, dict):
+        return {}
+    nested = {}
+    for uid, value in raw.items():
+        if not isinstance(value, dict):
+            continue
+        if 'target' in value and 'status' in value:
+            target = str(value.get('target') or '')
+            if target:
+                nested.setdefault(uid, {})[target] = value
+            else:
+                logger.info('Cheburcheck: dropped a cache record without target')
+            continue
+        nested[uid] = {}
+        dropped = 0
+        for target, rec in value.items():
+            if not isinstance(rec, dict) or not rec.get('target'):
+                dropped += 1
+                continue
+            nested[uid][str(target)] = rec
+        if dropped:
+            logger.info('Cheburcheck: dropped %d nested cache records without target',
+                        dropped)
+    if source == legacy_path:
+        try:
+            os.remove(legacy_path)
+        except OSError:
+            pass
+    elif os.path.exists(legacy_path):
+        # Sibling file is the source of truth; drop the migrated legacy copy.
+        try:
+            os.remove(legacy_path)
+        except OSError:
+            pass
+    return nested
+
+
+def _cheburcheck_records_for(server, cfg, cache):
+    """Per-target records for one server, with synthetic entries (C2)."""
+    uid = server.get('uid')
+    resolved = cheburcheck_targets(server, cfg)
+    stored = cache.get(uid) or {}
+    if not isinstance(stored, dict):
+        stored = {}
+    if not resolved:
+        return {'': _cheburcheck_synthetic('', 'no target configured')}
+    records = {}
+    for target in resolved:
+        record = stored.get(target)
+        if isinstance(record, dict):
+            records[target] = record
+        else:
+            error = ('target changed, re-check required' if stored
+                     else 'not checked yet')
+            records[target] = _cheburcheck_synthetic(target, error)
+    return records
+
+
+def _cheburcheck_aggregate(records):
+    """One summary for a server: worst verdict wins, probe counters sum up."""
+    if not records:
+        records = {'': _cheburcheck_synthetic('', 'no target configured')}
+    rank = {'banned': 3, 'unknown': 2, 'clean': 1}
+    statuses = [record.get('status') or 'unknown' for record in records.values()]
+    if 'banned' in statuses:
+        status = 'banned'
+    elif 'unknown' in statuses:
+        status = 'unknown'
+    else:
+        status = 'clean'
+    worst = sorted(records.items(),
+                   key=lambda item: (-rank.get(item[1].get('status'), 0), item[0]))[0]
+    blocking = sum(int((record.get('probe') or {}).get('blocking_regions') or 0)
+                   for record in records.values())
+    restricted = sum(int((record.get('probe') or {}).get('restricted_regions') or 0)
+                     for record in records.values())
+    clear = sum(int((record.get('probe') or {}).get('clear_regions') or 0)
+                for record in records.values())
+    response = sum(int((record.get('probe') or {}).get('response_count') or 0)
+                   for record in records.values())
+    errors = []
+    for record in records.values():
+        error = record.get('error')
+        if error and str(error) not in errors:
+            errors.append(str(error))
+    checked = [record.get('checked_at') for record in records.values()
+               if record.get('checked_at')]
+    static_hit = any(
+        bool((record.get('static') or {}).get('blocked'))
+        or bool((record.get('static') or {}).get('cdn_providers'))
+        for record in records.values())
+    # Режим агрегата: полный отчёт только если пробы отработали у всех целей.
+    modes = [record.get('scan_mode') or 'failed' for record in records.values()]
+    if all(mode == 'full' for mode in modes):
+        scan_mode = 'full'
+    elif all(mode == 'static_only' for mode in modes):
+        scan_mode = 'static_only'
+    elif all(mode == 'failed' for mode in modes):
+        scan_mode = 'failed'
+    else:
+        scan_mode = 'partial'
+    return {
+        'checked_at': max(checked) if checked else None,
+        'status': status,
+        'target': worst[0],
+        'static_hit': static_hit,
+        'scan_mode': scan_mode,
+        # A static list hit counts as one more remark beside the probe
+        # restrictions, so the card can show "замечания (N)".
+        'remarks': restricted + (1 if static_hit else 0),
+        'probe': {'response_count': response,
+                  'blocking_regions': blocking,
+                  'restricted_regions': restricted,
+                  'clear_regions': clear},
+        'error': '; '.join(errors) if errors else None,
+    }
 
 
 async def periodic_background_tasks():
@@ -6180,6 +6488,23 @@ def _cheburcheck_server_index(server_id, data):
     return None
 
 
+def _cheburcheck_targets_context(data):
+    """uid -> resolved targets for every server (settings page, A6)."""
+    cfg = (data.get('settings') or {}).get('cheburcheck') or {}
+    return {srv.get('uid'): cheburcheck_targets(srv, cfg)
+            for srv in data.get('servers', [])}
+
+
+def _cheburcheck_flagged(server, cfg):
+    return bool((cfg.get('servers') or {}).get(server.get('uid')))
+
+
+def _cheburcheck_summary_for(server, cfg, cache):
+    """Aggregate + per-target records for one server (C2 synthetic included)."""
+    records = _cheburcheck_records_for(server, cfg, cache)
+    return _cheburcheck_aggregate(records), records
+
+
 @app.post('/api/servers/cheburcheck/run_all', tags=["Servers"])
 async def api_cheburcheck_run_all(request: Request):
     global _CHEBURCHECK_TASK
@@ -6191,22 +6516,32 @@ async def api_cheburcheck_run_all(request: Request):
         return {'ok': True, 'started': 0, 'reason': 'disabled'}
     if _CHEBURCHECK_TASK is not None and not _CHEBURCHECK_TASK.done():
         return {'ok': True, 'already_running': True}
-    by_uid = {s.get('uid'): s for s in data.get('servers', [])}
-    targets = [by_uid[uid] for uid, name, host in _cheburcheck_enabled_servers(cfg)
-               if uid in by_uid]
-    if not targets:
+    flagged = [srv for srv in data.get('servers', [])
+               if _cheburcheck_flagged(srv, cfg)]
+    if not flagged:
         return {'ok': True, 'started': 0, 'reason': 'no_servers'}
+    prepared = []
+    for srv in flagged:
+        targets = cheburcheck_targets(srv, cfg)
+        if targets:
+            prepared.append((srv, targets))
+    if not prepared:
+        return {'ok': True, 'started': 0, 'reason': 'no_targets'}
+    reserved = []
+    for srv, targets in prepared:
+        if _cheburcheck_reserve(srv.get('uid')):
+            reserved.append((srv, targets))
+    if not reserved:
+        return {'ok': True, 'started': 0, 'reason': 'nothing_started'}
 
     async def runner():
-        for srv in targets:
-            try:
-                await _run_cheburcheck_one(srv)
-            except Exception as e:
-                logger.error(f"Cheburcheck run_all failed for {srv.get('name')}: {e}")
-            await asyncio.sleep(13)
+        for index, (srv, targets) in enumerate(reserved):
+            await _cheburcheck_run_server(srv, targets)
+            if index < len(reserved) - 1:
+                await asyncio.sleep(_CHEBURCHECK_SPACING)
 
     _CHEBURCHECK_TASK = asyncio.create_task(runner())
-    return {'ok': True, 'started': len(targets)}
+    return {'ok': True, 'started': len(reserved)}
 
 
 @app.get('/api/servers/cheburcheck_flags', tags=["Servers"])
@@ -6217,16 +6552,19 @@ async def api_cheburcheck_flags(request: Request):
     cfg = (data.get('settings') or {}).get('cheburcheck') or {}
     enabled = bool(cfg.get('enabled'))
     async with CHEBURCHECK_CACHE_LOCK:
-        cache = dict(CHEBURCHECK_CACHE)
+        cache = {uid: dict(records) for uid, records in CHEBURCHECK_CACHE.items()
+                 if isinstance(records, dict)}
     out = {}
-    for i, s in enumerate(data.get('servers', [])):
-        c = cache.get(s.get('uid'))
-        on = bool((cfg.get('servers') or {}).get(s.get('uid')))
-        if c is None and not on:
-            continue          # nothing to show, checkbox off
-        flag = dict(c) if c is not None else {}
-        flag['enabled'] = on
-        out[str(i)] = flag
+    for i, srv in enumerate(data.get('servers', [])):
+        if not _cheburcheck_flagged(srv, cfg):
+            continue          # synthetic entries are for enabled servers only
+        summary, _records = _cheburcheck_summary_for(srv, cfg, cache)
+        out[str(i)] = {'status': summary['status'],
+                       'probe': summary['probe'],
+                       'remarks': summary['remarks'],
+                       'static_hit': summary['static_hit'],
+                       'scan_mode': summary['scan_mode'],
+                       'enabled': True}
     return {'enabled': enabled,
             'running': bool(_CHEBURCHECK_TASK is not None and not _CHEBURCHECK_TASK.done()),
             'flags': out}
@@ -6242,21 +6580,31 @@ async def api_cheburcheck_get(request: Request, server_id: int):
         return JSONResponse({'error': 'Server not found'}, status_code=404)
     srv = data['servers'][idx]
     uid = srv.get('uid')
-    async with CHEBURCHECK_CACHE_LOCK:
-        cached = CHEBURCHECK_CACHE.get(uid)
     cfg = (data.get('settings') or {}).get('cheburcheck') or {}
+    async with CHEBURCHECK_CACHE_LOCK:
+        cache = {key: dict(records) for key, records in CHEBURCHECK_CACHE.items()
+                 if isinstance(records, dict)}
+    summary, records = _cheburcheck_summary_for(srv, cfg, cache)
     return {
-        'enabled_for_server': bool((cfg.get('servers') or {}).get(uid)),
+        'enabled_for_server': _cheburcheck_flagged(srv, cfg),
         'global_enabled': bool(cfg.get('enabled')),
         'interval_hours': cfg.get('interval_hours', 1),
         'running': uid in _CHEBURCHECK_RUNNING,
-        'data': cached,
+        'checked_at': summary['checked_at'],
+        'status': summary['status'],
+        'target': summary['target'],
+        'probe': summary['probe'],
+        'remarks': summary['remarks'],
+        'static_hit': summary['static_hit'],
+        'scan_mode': summary['scan_mode'],
+        'error': summary['error'],
+        'targets': records,
     }
 
 
 @app.post('/api/servers/{server_id}/cheburcheck/run', tags=["Servers"])
 async def api_cheburcheck_run(request: Request, server_id: int):
-    """Start a one-shot check in the background.
+    """Start a one-shot check of every target of the server in the background.
 
     A full check takes 15-60s (static + 40 probes). Holding the HTTP request
     for that long lets a proxy or the browser abort it, which looks like
@@ -6270,12 +6618,18 @@ async def api_cheburcheck_run(request: Request, server_id: int):
         return JSONResponse({'error': 'Server not found'}, status_code=404)
     srv = data['servers'][idx]
     uid = srv.get('uid')
-    if uid in _CHEBURCHECK_RUNNING:
-        return {'ok': True, 'already_running': True}
     cfg = (data.get('settings') or {}).get('cheburcheck') or {}
     if not cfg.get('enabled'):
         return {'ok': True, 'started': 0, 'reason': 'disabled'}
-    _CHEBURCHECK_RUNNING[uid] = asyncio.create_task(_run_cheburcheck_one(srv))
+    if uid in _CHEBURCHECK_RUNNING:
+        return {'ok': True, 'already_running': True}
+    targets = cheburcheck_targets(srv, cfg)
+    if not targets:
+        return {'ok': True, 'started': 0, 'reason': 'no_targets'}
+    if not _cheburcheck_reserve(uid):
+        return {'ok': True, 'already_running': True}
+    _CHEBURCHECK_RUNNING[uid] = asyncio.create_task(
+        _cheburcheck_run_server(srv, targets))
     return {'ok': True, 'started': 1}
 
 
@@ -6286,9 +6640,19 @@ async def api_cheburcheck_settings_get(request: Request):
     data = load_data()
     cfg = (data.get('settings') or {}).get('cheburcheck') or {}
     srv_map = dict(cfg.get('servers') or {})
+    known = set()
+    resolved = {}
     for s in data.get('servers', []):
-        if s.get('uid') is not None:
-            srv_map.setdefault(s.get('uid'), False)
+        uid = s.get('uid')
+        if uid is None:
+            continue
+        known.add(uid)
+        srv_map.setdefault(uid, False)
+        resolved[uid] = cheburcheck_targets(s, cfg)
+    targets = {uid: list(values)
+               for uid, values in (cfg.get('targets') or {}).items()
+               if uid in known and values}
+    token = str(cfg.get('api_token') or '')
     return {
         'enabled': bool(cfg.get('enabled')),
         'interval_hours': int(cfg.get('interval_hours') or 1),
@@ -6296,6 +6660,11 @@ async def api_cheburcheck_settings_get(request: Request):
         'quiet_start': cfg.get('quiet_start', 0),
         'quiet_end': cfg.get('quiet_end', 0),
         'servers': srv_map,
+        'targets': targets,
+        'targets_resolved': resolved,
+        # Только признак и хвост токена: сам токен не отдаём ни в каком виде.
+        'api_token_set': bool(token),
+        'api_token_hint': ('••••' + token[-4:]) if token else '',
     }
 
 
@@ -6306,6 +6675,13 @@ class CheburcheckSettingsRequest(BaseModel):
     quiet_start: Optional[int] = None
     quiet_end: Optional[int] = None
     servers: Optional[dict] = None
+    targets: Optional[object] = None
+    # None / отсутствие поля — «не менять»; "" — удалить; иначе — сохранить.
+    api_token: Optional[str] = None
+
+
+class CheburcheckTokenCheckRequest(BaseModel):
+    api_token: Optional[str] = None
 
 
 @app.post('/api/settings/cheburcheck', tags=["Settings"])
@@ -6314,6 +6690,41 @@ async def api_cheburcheck_settings_set(request: Request, req: CheburcheckSetting
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     data = load_data()
     cfg = data.setdefault('settings', {}).setdefault('cheburcheck', {})
+    known = {s.get('uid') for s in data.get('servers', []) if s.get('uid')}
+    # Validate the override map before touching anything: a bad payload must
+    # leave data.json unchanged (the typed Optional[Dict[str, List[str]]] model
+    # gives 422 and accepts null, so this field is validated by hand).
+    targets_supplied = 'targets' in getattr(req, 'model_fields_set', set())
+    normalized_targets = None
+    if targets_supplied:
+        raw_targets = req.targets
+        if raw_targets is None or not isinstance(raw_targets, dict):
+            return JSONResponse({'error': 'targets must be an object'},
+                                status_code=400)
+        normalized_targets = {}
+        try:
+            for key, values in raw_targets.items():
+                if key not in known:
+                    continue
+                if not isinstance(values, list):
+                    raise ValueError('each value must be a list')
+                addresses = _cheburcheck_normalize_targets(values)
+                if addresses:
+                    normalized_targets[key] = addresses
+        except (TypeError, ValueError) as exc:
+            return JSONResponse({'error': f'invalid targets: {exc}'},
+                                status_code=400)
+    # API-токен: None/отсутствие поля — «не менять», "" — «удалить»,
+    # непустая строка — сохранить. Длина проверяется до любых изменений.
+    token_supplied = ('api_token' in getattr(req, 'model_fields_set', set())
+                      and req.api_token is not None)
+    new_token = None
+    if token_supplied:
+        candidate = str(req.api_token).strip()
+        if candidate and not (8 <= len(candidate) <= 512):
+            return JSONResponse({'error': 'api_token must be 8..512 characters'},
+                                status_code=400)
+        new_token = candidate or None
     if req.enabled is not None:
         cfg['enabled'] = bool(req.enabled)
     if req.interval_hours is not None:
@@ -6328,9 +6739,9 @@ async def api_cheburcheck_settings_set(request: Request, req: CheburcheckSetting
     # instead of blocking every check.
     if cfg.get('quiet_enabled') and cfg.get('quiet_start') == cfg.get('quiet_end'):
         cfg['quiet_enabled'] = False
-    known = {s.get('uid') for s in data.get('servers', []) if s.get('uid')}
+    cfg.setdefault('servers', {})
     if req.servers is not None:
-        cur = cfg.setdefault('servers', {})
+        cur = cfg['servers']
         for k, v in req.servers.items():
             # Accept only uids of servers that exist: a stale name from an old
             # tab must not resurrect a flag for a server that was renamed.
@@ -6339,8 +6750,55 @@ async def api_cheburcheck_settings_set(request: Request, req: CheburcheckSetting
     # keep the list in sync with the current fleet (new servers unchecked)
     for uid in known:
         cfg['servers'].setdefault(uid, False)
+    if targets_supplied:
+        merged = {key: value
+                  for key, value in (cfg.get('targets') or {}).items()
+                  if key in known and value}
+        for key, values in normalized_targets.items():
+            merged[key] = values
+        for key, values in raw_targets.items():
+            if key in known and isinstance(values, list) and not values:
+                merged.pop(key, None)       # explicit [] removes the override
+        cfg['targets'] = merged
+    if token_supplied:
+        if new_token:
+            cfg['api_token'] = new_token
+        else:
+            cfg.pop('api_token', None)
     save_data(data)
+    # Применяем сразу, без рестарта: следующий прогон уже видит новый токен.
+    cheburcheck.set_api_token(cfg.get('api_token'))
     return {'ok': True}
+
+
+@app.post('/api/settings/cheburcheck/token_check', tags=["Settings"])
+async def api_cheburcheck_token_check(request: Request,
+                                      req: Optional[CheburcheckTokenCheckRequest] = None):
+    """Проверить API-токен через GET /api/v1/credits (только админ).
+
+    Токен из тела запроса не сохраняется и в ответ не попадает: наружу уходит
+    только остаток кредитов либо текст ошибки сервиса.
+    """
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    cfg = (load_data().get('settings') or {}).get('cheburcheck') or {}
+    token = None
+    if req is not None and req.api_token is not None:
+        token = str(req.api_token).strip() or None
+    if not token:
+        token = str(cfg.get('api_token') or '').strip() or None
+    if not token:
+        return {'ok': False, 'error': cheburcheck.NO_TOKEN_MESSAGE}
+    try:
+        credits = await cheburcheck.fetch_credits(token)
+    except cheburcheck.CheburcheckApiError as exc:
+        return {'ok': False, 'error': exc.user_message}
+    except Exception as exc:
+        # Сетевой сбой или неожиданный ответ: панель не роняем.
+        logger.warning('cheburcheck token_check failed: %s', exc)
+        return {'ok': False,
+                'error': 'не удалось проверить токен: {}'.format(exc)[:300]}
+    return {'ok': True, 'credits': credits}
 
 
 # --- one-shot boot-restore migration ----------------------------------------
@@ -11335,6 +11793,7 @@ def settings_page(request: Request):
         current_version=CURRENT_VERSION,
         backup_csrf=backup_csrf,
         self_service_protocol_choices=self_service_protocol_choices(),
+        cheburcheck_targets=_cheburcheck_targets_context(data),
     )
 
 
@@ -11343,7 +11802,14 @@ def api_get_settings(request: Request):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     data = load_data()
-    return data.get('settings', {})
+    settings = dict(data.get('settings', {}))
+    # API-токен cheburcheck — только на запись: из общего ответа настроек он
+    # вырезается, иначе утекает в каждый GET /api/settings.
+    cb = settings.get('cheburcheck')
+    if isinstance(cb, dict) and 'api_token' in cb:
+        settings['cheburcheck'] = {k: v for k, v in cb.items()
+                                   if k != 'api_token'}
+    return settings
 
 
 @app.get('/api/settings/tunnels/status', tags=["Settings"])

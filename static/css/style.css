@@ -803,7 +803,6 @@ a:hover {
     font-weight: 500;
     color: var(--text-secondary);
     margin-bottom: var(--space-xs);
-    text-transform: uppercase;
     letter-spacing: 0.05em;
 }
 
@@ -985,7 +984,7 @@ a:hover {
     border: 1px solid var(--border-color);
     border-radius: var(--radius-xl);
     width: 90%;
-    max-width: 520px;
+    max-width: 720px;
     max-height: 90vh;
     overflow-y: auto;
     padding: var(--space-xl);
