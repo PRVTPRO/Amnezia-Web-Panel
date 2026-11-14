@@ -3,13 +3,43 @@ import os
 import uuid
 import logging
 import base64
+import functools
+import re
 import shlex
+import threading
 from datetime import datetime
 import urllib.parse
+
+from managers.awg_manager import AWGManager
+from managers.clients_table import save_clients_table
 
 logger = logging.getLogger(__name__)
 
 XRAY_CORE_VERSION = "v26.10.31"
+
+# uname -m -> asset suffix of the Xray-core Linux release archive
+XRAY_ARCH_ZIPS = {'x86_64': '64', 'aarch64': 'arm64-v8a', 'armv7l': 'arm32-v7a'}
+
+# Panel-side serialization for clientsTable read-modify-write: the page polls
+# get_clients while add/toggle/rename run, and the last save wins with a
+# stale snapshot unless the whole RMW holds one lock (see wireguard_manager).
+_XRAY_TABLE_LOCKS = {}
+_XRAY_TABLE_LOCKS_GUARD = threading.Lock()
+
+
+def _xray_clients_table_lock(host, container_name):
+    with _XRAY_TABLE_LOCKS_GUARD:
+        return _XRAY_TABLE_LOCKS.setdefault((host, container_name), threading.Lock())
+
+
+def _serialized_table_write(method):
+    """Hold the per-container table lock for the whole read-modify-write."""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        host = getattr(self.ssh, 'host', '') or 'unknown'
+        with _xray_clients_table_lock(host, self.container_name):
+            return method(self, *args, **kwargs)
+    return wrapper
 
 class XrayManager:
     """Manages Xray (VLESS-Reality) protocol installation and client management."""
@@ -558,18 +588,14 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         return []
 
     def _save_clients_table(self, data):
-        """Write clientsTable to the file matching the current layout, in both
-        the container and the host bind-mount.
+        """Write clientsTable to the file matching the current layout, in the
+        container and on the host bind-mount.
+
+        Delegated to the shared checked writer (private host staging, atomic
+        rename inside the container, one previous snapshot kept as
+        <path>.panel-backup). Callers hold the per-container table lock.
         """
-        path = self._clients_table_path()
-        tmp_file = "/tmp/_xray_clients.json"
-        self.ssh.upload_file_sudo(json.dumps(data, indent=2), tmp_file)
-        self.ssh.run_sudo_command(
-            f"docker cp {tmp_file} {self.container_name}:{path}"
-        )
-        self.ssh.run_sudo_command(
-            f"cp {tmp_file} {path} 2>/dev/null || true"
-        )
+        save_clients_table(self.ssh, self.container_name, self._clients_table_path(), data)
 
     def _upgrade_config_for_stats(self, config, restart=True):
         """Injects API and Stats blocks into older Xray configs transparently."""
@@ -665,7 +691,11 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
             v = int(v)
         return f"{v} {powers.get(n, 'B')}"
 
-    def get_clients(self, protocol=None, strict=False):
+    @_serialized_table_write
+    def get_clients(self, protocol=None, strict=True):
+        # strict by default: this read feeds auto-import and lastSeen
+        # persistence, and a transient SSH failure answered with an empty
+        # table would be written back over the real one (issue #182).
         config = self._get_server_json()
         if not config:
             if strict:
@@ -725,7 +755,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         return clients_table
 
     def get_client_config(self, protocol, client_id, server_host, port, public_port=None):
-        clients = self._get_clients_table()
+        clients = self._get_clients_table(strict=True)
         client = next((c for c in clients if c['clientId'] == client_id), None)
         if not client: return None
 
@@ -756,6 +786,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         )
         return url
 
+    @_serialized_table_write
     def add_client(self, protocol, client_name, server_host, port, public_port=None,
                    warp_ctx=None):
         client_id = str(uuid.uuid4())
@@ -786,7 +817,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         self._write_server_json(config, restart=False)
 
         # Update table
-        clients_table = self._get_clients_table()
+        clients_table = self._get_clients_table(strict=True)
         clients_table.append({
             'clientId': client_id,
             'userData': {
@@ -802,6 +833,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
             'config': self.get_client_config(protocol, client_id, server_host, port, public_port)
         }
 
+    @_serialized_table_write
     def toggle_client(self, protocol, client_id, enable):
         config = self._get_server_json()
         self._upgrade_config_for_stats(config, restart=False)
@@ -828,12 +860,13 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
 
         self._write_server_json(config, restart=False)
 
-        clients_table = self._get_clients_table()
+        clients_table = self._get_clients_table(strict=True)
         for c in clients_table:
             if c['clientId'] == client_id:
                 c.setdefault('userData', {})['enabled'] = enable
         self._save_clients_table(clients_table)
 
+    @_serialized_table_write
     def remove_client(self, protocol, client_id):
         config = self._get_server_json()
         self._upgrade_config_for_stats(config, restart=False)
@@ -846,17 +879,18 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         inbound['settings']['clients'] = [c for c in clients_node if c['id'] != client_id]
         self._write_server_json(config, restart=False)
 
-        clients_table = self._get_clients_table()
+        clients_table = self._get_clients_table(strict=True)
         clients_table = [c for c in clients_table if c['clientId'] != client_id]
         self._save_clients_table(clients_table)
         return True
 
+    @_serialized_table_write
     def rename_client(self, protocol, client_id, new_name):
         """Rename a client. The display name lives in clientsTable
         (userData.clientName) and is embedded into the VLESS URL fragment on
         the fly, so updating the table is enough — UUID, keys and server.json
         stay untouched and existing links keep working."""
-        clients_table = self._get_clients_table()
+        clients_table = self._get_clients_table(strict=True)
         client = next((c for c in clients_table if c.get('clientId') == client_id), None)
         if client is None:
             raise RuntimeError('Client not found')
