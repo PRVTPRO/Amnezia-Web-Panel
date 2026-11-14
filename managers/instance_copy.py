@@ -146,7 +146,10 @@ class InstanceCopier:
         return parse_used_ports(ss_out, ps_out)
 
     def inspect_container(self, ssh, container):
-        out, _, code = self._sudo(ssh, 'docker inspect %s 2>/dev/null' % shlex.quote(container))
+        # --type container matters: `docker inspect amnezia-awg3` also matches the
+        # image of that name and would fake a name collision on the target.
+        out, _, code = self._sudo(
+            ssh, 'docker inspect --type container %s 2>/dev/null' % shlex.quote(container))
         if code != 0 or not (out or '').strip():
             return None
         import json
