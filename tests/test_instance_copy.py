@@ -22,6 +22,7 @@ from managers.instance_copy import (
     container_name,
     next_instance,
     parse_listen_port,
+    parse_used_ports,
     patch_listen_port,
     pick_port,
 )
@@ -113,6 +114,43 @@ class CopyHelperTests(unittest.TestCase):
         used = set(range(55424, 65536))
         self.assertEqual(pick_port(55424, used), 1024)
 
+    def test_parse_used_ports_reads_ss_and_docker_ps_output(self):
+        ss_output = (
+            "State Recv-Q Send-Q Local Address:Port Peer Address:Port\n"
+            "UNCONN 0 0 0.0.0.0:55424 0.0.0.0:*\n"
+            "UNCONN 0 0 [::]:55551 [::]:*\n"
+        )
+        docker_ps = "0.0.0.0:50808->50808/udp, :::50808->50808/udp\n"
+        ports = parse_used_ports(ss_output, docker_ps)
+        self.assertIn(55424, ports)
+        self.assertIn(55551, ports)
+        self.assertIn(50808, ports)
+        self.assertNotIn(0, ports)
+        self.assertNotIn(150000, ports)
+
+    def test_port_override_rewrites_only_the_port_mapping(self):
+        from managers.awg_manager import AWGManager
+        info = {
+            'HostConfig': {
+                'RestartPolicy': {'Name': 'always'},
+                'Privileged': True,
+                'CapAdd': ['NET_ADMIN'],
+                'Sysctls': {'net.ipv4.conf.all.src_valid_mark': '1'},
+                'PortBindings': {'55424/udp': [{'HostIp': '0.0.0.0',
+                                                'HostPort': '55424'}]},
+            },
+            'Config': {'Image': 'amnezia-awg3',
+                       'Entrypoint': ['dumb-init', '/opt/amnezia/start.sh'],
+                       'Cmd': [], 'Env': []},
+        }
+        command = AWGManager._run_cmd_from_inspect(info, 'amnezia-awg3-2',
+                                                   'amnezia-awg3', port_override=6000)
+        self.assertIn('-p 0.0.0.0:6000:6000/udp', command)
+        self.assertNotIn('55424', command)
+        self.assertIn('--name amnezia-awg3-2', command)
+        self.assertIn('--privileged', command)
+        self.assertIn('--restart always', command)
+
 
 class CopyArchiveTests(unittest.TestCase):
     def make_archive(self, path, config=SERVER_CONFIG, extra=()):
@@ -202,6 +240,19 @@ class CopyStagingTests(unittest.TestCase):
         self.assertTrue(seen)
         self.assertNotEqual(seen['remote'], seen['local'])
         self.assertFalse(os.path.exists(os.path.dirname(seen['local'])))
+
+    def test_image_present_skips_the_transfer(self):
+        copier = InstanceCopier(FakeSSH(), FakeSSH())
+        commands = []
+        copier._sudo = lambda ssh, command, timeout=120: (
+            commands.append(command) or ('', '', 0))
+        copier._sftp_get = lambda *args: self.fail('no transfer expected')
+        copier._sftp_put = lambda *args: self.fail('no transfer expected')
+
+        copier._ensure_image({'image': 'img', 'image_present': True},
+                             lambda stage, text: None)
+
+        self.assertEqual(commands, [])
 
 
 class CopyRollbackTests(unittest.TestCase):
@@ -355,6 +406,7 @@ class PanelMergeTests(unittest.TestCase):
             self.assertEqual(connection['last_bytes'], 0)
             self.assertEqual(connection['last_rx_bytes'], 0)
             self.assertEqual(connection['last_tx_bytes'], 0)
+            self.assertTrue(connection['accounting_unowned'])
             self.assertNotIn(connection['id'], ('c1', 'c2'))
 
     def test_apply_refuses_a_taken_instance_name(self):
@@ -438,6 +490,138 @@ class CopyEndpointTests(unittest.IsolatedAsyncioTestCase):
         cancelled = await self.app.api_instance_copy_cancel(object(), 0, op_id)
         self.assertEqual(cancelled['status'], 'cancelling')
         self.assertTrue(self.app._inst_copy_ops[op_id]['cancel_requested'])
+
+
+class CopyWorkerTests(unittest.IsolatedAsyncioTestCase):
+    """_run_instance_copy: state transitions, rollback and cancel handling."""
+
+    class FakeSSH:
+        def connect(self):
+            return None
+
+        def disconnect(self):
+            return None
+
+    class FakeCopier:
+        behaviour = 'ok'
+        destroyed = []
+
+        def __init__(self, source_ssh, target_ssh):
+            pass
+
+        def plan(self, protocol, container, protocols):
+            return {'target_key': 'awg3__2', 'target_container': 'amnezia-awg3-2',
+                    'target_index': 2, 'port': 6000, 'peers': 3, 'base': 'awg3'}
+
+        def execute(self, plan, log, should_cancel):
+            log('done', 'fake')
+            if self.behaviour == 'cancel':
+                raise CopyCancelled()
+            if self.behaviour == 'error':
+                raise InstanceCopyError('start_failed', 'boom')
+            return {'container': plan['target_container'], 'port': plan['port'],
+                    'peers': plan['peers']}
+
+        def destroy(self, plan):
+            self.destroyed.append(plan['target_container'])
+
+    def setUp(self):
+        import app
+        self.app = app
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.FakeCopier.destroyed = []
+        self.patches = [
+            patch.object(app, '_instance_copy_store_path',
+                         return_value=os.path.join(self.tmp.name, 'ops.json')),
+            patch.object(app, '_instance_copy_source',
+                         return_value=({'name': 'SRC'}, {}, 'amnezia-awg3')),
+            patch.object(app, 'get_ssh', side_effect=lambda server: self.FakeSSH()),
+            patch.object(app, 'InstanceCopier', new=self.FakeCopier),
+            patch.object(app, '_instance_copy_apply', return_value=2),
+        ]
+        for patcher in self.patches:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        app._inst_copy_ops.clear()
+        app._inst_copy_active['op_id'] = None
+        self.addCleanup(app._inst_copy_ops.clear)
+
+    async def run_worker(self):
+        op_id = 'op-1'
+        self.app._inst_copy_ops[op_id] = {
+            'id': op_id, 'source_server_id': 0, 'target_server_id': 1,
+            'protocol': 'awg3', 'state': 'running', 'lines': [], 'result': None,
+            'error': None, 'cancel_requested': False, 'step': 0, 'total': 8,
+            'percent': 0,
+        }
+        self.app._inst_copy_active['op_id'] = op_id
+        await self.app._run_instance_copy(op_id)
+        return self.app._inst_copy_ops[op_id]
+
+    async def test_success_writes_the_panel_and_frees_the_slot(self):
+        op = await self.run_worker()
+        self.assertEqual(op['state'], 'success')
+        self.assertEqual(op['percent'], 100)
+        self.assertEqual(op['result']['connections'], 2)
+        self.assertIsNone(self.app._inst_copy_active['op_id'])
+
+    async def test_cancel_is_reported_as_cancelled(self):
+        self.FakeCopier.behaviour = 'cancel'
+        try:
+            op = await self.run_worker()
+        finally:
+            self.FakeCopier.behaviour = 'ok'
+        self.assertEqual(op['state'], 'cancelled')
+        self.assertEqual(op['error'], None)
+
+    async def test_instance_copy_error_is_reported_with_code(self):
+        self.FakeCopier.behaviour = 'error'
+        try:
+            op = await self.run_worker()
+        finally:
+            self.FakeCopier.behaviour = 'ok'
+        self.assertEqual(op['state'], 'failed')
+        self.assertEqual(op['error']['code'], 'start_failed')
+
+    async def test_panel_write_failure_removes_the_container(self):
+        with patch.object(self.app, '_instance_copy_apply',
+                          side_effect=InstanceCopyError('state_busy', 'cannot save')):
+            op = await self.run_worker()
+        self.assertEqual(op['state'], 'failed')
+        self.assertEqual(self.FakeCopier.destroyed, ['amnezia-awg3-2'])
+
+
+class CopyAccountingOwnershipTests(unittest.TestCase):
+    """A copied peer blocks instance removal only once it carries traffic."""
+
+    @staticmethod
+    def row(**extra):
+        row = {'id': 'c', 'user_id': 'u', 'server_id': 1, 'protocol': 'awg3',
+               'client_id': 'k', 'accounting_unowned': True, 'last_bytes': 0}
+        row.update(extra)
+        return row
+
+    def test_zero_traffic_copy_does_not_block_removal(self):
+        from peer_accounting import ownership_rows
+        data = {'servers': [{}, {}], 'user_connections': [self.row()]}
+        self.assertEqual(ownership_rows(data, server_id=1, protocol='awg3'), [])
+
+    def test_copy_with_usage_is_ownership_again(self):
+        from peer_accounting import ownership_rows
+        for extra in ({'last_bytes': 500},
+                      {'traffic_counter_epoch': 'epoch'},
+                      {'traffic_accounting_gap': {'reason': 'epoch_changed'}}):
+            data = {'servers': [{}, {}], 'user_connections': [self.row(**extra)]}
+            self.assertEqual(
+                len(ownership_rows(data, server_id=1, protocol='awg3')), 1, extra)
+
+    def test_regular_connection_is_never_skipped(self):
+        from peer_accounting import ownership_rows
+        data = {'servers': [{}, {}], 'user_connections': [
+            {'id': 'c', 'user_id': 'u', 'server_id': 1, 'protocol': 'awg3',
+             'client_id': 'k', 'last_bytes': 0}]}
+        self.assertEqual(len(ownership_rows(data, server_id=1, protocol='awg3')), 1)
 
 
 class CopyTranslationTests(unittest.TestCase):

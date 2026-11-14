@@ -9219,6 +9219,10 @@ def _instance_copy_apply(plan, source_server_id, target_server_id, source_protoc
             'last_bytes': 0,
             'last_rx_bytes': 0,
             'last_tx_bytes': 0,
+            # Nothing to finalize on the copy until it actually carries traffic:
+            # without this flag the usage-accounting guard blocks uninstalling
+            # the instance the copy just created (peer_accounting.ownership_rows).
+            'accounting_unowned': True,
         })
         copied += 1
     save_data(data)
