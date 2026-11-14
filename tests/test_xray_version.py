@@ -11,15 +11,21 @@ class FakeSSH:
 
     def __init__(self):
         self.uploads = []
+        self.commands = []
 
     def upload_file_sudo(self, content, remote_path):
         self.uploads.append((content, remote_path))
         return True
 
+    def run_sudo_script(self, script, **kwargs):
+        return ("", "", 0)
+
     def run_sudo_command(self, command, **kwargs):
+        self.commands.append(command)
         return ("", "", 0)
 
     def run_command(self, command, **kwargs):
+        self.commands.append(command)
         return ("", "", 0)
 
 
@@ -55,6 +61,19 @@ class XrayVersionTests(unittest.TestCase):
             any(XRAY_CORE_VERSION in content for content in dockerfile_uploads),
             "Uploaded Dockerfile does not pin XRAY_CORE_VERSION",
         )
+
+    def test_second_instance_uses_its_own_config_dir(self):
+        ssh = FakeSSH()
+        mgr = XrayManager(ssh, 'xray__2')
+        mgr.install_protocol(port=443)
+
+        uploaded_paths = [path for _, path in ssh.uploads]
+        for name in ('xray_private.key', 'xray_public.key', 'xray_short_id.key',
+                     'xray_uuid.key', 'clientsTable', 'server.json'):
+            self.assertIn('/opt/amnezia/xray-2/' + name, uploaded_paths, name)
+            self.assertNotIn('/opt/amnezia/xray/' + name, uploaded_paths, name)
+        run = [c for c in ssh.commands if c.startswith('docker run -d')][0]
+        self.assertIn('-v /opt/amnezia/xray-2:/opt/amnezia/xray-2', run)
 
 
 if __name__ == '__main__':

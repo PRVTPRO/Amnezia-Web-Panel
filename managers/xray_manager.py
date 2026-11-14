@@ -313,14 +313,16 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         self.ssh.run_sudo_command(f"mkdir -p {config_dir}")
         self.ssh.upload_file_sudo(json.dumps(server_json, indent=2), f"{config_dir}/server.json")
         # Native layout — separate key files matching the official Amnezia client install.
+        # Everything lands in THIS instance's config_dir: a second instance
+        # (xray__2 -> /opt/amnezia/xray-2) must not share the base keys.
         # See client/server_scripts/xray/configure_container.sh for the canonical layout.
-        self.ssh.upload_file_sudo(priv_key + '\n', "/opt/amnezia/xray/xray_private.key")
-        self.ssh.upload_file_sudo(pub_key + '\n', "/opt/amnezia/xray/xray_public.key")
-        self.ssh.upload_file_sudo(short_id + '\n', "/opt/amnezia/xray/xray_short_id.key")
+        self.ssh.upload_file_sudo(priv_key + '\n', f"{config_dir}/xray_private.key")
+        self.ssh.upload_file_sudo(pub_key + '\n', f"{config_dir}/xray_public.key")
+        self.ssh.upload_file_sudo(short_id + '\n', f"{config_dir}/xray_short_id.key")
         # xray_uuid.key marks the install-time "default" client whose ID gets skipped on
         # auto-import. Panel installs do not reserve such a client, so we leave it empty.
-        self.ssh.upload_file_sudo('\n', "/opt/amnezia/xray/xray_uuid.key")
-        self.ssh.upload_file_sudo("[]", "/opt/amnezia/xray/clientsTable")
+        self.ssh.upload_file_sudo('\n', f"{config_dir}/xray_uuid.key")
+        self.ssh.upload_file_sudo("[]", f"{config_dir}/clientsTable")
 
         results.append("Starting container...")
         run_cmd = f"""docker run -d \\
