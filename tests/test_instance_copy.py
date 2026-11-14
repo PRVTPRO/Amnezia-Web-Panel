@@ -164,6 +164,15 @@ class CopyArchiveTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 'name_taken')
 
 
+    def test_inspect_container_is_limited_to_containers(self):
+        """An image with the same name must not look like a container."""
+        ssh = FakeSSH()
+        copier = InstanceCopier(ssh, ssh)
+        copier.inspect_container(ssh, 'amnezia-awg3')
+        self.assertTrue(any('--type container' in command for command in ssh.commands),
+                        ssh.commands)
+
+
 class CopyStagingTests(unittest.TestCase):
     """The panel can run on the source host: local staging must not collide."""
 
