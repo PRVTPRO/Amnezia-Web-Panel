@@ -889,7 +889,15 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         """Rename a client. The display name lives in clientsTable
         (userData.clientName) and is embedded into the VLESS URL fragment on
         the fly, so updating the table is enough — UUID, keys and server.json
-        stay untouched and existing links keep working."""
+        stay untouched and existing links keep working.
+
+        The shared writer commits with `docker exec`, so a stopped instance
+        is rejected up front with a clear message instead of a generic
+        staging failure.
+        """
+        if not self.check_container_running():
+            raise RuntimeError(
+                'Xray container is not running - start the instance to rename its clients')
         clients_table = self._get_clients_table(strict=True)
         client = next((c for c in clients_table if c.get('clientId') == client_id), None)
         if client is None:

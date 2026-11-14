@@ -45,7 +45,8 @@ TABLE_PATH = '/opt/amnezia/xray/clientsTable'
 class FakeSSH:
     """Serves the native-layout config dir; table reads can fail on demand."""
 
-    def __init__(self, table_content='[]', fail_table_read=False):
+    def __init__(self, table_content='[]', fail_table_read=False, container_running=True):
+        self.container_running = container_running
         self.fail_table_read = fail_table_read
         self.files = {
             '/opt/amnezia/xray/server.json': json.dumps(SERVER_JSON),
@@ -66,6 +67,8 @@ class FakeSSH:
     def run_sudo_command(self, command, *args, **kwargs):
         cmd = command.strip()
         self.commands.append(cmd)
+        if 'docker ps --filter' in cmd:
+            return ('Up 2 minutes', '', 0) if self.container_running else ('', '', 0)
         if cmd.startswith('ls -1'):
             dir_path = cmd.split()[2]
             names = [p[len(dir_path):].lstrip('/')
@@ -108,6 +111,15 @@ class StrictReadTests(unittest.TestCase):
         self.ssh.fail_table_read = True
         with self.assertRaises(RuntimeError):
             self.mgr.rename_client('xray', 'existing-1', 'New name')
+
+    def test_rename_on_a_stopped_instance_fails_with_a_clear_message(self):
+        self.ssh.container_running = False
+        with self.assertRaises(RuntimeError) as ctx:
+            self.mgr.rename_client('xray', 'existing-1', 'New name')
+        self.assertIn('not running', str(ctx.exception))
+        # No table traffic at all: the guard fires before the read.
+        table_ops = [c for c in self.ssh.commands if 'clientsTable' in c]
+        self.assertEqual(table_ops, [])
 
     def test_malformed_table_aborts_toggle(self):
         self.ssh.files[TABLE_PATH] = 'not-json'
