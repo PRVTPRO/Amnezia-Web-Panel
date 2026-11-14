@@ -3355,6 +3355,9 @@ x_warp_up() {
         if code != 0 or not (out or '').strip():
             raise RuntimeError('This instance has no exit link file')
         self.ssh.upload_file(rewrite_transit_conf(out, awg_params), '/tmp/_amnz_exit0.conf')
+        # The file carries the entry's private key: keep it 0600 and delete it
+        # as soon as docker cp has copied it into the container.
+        self.ssh.run_command('chmod 600 /tmp/_amnz_exit0.conf')
         try:
             for step in (
                 f"docker cp /tmp/_amnz_exit0.conf {container_name}:{EXIT_CONF}",

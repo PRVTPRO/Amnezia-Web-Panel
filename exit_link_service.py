@@ -66,6 +66,10 @@ class ExitLinkService:
         # Automatic switches of different entries still go one at a time so a
         # failed apply can restore the previous conf without overlapping writes.
         self._failover_switch_lock = asyncio.Lock()
+        # Transit version changes are exit-wide: one at a time, and never while
+        # holding more than one per-entry lock (that ordering deadlocked two
+        # concurrent links through the same exit).
+        self._transit_lock = asyncio.Lock()
 
     # ----- read-only helpers (no SSH) -----
 
@@ -244,40 +248,48 @@ class ExitLinkService:
         interface, so a mixed link is impossible. Keys, PSKs and transit
         addresses stay; `skip` is the entry that is being linked right now and
         gets its config from the link itself.
+
+        Runs under one transit lock and deliberately does not take per-entry
+        locks: the caller already holds the linking entry's lock, and two such
+        calls would otherwise wait on each other. Every entry receives the same
+        parameter block, so concurrent writes converge.
         """
-        data = self.load_data()
-        exit_srv, _ = self._exit(data, exit_uid)
-        exit_manager = await self._exit_manager(exit_srv)
-        info = await asyncio.to_thread(exit_manager.apply_transit_params, False)
-        params = info.get('awg_params') or {}
-        for item in self.linked_entries(self.load_data(), exit_uid):
-            if skip and (item.get('server_id'), item.get('protocol')) == skip:
-                continue
-            try:
-                fresh = self.load_data()
-                entry, _ = self._entry(fresh, item['server_id'], item['protocol'])
-                awg = await self._awg(entry)
-                async with self._locks[(entry['uid'], item['protocol'])]:
+        async with self._transit_lock:
+            data = self.load_data()
+            exit_srv, _ = self._exit(data, exit_uid)
+            exit_manager = await self._exit_manager(exit_srv)
+            info = await asyncio.to_thread(exit_manager.apply_transit_params, False)
+            params = info.get('awg_params') or {}
+            failed = []
+            for item in self.linked_entries(self.load_data(), exit_uid):
+                if skip and (item.get('server_id'), item.get('protocol')) == skip:
+                    continue
+                try:
+                    fresh = self.load_data()
+                    entry, _ = self._entry(fresh, item['server_id'], item['protocol'])
+                    awg = await self._awg(entry)
                     await asyncio.to_thread(
                         awg.exit_update_params, item['protocol'], params)
-                await self._update_record(
-                    entry['uid'], item['protocol'],
-                    lambda r: (r.get('exit_link') or {}).update({
-                        'awg_params': params,
-                        'mtu': info.get('mtu'),
-                        'protocol_version': info.get('protocol_version'),
-                    }))
-            except Exception as err:
-                logger.warning("2.0 fallback for %s/%s failed: %s",
-                               item.get('name'), item.get('protocol'), err)
-        data = self.load_data()
-        _, exit_rec = self._exit(data, exit_uid)
-        exit_rec['awg_params'] = params
-        exit_rec['protocol_version'] = info.get('protocol_version')
-        if info.get('mtu'):
-            exit_rec['mtu'] = str(info['mtu'])
-        self.save_data(data)
-        return params
+                    await self._update_record(
+                        entry['uid'], item['protocol'],
+                        lambda r: (r.get('exit_link') or {}).update({
+                            'awg_params': params,
+                            'mtu': info.get('mtu'),
+                            'protocol_version': info.get('protocol_version'),
+                        }))
+                except Exception as err:
+                    failed.append(item.get('name') or item.get('protocol'))
+                    logger.warning("2.0 fallback for %s/%s failed: %s",
+                                   item.get('name'), item.get('protocol'), err)
+            async with self.data_lock:
+                data = self.load_data()
+                _, exit_rec = self._exit(data, exit_uid)
+                exit_rec['awg_params'] = params
+                exit_rec['protocol_version'] = info.get('protocol_version')
+                if info.get('mtu'):
+                    exit_rec['mtu'] = str(info['mtu'])
+                self.save_data(data)
+            return params, failed
 
     async def set_transit_version(self, exit_uid, awg3):
         """Move an exit and every entry linked to it to the 3.1 (or 2.0) set.
@@ -289,21 +301,32 @@ class ExitLinkService:
         live apply keeps the interface and its flows when the kernel accepts
         the new set through syncconf.
         """
-        data = self.load_data()
-        exit_srv, _ = self._exit(data, exit_uid)
-        exit_manager = await self._exit_manager(exit_srv)
-        try:
-            info = await asyncio.to_thread(exit_manager.apply_transit_params, bool(awg3))
-        except Exception as err:
-            raise ExitLinkError('exit_apply_failed', str(err))
-        params = info.get('awg_params') or {}
-        outcomes = []
-        for item in self.linked_entries(self.load_data(), exit_uid):
+        async with self._transit_lock:
+            data = self.load_data()
+            exit_srv, _ = self._exit(data, exit_uid)
+            exit_manager = await self._exit_manager(exit_srv)
             try:
-                fresh = self.load_data()
-                entry, _ = self._entry(fresh, item['server_id'], item['protocol'])
-                awg = await self._awg(entry)
-                async with self._locks[(entry['uid'], item['protocol'])]:
+                current = await asyncio.to_thread(exit_manager.get_info)
+            except Exception:
+                current = {}
+            if (current.get('protocol_version') == '3.1') == bool(awg3):
+                # Уже на нужном наборе: не генерируем новые ключи и не трогаем
+                # интерфейс - только приводим записи панели в соответствие.
+                info = dict(current)
+                info['applied'] = 'unchanged'
+            else:
+                try:
+                    info = await asyncio.to_thread(
+                        exit_manager.apply_transit_params, bool(awg3))
+                except Exception as err:
+                    raise ExitLinkError('exit_apply_failed', str(err))
+            params = info.get('awg_params') or {}
+            outcomes = []
+            for item in self.linked_entries(self.load_data(), exit_uid):
+                try:
+                    fresh = self.load_data()
+                    entry, _ = self._entry(fresh, item['server_id'], item['protocol'])
+                    awg = await self._awg(entry)
                     res = await asyncio.to_thread(
                         awg.exit_update_params, item['protocol'], params)
                     await self._update_record(
@@ -314,28 +337,29 @@ class ExitLinkService:
                             'protocol_version': info.get('protocol_version'),
                             'backend': res.get('backend'),
                         }))
-                outcomes.append({**item, 'status': 'success',
-                                 'applied': res.get('applied'),
-                                 'backend': res.get('backend')})
-            except Exception as err:
-                logger.warning("params update for %s/%s failed: %s",
-                               item.get('name'), item.get('protocol'), err)
-                outcomes.append({**item, 'status': 'error', 'error': str(err)})
-        data = self.load_data()
-        _, exit_rec = self._exit(data, exit_uid)
-        exit_rec['awg_params'] = params
-        exit_rec['protocol_version'] = info.get('protocol_version')
-        if info.get('mtu'):
-            exit_rec['mtu'] = str(info['mtu'])
-        self.save_data(data)
-        return {
-            'status': 'success',
-            'protocol_version': info.get('protocol_version'),
-            'mtu': info.get('mtu'),
-            'applied': info.get('applied'),
-            'backend': info.get('backend'),
-            'entries': outcomes,
-        }
+                    outcomes.append({**item, 'status': 'success',
+                                     'applied': res.get('applied'),
+                                     'backend': res.get('backend')})
+                except Exception as err:
+                    logger.warning("params update for %s/%s failed: %s",
+                                   item.get('name'), item.get('protocol'), err)
+                    outcomes.append({**item, 'status': 'error', 'error': str(err)})
+            async with self.data_lock:
+                data = self.load_data()
+                _, exit_rec = self._exit(data, exit_uid)
+                exit_rec['awg_params'] = params
+                exit_rec['protocol_version'] = info.get('protocol_version')
+                if info.get('mtu'):
+                    exit_rec['mtu'] = str(info['mtu'])
+                self.save_data(data)
+            return {
+                'status': 'success',
+                'protocol_version': info.get('protocol_version'),
+                'mtu': info.get('mtu'),
+                'applied': info.get('applied'),
+                'backend': info.get('backend'),
+                'entries': outcomes,
+            }
 
     async def link(self, entry_server_id, protocol, exit_uid, force=False, dns_via_exit=None,
                    *, restore_on_failure=False, source='manual', _locked=False):
@@ -424,7 +448,7 @@ class ExitLinkService:
                 module = await asyncio.to_thread(awg._host_awg_module_version)
                 if not awg._module_supports_awg3(module):
                     try:
-                        exit_params = await self._downgrade_exit(
+                        exit_params, failed_entries = await self._downgrade_exit(
                             exit_uid, skip=(entry_server_id, protocol))
                     except Exception as err:
                         raise ExitLinkError(
@@ -438,6 +462,12 @@ class ExitLinkService:
                     live_exit['mtu'] = transit_mtu(exit_params)
                     live_exit['protocol_version'] = '2.0'
                     warnings.append('exit_awg3_downgraded')
+                    if failed_entries:
+                        # Выход уже на 2.0, а часть входов обновить не удалось:
+                        # их линки останутся на старом наборе до повтора.
+                        logger.warning("2.0 fallback left entries behind: %s",
+                                       ', '.join(failed_entries))
+                        warnings.append('exit_awg3_downgrade_incomplete')
             link_mtu = int((live_exit or {}).get('mtu')
                            or (exit_rec or {}).get('mtu')
                            or transit_mtu(exit_params) or EXIT_MTU_LIMIT)

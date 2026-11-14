@@ -305,9 +305,6 @@ class SetTransitVersionTests(unittest.TestCase):
         self.assertEqual(exit_rec['protocol_version'], '3.1')
 
 
-if __name__ == '__main__':
-    unittest.main()
-
 
 class FakeDowngradeExitMgr:
     def __init__(self):
@@ -359,8 +356,10 @@ class DowngradeExitTests(unittest.TestCase):
             find_server_by_uid=lambda d, uid: next(
                 (i, s) for i, s in enumerate(d['servers']) if s.get('uid') == uid),
         )
-        params = asyncio.run(svc._downgrade_exit('exit-uid', skip=(0, 'awg3')))
+        params, failed = asyncio.run(
+            svc._downgrade_exit('exit-uid', skip=(0, 'awg3')))
         self.assertEqual(exit_mgr.calls, [False])
+        self.assertEqual(failed, [])
         self.assertNotIn('header_protection_key', params)
         self.assertIn('junk_packet_count', params)
         # текущий (линкующийся) вход не трогаем, остальные переводим
@@ -372,3 +371,7 @@ class DowngradeExitTests(unittest.TestCase):
         self.assertEqual(rec['mtu'], 1420)
         exit_rec = state['data']['servers'][2]['protocols']['exit']
         self.assertEqual(exit_rec['protocol_version'], '2.0')
+
+
+if __name__ == '__main__':
+    unittest.main()

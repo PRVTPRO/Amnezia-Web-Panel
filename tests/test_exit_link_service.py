@@ -139,6 +139,10 @@ class FakeAWG:
             raise RuntimeError(self.dns_error)
         return 'exit link up: 10.9.0.7/24 -> table 200'
 
+    def exit_update_params(self, protocol, awg_params):
+        self.calls.append(('exit_update_params', protocol, dict(awg_params)))
+        return {'applied': 'syncconf', 'backend': self.backend}
+
     def exit_unlink(self, protocol):
         self.calls.append(('exit_unlink', protocol))
         if self.fail_unlink:
@@ -160,6 +164,27 @@ class FakeExit:
         self.protocol_version = None
         self.awg_params = {}
         self.exit_backend = 'kernel'
+
+    def get_info(self):
+        return {
+            'public_key': f'EXITPUB-{self.host}',
+            'port': '55520',
+            'subnet': '10.9.0.0/24',
+            'obfuscation': bool(self.awg_params),
+            'protocol_version': self.protocol_version,
+            'mtu': self.mtu,
+            'awg_params': dict(self.awg_params),
+        }
+
+    def apply_transit_params(self, awg3):
+        self.calls.append(('apply_transit_params', awg3))
+        if awg3:
+            self.awg_params = {'header_protection_key': 'KEY='}
+            self.protocol_version, self.mtu = '3.1', 1400
+        else:
+            self.awg_params = {'junk_packet_count': '12'}
+            self.protocol_version, self.mtu = '2.0', 1420
+        return self.get_info()
 
     def transit_backend(self):
         self.calls.append(('transit_backend',))
@@ -341,14 +366,20 @@ class LinkTests(unittest.TestCase):
         self.assertEqual(saved['mtu'], 1400)
         self.assertTrue(any('Backend: entry=kernel exit=kernel' in line for line in result['log']))
 
-    def test_awg31_exit_refuses_a_pre_3_entry_module(self):
+    def test_awg31_exit_downgrades_for_a_pre_3_entry_module(self):
         h = Harness()
-        self._awg31_exit(h)
+        exit_node = self._awg31_exit(h)
         h.awg().module_version = '1.0.20240301'
-        with self.assertRaises(ExitLinkError) as ctx:
-            run(h.service.link(0, 'awg2', 'exit-b'))
-        self.assertEqual(ctx.exception.code, 'exit_awg3_kernel_required')
-        self.assertEqual(h.exit('203.0.113.9').calls, [], 'no peer may be created')
+
+        result = run(h.service.link(0, 'awg2', 'exit-b'))
+
+        self.assertEqual(result['status'], 'success')
+        self.assertIn('exit_awg3_downgraded', result.get('warnings', []))
+        # выход переведён на 2.0 целиком, пир создан уже на 2.0-наборе
+        self.assertIn(('apply_transit_params', False), exit_node.calls)
+        applied = h.awg().applied_link or {}
+        self.assertEqual(applied.get('protocol_version'), '2.0')
+        self.assertNotIn('header_protection_key', applied.get('awg_params') or {})
 
     def test_awg31_exit_refuses_the_userspace_backend(self):
         h = Harness()

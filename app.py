@@ -7492,6 +7492,7 @@ class ExitTransitVersionRequest(BaseModel):
 
 
 @app.post('/api/exit-nodes/{exit_uid}/transit-version', tags=["Protocols"])
+@serialize_peer_lifecycle
 async def api_exit_transit_version(request: Request, exit_uid: str,
                                    req: ExitTransitVersionRequest):
     """Switch an exit and every entry linked to it between the AWG 3.1 and 2.0
