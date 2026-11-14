@@ -539,6 +539,19 @@ class PanelMergeTests(unittest.TestCase):
         # The source bindings and the awg2 binding are untouched.
         self.assertEqual(len(data['user_connections']), 3)
 
+    def test_rollback_keeps_an_instance_it_did_not_create(self):
+        """A concurrent install took the key first: do not delete its work."""
+        self.app._instance_copy_apply(self.plan(), 0, 1, 'awg3')
+        data = json.loads(Path(self.data_path).read_text(encoding='utf-8'))
+        data['servers'][1]['protocols']['awg3__2']['container_name'] = 'amnezia-awg3-9'
+        Path(self.data_path).write_text(json.dumps(data), encoding='utf-8')
+
+        self.app._instance_copy_rollback_panel(self.plan(), 1)
+
+        data = json.loads(Path(self.data_path).read_text(encoding='utf-8'))
+        self.assertIn('awg3__2', data['servers'][1]['protocols'])
+        self.assertEqual(len(data['user_connections']), 5)
+
 
 class CopyEndpointTests(unittest.IsolatedAsyncioTestCase):
     """The HTTP layer: the start handler must create a journal entry, not blow up."""

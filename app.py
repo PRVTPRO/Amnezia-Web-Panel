@@ -9131,6 +9131,12 @@ def _instance_copy_rollback_panel(plan, target_server_id):
         data = load_data()
         target = data['servers'][target_server_id]
         protocols = target.get('protocols') or {}
+        entry = protocols.get(plan['target_key'])
+        if (isinstance(entry, dict)
+                and entry.get('container_name') != plan['target_container']):
+            # A concurrent install took the same key after planning: that
+            # instance is not ours, so keep it and its user bindings.
+            return
         protocols.pop(plan['target_key'], None)
         connections = data.get('user_connections') or []
         data['user_connections'] = [
@@ -9205,10 +9211,12 @@ async def _run_instance_copy(op_id):
                     op['target_server_id'], op['protocol'])
         except Exception:
             # The container exists but the panel cannot record it: drop the
-            # partial panel entry first, then remove the container, otherwise
-            # the target keeps an instance nothing knows about.
-            await asyncio.to_thread(
-                _instance_copy_rollback_panel, plan, op['target_server_id'])
+            # partial panel entry under the same lock the successful write
+            # uses (a traffic update must not be overwritten by the snapshot),
+            # then remove the container.
+            async with DATA_LOCK:
+                await asyncio.to_thread(
+                    _instance_copy_rollback_panel, plan, op['target_server_id'])
             await asyncio.to_thread(copier.destroy, plan)
             raise
         result['connections'] = copied
