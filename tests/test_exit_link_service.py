@@ -51,6 +51,22 @@ class FakeAWG:
         self.restore_error = None
         self.conf_snapshot = None
         self.applied_link = None
+        self.module_version = '3.1.20260906'
+        self.backend = 'kernel'
+
+    def _host_awg_module_version(self):
+        return self.module_version
+
+    @staticmethod
+    def _module_supports_awg3(version):
+        try:
+            return int(str(version).split('.')[0]) >= 3
+        except (AttributeError, ValueError):
+            return False
+
+    def exit_link_backend(self, protocol):
+        self.calls.append(('exit_link_backend', protocol))
+        return self.backend
 
     def exit_prepare_keys(self, protocol):
         self.calls.append(('exit_prepare_keys', protocol))
@@ -140,6 +156,14 @@ class FakeExit:
         self.next_ip = '10.9.0.7'
         self.running = True
         self.running_error = None
+        self.mtu = 1420
+        self.protocol_version = None
+        self.awg_params = {}
+        self.exit_backend = 'kernel'
+
+    def transit_backend(self):
+        self.calls.append(('transit_backend',))
+        return self.exit_backend
 
     def add_peer(self, peer_id, name, public_key):
         self.calls.append(('add_peer', peer_id, name, public_key))
@@ -147,7 +171,9 @@ class FakeExit:
         if self.add_error:
             raise RuntimeError(self.add_error)
         return {'transit_ip': self.next_ip, 'psk': 'PSK', 'public_key': f'EXITPUB-{self.host}', 'port': '55520',
-                'subnet': '10.9.0.0/24', 'obfuscation': self.host == '203.0.113.9', 'awg_params': {}}
+                'subnet': '10.9.0.0/24', 'obfuscation': self.host == '203.0.113.9',
+                'awg_params': dict(self.awg_params), 'mtu': self.mtu,
+                'protocol_version': self.protocol_version}
 
     def remove_peer(self, public_key=None, peer_id=None):
         self.calls.append(('remove_peer', public_key, peer_id))
@@ -277,6 +303,72 @@ class LinkTests(unittest.TestCase):
             run(h.service.link(1, 'awg2', 'exit-a'))
         self.assertEqual(ctx.exception.code, 'exit_self')
         self.assertEqual(h.exit().calls, [])
+
+    AWG31_PARAMS = {
+        'junk_packet_count': '6', 'junk_packet_min_size': '10', 'junk_packet_max_size': '40',
+        'init_packet_junk_size': '20', 'response_packet_junk_size': '20',
+        'init_packet_magic_header': '1', 'response_packet_magic_header': '2',
+        'underload_packet_magic_header': '3', 'transport_packet_magic_header': '4',
+        'cookie_reply_packet_junk_size': '12', 'transport_packet_junk_size': '12',
+        'header_protection_key': 'HPK', 'content_padding_addition': '8-24',
+        'random_trailers': 'on', 'disable_cookies': 'on',
+        'i1': '<r 2><b 0x85>',
+    }
+
+    def _awg31_exit(self, h, mtu=1400):
+        rec = h.data['servers'][2]['protocols']['exit']
+        rec.update({'obfuscation': True, 'awg_params': dict(self.AWG31_PARAMS), 'mtu': mtu})
+        exit_node = h.exit('203.0.113.9')
+        exit_node.awg_params = dict(self.AWG31_PARAMS)
+        exit_node.mtu = mtu
+        exit_node.protocol_version = '3.1'
+        return exit_node
+
+    def test_awg31_exit_links_on_the_kernel_backend(self):
+        h = Harness()
+        self._awg31_exit(h)
+        h.awg().mtu = '1400'
+        result = run(h.service.link(0, 'awg2', 'exit-b'))
+
+        self.assertEqual(result['status'], 'success')
+        link = h.awg().applied_link
+        self.assertEqual(link['protocol_version'], '3.1')
+        self.assertEqual(link['mtu'], 1400)
+        self.assertEqual(link['awg_params']['header_protection_key'], 'HPK')
+        saved = h.record()['exit_link']
+        self.assertEqual(saved['backend'], 'kernel')
+        self.assertEqual(saved['protocol_version'], '3.1')
+        self.assertEqual(saved['mtu'], 1400)
+        self.assertTrue(any('Backend: entry=kernel exit=kernel' in line for line in result['log']))
+
+    def test_awg31_exit_refuses_a_pre_3_entry_module(self):
+        h = Harness()
+        self._awg31_exit(h)
+        h.awg().module_version = '1.0.20240301'
+        with self.assertRaises(ExitLinkError) as ctx:
+            run(h.service.link(0, 'awg2', 'exit-b'))
+        self.assertEqual(ctx.exception.code, 'exit_awg3_kernel_required')
+        self.assertEqual(h.exit('203.0.113.9').calls, [], 'no peer may be created')
+
+    def test_awg31_exit_refuses_the_userspace_backend(self):
+        h = Harness()
+        self._awg31_exit(h)
+        h.awg().mtu = '1400'
+        h.awg().backend = 'userspace'
+        with self.assertRaises(ExitLinkError) as ctx:
+            run(h.service.link(0, 'awg2', 'exit-b'))
+        self.assertEqual(ctx.exception.code, 'exit_awg3_userspace')
+        self.assertIn(('exit_unlink', 'awg2'), h.awg().calls)
+        self.assertNotIn('exit_link', h.record())
+
+    def test_awg31_exit_mtu_is_the_link_ceiling(self):
+        h = Harness()
+        self._awg31_exit(h)
+        h.awg().mtu = '1420'
+        with self.assertRaises(ExitLinkError) as ctx:
+            run(h.service.link(0, 'awg2', 'exit-b'))
+        self.assertEqual(ctx.exception.code, 'exit_mtu_too_big')
+        self.assertIn('1400', str(ctx.exception))
 
     def test_add_peer_failure_leaves_everything_untouched(self):
         h = Harness()

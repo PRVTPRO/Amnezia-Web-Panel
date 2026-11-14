@@ -301,6 +301,28 @@
     @media (prefers-reduced-motion: reduce) {
         .server-stats-skel { animation: none; }
     }
+    /* Загрузка шапки: страница рисуется сразу, пробы догоняют её фоном.
+       Пульсируют только точки уже существующих кнопок, скелетоны — блоки. */
+    .srv-header .srv-status-btn[data-state="loading"] .ssh-trust-dot,
+    .srv-header .srv-status-btn[data-state="loading"] .awg-plugin-dot,
+    .srv-header .srv-status-btn[data-state="loading"] .cheburcheck-dot {
+        background: var(--text-muted);
+        animation: serverStatsPulse 1.2s ease-in-out infinite;
+    }
+    .srv-header .badge.is-skeleton,
+    .srv-header .ip-chip.is-skeleton {
+        color: transparent;
+        background: var(--bg-secondary);
+        border-color: var(--border-color);
+        animation: serverStatsPulse 1.2s ease-in-out infinite;
+    }
+    @media (prefers-reduced-motion: reduce) {
+        .srv-header .srv-status-btn[data-state="loading"] .ssh-trust-dot,
+        .srv-header .srv-status-btn[data-state="loading"] .awg-plugin-dot,
+        .srv-header .srv-status-btn[data-state="loading"] .cheburcheck-dot,
+        .srv-header .badge.is-skeleton,
+        .srv-header .ip-chip.is-skeleton { animation: none; }
+    }
     @media (max-width: 520px) {
         .server-stats-popover {
             position: fixed;
@@ -611,6 +633,7 @@
         const text = document.getElementById('sshTrustBtnText');
         const dot = document.getElementById('sshTrustDot');
         if (!btn || !text || !dot) return;
+        btn.removeAttribute('aria-busy');
         btn.classList.remove('is-urgent', 'is-danger', 'is-ok');
         dot.classList.remove('is-urgent', 'is-danger', 'is-ok');
         if (state === 'changed') {
@@ -639,8 +662,7 @@
         } catch (error) {
             setSSHTrustButton('urgent');
         }
-    }
-    async function inspectSSHTrust() {
+    }    async function inspectSSHTrust() {
         sshTrustToken = null;
         document.getElementById('ssh-trust-confirmation').hidden = true;
         document.getElementById('ssh-trust-verified').checked = false;
@@ -671,9 +693,262 @@
             document.getElementById('ssh-trust-details').textContent = error.message;
         } finally { button.disabled = false; }
     }
-    document.addEventListener('DOMContentLoaded', loadSSHTrustStatus);
 </script>
 
+<!-- ===== Copy one AWG instance to another server ===== -->
+<div class="modal-backdrop" id="copyInstanceModal">
+    <div class="modal" style="max-width: 620px;">
+        <div class="modal-header">
+            <h2 class="modal-title">{{ _('copy_instance_title') }}</h2>
+            <button class="modal-close" type="button" onclick="closeCopyInstance()">×</button>
+        </div>
+        <div id="copyInstanceForm">
+            <p class="text-muted" style="margin-top: 0;">{{ _('copy_instance_desc') }}</p>
+            <div class="form-group">
+                <label class="form-label">{{ _('copy_instance_source') }}</label>
+                <div class="form-hint" id="copyInstanceSource"></div>
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="copyInstanceTarget">{{ _('copy_instance_target') }}</label>
+                <select class="form-select" id="copyInstanceTarget" onchange="loadCopyPreview()"></select>
+            </div>
+            <div class="form-hint" id="copyInstancePreview">{{ _('copy_instance_checking') }}</div>
+            <div class="form-hint" style="margin-top: var(--space-sm);">{{ _('copy_instance_key_warning') }}</div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" type="button" onclick="closeCopyInstance()">{{ _('copy_instance_close') }}</button>
+                <button class="btn btn-primary" type="button" id="copyInstanceStart" onclick="startCopyInstance()" disabled>{{ _('copy_instance_start') }}</button>
+            </div>
+        </div>
+        <div id="copyInstanceProgress" class="hidden">
+            <div class="awg-progress">
+                <div class="awg-progress-head">
+                    <span id="copyInstanceStage">{{ _('copy_instance_running') }}</span>
+                    <span class="awg-progress-percent" id="copyInstancePercent">0%</span>
+                </div>
+                <div class="awg-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+                     aria-valuenow="0" id="copyInstanceTrack">
+                    <div class="awg-progress-fill" id="copyInstanceFill"></div>
+                </div>
+            </div>
+            <div class="awg-plugin-stage" id="copyInstanceStep"></div>
+            <details class="awg-plugin-details" id="copyInstanceLogBox">
+                <summary>{{ _('copy_instance_log') }}</summary>
+                <div class="awg-plugin-log" id="copyInstanceLog" aria-live="polite"></div>
+            </details>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" type="button" id="copyInstanceCancel"
+                        onclick="cancelCopyInstance()">{{ _('copy_instance_cancel') }}</button>
+                <button class="btn btn-primary hidden" type="button" id="copyInstanceDone"
+                        onclick="closeCopyInstance()">{{ _('copy_instance_close') }}</button>
+            </div>
+        </div>
+    </div>
+</div>
+<script>
+    const COPY_TARGETS = {{ copy_targets | tojson }};
+    const COPY_LABELS = {{ {
+        'checking': _('copy_instance_checking'),
+        'preview': _('copy_instance_preview'),
+        'port': _('port'),
+        'peers': _('connections'),
+        'port_busy': _('copy_instance_port_busy'),
+        'image': _('copy_instance_image'),
+        'no_targets': _('copy_instance_target_missing'),
+        'running': _('copy_instance_running'),
+        'step': _('copy_instance_step'),
+        'success': _('copy_instance_success'),
+        'failed': _('copy_instance_failed'),
+        'cancelled': _('copy_instance_cancelled'),
+        'connections': _('copy_instance_connections'),
+        'error': _('error')
+    } | tojson }};
+    let copySource = null;
+    let copyPlan = null;
+    let copyOp = null;
+    let copyFinished = null;
+
+    function copyFmt(text, vars) {
+        return String(text || '').replace(/\{(\w+)\}/g, function (match, key) {
+            return vars[key] !== undefined ? vars[key] : match;
+        });
+    }
+
+    function openCopyInstance(proto) {
+        if (copyOp && copyOp.timer) clearTimeout(copyOp.timer);
+        copyOp = null;
+        copySource = proto;
+        copyPlan = null;
+        copyFinished = null;
+        const source = document.getElementById('copyInstanceSource');
+        if (source) source.textContent = getProtoTitle(proto);
+        const select = document.getElementById('copyInstanceTarget');
+        const start = document.getElementById('copyInstanceStart');
+        const preview = document.getElementById('copyInstancePreview');
+        document.getElementById('copyInstanceForm').classList.remove('hidden');
+        document.getElementById('copyInstanceProgress').classList.add('hidden');
+        document.getElementById('copyInstanceLog').textContent = '';
+        if (select) {
+            select.innerHTML = (COPY_TARGETS || []).map(function (target) {
+                return '<option value="' + target.id + '">' + escapeHtml(target.name) +
+                    ' — ' + escapeHtml(target.host) + '</option>';
+            }).join('');
+        }
+        if (start) start.disabled = true;
+        if (preview) preview.textContent = COPY_TARGETS.length ? COPY_LABELS.checking : COPY_LABELS.no_targets;
+        openModal('copyInstanceModal');
+        if (COPY_TARGETS.length) loadCopyPreview();
+    }
+
+    async function loadCopyPreview() {
+        const select = document.getElementById('copyInstanceTarget');
+        const preview = document.getElementById('copyInstancePreview');
+        const start = document.getElementById('copyInstanceStart');
+        if (!select || !select.value || !copySource) return;
+        copyPlan = null;
+        if (start) start.disabled = true;
+        if (preview) preview.textContent = COPY_LABELS.checking;
+        try {
+            const plan = await apiCall(`/api/servers/${SERVER_ID}/copy/preflight`, 'POST', {
+                protocol: copySource,
+                target_server_id: Number(select.value),
+            });
+            copyPlan = plan;
+            const parts = [
+                COPY_LABELS.preview + ': ' + plan.target_key + ' · ' + plan.target_container,
+                COPY_LABELS.port + ': ' + plan.port,
+                COPY_LABELS.peers + ': ' + plan.peers,
+            ];
+            const warnings = plan.warnings || [];
+            if (warnings.indexOf('port_in_use') !== -1) {
+                parts.push(copyFmt(COPY_LABELS.port_busy, {port: plan.source_port, new: plan.port}));
+            }
+            if (warnings.indexOf('image_transfer') !== -1) parts.push(COPY_LABELS.image);
+            if (preview) preview.textContent = parts.join(' · ');
+            if (start) start.disabled = false;
+        } catch (error) {
+            if (preview) preview.textContent = COPY_LABELS.error + ': ' + error.message;
+        }
+    }
+
+    async function startCopyInstance() {
+        const select = document.getElementById('copyInstanceTarget');
+        const start = document.getElementById('copyInstanceStart');
+        if (!copySource || !select || !select.value) return;
+        if (start) start.disabled = true;
+        try {
+            const res = await apiCall(`/api/servers/${SERVER_ID}/copy`, 'POST', {
+                protocol: copySource,
+                target_server_id: Number(select.value),
+            });
+            copyOp = {opId: res.operation_id, offset: 0, timer: null};
+            document.getElementById('copyInstanceForm').classList.add('hidden');
+            document.getElementById('copyInstanceProgress').classList.remove('hidden');
+            document.getElementById('copyInstanceDone').classList.add('hidden');
+            const cancel = document.getElementById('copyInstanceCancel');
+            if (cancel) {
+                cancel.disabled = false;
+                cancel.textContent = {{ _('copy_instance_cancel') | tojson }};
+            }
+            pollCopyInstance();
+        } catch (error) {
+            showToast(COPY_LABELS.error + ': ' + error.message, 'error');
+            if (start) start.disabled = false;
+        }
+    }
+
+    async function pollCopyInstance() {
+        const op = copyOp;
+        if (!op) return;
+        try {
+            const data = await apiCall(`/api/servers/${SERVER_ID}/copy/` +
+                encodeURIComponent(op.opId) + '?offset=' + op.offset);
+            op.offset = data.next_offset;
+            const percent = Math.max(0, Math.min(100, data.percent || 0));
+            const fill = document.getElementById('copyInstanceFill');
+            const label = document.getElementById('copyInstancePercent');
+            const track = document.getElementById('copyInstanceTrack');
+            const stepEl = document.getElementById('copyInstanceStep');
+            if (fill) fill.style.width = percent + '%';
+            if (label) label.textContent = percent + '%';
+            if (track) track.setAttribute('aria-valuenow', String(percent));
+            const log = document.getElementById('copyInstanceLog');
+            (data.lines || []).forEach(function (line) {
+                if (log) log.textContent += '[' + line.ts + '] ' + line.text + '\n';
+            });
+            if (log) log.scrollTop = log.scrollHeight;
+            if (data.state === 'running') {
+                if (stepEl) stepEl.textContent = copyFmt(COPY_LABELS.step,
+                    {step: data.step || 0, total: data.total || 8});
+                op.timer = setTimeout(pollCopyInstance, 1000);
+                return;
+            }
+            const cancel = document.getElementById('copyInstanceCancel');
+            if (cancel) cancel.remove();
+            document.getElementById('copyInstanceDone').classList.remove('hidden');
+            if (data.state === 'success') {
+                copyFinished = 'success';
+                if (stepEl) {
+                    stepEl.textContent = copyFmt(COPY_LABELS.success, {name: data.target_key || ''});
+                    stepEl.className = 'awg-plugin-stage awg-plugin-updated';
+                }
+                if (data.result && data.result.connections !== undefined && stepEl) {
+                    stepEl.textContent += ' · ' +
+                        copyFmt(COPY_LABELS.connections, {n: data.result.connections});
+                }
+            } else if (data.state === 'cancelled') {
+                copyFinished = 'cancelled';
+                if (stepEl) stepEl.textContent = COPY_LABELS.cancelled;
+            } else {
+                copyFinished = 'failed';
+                const box = document.getElementById('copyInstanceLogBox');
+                if (box) box.open = true;
+                if (stepEl) {
+                    stepEl.textContent = COPY_LABELS.failed + ': ' +
+                        ((data.error && data.error.message) || '');
+                    stepEl.style.color = 'var(--danger)';
+                }
+            }
+        } catch (error) {
+            // A dropped poll must not spin forever: after ten misses show the
+            // reason and stop, the operation keeps running on the server.
+            op.failures = (op.failures || 0) + 1;
+            if (op.failures > 10) {
+                const stepEl = document.getElementById('copyInstanceStep');
+                if (stepEl) {
+                    stepEl.textContent = COPY_LABELS.error + ': ' + error.message;
+                    stepEl.style.color = 'var(--danger)';
+                }
+                const cancel = document.getElementById('copyInstanceCancel');
+                if (cancel) cancel.remove();
+                document.getElementById('copyInstanceDone').classList.remove('hidden');
+                return;
+            }
+            op.timer = setTimeout(pollCopyInstance, 2000);
+        }
+    }
+
+    async function cancelCopyInstance() {
+        const op = copyOp;
+        if (!op) return;
+        const button = document.getElementById('copyInstanceCancel');
+        if (button) button.disabled = true;
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/copy/` +
+                encodeURIComponent(op.opId) + '/cancel', 'POST');
+        } catch (error) {
+            if (button) button.disabled = false;
+        }
+    }
+
+    function closeCopyInstance() {
+        if (copyOp && copyOp.timer) clearTimeout(copyOp.timer);
+        copyOp = null;
+        closeModal('copyInstanceModal');
+        const reload = copyFinished === 'success';
+        copyFinished = null;
+        if (reload) location.reload();
+    }
+</script>
 <!-- ===== AmneziaWG plugin updates ===== -->
 <div class="modal-backdrop" id="awgPluginModal">
     <div class="modal" style="max-width: 640px;">
@@ -729,6 +1004,7 @@
         const btn = document.getElementById('awgPluginBtn');
         const text = document.getElementById('awgPluginBtnText');
         if (!btn || !text) return;
+        btn.removeAttribute('aria-busy');
         btn.classList.remove('is-update');
         btn.dataset.state = state;
         const labels = awgPluginLabel();
@@ -1316,8 +1592,6 @@
             installOp.timer = setTimeout(pollInstallOp, 3000);
         }
     }
-
-    document.addEventListener('DOMContentLoaded', loadAwgPluginStatus);
 </script>
 {% endif %}
 <a href="/" class="back-link page-back-link">{{ _('back_to_servers') }}</a>
@@ -1361,20 +1635,20 @@
                 </div>
                 {% if current_user and current_user.role == 'admin' %}
                 <button class="btn btn-sm ssh-trust-btn srv-status-btn" type="button" id="sshTrustBtn"
-                        onclick="openSSHTrustModal()">
+                        onclick="openSSHTrustModal()" data-state="loading">
                     <span class="ssh-trust-dot" id="sshTrustDot"></span>
                     {{ ui_icon('key', 14) }}
                     <span id="sshTrustBtnText">{{ _('ssh_trust_button') }}</span>
                 </button>
                 <button class="btn btn-sm awg-plugin-btn srv-status-btn" type="button" id="awgPluginBtn"
-                        onclick="openAwgPluginModal()" data-state="unknown">
+                        onclick="openAwgPluginModal()" data-state="loading">
                     <span class="awg-plugin-dot" id="awgPluginDot"></span>
                     {{ ui_icon('plug', 14) }}
                     <span id="awgPluginBtnText">{{ _('awg_plugin_button') }}</span>
                 </button>
                 {% if cheburcheck_enabled %}
                 <button class="btn btn-sm srv-status-btn" type="button" id="cheburcheckBtn"
-                        onclick="openCheburcheckModal()" data-state="unknown">
+                        onclick="openCheburcheckModal()" data-state="loading">
                     <span class="cheburcheck-dot" id="cheburcheckDot"></span>
                     {{ ui_icon('shield', 14) }}
                     <span id="cheburcheckBtnText">{{ _('cheburcheck_button') }}</span>
@@ -1392,13 +1666,13 @@
         </button>
     </div>
 
-    <div id="serverStatus" class="srv-header__status hidden">
+    <div id="serverStatus" class="srv-header__status">
         <div class="srv-header__badges" id="statusBadges"></div>
         <div class="srv-header__actions">
-            <button class="btn btn-primary btn-sm srv-action" onclick="openMarketplaceModal()" id="marketplaceBtn">
+            <button class="btn btn-primary btn-sm srv-action" onclick="openMarketplaceModal()" id="marketplaceBtn" disabled>
                 {{ ui_icon('store', 15) }} <span>{{ _('marketplace') }}</span>
             </button>
-            <button class="btn btn-secondary btn-sm srv-action" onclick="openServerManagement()" id="managementBtn">
+            <button class="btn btn-secondary btn-sm srv-action" onclick="openServerManagement()" id="managementBtn" disabled>
                 {{ ui_icon('sliders', 15) }} <span>{{ _('management') }}</span>
             </button>
             <button class="btn btn-secondary btn-sm srv-action" onclick="openHostTuning()" id="hostTuningBtn">
@@ -2221,6 +2495,12 @@
                     </label>
                     <div class="form-hint">{{ _('exit_obfuscation_hint') }}</div>
                 </div>
+                <div class="form-group">
+                    <label class="form-label" style="display:flex; align-items:center; gap:var(--space-sm);">
+                        <input type="checkbox" id="installExitAwg3"> {{ _('exit_awg3') }}
+                    </label>
+                    <div class="form-hint">{{ _('exit_awg3_hint') }}</div>
+                </div>
             </div>
             <div id="socks5Options"
                 style="display:none; padding: var(--space-md); background: rgba(0,0,0,0.03); border-radius: var(--radius-md); margin-bottom: var(--space-md);">
@@ -2997,6 +3277,9 @@
     const WARP_STATUS_TTL = 5000;
 
     const AWG_PROTOCOLS = ['awg', 'awg2', 'awg3', 'awg_legacy'];
+    // Instance copy is AmneziaWG 2.0/3.x only: the legacy client has no
+    // compatible container layout on newer targets.
+    const COPYABLE_PROTOCOLS = ['awg', 'awg2', 'awg3'];
     // Protocols that hand out a client config or link, and therefore have an
     // address a client dials.
     const ENDPOINT_PROTOCOLS = [...AWG_PROTOCOLS, 'wireguard', 'xray', 'telemt'];
@@ -3789,20 +4072,31 @@
             : `<tr><td colspan="5">${_('server_ipv6_state_unknown')}</td></tr>`;
     }
 
-    async function loadIpStatus() {
-        try {
-            const data = await apiCall(`/api/servers/${SERVER_ID}/ip-status`, 'GET');
-            ipStatusCache = data;
-            renderIpChips(data);
-            if (document.getElementById('ipSettingsModal').classList.contains('active')) {
-                renderIpSettings(data);
+    let ipStatusInFlight = null;
+
+    // Одна проба на страницу: очередь, поллер и visibilitychange не должны
+    // ставить в SSH-соединение сервера второй такой же запрос.
+    function loadIpStatus() {
+        if (ipStatusInFlight) return ipStatusInFlight;
+        ipStatusInFlight = (async () => {
+            try {
+                const data = await apiCall(`/api/servers/${SERVER_ID}/ip-status`, 'GET');
+                ipStatusCache = data;
+                renderIpChips(data);
+                if (document.getElementById('ipSettingsModal').classList.contains('active')) {
+                    renderIpSettings(data);
+                }
+                if (document.getElementById('installModal').classList.contains('active')) {
+                    renderInstallIpv6Note();
+                }
+            } catch (err) {
+                console.warn('IP status failed:', err);
+                markIpChipsError();
+            } finally {
+                ipStatusInFlight = null;
             }
-            if (document.getElementById('installModal').classList.contains('active')) {
-                renderInstallIpv6Note();
-            }
-        } catch (err) {
-            console.warn('IP status failed:', err);
-        }
+        })();
+        return ipStatusInFlight;
     }
 
     async function openIpSettings() {
@@ -4266,7 +4560,7 @@
                 <div class="protocol-info-item"><span class="protocol-info-label">${_('port')}</span><span class="protocol-info-value">${info.port || '—'}/UDP</span></div>
                 <div class="protocol-info-item"><span class="protocol-info-label">${_('exit_subnet')}</span><span class="protocol-info-value">${escapeHtml(info.subnet || '—')}</span></div>
                 <div class="protocol-info-item"><span class="protocol-info-label">${_('exit_peers')}</span><span class="protocol-info-value">${info.peers_count ?? 0}</span></div>
-                <div class="protocol-info-item"><span class="protocol-info-label">${_('exit_obfuscation_short')}</span><span class="protocol-info-value">${info.obfuscation ? _('on') : _('off')}</span></div>
+                <div class="protocol-info-item"><span class="protocol-info-label">${_('exit_obfuscation_short')}</span><span class="protocol-info-value">${info.obfuscation ? (info.protocol_version || _('on')) : _('off')}</span></div>
                 <div class="protocol-info-item"><span class="protocol-info-label">${_('exit_public_key')}</span><span class="protocol-info-value">${key}</span></div>
             `;
         }
@@ -4435,10 +4729,14 @@
                     const endpointBtn = ENDPOINT_PROTOCOLS.includes(protoBase(proto))
                         ? `<button class="btn btn-secondary btn-sm" onclick="openPublicEndpointModal('${proto}')" title="${_('public_endpoint_title')}">🌐${ep ? ' ' + escapeHtml(publicEndpointLabel(ep)) : ''}</button>`
                         : '';
+                    const copyBtn = COPYABLE_PROTOCOLS.includes(protoBase(proto))
+                        ? `<button class="btn btn-secondary btn-sm" onclick="openCopyInstance('${proto}')" title="${_('copy_instance_title')}">${_('copy_instance_btn')}</button>`
+                        : '';
                     ctrlEl.innerHTML = `
                         ${awgBtn}
                         ${exitBtn}
                         ${endpointBtn}
+                        ${copyBtn}
                         <button class="btn btn-secondary btn-sm" onclick="showServerConfig('${proto}')" title="${_('server_config')}">${_('config_btn')}</button>
                         <button class="btn btn-danger btn-sm" onclick="toggleContainer('${proto}', true)" title="${_('stop_container_confirm').replace('{}', '')}">${_('stop_btn')}</button>
                     `;
@@ -5188,6 +5486,7 @@
             } else if (protoBase(currentInstallProto) === 'exit') {
                 params.exit_subnet = document.getElementById('installExitSubnet').value.trim();
                 params.exit_obfuscation = document.getElementById('installExitObfuscation').checked;
+                params.exit_awg3 = params.exit_obfuscation && document.getElementById('installExitAwg3').checked;
             } else if (AWG_PROTOCOLS.includes(protoBase(currentInstallProto))) {
                 params.awg_mtu = document.getElementById('installAwgMtu').value.trim();
                 params.awg_dns1 = document.getElementById('installAwgDns1').value.trim();
@@ -5576,7 +5875,7 @@
         try {
             const data = await apiCall(`/api/servers/${SERVER_ID}/exit/peers`, 'POST', { protocol: currentExitPeersProto });
             const info = data.info || {};
-            infoEl.textContent = `${_('port')}: ${info.port || '—'}/UDP · ${_('exit_subnet')}: ${info.subnet || '—'} · ${_('exit_obfuscation_short')}: ${info.obfuscation ? _('on') : _('off')}`;
+            infoEl.textContent = `${_('port')}: ${info.port || '—'}/UDP · ${_('exit_subnet')}: ${info.subnet || '—'} · ${_('exit_obfuscation_short')}: ${info.obfuscation ? (info.protocol_version || _('on')) : _('off')}`;
             const e = escapeHtml;
             if (!data.peers || !data.peers.length) {
                 list.innerHTML = `<div class="empty-state">${_('exit_no_peers')}</div>`;
@@ -7765,7 +8064,5 @@ function openCheburcheckModal() {
     openModal('cheburcheckModal');
     loadCheburcheck();
 }
-
-document.addEventListener('DOMContentLoaded', loadCheburcheck);
 </script>
 {% endblock %}

@@ -18,6 +18,7 @@ from collections import defaultdict
 from datetime import datetime
 
 import exit_failover as failover_policy
+from managers.awg_manager import is_awg31_params, transit_mtu
 
 logger = logging.getLogger(__name__)
 
@@ -236,6 +237,106 @@ class ExitLinkService:
                 results.append({**item, 'status': 'error', 'error': str(err)})
         return results
 
+    async def _downgrade_exit(self, exit_uid, skip=None):
+        """Move an exit and every entry linked to it to the 2.0 parameter set.
+
+        Used when an entry cannot do 3.1: the parameter block is shared per
+        interface, so a mixed link is impossible. Keys, PSKs and transit
+        addresses stay; `skip` is the entry that is being linked right now and
+        gets its config from the link itself.
+        """
+        data = self.load_data()
+        exit_srv, _ = self._exit(data, exit_uid)
+        exit_manager = await self._exit_manager(exit_srv)
+        info = await asyncio.to_thread(exit_manager.apply_transit_params, False)
+        params = info.get('awg_params') or {}
+        for item in self.linked_entries(self.load_data(), exit_uid):
+            if skip and (item.get('server_id'), item.get('protocol')) == skip:
+                continue
+            try:
+                fresh = self.load_data()
+                entry, _ = self._entry(fresh, item['server_id'], item['protocol'])
+                awg = await self._awg(entry)
+                async with self._locks[(entry['uid'], item['protocol'])]:
+                    await asyncio.to_thread(
+                        awg.exit_update_params, item['protocol'], params)
+                await self._update_record(
+                    entry['uid'], item['protocol'],
+                    lambda r: (r.get('exit_link') or {}).update({
+                        'awg_params': params,
+                        'mtu': info.get('mtu'),
+                        'protocol_version': info.get('protocol_version'),
+                    }))
+            except Exception as err:
+                logger.warning("2.0 fallback for %s/%s failed: %s",
+                               item.get('name'), item.get('protocol'), err)
+        data = self.load_data()
+        _, exit_rec = self._exit(data, exit_uid)
+        exit_rec['awg_params'] = params
+        exit_rec['protocol_version'] = info.get('protocol_version')
+        if info.get('mtu'):
+            exit_rec['mtu'] = str(info['mtu'])
+        self.save_data(data)
+        return params
+
+    async def set_transit_version(self, exit_uid, awg3):
+        """Move an exit and every entry linked to it to the 3.1 (or 2.0) set.
+
+        The parameter block lives in [Interface] on both ends, so the swap is
+        all-or-nothing per exit: the exit is rewritten first (its key pair and
+        all [Peer] sections stay), then each entry's exit0.conf follows. Keys,
+        PSKs and transit addresses never change, so no re-link is needed; the
+        live apply keeps the interface and its flows when the kernel accepts
+        the new set through syncconf.
+        """
+        data = self.load_data()
+        exit_srv, _ = self._exit(data, exit_uid)
+        exit_manager = await self._exit_manager(exit_srv)
+        try:
+            info = await asyncio.to_thread(exit_manager.apply_transit_params, bool(awg3))
+        except Exception as err:
+            raise ExitLinkError('exit_apply_failed', str(err))
+        params = info.get('awg_params') or {}
+        outcomes = []
+        for item in self.linked_entries(self.load_data(), exit_uid):
+            try:
+                fresh = self.load_data()
+                entry, _ = self._entry(fresh, item['server_id'], item['protocol'])
+                awg = await self._awg(entry)
+                async with self._locks[(entry['uid'], item['protocol'])]:
+                    res = await asyncio.to_thread(
+                        awg.exit_update_params, item['protocol'], params)
+                    await self._update_record(
+                        entry['uid'], item['protocol'],
+                        lambda r: (r.get('exit_link') or {}).update({
+                            'awg_params': params,
+                            'mtu': info.get('mtu'),
+                            'protocol_version': info.get('protocol_version'),
+                            'backend': res.get('backend'),
+                        }))
+                outcomes.append({**item, 'status': 'success',
+                                 'applied': res.get('applied'),
+                                 'backend': res.get('backend')})
+            except Exception as err:
+                logger.warning("params update for %s/%s failed: %s",
+                               item.get('name'), item.get('protocol'), err)
+                outcomes.append({**item, 'status': 'error', 'error': str(err)})
+        data = self.load_data()
+        _, exit_rec = self._exit(data, exit_uid)
+        exit_rec['awg_params'] = params
+        exit_rec['protocol_version'] = info.get('protocol_version')
+        if info.get('mtu'):
+            exit_rec['mtu'] = str(info['mtu'])
+        self.save_data(data)
+        return {
+            'status': 'success',
+            'protocol_version': info.get('protocol_version'),
+            'mtu': info.get('mtu'),
+            'applied': info.get('applied'),
+            'backend': info.get('backend'),
+            'entries': outcomes,
+        }
+
     async def link(self, entry_server_id, protocol, exit_uid, force=False, dns_via_exit=None,
                    *, restore_on_failure=False, source='manual', _locked=False):
         data = self.load_data()
@@ -304,9 +405,45 @@ class ExitLinkService:
                     'exit_link_ipv6',
                     'Instance has IPv6 enabled; disable IPv6 before linking '
                     'to an exit node')
-            if mtu > EXIT_MTU_LIMIT and not force:
+            exit_manager = await self._exit_manager(exit_srv)
+            # The exit record is written once at install time; the live config
+            # is the truth. Reading the record made a transit upgraded in
+            # place look like 2.0 and rewrote the entry side back to 2.0.
+            try:
+                live_exit = await asyncio.to_thread(exit_manager.get_info)
+            except Exception:
+                live_exit = {}
+            exit_params = ((live_exit or {}).get('awg_params')
+                           or (exit_rec or {}).get('awg_params') or {})
+            if is_awg31_params(exit_params):
+                # 3.1 needs the kernel module on both ends. A node without it
+                # falls back to the 2.0 set instead of failing the link: the
+                # parameter block is per interface, so the exit and its other
+                # entries move to 2.0 together (one short rekey each) and this
+                # link comes up on 2.0 with a warning.
+                module = await asyncio.to_thread(awg._host_awg_module_version)
+                if not awg._module_supports_awg3(module):
+                    try:
+                        exit_params = await self._downgrade_exit(
+                            exit_uid, skip=(entry_server_id, protocol))
+                    except Exception as err:
+                        raise ExitLinkError(
+                            'exit_awg3_kernel_required',
+                            'AmneziaWG 3.1 needs the amneziawg kernel module 3.0+ '
+                            f'on this node (found {module or "none"}); userspace '
+                            'amneziawg-go is not supported and the exit could not '
+                            f'be moved to 2.0: {err}')
+                    live_exit = dict(live_exit or {})
+                    live_exit['awg_params'] = exit_params
+                    live_exit['mtu'] = transit_mtu(exit_params)
+                    live_exit['protocol_version'] = '2.0'
+                    warnings.append('exit_awg3_downgraded')
+            link_mtu = int((live_exit or {}).get('mtu')
+                           or (exit_rec or {}).get('mtu')
+                           or transit_mtu(exit_params) or EXIT_MTU_LIMIT)
+            if mtu > link_mtu and not force:
                 raise ExitLinkError('exit_mtu_too_big',
-                                    f'Client MTU {mtu} exceeds the link MTU {EXIT_MTU_LIMIT}; '
+                                    f'Client MTU {mtu} exceeds the link MTU {link_mtu}; '
                                     f'lower it in the AWG settings or link anyway')
 
             # The peer on a previous exit is dropped only after the new link is
@@ -320,8 +457,6 @@ class ExitLinkService:
                 except Exception as err:
                     raise ExitLinkError('exit_apply_failed',
                                         f'Could not snapshot the current exit link: {err}')
-
-            exit_manager = await self._exit_manager(exit_srv)
 
             async def rolled_back():
                 # Manual link: teardown so a half-applied conf cannot leak.
@@ -362,6 +497,8 @@ class ExitLinkService:
                 'endpoint_port': peer['port'] or exit_rec.get('port'),
                 'obfuscation': bool(peer.get('obfuscation')),
                 'awg_params': peer.get('awg_params') or {},
+                'mtu': peer.get('mtu') or link_mtu,
+                'protocol_version': peer.get('protocol_version'),
                 'dns_via_exit': dns_via_exit,
             }
             try:
@@ -379,6 +516,26 @@ class ExitLinkService:
                                         f"(is {link['endpoint_port']}/udp reachable on {link['endpoint_host']}?). "
                                         f"The link was rolled back")
                 warnings.append('no_handshake_yet')
+
+            if is_awg31_params(link['awg_params']):
+                # A rejected 3.1 config makes awg-quick delete the interface and
+                # awg3 instances fall back to amneziawg-go, which speaks the same
+                # keys but is not what this link is supposed to run on.
+                entry_backend = await asyncio.to_thread(awg.exit_link_backend, protocol)
+                exit_backend = await asyncio.to_thread(exit_manager.transit_backend)
+                link['backend'] = entry_backend
+                log.append(f"Backend: entry={entry_backend} exit={exit_backend}")
+                # 'down' means the interface never came up: it must not be
+                # mistaken for a healthy kernel link.
+                if 'userspace' in (entry_backend, exit_backend) or 'down' in (entry_backend, exit_backend):
+                    if not force:
+                        await rolled_back()
+                        raise ExitLinkError(
+                            'exit_awg3_userspace',
+                            'The 3.1 link came up on userspace amneziawg-go '
+                            f'(entry={entry_backend}, exit={exit_backend}); '
+                            'the amneziawg kernel module is required')
+                    warnings.append('exit_awg3_userspace')
 
             if switching:
                 # New link confirmed: drop our peer on the previous exit, best effort.
@@ -398,6 +555,9 @@ class ExitLinkService:
                 'endpoint_host': link['endpoint_host'],
                 'endpoint_port': link['endpoint_port'],
                 'obfuscation': link['obfuscation'],
+                'protocol_version': link.get('protocol_version'),
+                'mtu': link.get('mtu'),
+                'backend': link.get('backend'),
                 'dns_via_exit': dns_via_exit,
                 'linked_at': datetime.now().isoformat(),
                 'stale': None,
@@ -639,7 +799,7 @@ class ExitLinkService:
             'exit_failover': self.failover_view(data, rec, entry.get('uid')),
             'ipv6': ipv6,
             'mtu': mtu,
-            'exit_mtu': EXIT_MTU_LIMIT,
+            'exit_mtu': (rec.get('exit_link') or {}).get('mtu') or EXIT_MTU_LIMIT,
         }
 
     # ----- automatic exit failover (opt-in, disabled by default) -----

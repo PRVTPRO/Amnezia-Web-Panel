@@ -41,3 +41,10 @@ data.json.recovery/
 .vscode/
 .idea/
 .worktrees/
+
+# Local merge scratch and stale copies: never indexed by graphify/ripgrep,
+# a third of the code graph used to point at these instead of live files.
+merge-work/
+.app_main.py
+server.html.txt
+venv.kimi-backup-*/

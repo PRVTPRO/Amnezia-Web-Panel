@@ -51,6 +51,40 @@ AWG_IPV6_ENV = 'AWG_IPV6'
 IPV6_FORCE_OFF = ('off', 'false', '0', 'no', 'disable', 'disabled')
 IPV6_FORCE_ON = ('on', 'true', '1', 'yes', 'force', 'forced')
 
+# The panel used to add `-p icmp --icmp-type echo-request -j DROP` to INPUT in
+# setup_firewall(). That made the host itself unpingable, so ICMP that arrived
+# through a tunnel was dropped after decryption and diagnostics lied. New
+# installs remove the rule instead; app.py reuses the same script to clean up
+# hosts provisioned by an older panel.
+ICMP_ECHO_ALLOW_SCRIPT = """
+ICMP_ECHO_DROP_LEFT=0
+for bin in iptables iptables-legacy; do
+    command -v "$bin" >/dev/null 2>&1 || continue
+    for spec in "-p icmp --icmp-type echo-request" "-p icmp -m icmp --icmp-type echo-request" "-p icmp --icmp-type 8" "-p icmp -m icmp --icmp-type 8"; do
+        while "$bin" -C INPUT $spec -j DROP 2>/dev/null; do
+            "$bin" -D INPUT $spec -j DROP 2>/dev/null || break
+        done
+    done
+done
+if [ -f /etc/iptables/rules.v4 ]; then
+    if grep -E -q '^-A INPUT .*-p icmp .*(--icmp-type (8|echo-request)).*-j DROP' /etc/iptables/rules.v4; then
+        cp -p /etc/iptables/rules.v4 "/etc/iptables/rules.v4.bak.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+        if grep -E -v '^-A INPUT .*-p icmp .*(--icmp-type (8|echo-request)).*-j DROP' /etc/iptables/rules.v4 > /etc/iptables/rules.v4.awp.tmp 2>/dev/null; then
+            mv /etc/iptables/rules.v4.awp.tmp /etc/iptables/rules.v4 || rm -f /etc/iptables/rules.v4.awp.tmp
+        else
+            rm -f /etc/iptables/rules.v4.awp.tmp
+        fi
+    fi
+fi
+for bin in iptables iptables-legacy; do
+    command -v "$bin" >/dev/null 2>&1 || continue
+    n=$("$bin" -S INPUT 2>/dev/null | grep -E -c -- '-p icmp .*--icmp-type (8|echo-request) .*-j DROP' || true)
+    ICMP_ECHO_DROP_LEFT=$((ICMP_ECHO_DROP_LEFT + ${n:-0}))
+done
+echo "ICMP_ECHO_DROP_LEFT=$ICMP_ECHO_DROP_LEFT"
+exit 0
+"""
+
 # Default AWG parameters (from protocols_defs.h)
 AWG_DEFAULTS = {
     'port': '55424',
@@ -222,6 +256,35 @@ TRANSIT_PARAM_KEYS = (
     ('underload_packet_magic_header', 'H3'),
     ('transport_packet_magic_header', 'H4'),
 )
+
+# AWG 3.1 keys of a transit link. HeaderProtectionKey makes the kernel demand
+# S1-S4 >= AWG3_MIN_JUNK_SIZE, so S3/S4 come back at the floor (12) - the
+# MTU budget pays for S4, and the entry side must write the same set.
+# H1-H4 stay at the 1..4 compatibility values: with header protection on the
+# custom-header mechanism is off, and ranged headers plus RandomTrailers
+# misclassify transport packets as handshakes (amneziawg-go#186).
+TRANSIT_AWG3_PARAM_KEYS = (
+    ('cookie_reply_packet_junk_size', 'S3'),
+    ('transport_packet_junk_size', 'S4'),
+    ('header_protection_key', 'HeaderProtectionKey'),
+    ('content_padding_addition', 'ContentPaddingAddition'),
+    ('rekey_after_time', 'RekeyAfterTime'),
+    ('rekey_timeout', 'RekeyTimeout'),
+    ('reject_after_time', 'RejectAfterTime'),
+    ('keepalive_timeout', 'KeepaliveTimeout'),
+    ('max_handshake_attempts', 'MaxHandshakeAttempts'),
+    ('random_trailers', 'RandomTrailers'),
+    ('disable_cookies', 'DisableCookies'),
+    ('i1', 'I1'),
+    ('i2', 'I2'),
+    ('i3', 'I3'),
+    ('i4', 'I4'),
+    ('i5', 'I5'),
+)
+
+# Transit 3.1 padding is deliberately narrower than on a client instance: the
+# link is a tunnel inside a tunnel, and every padded byte is lost client MTU.
+TRANSIT_AWG3_PADDING = '8-24'
 
 # Runs inside the awg3 container before awg-quick. Creating a throwaway
 # interface both loads the module (a module present on disk but not yet loaded
@@ -527,6 +590,125 @@ def generate_awg_params(use_ranges=False, awg3=False):
         })
 
     return params
+
+
+def is_awg31_params(params):
+    """Whether a transit param dict carries the AWG 3.1 header-protection set."""
+    return bool((params or {}).get('header_protection_key'))
+
+
+def transit_param_lines(params):
+    """Obfuscation lines of a transit config.
+
+    Both ends render from the very same dict: the entry copies it from the exit
+    node record, so header protection keys, padding and timings always match.
+    2.0 links carry TRANSIT_PARAM_KEYS only - S3/S4 pad every transport packet
+    and are left out of that hop; a 3.1 link needs them to satisfy the
+    header-protection floor, so they come back with the rest of that set.
+    """
+    params = params or {}
+    keys = TRANSIT_PARAM_KEYS
+    if is_awg31_params(params):
+        keys = keys + TRANSIT_AWG3_PARAM_KEYS
+    return ''.join(
+        f"{config_key} = {params[param_key]}\n"
+        for param_key, config_key in keys
+        if params.get(param_key)
+    )
+
+
+def transit_param_names():
+    """Config keys that belong to the obfuscation block (plus MTU)."""
+    names = {config_key.lower() for _, config_key in
+             TRANSIT_PARAM_KEYS + TRANSIT_AWG3_PARAM_KEYS}
+    names.add('mtu')
+    return names
+
+
+def rewrite_transit_conf(text, awg_params):
+    """Replace the obfuscation block and MTU of a transit config in place.
+
+    Everything else - the private key, Address, ListenPort, Table, the
+    ``# ProtocolVersion`` marker and every ``[Peer]`` section with its
+    PresharedKey - is copied through untouched. Used to switch an already
+    configured link between the 3.1 and 2.0 parameter sets: regenerating the
+    file from scratch would rotate the key pair and drop the peers.
+    """
+    names = transit_param_names()
+    version = '3.1' if is_awg31_params(awg_params) else (
+        '2.0' if awg_params else 'wireguard')
+    block = transit_param_lines(awg_params)
+    mtu = transit_mtu(awg_params)
+    out, in_interface, inserted = [], False, False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith('['):
+            in_interface = stripped == '[Interface]'
+            out.append(line)
+            continue
+        if not in_interface:
+            out.append(line)
+            continue
+        if not stripped:
+            out.append(line)
+            continue
+        if stripped.startswith('#'):
+            if stripped.lower().startswith('# protocolversion'):
+                out.append(f'# ProtocolVersion = {version}')
+            else:
+                out.append(line)
+            continue
+        name = stripped.split('=', 1)[0].strip().lower()
+        if name in names:
+            continue
+        out.append(line)
+        if name == 'address' and not inserted:
+            out.append(f'MTU = {mtu}')
+            if block:
+                out.extend(block.rstrip('\n').splitlines())
+            inserted = True
+    if not inserted:
+        raise RuntimeError('exit link config has no Address line')
+    return '\n'.join(out) + '\n'
+
+
+def transit_mtu(params, link_mtu=DEFAULT_LINK_MTU):
+    """exit0 MTU that still fits the transit obfuscation overhead.
+
+    The contract is the same as safe_client_mtu: size against the *maximum*
+    ContentPaddingAddition/S4, otherwise only the unlucky packets are dropped.
+    Without 3.1 keys the answer is the historic 1420.
+    """
+    try:
+        link = int(link_mtu)
+    except (TypeError, ValueError):
+        link = DEFAULT_LINK_MTU
+    room = (link - transport_overhead(params)) // 8 * 8
+    return max(MIN_CLIENT_MTU, min(EXIT_MTU, room))
+
+
+def generate_transit_params(awg3=False):
+    """Obfuscation parameters of an exit-node transit link.
+
+    `awg3` produces the full 3.1 set: header protection, narrow content
+    padding, the fixed H1-H4 compatibility values, S3/S4 at the module floor
+    and the desktop client's special junk packet (I1).
+    """
+    if not awg3:
+        wanted = {param_key for param_key, _ in TRANSIT_PARAM_KEYS}
+        return {k: v for k, v in generate_awg_params(use_ranges=False).items()
+                if k in wanted}
+
+    wanted = {param_key for param_key, _ in
+              TRANSIT_PARAM_KEYS + TRANSIT_AWG3_PARAM_KEYS}
+    params = generate_awg_params(awg3=True)
+    params.setdefault('i1', AWG_DEFAULT_I1)
+    # HeaderProtectionKey needs S1-S4 >= 12; S3/S4 are the ones a 2.0 link
+    # leaves out, so pin them to the floor instead of the random 12-50.
+    params['cookie_reply_packet_junk_size'] = str(AWG3_MIN_JUNK_SIZE)
+    params['transport_packet_junk_size'] = str(AWG3_MIN_JUNK_SIZE)
+    params['content_padding_addition'] = TRANSIT_AWG3_PADDING
+    return {k: v for k, v in params.items() if k in wanted}
 
 
 class AWGManager:
@@ -1339,11 +1521,14 @@ class AWGManager:
         return parsed[0] if isinstance(parsed, list) and parsed else None
 
     @staticmethod
-    def _run_cmd_from_inspect(info, name, image):
+    def _run_cmd_from_inspect(info, name, image, port_override=None):
         """Rebuild the run command from the container's own inspect data.
 
         Keeps binds, caps, ulimits, ports, restart policy and sysctls, then
         forces the two IPv6 sysctls the old container was missing.
+
+        ``port_override`` republishes every UDP mapping on another port; the
+        instance copy uses it to move a container to a free port on the target.
         """
         if not isinstance(info, dict):
             return None
@@ -1410,10 +1595,17 @@ class AWGManager:
         for port, bindings in (host.get('PortBindings') or {}).items():
             if skip_ports:
                 break
+            protocol = port.partition('/')[2]
+            try:
+                override = int(port_override) if port_override else None
+            except (TypeError, ValueError):
+                override = None
+            container_port = (f'{override}/{protocol}' if protocol else str(override)) if override else port
             for binding in bindings or []:
                 host_ip = binding.get('HostIp') or ''
-                host_port = binding.get('HostPort') or ''
-                mapping = f'{host_ip}:{host_port}:{port}' if host_ip else f'{host_port}:{port}'
+                host_port = str(override) if override else (binding.get('HostPort') or '')
+                mapping = (f'{host_ip}:{host_port}:{container_port}' if host_ip
+                           else f'{host_port}:{container_port}')
                 parts.append(f'-p {shlex.quote(mapping)}')
         parts.append(f'--name {shlex.quote(name)}')
         parts.append(shlex.quote(image))
@@ -2086,10 +2278,9 @@ echo "KERNEL_MODULE: ok: installed {v}"
         users see as random connection freezes. 262144 is a safe value
         for a VPN gateway; persisted via /etc/sysctl.d.
         """
-        script = """
+        script = ICMP_ECHO_ALLOW_SCRIPT + """
 sysctl -w net.ipv4.ip_forward=1
 sysctl -w net.ipv6.conf.all.forwarding=1 2>/dev/null || true
-iptables -C INPUT -p icmp --icmp-type echo-request -j DROP 2>/dev/null || iptables -A INPUT -p icmp --icmp-type echo-request -j DROP
 iptables -C FORWARD -j DOCKER-USER 2>/dev/null || iptables -A FORWARD -j DOCKER-USER 2>/dev/null
 if [ -f /proc/sys/net/netfilter/nf_conntrack_max ]; then
     cur=$(cat /proc/sys/net/netfilter/nf_conntrack_max)
@@ -3086,16 +3277,16 @@ x_warp_up() {
             f"# ExitUid = {link.get('exit_uid', '')}",
             f"# ExitName = {link.get('exit_name', '')}",
             f"# Obfuscation = {'on' if link.get('obfuscation') else 'off'}",
+            f"# ProtocolVersion = {'3.1' if is_awg31_params(link.get('awg_params')) else ('2.0' if link.get('obfuscation') else 'wireguard')}",
             f"# DnsViaExit = {'on' if link.get('dns_via_exit') else 'off'}",
             f"PrivateKey = {ENTRY_PRIVATE_KEY_PLACEHOLDER}",
             f"Address = {link['transit_ip']}/{link.get('subnet_cidr', 24)}",
-            f"MTU = {EXIT_MTU}",
+            f"MTU = {link.get('mtu') or transit_mtu(link.get('awg_params'))}",
             'Table = off',
         ]
         if link.get('obfuscation'):
             params = link.get('awg_params') or {}
-            lines += [f"{config_key} = {params[param_key]}"
-                      for param_key, config_key in TRANSIT_PARAM_KEYS if params.get(param_key)]
+            lines += transit_param_lines(params).splitlines()
         lines += [
             '',
             '[Peer]',
@@ -3191,6 +3382,43 @@ x_warp_up() {
             raise RuntimeError(f"Failed to update the DNS route of the link: {err or out}")
         return self._exit_apply(protocol_type)
 
+    def exit_update_params(self, protocol_type, awg_params):
+        """Switch an existing exit0.conf between the WG / 2.0 / 3.1 param sets.
+
+        Only the obfuscation lines and MTU are rewritten: the private key, the
+        address, Table and the [Peer] with its PresharedKey stay as they are,
+        so the exit never sees a new peer and the link keeps its keys. Applied
+        live with `awg syncconf` (interface and flows keep running); a kernel
+        that refuses the change (removing 3.1 keys is not allowed) falls back
+        to the recreate path every other link apply already uses.
+        """
+        container_name = self._container_name(protocol_type)
+        out, err, code = self.ssh.run_sudo_command(
+            f"docker exec -i {container_name} sh -c 'test -f {EXIT_CONF} && cat {EXIT_CONF}'")
+        if code != 0 or not (out or '').strip():
+            raise RuntimeError('This instance has no exit link file')
+        self.ssh.upload_file(rewrite_transit_conf(out, awg_params), '/tmp/_amnz_exit0.conf')
+        try:
+            for step in (
+                f"docker cp /tmp/_amnz_exit0.conf {container_name}:{EXIT_CONF}",
+                f"docker exec -i {container_name} chmod 600 {EXIT_CONF}",
+            ):
+                _out, _err, rc = self.ssh.run_sudo_command(step)
+                if rc != 0:
+                    raise RuntimeError(f"Failed to write exit0.conf: {_err or _out}")
+        finally:
+            self.ssh.run_command('rm -f /tmp/_amnz_exit0.conf')
+        applied = 'syncconf'
+        sync = self.ssh.run_sudo_command(
+            f"docker exec -i {container_name} bash -c '"
+            f"{self._quick_binary(protocol_type)} strip {EXIT_CONF} > /tmp/_amnz_exit0.sync && "
+            f"{self._wg_binary(protocol_type)} syncconf {EXIT_IFACE} /tmp/_amnz_exit0.sync'")
+        if sync[2] != 0:
+            applied = 'recreate'
+            self._exit_apply(protocol_type)
+        return {'applied': applied,
+                'backend': self.exit_link_backend(protocol_type)}
+
     def exit_unlink(self, protocol_type):
         """Tear the link down live and delete exit0.conf; the key pair stays
         so a re-link reuses the public key already known to the exit."""
@@ -3224,6 +3452,24 @@ x_warp_up() {
         if code != 0:
             raise RuntimeError(f"Failed to restore exit0.conf: {err or out or f'SSH exit code {code}'}")
         return self._exit_apply(protocol_type)
+
+    def _tunnel_backend(self, protocol_type, iface):
+        """Which implementation carries an interface: 'kernel', 'userspace', 'down'.
+
+        amneziawg-go creates a plain TUN device, while the kernel module
+        creates a link of type `amneziawg` - that is the only reliable
+        difference in `ip -d link` output.
+        """
+        out, _, _ = self.ssh.run_sudo_command(
+            f"docker exec {self._container_name(protocol_type)} "
+            f"sh -c 'ip -d link show {iface} 2>/dev/null'")
+        if not (out or '').strip():
+            return 'down'
+        return 'kernel' if 'amneziawg' in out else 'userspace'
+
+    def exit_link_backend(self, protocol_type):
+        """Backend carrying exit0 (see _tunnel_backend)."""
+        return self._tunnel_backend(protocol_type, EXIT_IFACE)
 
     def exit_link_info(self, protocol_type):
         """What the container believes it is linked to, or None. Reads only
