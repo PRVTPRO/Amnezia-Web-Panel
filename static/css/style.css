@@ -792,6 +792,51 @@ a:hover {
     background: currentColor;
 }
 
+/* ===== Smart Route mark (inside the exit-node button) ===== */
+/* The exit-node button names the node; this mark says whether that link is
+   split by Smart Route. No mark = the split is off, so the common case stays
+   quiet. States: on (info), paused server-wide (muted, dashed), lost (warning). */
+.sr-mark {
+    display: inline-flex;
+    align-items: center;
+    margin-left: 6px;
+    padding: 0 6px;
+    border-radius: var(--radius-full);
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 16px;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+}
+
+.sr-mark--on {
+    background: var(--info-bg);
+    color: var(--info);
+    box-shadow: inset 0 0 0 1px var(--info-border);
+}
+
+.sr-mark--paused {
+    background: transparent;
+    color: var(--text-secondary);
+    outline: 1px dashed var(--border-color);
+    outline-offset: -1px;
+    opacity: 0.9;
+}
+
+.sr-mark--lost {
+    background: var(--warning-bg);
+    color: var(--warning);
+    box-shadow: inset 0 0 0 1px var(--warning-border);
+}
+
+@media (max-width: 640px) {
+    .sr-mark {
+        margin-left: 4px;
+        padding: 0 4px;
+        font-size: 9px;
+    }
+}
+
 /* ===== Form Elements ===== */
 .form-group {
     margin-bottom: var(--space-md);

@@ -2984,6 +2984,9 @@
     let currentAwgProto = 'awg2';
     // Smart Route app state (GET /api/servers/{id}/smartroute/status); null = not loaded.
     let smartRouteStatus = null;
+    // Last /check protocols payload: lets the exit-node marks be repainted after
+    // a Smart Route action without running a second (SSH-heavy) check.
+    let lastProtocolsInfo = {};
     let smartRouteBusy = false;
     // RKN Block app state (GET /api/servers/{id}/rkn_scans); null = not loaded.
     let rknBlockStatus = {{ server.get('rknblock') | tojson }};
@@ -4090,6 +4093,7 @@
             }
             badges.innerHTML = html;
             if (data.protocols) {
+                lastProtocolsInfo = data.protocols;
                 const protoSelect = document.getElementById('connProtoSelect');
                 const currentVal = protoSelect.value;
                 protoSelect.innerHTML = '';
@@ -4126,6 +4130,9 @@
             // Smart Route card is painted with its final badge together with
             // the protocol cards instead of appearing later.
             smartRouteStatus = await smartRouteProbe;
+            // Cards were painted before the probe resolved: repaint the
+            // exit-node marks now that "installed/enabled" is known.
+            refreshExitMarks();
             updateStatusCounts(data.protocols || {});
             showToast(_('server_check_complete'), 'success');
         } catch (err) {
@@ -4429,7 +4436,7 @@
                         ? `<button class="btn btn-secondary btn-sm" onclick="openAwgSettings('${proto}')" title="${_('awg_settings_title')}">${_('awg_settings_btn')}</button>`
                         : '';
                     const exitBtn = AWG_PROTOCOLS.includes(protoBase(proto))
-                        ? `<button class="btn btn-secondary btn-sm" onclick="openExitLinkModal('${proto}')" title="${_('exit_link_title')}">🚪${info.exit_link ? ' ' + escapeHtml(info.exit_link.exit_name || '') : ''}</button>`
+                        ? `<button class="btn btn-secondary btn-sm exit-link-btn" onclick="openExitLinkModal('${proto}')" title="${_('exit_link_title')}">🚪${info.exit_link ? ' ' + escapeHtml(info.exit_link.exit_name || '') + smartRouteMark(info.exit_link) : ''}</button>`
                         : '';
                     const ep = PUBLIC_ENDPOINTS[proto];
                     const endpointBtn = ENDPOINT_PROTOCOLS.includes(protoBase(proto))
@@ -5567,6 +5574,48 @@
         return EXIT_LINK_ERROR_KEYS.includes(err.message) ? _(err.message) : err.message;
     }
 
+    // Smart Route state of a linked instance. The split flags live in
+    // exit_link (merged into /check from the saved record), the app-wide
+    // switch lives in smartRouteStatus (probed in parallel by checkServer).
+    // 'lost' wins over 'paused': a removed app must not look like a pause.
+    function smartRouteMarkState(link) {
+        if (!link) return null;
+        // A removed app leaves smart_route=false + smart_route_lost=true: the
+        // warning must win, otherwise the instance looks simply unlinked.
+        if (link.smart_route_lost) return 'lost';
+        if (!link.smart_route) return null;
+        if (!smartRouteStatus || !smartRouteStatus.installed) return 'lost';
+        if (smartRouteStatus.enabled === false) return 'paused';
+        return 'on';
+    }
+
+    // The mark is appended inside the exit-node button, so the mode is visible
+    // without opening the modal; no mark at all means the split is off.
+    function smartRouteMark(link) {
+        const state = smartRouteMarkState(link);
+        if (!state) return '';
+        const labels = { on: '⇄ RU', paused: '⇄ RU', lost: '⚠ RU' };
+        const hint = _(`smartroute_mark_${state}_hint`).replace('{name}', (link && link.exit_name) || '');
+        return `<span class="sr-mark sr-mark--${state}" role="img" aria-label="${escapeHtml(_('smartroute_title'))}" title="${escapeHtml(hint)}">${labels[state]}</span>`;
+    }
+
+    // Repaint the mark on one card, keeping the node name in place.
+    function refreshExitMark(proto, info) {
+        const btn = document.querySelector(`#proto-${protoDomKey(proto)} .exit-link-btn`);
+        if (!btn) return;
+        const old = btn.querySelector('.sr-mark');
+        if (old) old.remove();
+        const mark = info && info.exit_link ? smartRouteMark(info.exit_link) : '';
+        if (mark) btn.insertAdjacentHTML('beforeend', mark);
+    }
+
+    // updateProtocolCard paints before the Smart Route probe settles, and app
+    // actions change the flags without a fresh /check: repaint from the cache.
+    function refreshExitMarks(protocols) {
+        Object.entries(protocols || lastProtocolsInfo || {}).forEach(
+            ([proto, info]) => refreshExitMark(proto, info));
+    }
+
     async function showExitPeers(proto = 'exit') {
         currentExitPeersProto = proto || 'exit';
         const list = document.getElementById('exitPeersList');
@@ -5992,6 +6041,8 @@
             smartRouteStatus = await loadSmartRouteStatus();
             renderSmartRouteCard();
             renderMarketplace();
+            // Pause/resume is server-wide: every split instance changes mark.
+            refreshExitMarks();
         } catch (err) {
             showToast(_('error') + ': ' + smartrouteErrorText(err), 'error');
         } finally {
@@ -6089,6 +6140,11 @@
                                         { protocol: currentExitLinkProto });
             currentExitLinkState = state;
             renderExitLinkState(state);
+            // Keep the exit-node mark on the card in sync with the toggle.
+            if (lastProtocolsInfo[currentExitLinkProto]) {
+                lastProtocolsInfo[currentExitLinkProto].exit_link = state.exit_link;
+            }
+            refreshExitMark(currentExitLinkProto, state);
         } catch (err) {
             box.checked = !enabled;
             showToast(_('error') + ': ' + smartrouteErrorText(err), 'error');
@@ -6177,6 +6233,7 @@
     async function uninstallSmartRoute() {
         if (!confirm(_('smartroute_uninstall_confirm'))) return;
         const btn = document.getElementById('smartRouteUninstallBtn');
+        const splitProtos = (smartRouteStatus && smartRouteStatus.split_instances) || [];
         btn.disabled = true;
         try {
             await apiCall(`/api/servers/${SERVER_ID}/smartroute/uninstall`, 'POST');
@@ -6185,6 +6242,16 @@
             renderSmartRouteModal(smartRouteStatus);
             renderSmartRouteCard();
             applyInstalledAppsVisibility();
+            // The backend keeps the links but flags the split as lost; mirror
+            // that locally so the node marks turn warning without a /check.
+            splitProtos.forEach(proto => {
+                const info = lastProtocolsInfo[proto];
+                if (info && info.exit_link) {
+                    info.exit_link.smart_route = false;
+                    info.exit_link.smart_route_lost = true;
+                }
+            });
+            refreshExitMarks();
         } catch (err) {
             showToast(_('error') + ': ' + smartrouteErrorText(err), 'error');
         } finally {
