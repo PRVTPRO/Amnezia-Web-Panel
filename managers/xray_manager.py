@@ -839,6 +839,49 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         )
         return url
 
+    def get_reality_state(self):
+        """Current transport and Reality target of the VLESS inbound."""
+        config = self._get_server_json()
+        if not config:
+            return None
+        inbound = self._get_vless_inbound(config)
+        if not inbound:
+            return None
+        stream = inbound.get('streamSettings', {}) or {}
+        reality = stream.get('realitySettings', {}) or {}
+        names = reality.get('serverNames') or []
+        return {
+            'network': stream.get('network', 'tcp'),
+            'dest': reality.get('dest'),
+            'sni': names[0] if names else None,
+        }
+
+    def apply_selfsteal(self, domain, dest):
+        """Point Reality at the local NGINX site (self-steal SNI).
+
+        The site must already answer with a valid certificate for the
+        domain — failed probes are forwarded there, so the mask only
+        holds while the site is real. dest uses the docker name when the
+        containers share a network, so it survives re-creation.
+        """
+        config = self._get_server_json()
+        if not config:
+            raise RuntimeError("Xray server config not found.")
+        inbound = self._get_vless_inbound(config)
+        if not inbound:
+            raise RuntimeError("Xray VLESS inbound not found.")
+        stream = inbound.get('streamSettings', {}) or {}
+        reality = stream.get('realitySettings') or {}
+        if not reality:
+            raise RuntimeError("Reality is not configured on this instance.")
+        reality['dest'] = dest
+        reality['serverNames'] = [domain]
+        # XHTTP carries the mask in the Host header as well.
+        if stream.get('network') == 'xhttp':
+            stream.setdefault('xhttpSettings', {})['host'] = domain
+        self._write_server_json(config, restart=True)
+        return {'dest': dest, 'sni': domain, 'network': stream.get('network', 'tcp')}
+
     def add_client(self, protocol, client_name, server_host, port, public_port=None,
                    warp_ctx=None):
         client_id = str(uuid.uuid4())
