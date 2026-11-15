@@ -795,8 +795,17 @@
             </div>
             <div class="form-group">
                 <label class="form-label" for="cb_api_token">{{ _('cheburcheck_token_label') }}</label>
-                <input type="password" class="form-input" id="cb_api_token" autocomplete="off"
-                       spellcheck="false" placeholder="{{ _('cheburcheck_token_placeholder') }}">
+                {# Токен, кнопка и ответ проверки — одной строкой: ответ появляется
+                   справа от кнопки (как проверка выходного IP в модуле выходной ноды). #}
+                <div style="display:flex; align-items:center; gap:var(--space-sm); flex-wrap:wrap;">
+                    <input type="password" class="form-input" id="cb_api_token" autocomplete="off"
+                           spellcheck="false" placeholder="{{ _('cheburcheck_token_placeholder') }}"
+                           style="flex:1 1 220px; min-width:0; width:auto;">
+                    <button type="button" class="btn btn-secondary btn-sm" id="cb_token_check_btn"
+                            onclick="checkCheburcheckToken()">{{ _('cheburcheck_token_check') }}</button>
+                    <span id="cb_token_check_result" class="form-hint" role="status" aria-live="polite"
+                          style="margin:0; display:none;"></span>
+                </div>
                 <p class="form-hint" style="margin-top:6px;">
                     {% set cb_token = settings.get('cheburcheck', {}).get('api_token') or '' %}
                     <span id="cb_token_state">{% if cb_token %}{{ _('cheburcheck_token_set') }} (••••{{ cb_token[-4:] }}){% else %}{{ _('cheburcheck_token_not_set') }}{% endif %}</span>
@@ -806,7 +815,6 @@
                     {{ _('cheburcheck_token_basic_only') }}
                     <a href="https://cheburcheck.ru/kb/api#authorization" target="_blank" rel="noopener">{{ _('cheburcheck_token_docs_link') }}</a>
                 </p>
-                <button type="button" class="btn btn-secondary btn-sm" onclick="checkCheburcheckToken()">{{ _('cheburcheck_token_check') }}</button>
             </div>
             <div class="form-group">
                 <label class="form-label">{{ _('cheburcheck_servers_label') }}</label>
@@ -1899,23 +1907,35 @@ function collectCheburcheckSettings() {
 
 // Проверка токена: сервер дергает /api/v1/credits с Bearer и возвращает
 // только остаток кредитов либо текст ошибки. Сам токен в ответ не попадает.
+// Ответ выводится справа от кнопки, в той же манере, что проверка выходного
+// IP в модуле выходной ноды: «Проверка...» → цветной результат с иконкой.
 async function checkCheburcheckToken() {
-    const st = document.getElementById('cb_status');
+    const box = document.getElementById('cb_token_check_result');
+    const btn = document.getElementById('cb_token_check_btn');
     const input = document.getElementById('cb_api_token');
     const body = {};
     if (input && input.value.trim()) body.api_token = input.value.trim();
-    if (st) st.textContent = '…';
+    const show = (text, color) => {
+        if (!box) return;
+        box.style.display = text ? '' : 'none';
+        box.style.color = color || '';
+        box.textContent = text || '';
+    };
+    if (btn) btn.disabled = true;
+    show(window._('checking_updates') || '…', '');
     try {
         const res = await apiCall('/api/settings/cheburcheck/token_check', 'POST', body);
-        if (!st) return;
         if (res && res.ok) {
             const tpl = window._('cheburcheck_token_ok') || 'token accepted, credits: {n}';
-            st.textContent = '✓ ' + tpl.replace('{n}', String(res.credits));
+            show('✓ ' + tpl.replace('{n}', String(res.credits)), 'var(--success, #4ade80)');
         } else {
-            st.textContent = '✗ ' + ((res && res.error) || window._('cheburcheck_token_failed') || 'token rejected');
+            show('✗ ' + ((res && res.error) || window._('cheburcheck_token_failed') || 'token rejected'),
+                 'var(--danger, #f87171)');
         }
     } catch (e) {
-        if (st) st.textContent = '✗ ' + (e.message || e);
+        show('✗ ' + (e.message || e), 'var(--danger, #f87171)');
+    } finally {
+        if (btn) btn.disabled = false;
     }
 }
 
