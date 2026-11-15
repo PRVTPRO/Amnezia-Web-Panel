@@ -164,6 +164,8 @@ CHEBURCHECK_KEYS = {
     'cheburcheck_token_docs',
     'cheburcheck_token_basic_only', 'cheburcheck_token_docs_link',
     'cheburcheck_static_only', 'cheburcheck_static_only_note',
+    'cheburcheck_progress',
+    'cheburcheck_token_ok_free', 'cheburcheck_token_credits_hint',
 }
 
 
