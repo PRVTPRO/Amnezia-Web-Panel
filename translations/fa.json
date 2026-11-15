@@ -1279,6 +1279,7 @@
   "cheburcheck_servers_label": "Servers to check",
   "cheburcheck_servers_hint": "New servers appear here unchecked — enable manually.",
   "cheburcheck_run_all": "Check all now",
+  "cheburcheck_progress": "بررسی شد {done} از {total}",
   "cheburcheck_none_enabled": "no servers selected",
   "cheburcheck_running_all": "checking",
   "cheburcheck_banned_count": "banned",

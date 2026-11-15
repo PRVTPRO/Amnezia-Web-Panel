@@ -3581,6 +3581,9 @@ _CHEBURCHECK_TASK = None
 # server uid -> asyncio.Task for one-shot runs started from the UI
 _CHEBURCHECK_RUNNING = {}
 _CHEBURCHECK_SPACING = 13               # seconds between any two checks
+# Прогресс пакетного прогона для интерфейса настроек: сколько серверов уже
+# проверено из запущенных. Пишется только в _cheburcheck_run_batch.
+_CHEBURCHECK_PROGRESS = {'running': False, 'done': 0, 'total': 0, 'current': ''}
 
 # Client-facing protocols whose public endpoints are worth checking. Infrastructure
 # protocols (nginx/adguard/dns/exit, ...) never enter the automatic resolution.
@@ -3727,6 +3730,32 @@ async def cheburcheck_background_loop():
         except Exception as e:
             logger.error(f"cheburcheck_background_loop error: {e}")
             await asyncio.sleep(300)
+
+
+async def _cheburcheck_run_batch(prepared):
+    """Проверить зарезервированные серверы по очереди, ведя прогресс для UI.
+
+    ``prepared`` — список пар (srv, targets); uid уже зарезервирован
+    вызывающим кодом. Прогресс читается из /api/servers/cheburcheck_flags.
+    """
+    total = len(prepared)
+    _CHEBURCHECK_PROGRESS.update({'running': True, 'done': 0, 'total': total,
+                                  'current': ''})
+    try:
+        for index, (srv, targets) in enumerate(prepared):
+            _CHEBURCHECK_PROGRESS['current'] = srv.get('name') or ''
+            try:
+                await _cheburcheck_run_server(srv, targets)
+            except Exception as e:
+                # Один сбойный сервер не должен обрывать пакетный прогон.
+                logger.error(f"Cheburcheck batch failed for {srv.get('name')}: {e}")
+            finally:
+                # Счётчик растёт даже при ошибке: иначе прогресс застрянет.
+                _CHEBURCHECK_PROGRESS['done'] = index + 1
+            if index < total - 1:
+                await asyncio.sleep(_CHEBURCHECK_SPACING)
+    finally:
+        _CHEBURCHECK_PROGRESS.update({'running': False, 'current': ''})
 
 
 async def _cheburcheck_run_server(srv, targets):
@@ -6535,10 +6564,7 @@ async def api_cheburcheck_run_all(request: Request):
         return {'ok': True, 'started': 0, 'reason': 'nothing_started'}
 
     async def runner():
-        for index, (srv, targets) in enumerate(reserved):
-            await _cheburcheck_run_server(srv, targets)
-            if index < len(reserved) - 1:
-                await asyncio.sleep(_CHEBURCHECK_SPACING)
+        await _cheburcheck_run_batch(reserved)
 
     _CHEBURCHECK_TASK = asyncio.create_task(runner())
     return {'ok': True, 'started': len(reserved)}
@@ -6567,6 +6593,7 @@ async def api_cheburcheck_flags(request: Request):
                        'enabled': True}
     return {'enabled': enabled,
             'running': bool(_CHEBURCHECK_TASK is not None and not _CHEBURCHECK_TASK.done()),
+            'progress': dict(_CHEBURCHECK_PROGRESS),
             'flags': out}
 
 

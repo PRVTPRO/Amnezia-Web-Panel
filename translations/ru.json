@@ -1279,6 +1279,7 @@
   "cheburcheck_servers_label": "Серверы для проверки",
   "cheburcheck_servers_hint": "Новые серверы появляются здесь без галочки — включите вручную. Для отмеченных всегда проверяются SSH-адрес и домены инстансов; дополнительные адреса можно вписать отдельно.",
   "cheburcheck_run_all": "Проверить все сейчас",
+  "cheburcheck_progress": "проверено {done} из {total}",
   "cheburcheck_none_enabled": "серверы не выбраны",
   "cheburcheck_running_all": "проверка",
   "cheburcheck_banned_count": "забанено",

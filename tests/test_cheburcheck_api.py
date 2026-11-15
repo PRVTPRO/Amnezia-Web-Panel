@@ -1,4 +1,5 @@
 """API/settings-level tests for the Cheburcheck integration (multi-target)."""
+import asyncio
 import json
 import os
 import tempfile
@@ -64,6 +65,8 @@ class CheburcheckApiTests(unittest.TestCase):
     def tearDown(self):
         self.app.CHEBURCHECK_CACHE.clear()
         self.app._CHEBURCHECK_RUNNING.clear()
+        self.app._CHEBURCHECK_PROGRESS.update({'running': False, 'done': 0,
+                                               'total': 0, 'current': ''})
         self._patch.stop()
         self._tmp.cleanup()
 
@@ -230,6 +233,13 @@ class CheburcheckApiTests(unittest.TestCase):
         ids = self.client.get('/api/servers/cheburcheck_flags').json()['flags']
         self.assertEqual(ids['1']['status'], 'clean')
         self.assertEqual(ids['1']['probe']['blocking_regions'], 0)
+
+    def test_flags_report_batch_progress(self):
+        """Прогресс пакетного прогона нужен интерфейсу настроек («проверено N из M»)."""
+        self.app._CHEBURCHECK_PROGRESS.update({'running': True, 'done': 2,
+                                               'total': 5, 'current': 'EURO'})
+        pr = self.client.get('/api/servers/cheburcheck_flags').json()['progress']
+        self.assertEqual(pr, {'running': True, 'done': 2, 'total': 5, 'current': 'EURO'})
 
     def test_get_returns_synthetic_even_when_flag_off(self):
         body = self.client.get('/api/servers/1/cheburcheck').json()
@@ -895,3 +905,60 @@ class MasterSwitchApiTests(CheburcheckApiTests):
         data = json.loads(df.read_text(encoding='utf-8'))
         self.assertNotIn('cheburcheck', data['settings'])
         self.assertFalse(self.app.cheburcheck_enabled(data))
+
+class BatchProgressTests(unittest.TestCase):
+    """_cheburcheck_run_batch ведёт прогресс «проверено N из M» для интерфейса."""
+
+    def setUp(self):
+        import app
+        self.app = app
+        self._tmp = tempfile.TemporaryDirectory()
+        self.df = _seed(self._tmp.name, [dict(s) for s in SRV])
+        self._patch = patch.object(app, 'DATA_FILE', str(self.df))
+        self._patch.start()
+        self._spacing = patch.object(app, '_CHEBURCHECK_SPACING', 0)
+        self._spacing.start()
+        self.app._CHEBURCHECK_PROGRESS.update({'running': False, 'done': 0,
+                                               'total': 0, 'current': ''})
+
+    def tearDown(self):
+        self.app._CHEBURCHECK_PROGRESS.update({'running': False, 'done': 0,
+                                               'total': 0, 'current': ''})
+        self._spacing.stop()
+        self._patch.stop()
+        self._tmp.cleanup()
+
+    PREPARED = [({'name': 'FINN', 'uid': 'u1'}, ['95.81.126.149']),
+                ({'name': 'EURO', 'uid': 'u2'}, ['46.30.41.17'])]
+
+    def test_progress_grows_once_per_server(self):
+        seen = []
+
+        async def fake_run(srv, targets):
+            seen.append(dict(self.app._CHEBURCHECK_PROGRESS))
+
+        with patch.object(self.app, '_cheburcheck_run_server', fake_run):
+            asyncio.run(self.app._cheburcheck_run_batch(self.PREPARED))
+
+        self.assertEqual([s['done'] for s in seen], [0, 1])
+        self.assertEqual([s['current'] for s in seen], ['FINN', 'EURO'])
+        self.assertTrue(all(s['total'] == 2 and s['running'] for s in seen))
+        self.assertEqual(self.app._CHEBURCHECK_PROGRESS['done'], 2)
+        self.assertFalse(self.app._CHEBURCHECK_PROGRESS['running'])
+
+    def test_failed_server_still_counts_and_resets_flag(self):
+        tried = []
+
+        async def boom(srv, targets):
+            tried.append(srv['uid'])
+            if srv['uid'] == 'u1':
+                raise RuntimeError('probe exploded')
+
+        with patch.object(self.app, '_cheburcheck_run_server', boom):
+            asyncio.run(self.app._cheburcheck_run_batch(self.PREPARED))
+
+        # Сбой первого сервера не обрывает пакет, оба попали в прогресс.
+        self.assertEqual(tried, ['u1', 'u2'])
+        self.assertEqual(self.app._CHEBURCHECK_PROGRESS['done'], 2)
+        self.assertFalse(self.app._CHEBURCHECK_PROGRESS['running'])
+        self.assertEqual(self.app._CHEBURCHECK_PROGRESS['current'], '')
