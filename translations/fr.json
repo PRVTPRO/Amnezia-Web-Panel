@@ -1188,6 +1188,8 @@
   "srv_warp_tos_text": "Ce serveur utilisera Cloudflare WARP comme sortie pour les instances AmneziaWG sélectionnées. WARP est exploité par Cloudflare selon ses propres conditions d'utilisation ; en continuant, vous confirmez les accepter pour ce serveur.",
   "srv_warp_unlink": "Délier",
   "srv_warp_err_generic": "L'opération WARP a échoué.",
+  "srv_warp_err_no_awg": "WARP s'installe dans une instance AmneziaWG : ce serveur n'en a aucune.",
+  "srv_warp_no_awg": "Instance AWG requise",
   "srv_warp_state_error": "Erreur",
   "srv_warp_status_installed": "Installé",
   "srv_warp_job_running": "Opération WARP en cours : {kind}",

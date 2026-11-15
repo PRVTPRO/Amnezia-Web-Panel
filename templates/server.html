@@ -1285,8 +1285,13 @@
                 if (flow === 'smartroute') smartRouteBusy = false;
                 else if (flow === 'rknblock') rknBlockBusy = false;
                 else if (flow === 'warp') warpBusy = false;
+                // WARP failures carry a stable code: show the translated text
+                // instead of the raw srv_warp_* code in the log and the toast.
+                const opErrorText = flow === 'warp' && data.error?.code
+                    ? warpErrorMessage({payload: data.error})
+                    : (data.error?.message || _('install_error'));
                 if (stageEl) {
-                    stageEl.textContent = _('error') + ': ' + (data.error?.message || _('install_error'));
+                    stageEl.textContent = _('error') + ': ' + opErrorText;
                     stageEl.style.color = 'var(--danger)';
                 }
                 if (fillEl) {
@@ -1295,10 +1300,10 @@
                 }
                 const errDiv = document.createElement('div');
                 errDiv.className = 'log-line error';
-                errDiv.textContent = `✕ ${_('error')}: ${data.error?.message || _('install_error')}`;
+                errDiv.textContent = `✕ ${_('error')}: ${opErrorText}`;
                 logEl.appendChild(errDiv);
                 logEl.scrollTop = logEl.scrollHeight;
-                showToast(_('install_error') + ': ' + (data.error?.message || _('install_error')), 'error');
+                showToast(_('install_error') + ': ' + opErrorText, 'error');
                 if (flow === 'warp') {
                     await loadWarpStatus(true);
                     applyInstalledAppsVisibility();
@@ -2949,6 +2954,10 @@
         {{ proto|tojson }}: { host: {{ (info.get('public_host') or '')|tojson }}, port: {{ (info.get('public_port') or '')|tojson }} },
         {%- endfor %}
     };
+    // Protocol records known at render time. The marketplace uses this to tell
+    // a host with no AmneziaWG instance (nothing to install WARP into) from one
+    // where the app simply is not active yet.
+    const SERVER_PROTOCOL_KEYS = {{ (server.get('protocols') or {}).keys()|list|tojson }};
     const MARKETPLACE_APPS = [
         { proto: 'awg3', category: 'protocols', icon: '🛡', title: 'AmneziaWG 3.1', descKey: 'awg3_desc', badge: 'NEW' },
         { proto: 'awg2', category: 'protocols', icon: '✨', title: 'AmneziaWG 2.0', descKey: 'awg_desc' },
@@ -3187,15 +3196,21 @@
                                     : (isWarp ? warpIsInstalled()
                                         : baseInstalled(app.proto)));
                             const canInstallAnother = installed && isMultiInstanceBase(app.proto);
+                            // WARP is not a host-level binary: wgcf and
+                            // warp0.conf live inside an AmneziaWG container, so
+                            // an exit-only host has nothing to install into.
+                            const warpNoTarget = isWarp && !installed && !warpHasTargetInstance();
                             const action = isSmart
                                 ? `onclick="openSmartRouteModal()"`
                                 : (isWarp
-                                    ? (installed ? 'disabled' : `onclick="closeModal('marketplaceModal'); installWarp()"`)
+                                    ? (installed || warpNoTarget ? 'disabled' : `onclick="closeModal('marketplaceModal'); installWarp()"`)
                                     : (isRkn
                                         ? (installed || rknUnknown ? 'disabled' : `onclick="closeModal('marketplaceModal'); installRknBlock()"`)
                                         : (installed && !canInstallAnother ? 'disabled' : `onclick="installFromMarketplace('${app.proto}', ${canInstallAnother ? 'true' : 'false'})"`)));
                             const statusBadge = isWarp
-                                ? warpAggregateBadge()
+                                ? (warpNoTarget
+                                    ? `<span class="badge badge-warn"><span class="badge-dot"></span> ${escapeHtml(_('srv_warp_no_awg'))}</span>`
+                                    : warpAggregateBadge())
                                 : (isHostApp
                                     ? (installed
                                         ? `<span class="badge badge-success"><span class="badge-dot"></span> ${_('installed')}</span>`
@@ -3214,7 +3229,7 @@
                                     </div>
                                     <div class="marketplace-app-desc">${_(app.descKey)}</div>
                                     <button class="btn ${installed && !canInstallAnother ? 'btn-secondary' : 'btn-primary'} btn-sm" ${action}>
-                                        ${isSmart ? _('smartroute_open') : (canInstallAnother ? _('install_another') : (installed ? _('installed') : _('install')))}
+                                        ${isSmart ? _('smartroute_open') : (warpNoTarget ? _('srv_warp_no_awg') : (canInstallAnother ? _('install_another') : (installed ? _('installed') : _('install'))))}
                                     </button>
                                 </div>
                             `;
@@ -7360,6 +7375,7 @@
         srv_warp_xor_conflict: 'srv_warp_err_xor',
         srv_warp_tos_required: 'srv_warp_err_tos',
         srv_warp_job_busy: 'srv_warp_err_job_busy',
+        srv_warp_no_targets: 'srv_warp_err_no_awg',
     };
 
     function warpAggregate() {
@@ -7374,6 +7390,18 @@
         if (Array.isArray(d.instances) && d.instances.some(item => item && item.installed)) return true;
         const agg = warpAggregate();
         return agg === 'installed' || agg === 'degraded';
+    }
+
+    // WARP has no host-level binary: wgcf and warp0.conf live inside an
+    // AmneziaWG container. A host without such an instance (an exit-only node)
+    // cannot take WARP at all, so the marketplace says so instead of offering
+    // an install the backend would refuse.
+    function warpHasTargetInstance() {
+        const isTarget = proto => ['awg', 'awg2', 'awg3'].includes(protoBase(proto));
+        const known = Array.isArray(SERVER_PROTOCOL_KEYS) ? SERVER_PROTOCOL_KEYS : [];
+        if (known.some(isTarget)) return true;
+        // The status poll may report an instance the page snapshot predates.
+        return Object.keys(currentProtocolStatus || {}).some(isTarget);
     }
 
     function warpBadgeClass(agg) {

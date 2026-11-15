@@ -1188,6 +1188,8 @@
   "srv_warp_tos_text": "این سرور از Cloudflare WARP به‌عنوان خروجی برای نمونه‌های انتخاب‌شده AmneziaWG استفاده می‌کند. WARP توسط Cloudflare و بر اساس شرایط خودش ارائه می‌شود؛ با ادامه تأیید می‌کنید که این شرایط را برای این سرور می‌پذیرید.",
   "srv_warp_unlink": "قطع اتصال",
   "srv_warp_err_generic": "عملیات WARP ناموفق بود.",
+  "srv_warp_err_no_awg": "WARP درون یک نمونه AmneziaWG نصب می‌شود؛ این سرور چنین نمونه‌ای ندارد.",
+  "srv_warp_no_awg": "نیازمند نمونه AWG",
   "srv_warp_state_error": "خطا",
   "srv_warp_status_installed": "نصب‌شده",
   "srv_warp_job_running": "عملیات WARP در حال اجراست: {kind}",
