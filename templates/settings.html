@@ -2111,6 +2111,21 @@ async function runAllCheburcheck() {
         if (st) st.textContent = '✗ ' + (e.message || e);
     }
 }
+// Если прогон уже идёт (запущен из другой вкладки или до перезагрузки страницы),
+// подхватываем его прогресс при открытии настроек — иначе счётчик появится
+// только после повторного нажатия кнопки.
+(async function resumeCheburcheckProgress() {
+    const master = document.getElementById('cb_enabled');
+    if (!master || !master.checked) return;
+    let flags;
+    try { flags = await apiCall('/api/servers/cheburcheck_flags', 'GET'); }
+    catch (e) { return; }
+    if (flags && flags.running) {
+        const pr = flags.progress || {};
+        cbProgressShow(pr.done || 0, pr.total || 0, pr.current || '');
+        cbPollCheckProgress(pr.total || 0);
+    }
+})();
 renderCheburcheckTargets();
 </script>
 {% endblock %}
