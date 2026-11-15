@@ -3354,6 +3354,36 @@
         return size;
     }
 
+    // Mirrors the server: printable ASCII only, canonical <tag> <arg> form,
+    // and only tags both implementations parse. Returns '' when the value
+    // is acceptable, otherwise the message to show.
+    function awgI1Problem(value) {
+        if (!value) return '';
+        for (const ch of value) {
+            const code = ch.codePointAt(0);
+            if (code < 0x20 || code > 0x7e) return _('awg_i1_ascii_only');
+        }
+        const strict = /<(b|t|r|rc|rd)(?: ([^>]*))?>/g;
+        let consumed = 0;
+        let match;
+        while ((match = strict.exec(value)) !== null) {
+            if (match.index !== consumed) return _('awg_i1_canonical_tag');
+            const tag = match[1];
+            const arg = match[2] || '';
+            const canonical = arg ? '<' + tag + ' ' + arg + '>' : '<' + tag + '>';
+            if (arg !== arg.trim() || match[0] !== canonical) {
+                return _('awg_i1_canonical_tag');
+            }
+            consumed = match.index + match[0].length;
+        }
+        if (consumed !== value.length) {
+            const bad = value.match(/<\s*(c|d|ds|dz)\b/);
+            if (bad) return _('awg_i1_bad_tag').replace('{tag}', bad[1]);
+            return _('awg_i1_canonical_tag');
+        }
+        return '';
+    }
+
     function onAwgSetI1Input() {
         const value = document.getElementById('awgSetI1').value.trim();
         const bytes = document.getElementById('awgSetI1Bytes');
@@ -3364,12 +3394,8 @@
             renderAwgSetI1Badge(null, false);
             return;
         }
-        const badTag = value.match(/<\s*(c|d|ds|dz)\b/);
-        if (badTag) {
-            setAwgI1Status('awgSet', _('awg_i1_bad_tag').replace('{tag}', badTag[1]), true);
-            return;
-        }
-        setAwgI1Status('awgSet', _('awg_i1_valid'), false);
+        const problem = awgI1Problem(value);
+        setAwgI1Status('awgSet', problem || _('awg_i1_valid'), !!problem);
     }
 
     function generateAwgSetI1() {

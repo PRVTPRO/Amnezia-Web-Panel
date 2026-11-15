@@ -1327,5 +1327,7 @@
   "awg_i1_row_flags": "Flags",
   "awg_i1_row_question": "Question",
   "awg_i1_row_answer": "Answer",
-  "awg_i1_row_size": "Size"
+  "awg_i1_row_size": "Size",
+  "awg_i1_ascii_only": "Printable ASCII only: tabs, non-breaking spaces and Unicode separators are not allowed.",
+  "awg_i1_canonical_tag": "A tag is written exactly as <tag> or <tag value>: one space, nothing extra."
 }

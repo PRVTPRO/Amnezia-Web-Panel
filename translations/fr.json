@@ -1327,5 +1327,7 @@
   "awg_i1_row_flags": "Drapeaux",
   "awg_i1_row_question": "Question",
   "awg_i1_row_answer": "Réponse",
-  "awg_i1_row_size": "Taille"
+  "awg_i1_row_size": "Taille",
+  "awg_i1_ascii_only": "ASCII imprimable uniquement : tabulations, espaces insécables et séparateurs Unicode interdits.",
+  "awg_i1_canonical_tag": "Une balise s'écrit exactement <balise> ou <balise valeur> : un espace, rien de plus."
 }

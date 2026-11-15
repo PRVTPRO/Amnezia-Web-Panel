@@ -1327,5 +1327,7 @@
   "awg_i1_row_flags": "标志",
   "awg_i1_row_question": "问题",
   "awg_i1_row_answer": "回答",
-  "awg_i1_row_size": "大小"
+  "awg_i1_row_size": "大小",
+  "awg_i1_ascii_only": "仅允许可打印 ASCII：制表符、不换行空格和 Unicode 分隔符不可用。",
+  "awg_i1_canonical_tag": "标签必须精确写成 <tag> 或 <tag 值>：一个空格，不能有多余字符。"
 }

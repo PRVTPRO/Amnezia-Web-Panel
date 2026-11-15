@@ -79,7 +79,8 @@ PROTOCOL_UNINSTALL_KEYS = {
 
 # I1 masking block (per-instance special-junk packet): install and settings.
 AWG_I1_KEYS = {
-    'awg_i1_auto_badge', 'awg_i1_bad_tag', 'awg_i1_badge_custom',
+    'awg_i1_ascii_only', 'awg_i1_auto_badge', 'awg_i1_bad_tag',
+    'awg_i1_badge_custom', 'awg_i1_canonical_tag',
     'awg_i1_badge_default', 'awg_i1_badge_unknown', 'awg_i1_bytes_unit',
     'awg_i1_clear', 'awg_i1_custom_domain', 'awg_i1_domain',
     'awg_i1_domain_custom', 'awg_i1_domain_hint', 'awg_i1_empty',
