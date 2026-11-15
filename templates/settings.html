@@ -815,6 +815,7 @@
                     {{ _('cheburcheck_token_basic_only') }}
                     <a href="https://cheburcheck.ru/kb/api#authorization" target="_blank" rel="noopener">{{ _('cheburcheck_token_docs_link') }}</a>
                 </p>
+                <p class="form-hint" style="margin-top:4px;">{{ _('cheburcheck_token_credits_hint') }}</p>
             </div>
             <div class="form-group">
                 <label class="form-label">{{ _('cheburcheck_servers_label') }}</label>
@@ -1937,8 +1938,13 @@ async function checkCheburcheckToken() {
     try {
         const res = await apiCall('/api/settings/cheburcheck/token_check', 'POST', body);
         if (res && res.ok) {
-            const tpl = window._('cheburcheck_token_ok') || 'token accepted, credits: {n}';
-            show('✓ ' + tpl.replace('{n}', String(res.credits)), 'var(--success, #4ade80)');
+            // Кредиты списываются по одному на проверку сканерами; нулевой
+            // баланс — не ошибка, сервис переходит на бесплатный лимит.
+            const credits = Number(res.credits) || 0;
+            const tpl = credits > 0
+                ? (window._('cheburcheck_token_ok') || 'token accepted, credits: {n}')
+                : (window._('cheburcheck_token_ok_free') || 'token accepted, no credits: free limits apply');
+            show('✓ ' + tpl.replace('{n}', String(credits)), 'var(--success, #4ade80)');
         } else {
             show('✗ ' + ((res && res.error) || window._('cheburcheck_token_failed') || 'token rejected'),
                  'var(--danger, #f87171)');

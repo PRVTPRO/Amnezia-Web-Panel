@@ -1307,6 +1307,8 @@
   "cheburcheck_static_only_note": "Without an API token only the basic checks are available (RKN registry, CDN, geo). Network scanners require a token.",
   "cheburcheck_token_check": "Check token",
   "cheburcheck_token_ok": "token accepted, credits: {n}",
+  "cheburcheck_token_ok_free": "token accepted, 0 credits — checks run on the service's free limits",
+  "cheburcheck_token_credits_hint": "Each scanner check spends 1 credit. With a zero balance checks keep working on the service's free limits (5 checks per minute by default).",
   "cheburcheck_token_failed": "token rejected",
   "cheburcheck_token_required": "cheburcheck scanners require an API token",
   "cheburcheck_token_open_settings": "Open settings",

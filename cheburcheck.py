@@ -80,17 +80,38 @@ class CheburcheckApiError(Exception):
 
 
 def _error_from_payload(payload, status_code=None):
-    """Собрать CheburcheckApiError из JSON-тела ошибки сервиса."""
+    """Собрать CheburcheckApiError из JSON-тела ошибки сервиса.
+
+    Коды различаются по смыслу, а не только по названию: 400 — цель не
+    поддерживается сканерами (подсети, ASN), 403 без упоминания токена —
+    служебный/локальный адрес (bogon), 401/403 с текстом про токен — токен.
+    Иначе панель писала бы «API-токен не принят» на отказ трассировать
+    локальный адрес.
+    """
     data = payload if isinstance(payload, dict) else {}
-    code = data.get("code", status_code)
+    code = data.get("code", status_code) or status_code
     info = data.get("info") or data.get("error") or data.get("message")
     doc = data.get("documentation_url") or TOKEN_DOC_URL
-    if code in (401, 403) or status_code in (401, 403):
-        message = ("API-токен cheburcheck не принят ({}): {}. Документация: {}"
-                   .format(code or status_code, info or "нет доступа", doc))
+    low = str(info or "").lower()
+    mentions_token = any(word in low for word in
+                         ("токен", "token", "bearer", "authorization", "авторизац"))
+    if code == 400:
+        message = ("Сканеры cheburcheck не проверяют такую цель ({}): поддерживаются "
+                   "домены и отдельные IP-адреса, без подсетей, ASN и локальных "
+                   "адресов.".format(info or "неверные параметры"))
+    elif code == 403 and not mentions_token:
+        message = ("Сканеры cheburcheck отказали в проверке адреса (403: {}). "
+                   "Служебные и локальные адреса (bogon) не трассируются."
+                   .format(info or "Forbidden"))
+    elif code in (401, 403):
+        message = "API-токен cheburcheck не принят ({}): {}".format(
+            code, info or "нет доступа")
+        if "http" not in message:
+            # Текст сервиса иногда уже содержит ссылку на документацию.
+            message += ". Документация: " + doc
     else:
         message = "Ошибка API cheburcheck ({}): {}".format(
-            code or status_code or "?", info or "нет описания")
+            code or "?", info or "нет описания")
     return CheburcheckApiError(code=code, info=info,
                                documentation_url=doc, user_message=message)
 
@@ -111,7 +132,13 @@ async def _read_error_payload(resp):
     return data if isinstance(data, dict) else None
 
 
-# Service limits: 30 req/min for /check, 5 req/min for /probe (burst 1).
+# Service limits (defaults from docker-compose of cheburcheck):
+#   /check            — 30 req/min per IP, burst 1;
+#   /probe            — 5 req/min per key with 0 credits (burst 1),
+#                       60 req/min per key with credits (burst 10);
+#   каждый запрос /probe списывает 1 кредит ключа, даже если ответ из кеша.
+# Держим 12.5 с между пробами: это ~4.8/мин и укладывается в бесплатный лимит,
+# поэтому панель не зависит от баланса кредитов.
 CHECK_SPACING = 2.2
 PROBE_SPACING = 12.5
 

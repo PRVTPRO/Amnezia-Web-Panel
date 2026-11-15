@@ -1307,6 +1307,8 @@
   "cheburcheck_static_only_note": "没有 API 令牌时仅提供基础检查（RKN 注册表、CDN、地理位置）。网络扫描器需要令牌。",
   "cheburcheck_token_check": "检查令牌",
   "cheburcheck_token_ok": "令牌已接受，剩余额度：{n}",
+  "cheburcheck_token_ok_free": "令牌已接受，额度 0 — 检查按服务的免费额度进行",
+  "cheburcheck_token_credits_hint": "每次扫描检查消耗 1 点额度。额度为 0 时检查仍可按服务的免费额度进行（默认每分钟 5 次）。",
   "cheburcheck_token_failed": "令牌未被接受",
   "cheburcheck_token_required": "cheburcheck 扫描器需要 API 令牌",
   "cheburcheck_token_open_settings": "打开设置",

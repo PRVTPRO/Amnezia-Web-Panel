@@ -442,6 +442,33 @@ class TestApiToken(unittest.IsolatedAsyncioTestCase):
                 await cheburcheck.fetch_probe("c1", timeout=5)
         self.assertEqual(ctx.exception.code, 401)
 
+    async def test_400_reports_unsupported_target_not_token(self):
+        """Подсеть/ASN сканеры не проверяют: 400 не должен читаться как отказ токена."""
+        body = json.dumps({"code": 400, "info": "Bad Request"})
+        cheburcheck.set_api_token("test-token")
+        with patch.object(cheburcheck.httpx, "AsyncClient",
+                          lambda **kw: FakeClient([FakeStream(400, body)])):
+            with self.assertRaises(cheburcheck.CheburcheckApiError) as ctx:
+                await cheburcheck.fetch_probe("c1", timeout=5)
+        err = ctx.exception
+        self.assertEqual(err.code, 400)
+        self.assertIn("не проверяют такую цель", err.user_message)
+        self.assertNotIn("API-токен", err.user_message)
+
+    async def test_403_bogon_reports_forbidden_address_not_token(self):
+        """403 «Forbidden» = служебный/локальный адрес, а не проблема токена."""
+        body = json.dumps({"code": 403, "info": "Forbidden"})
+        cheburcheck.set_api_token("test-token")
+        with patch.object(cheburcheck.httpx, "AsyncClient",
+                          lambda **kw: FakeClient([FakeStream(403, body)])):
+            with self.assertRaises(cheburcheck.CheburcheckApiError) as ctx:
+                await cheburcheck.fetch_probe("c1", timeout=5)
+        err = ctx.exception
+        self.assertEqual(err.code, 403)
+        self.assertIn("bogon", err.user_message)
+        self.assertNotIn("API-токен", err.user_message)
+        self.assertNotIn("test-token", err.user_message)
+
     async def test_429_is_retried(self):
         streams = [FakeStream(429, ""), FakeStream(200, SSE_FIXTURE)]
         created = []

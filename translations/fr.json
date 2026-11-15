@@ -1307,6 +1307,8 @@
   "cheburcheck_static_only_note": "Sans jeton API, seules les vérifications de base sont disponibles (registre RKN, CDN, géo). Les scanners réseau exigent un jeton.",
   "cheburcheck_token_check": "Vérifier le jeton",
   "cheburcheck_token_ok": "jeton accepté, crédits : {n}",
+  "cheburcheck_token_ok_free": "jeton accepté, 0 crédit — les vérifications utilisent les limites gratuites du service",
+  "cheburcheck_token_credits_hint": "Chaque vérification par scanners coûte 1 crédit. À solde nul, les vérifications continuent avec les limites gratuites du service (5 par minute par défaut).",
   "cheburcheck_token_failed": "jeton refusé",
   "cheburcheck_token_required": "Les scanners cheburcheck exigent un jeton API",
   "cheburcheck_token_open_settings": "Ouvrir les paramètres",

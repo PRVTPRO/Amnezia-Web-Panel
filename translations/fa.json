@@ -1307,6 +1307,8 @@
   "cheburcheck_static_only_note": "بدون توکن API فقط بررسی‌های پایه در دسترس است (فهرست RKN، CDN، موقعیت جغرافیایی). اسکنرهای شبکه به توکن نیاز دارند.",
   "cheburcheck_token_check": "بررسی توکن",
   "cheburcheck_token_ok": "توکن پذیرفته شد، اعتبار: {n}",
+  "cheburcheck_token_ok_free": "توکن پذیرفته شد، اعتبار 0 — بررسی‌ها با محدودیت رایگان سرویس انجام می‌شود",
+  "cheburcheck_token_credits_hint": "هر بررسی اسکنرها ۱ اعتبار مصرف می‌کند. با اعتبار صفر، بررسی‌ها با محدودیت رایگان سرویس (به‌طور پیش‌فرض ۵ بار در دقیقه) ادامه می‌یابد.",
   "cheburcheck_token_failed": "توکن پذیرفته نشد",
   "cheburcheck_token_required": "اسکنرهای cheburcheck به توکن API نیاز دارند",
   "cheburcheck_token_open_settings": "باز کردن تنظیمات",
