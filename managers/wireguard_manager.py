@@ -21,6 +21,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 from managers.clients_table import save_clients_table
 from managers import split_tunnel
+from managers.torrent_guard import TorrentGuard
 
 logger = logging.getLogger(__name__)
 
@@ -709,6 +710,21 @@ tail -f /dev/null
         except Exception:
             return 0
 
+    def torrent_guard(self, protocol_type=None):
+        """Правила торрент-фильтра для wg0 (тот же движок, что у AWG).
+
+        Состояние — в /opt/amnezia/wireguard: каталога /opt/amnezia/awg в этом
+        контейнере нет, и `docker cp` туда падал бы молча (тогда правила
+        пересобирались бы каждый цикл и журнал по WG оставался пустым).
+        """
+        return TorrentGuard(
+            self.ssh,
+            container=self.CONTAINER_NAME,
+            iface=self.INTERFACE,
+            show_cmd='wg show 2>/dev/null',
+            state_path='/opt/amnezia/wireguard/torrent_guard.json',
+            host_key=getattr(self.ssh, 'host', '') or '',
+        )
     def _wg_show(self):
         """Run 'wg show all' and parse output."""
         out, err, code = self.ssh.run_sudo_command(

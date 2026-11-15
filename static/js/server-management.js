@@ -54,6 +54,14 @@
                     </div>
                     <div class="text-muted" style="font-size:0.78rem; margin-top:6px;">${_('peer_poll_hint')}</div>
                 </div>
+                <div style="margin-top: var(--space-md); padding-top: var(--space-md); border-top: 1px solid var(--border);">
+                    <label for="torrentGuardCardToggle" style="display:flex; align-items:center; gap:8px; font-size:0.9rem; cursor:pointer;">
+                        <input type="checkbox" id="torrentGuardCardToggle" disabled>
+                        <span>🛡 ${_('torrent_guard_card_title')}</span>
+                    </label>
+                    <div class="text-muted" style="font-size:0.78rem; margin-top:6px;">${_('torrent_guard_card_hint')}</div>
+                    <div id="torrentGuardCardState" class="text-muted" style="font-size:0.78rem; margin-top:4px;"></div>
+                </div>
             </div>`;
     }
 
@@ -133,6 +141,59 @@
         }
     }
 
+    // Тумблер «Фильтр торрентов» в карточке сервера: состояние тянем с сервера,
+    // потому что режимы живут по инстансам и могли быть изменены на странице
+    // сервера (on / count / off).
+    async function refreshTorrentGuard() {
+        const box = document.getElementById('torrentGuardCardToggle');
+        const state = document.getElementById('torrentGuardCardState');
+        if (!box || !context) return;
+        try {
+            const data = await api()(`/api/servers/${context.serverId}/torrent_guard`, 'GET');
+            box.checked = !!data.enabled;
+            box.disabled = !data.supported;
+            const health = data.health || {};
+            if (state) {
+                state.style.color = '';
+                state.title = '';
+                if (!data.supported) {
+                    state.textContent = _('torrent_guard_card_unsupported');
+                } else if (health.ok === false) {
+                    // Правила не подтверждены (нет модулей/ошибка iptables):
+                    // «включено» без этого выглядело бы как рабочая защита.
+                    state.textContent = _('torrent_guard_card_degraded');
+                    state.title = health.error || '';
+                    state.style.color = '#f87171';
+                } else if (!data.enabled) {
+                    state.textContent = _('torrent_guard_card_off_hint');
+                } else {
+                    state.textContent = '';
+                }
+            }
+        } catch (error) {
+            box.disabled = true;
+            if (state) state.textContent = _('error') + ': ' + error.message;
+        }
+    }
+
+    async function toggleTorrentGuard(box) {
+        if (!box || !context) return;
+        const wanted = !!box.checked;
+        box.disabled = true;
+        try {
+            const res = await api()(`/api/servers/${context.serverId}/torrent_guard`, 'POST', {enabled: wanted});
+            if (res && res.errors && res.errors.length) {
+                notify(_('error') + ': ' + res.errors.join('; '), 'error');
+            } else {
+                notify(wanted ? _('torrent_guard_card_enabled') : _('torrent_guard_card_disabled'), 'success');
+            }
+        } catch (error) {
+            box.checked = !wanted;
+            notify(_('error') + ': ' + error.message, 'error');
+        } finally {
+            await refreshTorrentGuard();
+        }
+    }
     async function savePoll() {
         const select = document.getElementById('peerPollSelect');
         const button = document.getElementById('peerPollSaveBtn');
@@ -154,6 +215,10 @@
         }
     }
 
+    document.addEventListener('change', event => {
+        const box = event.target.closest('#torrentGuardCardToggle');
+        if (box) toggleTorrentGuard(box);
+    });
     document.addEventListener('click', event => {
         const button = event.target.closest('[data-server-management-action]');
         if (!button || !context) return;

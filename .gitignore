@@ -34,6 +34,9 @@ data.json.credential.key
 *.credential.key
 # Per-write recovery snapshots next to data.json (runtime state, regenerated)
 data.json.recovery/
+# Журнал торрент-событий: runtime-состояние панели, не репозиторий
+torrent_events.json
+torrent_events.json.tmp
 *.runtime.lock
 .DS_Store
 
