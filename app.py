@@ -1688,10 +1688,15 @@ def awg_i1_domain_from(domain, pool=None):
     if not name:
         return None
     if not awg_i1_is_valid_domain(name):
-        raise ValueError('domain must look like example.com: no scheme, no spaces')
+        raise ValueError('domain must look like example.com: ASCII letters, '
+                         'digits and hyphens only, no scheme, no spaces')
     pool_name = (pool or '').strip().lower()
     if pool_name and awg_i1_pool_for(pool_name) is None:
         raise ValueError(f'unknown address pool: {pool}')
+    if awg_i1_pool_for(name) is not None and pool_name and pool_name != name:
+        # The catalog already knows this domain's network; a different pool
+        # would silently produce a packet from a foreign network.
+        raise ValueError(f'{name} already has its own address pool')
     if awg_i1_pool_for(name) is None and not pool_name:
         raise ValueError('a custom domain needs an address pool')
     return name

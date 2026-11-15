@@ -269,7 +269,7 @@ SPECIAL_JUNK_KEYS = ('i1', 'i2', 'i3', 'i4', 'i5')
 # deployment.
 AWG_DEFAULT_I1 = _DEFAULT_I1
 
-_SPECIAL_JUNK_TAG_RE = re.compile(r'<\s*(b|t|r|rc|rd)(?:\s+([^>]*?))?\s*>')
+_SPECIAL_JUNK_TAG_RE = re.compile(r'<(b|t|r|rc|rd)(?: ([^>]*))?>')
 
 # A junk packet still has to fit into one datagram.
 SPECIAL_JUNK_MAX_SIZE = 1280
@@ -277,13 +277,19 @@ SPECIAL_JUNK_MAX_SIZE = 1280
 
 def validate_special_junk(value):
     """Validate an I1-I5 value and return the packet size it produces."""
-    text = (value or '').strip()
-    if not text:
-        return 0
-    if '\n' in text or '\r' in text:
+    raw = value or ''
+    if '\n' in raw or '\r' in raw:
         # The value lands in the server config as `I1 = <value>`; a line break
         # would split it into extra lines and corrupt [Interface].
         raise ValueError("line breaks are not allowed in the I1-I5 value")
+    # Both parsers are stricter than Python whitespace: the kernel splits a
+    # tag into key/value on a single space (jp_parse_tags), so tabs, NBSP and
+    # Unicode separators make it reject the config while Go accepts it.
+    if any(ord(ch) < 0x20 or ord(ch) > 0x7e for ch in raw):
+        raise ValueError("only printable ASCII is allowed in the I1-I5 value")
+    text = raw.strip()
+    if not text:
+        return 0
 
     # Only the intersection of both parsers is allowed. A tag understood by
     # one side only makes the peer drop the whole config: amneziawg-go
@@ -312,6 +318,12 @@ def validate_special_junk(value):
 
         tag = match.group(1)
         arg = (match.group(2) or '').strip()
+        canonical = f"<{tag} {arg}>" if arg else f"<{tag}>"
+        if match.group(0) != canonical:
+            # `<r  2>`, `< r 2>` or `<r 2 >` are rejected by the kernel
+            # parser even though they look harmless.
+            raise ValueError(
+                f"tag must be written exactly as {canonical}, got {match.group(0)!r}")
         if tag in ('c', 't'):
             if arg:
                 raise ValueError(f"<{tag}> takes no argument")
@@ -5129,19 +5141,33 @@ PersistentKeepalive = 25
         if self._base_protocol(protocol_type) == self.AWG_LEGACY:
             special_junk = None
             i1_value = None
+        current = self._get_awg_params_from_config(protocol_type)
         junk = None
         if special_junk is not None:
-            junk = normalize_special_junk(special_junk)
+            # None = field not sent, leave it alone; '' = clear it. A value
+            # equal to the stored one is carried over verbatim: an instance
+            # saved before <c> was rejected must still allow an MTU change.
+            junk = {}
+            for key in SPECIAL_JUNK_KEYS:
+                provided = special_junk.get(key)
+                if provided is None:
+                    continue
+                raw = str(provided).strip()
+                if not raw:
+                    junk[key] = None
+                    continue
+                if raw != (current.get(key) or ''):
+                    try:
+                        validate_special_junk(raw)
+                    except ValueError as exc:
+                        raise ValueError(f"{key.upper()}: {exc}") from exc
+                junk[key] = raw
         elif i1_value is not None:
-            # Replace only I1 and keep I2-I5 as they are: regenerating the
-            # first packet must not silently drop the others. The stored
-            # I2-I5 are carried over verbatim on purpose - an old value the
-            # current validator rejects (e.g. <c>) must not block the fix.
-            validate_special_junk(i1_value)
-            current = self._get_awg_params_from_config(protocol_type)
+            # Replace only I1 and keep I2-I5 as they are.
+            validate_special_junk(i1_value.strip())
             junk = {key: current[key] for key in SPECIAL_JUNK_KEYS
                     if current.get(key)}
-            junk['i1'] = i1_value
+            junk['i1'] = i1_value.strip()
 
         # Validate DNS and DNS6 before writing
         if dns is not None:
@@ -5149,7 +5175,7 @@ PersistentKeepalive = 25
         if dns6 is not None:
             self._validate_dns_value(dns6)
 
-        current_junk = self._get_awg_params_from_config(protocol_type)
+        current_junk = current
         config = self._get_server_config(protocol_type)
         lines = config.split('\n')
 
@@ -5174,8 +5200,9 @@ PersistentKeepalive = 25
             value = str(dns6).strip()
             replaced['DNS6'] = f"# DNS6 = {value}" if value else None
         if junk is not None:
-            for key in SPECIAL_JUNK_KEYS:
-                value = junk.get(key)
+            # Only the keys the caller touched: a key missing from `junk`
+            # means "leave as is", not "clear".
+            for key, value in junk.items():
                 replaced[key.upper()] = f"{key.upper()} = {value}" if value else None
 
         # Everything lives in [Interface]; drop the old occurrences first so a
@@ -5202,7 +5229,7 @@ PersistentKeepalive = 25
             # packet cannot be pushed through syncconf -- the kernel would
             # keep sending the old one. Recreating the interface is the only
             # way to make a removal take effect.
-            dropped = any(current_junk.get(key) and not junk.get(key)
+            dropped = any(current_junk.get(key) and key in junk and not junk.get(key)
                           for key in SPECIAL_JUNK_KEYS)
             if dropped:
                 self._restart_container(protocol_type)

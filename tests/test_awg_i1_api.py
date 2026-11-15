@@ -64,6 +64,13 @@ class AwgI1ApiTests(unittest.TestCase):
         self.assertFalse(parsed['default'])
         self.assertEqual(parse_i1(body['i1'])['size'], parsed['size'])
 
+    def test_catalog_domain_rejects_a_foreign_pool(self):
+        response = self.client.post('/api/awg/i1/preview',
+                                    json={'domain': 'icloud.com',
+                                          'pool': 'www.microsoft.com'})
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn('own address pool', response.json()['error'])
+
     def test_preview_picks_a_domain_when_none_given(self):
         response = self.client.post('/api/awg/i1/preview', json={})
         self.assertEqual(response.status_code, 200, response.text)

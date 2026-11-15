@@ -3146,6 +3146,10 @@
     // never needs to know the public Amnezia default either.
     let awgI1Catalog = null;
     let awgI1Timer = null;
+    // Junk values as they were when the settings modal opened. Only fields
+    // the admin actually changed are sent, so an old value the current
+    // validator rejects cannot block an MTU/DNS save.
+    let awgSetJunkOriginal = {};
 
     // The install form and the settings modal name their inputs differently
     // (installAwgI1 vs awgSetI1), so callers pass the whole id prefix.
@@ -5880,9 +5884,12 @@
                 ipInst ? (ipInst.blocked_reason || '') : '');
             const junkGroup = document.getElementById('awgSetJunkGroup');
             junkGroup.style.display = data.supports_special_junk ? 'block' : 'none';
+            awgSetJunkOriginal = {};
             SPECIAL_JUNK_KEYS.forEach(key => {
                 const el = specialJunkField('awgSet', key);
-                if (el) el.value = data[key] || '';
+                const value = data[key] || '';
+                if (el) el.value = value;
+                awgSetJunkOriginal[key] = value;
             });
             if (data.supports_special_junk) {
                 await initAwgI1('awgSet');
@@ -5915,7 +5922,10 @@
         };
         if (document.getElementById('awgSetJunkGroup').style.display !== 'none') {
             SPECIAL_JUNK_KEYS.forEach(key => {
-                payload[key] = specialJunkField('awgSet', key).value.trim();
+                const value = specialJunkField('awgSet', key).value.trim();
+                if (value !== (awgSetJunkOriginal[key] || '').trim()) {
+                    payload[key] = value;
+                }
             });
         }
         btn.disabled = true;

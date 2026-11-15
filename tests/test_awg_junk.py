@@ -182,12 +182,40 @@ class UpdateOnlyI1Test(unittest.TestCase):
         self.assertIn('I2 = <t>', config)
         self.assertNotIn('0x8580', config)
 
-    def test_explicit_packets_still_clear_the_rest(self):
+    def test_only_provided_packets_are_touched(self):
         manager, written = self._manager()
         manager.update_awg_settings('awg3', special_junk={'i1': '<r 2><b 0x01>'})
         config = written['config']
         self.assertIn('I1 = <r 2><b 0x01>', config)
+        # I2 was not sent, so it stays as it was.
+        self.assertIn('I2 = <t>', config)
+
+    def test_empty_string_clears_only_that_packet(self):
+        manager, written = self._manager()
+        manager.update_awg_settings('awg3', special_junk={'i2': ''})
+        config = written['config']
+        self.assertIn('I1 = <r 2><b 0x8580>', config)
         self.assertNotIn('I2 =', config)
+
+    def test_unchanged_value_is_not_validated(self):
+        from managers.awg_manager import AWGManager
+        manager = AWGManager(ssh_manager=None)
+        manager._base_protocol = lambda proto: 'awg3'
+        # An instance saved before <c> was rejected still has it in I1.
+        manager._get_awg_params_from_config = lambda proto: {'i1': '<c>'}
+        manager._get_server_config = lambda proto: '[Interface]\nI1 = <c>\n\n[Peer]\n'
+        written = {}
+        manager._write_server_config = lambda proto, text: written.setdefault('config', text)
+        manager._sync_server_config = lambda proto: None
+        manager._restart_container = lambda proto: None
+        manager.get_awg_settings = lambda proto: {'status': 'ok'}
+
+        # Saving MTU alone must not raise, and the old packet is untouched.
+        manager.update_awg_settings('awg3', mtu='1300')
+        self.assertIn('I1 = <c>', written['config'])
+        # Sending the same value back is not "new input" either.
+        manager.update_awg_settings('awg3', special_junk={'i1': '<c>'})
+        self.assertIn('I1 = <c>', written['config'])
 
 
 class HardeningTest(unittest.TestCase):
@@ -210,6 +238,21 @@ class HardeningTest(unittest.TestCase):
     def test_hex_tag_without_prefix_is_not_parsed(self):
         self.assertIsNone(parse_i1('<r 2><b deadbeef>'))
         self.assertIsNone(parse_i1('<r 2><b>'))
+
+    def test_non_printable_and_padded_tags_are_rejected(self):
+        for value in ('<r  2>', '<r 2 >', '< r 2>', '<r\u00a02>', '<t>\x0b',
+                      '<r 2>\t<b 0x00>'):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    validate_special_junk(value)
+
+    def test_full_packet_in_a_single_tag_is_parsed(self):
+        from managers.awg_junk import tags_to_bytes
+        packet = '<b 0x' + tags_to_bytes(DEFAULT_I1).hex() + '>'
+        parsed = parse_i1(packet)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['domain'], 'icloud.com')
+        self.assertTrue(is_legacy_default(packet))
 
     def test_regeneration_does_not_require_valid_old_i2(self):
         from managers.awg_manager import AWGManager

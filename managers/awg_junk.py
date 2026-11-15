@@ -266,25 +266,13 @@ def _read_name(data, offset):
     return '.'.join(labels), offset + 1
 
 
-def parse_i1(value):
-    """Decode an I1 value into its DNS fields, or None when it is not a DNS answer.
-
-    Returns {'domain', 'ip', 'ttl', 'flags', 'size', 'owner', 'default'}.
-    Random tags are decoded as zeros; only structure and literals matter here.
-    """
-    text = (value or '').strip()
-    if not text:
+def _decode_dns(data, start, size):
+    """Decode a DNS answer starting at ``start``; None when it is not one."""
+    if len(data) < start + 12:
         return None
     try:
-        data = tags_to_bytes(text)
-        size = _tag_size(text)
-    except (ValueError, TypeError):
-        return None
-    if size < 12 or len(data) < 12:
-        return None
-    try:
-        flags, qdcount, ancount = struct.unpack('>HHH', data[2:8])
-        domain, offset = _read_name(data, 12)
+        flags, qdcount, ancount = struct.unpack('>HHH', data[start + 2:start + 8])
+        domain, offset = _read_name(data, start + 12)
         if not domain or qdcount < 1:
             return None
         qtype, _qclass = struct.unpack('>HH', data[offset:offset + 4])
@@ -297,7 +285,7 @@ def parse_i1(value):
         if rdlen != 4 or offset + 4 > len(data):
             return None
         ip = ipaddress.IPv4Address(data[offset:offset + 4])
-    except (struct.error, IndexError, UnicodeDecodeError):
+    except (struct.error, IndexError, UnicodeDecodeError, ValueError):
         return None
     pool = DOMAIN_POOLS.get(domain.lower())
     owner = None
@@ -315,8 +303,33 @@ def parse_i1(value):
         'size': size,
         'owner': owner,
         'in_pool': owner is not None,
-        'default': normalize_i1(text) == normalize_i1(DEFAULT_I1),
     }
+
+
+def parse_i1(value):
+    """Decode an I1 value into its DNS fields, or None when it is not a DNS answer.
+
+    Returns {'domain', 'ip', 'ttl', 'flags', 'size', 'owner', 'default'}.
+    Random tags are decoded as zeros; only structure and literals matter here.
+    """
+    text = (value or '').strip()
+    if not text:
+        return None
+    try:
+        data = tags_to_bytes(text)
+        size = _tag_size(text)
+    except (ValueError, TypeError):
+        return None
+    if size < 12 or len(data) < 12:
+        return None
+    # The generated packet starts with a 2-byte random id, a hand-written one
+    # may include the id in <b>: try both shapes instead of assuming one.
+    for start in (2, 0):
+        parsed = _decode_dns(data, start, size)
+        if parsed is not None:
+            parsed['default'] = normalize_i1(text) == normalize_i1(DEFAULT_I1)
+            return parsed
+    return None
 
 
 def normalize_i1(value):
@@ -326,7 +339,17 @@ def normalize_i1(value):
 
 def is_legacy_default(value):
     """Whether a value is byte-identical to the client's public default."""
-    return bool(value) and normalize_i1(value) == normalize_i1(DEFAULT_I1)
+    text = (value or '').strip()
+    if not text:
+        return False
+    if normalize_i1(text) == normalize_i1(DEFAULT_I1):
+        return True
+    try:
+        # A hand-written <b 0x...> packet carries the same bytes even though the
+        # literal differs; random tags decode as zeros on both sides.
+        return tags_to_bytes(text) == tags_to_bytes(DEFAULT_I1)
+    except (ValueError, TypeError):
+        return False
 
 
 def catalog():
