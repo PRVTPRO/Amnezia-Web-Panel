@@ -2298,6 +2298,23 @@
                 <div class="form-hint">{{ _('nginx_install_hint') }}</div>
             </div>
 
+            <div id="xrayOptions"
+                style="display:none; padding: var(--space-md); background: rgba(0,0,0,0.03); border-radius: var(--radius-md); margin-bottom: var(--space-md);">
+                <div class="form-group">
+                    <label class="form-label">{{ _('xray_transport') }}</label>
+                    <select class="form-input" id="installXrayTransport">
+                        <option value="xhttp">{{ _('xray_transport_xhttp') }}</option>
+                        <option value="tcp">{{ _('xray_transport_tcp') }}</option>
+                    </select>
+                    <div class="form-hint">{{ _('xray_transport_hint') }}</div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">{{ _('xray_domain') }}</label>
+                    <input class="form-input" type="text" id="installXrayDomain" placeholder="yahoo.com" spellcheck="false">
+                    <div class="form-hint">{{ _('xray_domain_hint') }}</div>
+                </div>
+            </div>
+
             <div class="modal-footer">
                 <button class="btn btn-secondary" onclick="closeModal('installModal')">{{ _('cancel') }}</button>
                 <button class="btn btn-primary" onclick="installProtocol()" id="installBtn">
@@ -4981,6 +4998,7 @@
         const nginxOpts = document.getElementById('nginxOptions');
         const awgOpts = document.getElementById('awgOptions');
         const exitOpts = document.getElementById('exitOptions');
+        const xrayOpts = document.getElementById('xrayOptions');
 
         telemtOpts.style.display = 'none';
         socks5Opts.style.display = 'none';
@@ -4988,6 +5006,7 @@
         nginxOpts.style.display = 'none';
         awgOpts.style.display = 'none';
         exitOpts.style.display = 'none';
+        xrayOpts.style.display = 'none';
 
         if (base === 'dns') {
             portLabel.textContent = _('port') + ' (Internal)';
@@ -4999,6 +5018,9 @@
             portInput.disabled = false;
             portInput.value = currentInstallAnother ? nextSuggestedPort(currentInstallProto, 443) : '443';
             portHint.textContent = currentInstallAnother ? _('port_next_instance_hint') : _('port_xray_hint');
+            xrayOpts.style.display = 'block';
+            document.getElementById('installXrayTransport').value = 'xhttp';
+            document.getElementById('installXrayDomain').value = '';
         } else if (base === 'telemt') {
             portLabel.textContent = _('port') + ' (TCP)';
             portInput.value = currentInstallAnother ? nextSuggestedPort(currentInstallProto, 443) : '443';
@@ -5185,6 +5207,9 @@
             } else if (protoBase(currentInstallProto) === 'nginx') {
                 params.nginx_domain = document.getElementById('installNginxDomain').value.trim();
                 params.nginx_email = document.getElementById('installNginxEmail').value.trim();
+            } else if (protoBase(currentInstallProto) === 'xray') {
+                params.xray_transport = document.getElementById('installXrayTransport').value;
+                params.xray_domain = document.getElementById('installXrayDomain').value.trim();
             } else if (protoBase(currentInstallProto) === 'exit') {
                 params.exit_subnet = document.getElementById('installExitSubnet').value.trim();
                 params.exit_obfuscation = document.getElementById('installExitObfuscation').checked;

@@ -1820,6 +1820,20 @@ def build_xray_client_config(link):
             stream.setdefault('grpcSettings', {})['serviceName'] = query['serviceName']
         if 'mode' in query:
             stream.setdefault('grpcSettings', {})['multiMode'] = query['mode'] == 'multi'
+    elif network == 'xhttp':
+        settings = stream.setdefault('xhttpSettings', {})
+        if query.get('path', '/') != '/':
+            settings['path'] = query['path']
+        if 'host' in query:
+            settings['host'] = query['host']
+        if 'mode' in query:
+            settings['mode'] = query['mode']
+        if 'extra' in query:
+            # extra rides on the link as compact, percent-encoded JSON
+            try:
+                settings['extra'] = json.loads(query['extra'])
+            except ValueError:
+                pass
 
     security = query.get('security', 'none')
     tls_key = 'xtlsSettings' if security == 'xtls' else ('tlsSettings' if security == 'tls' else 'realitySettings')
@@ -2764,6 +2778,9 @@ class InstallProtocolRequest(BaseModel):
     # NGINX
     nginx_domain: Optional[str] = None
     nginx_email: Optional[str] = None
+    # Xray
+    xray_transport: Optional[str] = None  # 'tcp' (legacy) or 'xhttp'
+    xray_domain: Optional[str] = None     # optional SNI/domain; empty keeps the default
     # Exit node
     exit_subnet: Optional[str] = None       # transit subnet, default 10.9.0.0/24
     exit_obfuscation: Optional[bool] = None  # AmneziaWG obfuscation on the transit link
@@ -7128,7 +7145,11 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
             )
         elif install_base == 'xray':
             install_args = ()
-            install_kwargs = dict(port=req.port)
+            install_kwargs = dict(
+                port=req.port,
+                transport=req.xray_transport or 'tcp',
+                site_name=(req.xray_domain or '').strip() or 'yahoo.com',
+            )
         elif install_base == 'wireguard':
             install_args = ()
             install_kwargs = dict(port=req.port)
