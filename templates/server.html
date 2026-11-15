@@ -148,6 +148,42 @@
         font-size: 0.78rem;
     }
     .ssh-trust-btn { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; }
+    /* --- I1 masking block (install + settings) --- */
+    .i1-panel {
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-md);
+        padding: var(--space-md);
+        background: var(--bg-secondary);
+    }
+    .i1-panel .i1-panel-head {
+        display: flex; align-items: baseline; gap: var(--space-sm);
+        flex-wrap: wrap; margin-bottom: var(--space-xs);
+    }
+    .i1-panel .i1-panel-head h4 { font-size: 0.98rem; font-weight: 650; }
+    .i1-memo {
+        display: flex; gap: 10px; align-items: flex-start;
+        padding: 10px 12px; border-radius: var(--radius-sm);
+        font-size: var(--text-sm); line-height: 1.5;
+        background: var(--info-bg); border: 1px solid var(--info-border);
+        margin-bottom: var(--space-md);
+    }
+    .i1-memo.is-warn { background: var(--warning-bg); border-color: var(--warning-border); }
+    .i1-memo.is-ok { background: var(--success-bg); border-color: var(--success-border); }
+    .i1-code {
+        font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.76rem;
+        line-height: 1.5; word-break: break-all;
+        padding: 10px 12px; border-radius: var(--radius-sm);
+        background: rgba(0, 0, 0, 0.28); border: 1px solid var(--border-color);
+    }
+    [data-theme="light"] .i1-code { background: rgba(0, 0, 0, 0.04); }
+    .i1-breakdown { list-style: none; font-size: var(--text-sm); margin-top: var(--space-sm); }
+    .i1-breakdown li { display: flex; gap: 10px; padding: 4px 0; border-bottom: 1px dashed var(--border-color); }
+    .i1-breakdown li:last-child { border-bottom: none; }
+    .i1-breakdown .k { flex: none; width: 118px; color: var(--text-muted); font-size: 0.76rem; }
+    .i1-breakdown .v { flex: 1; word-break: break-word; }
+    .i1-manual { border: 1px dashed var(--border-color); border-radius: var(--radius-md); padding: 10px 12px; }
+    .i1-manual > summary { cursor: pointer; font-size: var(--text-sm); color: var(--text-secondary); }
+    .i1-manual[open] > summary { margin-bottom: var(--space-sm); color: var(--text-primary); }
     .ssh-trust-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); flex: 0 0 auto; }
     .ssh-trust-btn.is-urgent { border-color: var(--warning); background: var(--warning-bg); color: var(--warning); }
     .ssh-trust-dot.is-urgent { background: var(--warning); animation: sshTrustPulse 1.4s infinite; }
@@ -2168,19 +2204,70 @@
                 </div>
                 <div class="ip-note" data-kind="info" id="installIpv6Note" style="display:none;"></div>
                 <div id="installAwgJunk">
-                    <div class="form-group">
-                        <label class="form-label" style="display:flex; justify-content:space-between; align-items:center;">
-                            {{ _('awg_special_junk') }}
-                            <button type="button" class="btn btn-secondary btn-sm"
-                                onclick="resetSpecialJunkFields('installAwg')">{{ _('awg_special_junk_reset') }}</button>
-                        </label>
-                        <div class="form-hint" style="margin-bottom:var(--space-xs);">{{ _('awg_special_junk_hint') }}</div>
-                        <input class="form-input" type="text" id="installAwgI1" spellcheck="false" placeholder="I1">
-                        <input class="form-input mt-xs" type="text" id="installAwgI2" spellcheck="false" placeholder="I2">
-                        <input class="form-input mt-xs" type="text" id="installAwgI3" spellcheck="false" placeholder="I3">
-                        <input class="form-input mt-xs" type="text" id="installAwgI4" spellcheck="false" placeholder="I4">
-                        <input class="form-input mt-xs" type="text" id="installAwgI5" spellcheck="false" placeholder="I5">
-                        <div class="form-hint">{{ _('awg_special_junk_syntax') }}</div>
+                    <div class="i1-panel">
+                        <div class="i1-panel-head">
+                            <h4>{{ _('awg_i1_title') }}</h4>
+                            <span class="badge badge-success">{{ _('awg_i1_auto_badge') }}</span>
+                        </div>
+                        <div class="form-hint" style="margin-bottom:var(--space-sm);">{{ _('awg_i1_intro') }}</div>
+                        <div class="i1-memo is-ok" id="installAwgI1Memo">{{ _('awg_i1_install_memo') }}</div>
+
+                        <div class="form-group">
+                            <label class="form-label">{{ _('awg_i1_profile') }}</label>
+                            <select class="form-select" id="installAwgI1Profile"
+                                    onchange="onAwgI1ProfileChange('install')">
+                                <option value="any">{{ _('awg_i1_profile_any') }}</option>
+                                <option value="apple">{{ _('awg_i1_profile_apple') }}</option>
+                                <option value="windows">{{ _('awg_i1_profile_windows') }}</option>
+                                <option value="android">{{ _('awg_i1_profile_android') }}</option>
+                                <option value="linux">{{ _('awg_i1_profile_linux') }}</option>
+                            </select>
+                            <div class="form-hint">{{ _('awg_i1_profile_hint') }}</div>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">{{ _('awg_i1_domain') }}</label>
+                            <select class="form-select" id="installAwgI1Domain"
+                                    onchange="onAwgI1DomainChange('install')"></select>
+                            <div class="form-hint">{{ _('awg_i1_domain_hint') }}</div>
+                        </div>
+
+                        <div id="installAwgI1CustomRow" style="display:none;">
+                            <div class="form-group">
+                                <label class="form-label">{{ _('awg_i1_custom_domain') }}</label>
+                                <input class="form-input" type="text" id="installAwgI1Custom"
+                                       spellcheck="false" placeholder="example.com"
+                                       oninput="previewAwgI1('install')">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">{{ _('awg_i1_pool') }}</label>
+                                <select class="form-select" id="installAwgI1Pool"
+                                        onchange="previewAwgI1('install')"></select>
+                                <div class="form-hint">{{ _('awg_i1_pool_hint') }}</div>
+                            </div>
+                        </div>
+
+                        <div class="form-group">
+                            <label class="form-label" style="display:flex; justify-content:space-between; align-items:center;">
+                                {{ _('awg_i1_packet') }}
+                                <span class="badge badge-secondary" id="installAwgI1Bytes">—</span>
+                            </label>
+                            <div class="i1-code" id="installAwgI1Preview">—</div>
+                            <div class="form-hint" style="display:flex; justify-content:space-between; gap:8px; align-items:center; flex-wrap:wrap;">
+                                <span id="installAwgI1Status">{{ _('awg_i1_install_status') }}</span>
+                                <button type="button" class="btn btn-secondary btn-sm"
+                                        onclick="previewAwgI1('install')">{{ _('awg_i1_regenerate') }}</button>
+                            </div>
+                        </div>
+
+                        <details class="i1-manual">
+                            <summary>{{ _('awg_i1_manual') }}</summary>
+                            <div class="form-hint" style="margin:var(--space-sm) 0;">{{ _('awg_i1_manual_hint') }}</div>
+                            <input class="form-input" type="text" id="installAwgI1" spellcheck="false" placeholder="I1">
+                            <input class="form-input mt-xs" type="text" id="installAwgI2" spellcheck="false" placeholder="I2">
+                            <input class="form-input mt-xs" type="text" id="installAwgI3" spellcheck="false" placeholder="I3">
+                            <input class="form-input mt-xs" type="text" id="installAwgI4" spellcheck="false" placeholder="I4">
+                            <input class="form-input mt-xs" type="text" id="installAwgI5" spellcheck="false" placeholder="I5">
+                        </details>
                     </div>
                 </div>
             </div>
@@ -2443,19 +2530,71 @@
                 {{ _('server_ipv6_apply') }}
             </button>
         </div>
-        <div class="form-group" id="awgSetJunkGroup">
-            <label class="form-label" style="display:flex; justify-content:space-between; align-items:center;">
-                {{ _('awg_special_junk') }}
+        <div class="i1-panel" id="awgSetJunkGroup">
+            <div class="i1-panel-head">
+                <h4>{{ _('awg_i1_title') }}</h4>
+                <span class="badge badge-secondary" id="awgSetI1Badge">{{ _('awg_i1_badge_unknown') }}</span>
+            </div>
+            <div class="form-hint" style="margin-bottom:var(--space-sm);">{{ _('awg_i1_intro') }}</div>
+            <div class="i1-memo" id="awgSetI1Memo" style="display:none;"></div>
+
+            <div class="form-group">
+                <label class="form-label">{{ _('awg_i1_profile') }}</label>
+                <select class="form-select" id="awgSetI1Profile" onchange="onAwgI1ProfileChange('awgSet')">
+                    <option value="any">{{ _('awg_i1_profile_any') }}</option>
+                    <option value="apple">{{ _('awg_i1_profile_apple') }}</option>
+                    <option value="windows">{{ _('awg_i1_profile_windows') }}</option>
+                    <option value="android">{{ _('awg_i1_profile_android') }}</option>
+                    <option value="linux">{{ _('awg_i1_profile_linux') }}</option>
+                </select>
+                <div class="form-hint">{{ _('awg_i1_profile_hint') }}</div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">{{ _('awg_i1_domain') }}</label>
+                <select class="form-select" id="awgSetI1Domain" onchange="onAwgI1DomainChange('awgSet')"></select>
+                <div class="form-hint">{{ _('awg_i1_domain_hint') }}</div>
+            </div>
+
+            <div id="awgSetI1CustomRow" style="display:none;">
+                <div class="form-group">
+                    <label class="form-label">{{ _('awg_i1_custom_domain') }}</label>
+                    <input class="form-input" type="text" id="awgSetI1Custom" spellcheck="false"
+                           placeholder="example.com">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">{{ _('awg_i1_pool') }}</label>
+                    <select class="form-select" id="awgSetI1Pool"></select>
+                    <div class="form-hint">{{ _('awg_i1_pool_hint') }}</div>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label" style="display:flex; justify-content:space-between; align-items:center;">
+                    I1
+                    <span class="badge badge-secondary" id="awgSetI1Bytes">—</span>
+                </label>
+                <textarea class="form-textarea" id="awgSetI1" spellcheck="false" rows="3"
+                          style="min-height:84px;" oninput="onAwgSetI1Input()"></textarea>
+                <div class="form-hint" id="awgSetI1Status">{{ _('awg_i1_settings_status') }}</div>
+            </div>
+
+            <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:var(--space-md);">
+                <button type="button" class="btn btn-primary btn-sm"
+                        onclick="generateAwgSetI1()">{{ _('awg_i1_generate') }}</button>
                 <button type="button" class="btn btn-secondary btn-sm"
-                    onclick="resetSpecialJunkFields('awgSet')">{{ _('awg_special_junk_reset') }}</button>
-            </label>
-            <div class="form-hint" style="margin-bottom:var(--space-xs);">{{ _('awg_special_junk_hint') }}</div>
-            <input class="form-input" type="text" id="awgSetI1" spellcheck="false" placeholder="I1">
-            <input class="form-input mt-xs" type="text" id="awgSetI2" spellcheck="false" placeholder="I2">
-            <input class="form-input mt-xs" type="text" id="awgSetI3" spellcheck="false" placeholder="I3">
-            <input class="form-input mt-xs" type="text" id="awgSetI4" spellcheck="false" placeholder="I4">
-            <input class="form-input mt-xs" type="text" id="awgSetI5" spellcheck="false" placeholder="I5">
-            <div class="form-hint">{{ _('awg_special_junk_syntax') }}</div>
+                        onclick="clearAwgSetI1()">{{ _('awg_i1_clear') }}</button>
+            </div>
+
+            <div id="awgSetI1Breakdown"></div>
+
+            <details class="i1-manual" style="margin-top:var(--space-md);">
+                <summary>I2–I5</summary>
+                <div class="form-hint" style="margin:var(--space-sm) 0;">{{ _('awg_i1_extra_hint') }}</div>
+                <input class="form-input" type="text" id="awgSetI2" spellcheck="false" placeholder="I2">
+                <input class="form-input mt-xs" type="text" id="awgSetI3" spellcheck="false" placeholder="I3">
+                <input class="form-input mt-xs" type="text" id="awgSetI4" spellcheck="false" placeholder="I4">
+                <input class="form-input mt-xs" type="text" id="awgSetI5" spellcheck="false" placeholder="I5">
+            </details>
         </div>
         <div class="modal-footer">
             <button class="btn btn-secondary" onclick="closeModal('awgSettingsModal')">{{ _('cancel') }}</button>
@@ -3001,8 +3140,12 @@
     // address a client dials.
     const ENDPOINT_PROTOCOLS = [...AWG_PROTOCOLS, 'wireguard', 'xray', 'telemt'];
     const SPECIAL_JUNK_KEYS = ['i1', 'i2', 'i3', 'i4', 'i5'];
-    // Same value the desktop client ships as its default I1.
-    const AWG_DEFAULT_I1 = '<r 2><b 0x858000010001000000000669636c6f756403636f6d0000010001c00c000100010000105a00044d583737>';
+    const AWG_I1_CUSTOM = '__custom__';
+    // Masking domains and device presets come from the backend (one source of
+    // truth: managers/awg_junk.py). Nothing is hardcoded here, so the panel
+    // never needs to know the public Amnezia default either.
+    let awgI1Catalog = null;
+    let awgI1Timer = null;
 
     // The install form and the settings modal name their inputs differently
     // (installAwgI1 vs awgSetI1), so callers pass the whole id prefix.
@@ -3011,10 +3154,227 @@
     }
 
     function resetSpecialJunkFields(prefix) {
-        SPECIAL_JUNK_KEYS.forEach((key, idx) => {
+        SPECIAL_JUNK_KEYS.forEach(key => {
             const el = specialJunkField(prefix, key);
-            if (el) el.value = idx === 0 ? AWG_DEFAULT_I1 : '';
+            if (el) el.value = '';
         });
+    }
+
+    function awgI1El(prefix, suffix) {
+        return document.getElementById(prefix === 'install'
+            ? 'installAwg' + suffix : 'awgSet' + suffix);
+    }
+
+    async function ensureAwgI1Catalog() {
+        if (awgI1Catalog) return awgI1Catalog;
+        awgI1Catalog = await apiCall('/api/awg/i1/catalog', 'GET');
+        return awgI1Catalog;
+    }
+
+    function awgI1DomainsFor(profile) {
+        const cat = awgI1Catalog || {domains: [], device_profiles: []};
+        const prof = (cat.device_profiles || []).find(item => item.key === profile);
+        const allowed = prof ? prof.domains : null;
+        return (cat.domains || []).filter(item => !allowed || allowed.includes(item.domain));
+    }
+
+    function awgI1Option(value, label) {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = label;
+        return option;
+    }
+
+    function fillAwgI1Pool(prefix) {
+        const select = awgI1El(prefix, 'I1Pool');
+        if (!select) return;
+        select.innerHTML = '';
+        (awgI1Catalog.domains || []).forEach(item => {
+            select.appendChild(awgI1Option(item.domain,
+                item.domain + ' — ' + item.owner + ', ' + item.cidr));
+        });
+    }
+
+    function renderAwgI1Domains(prefix) {
+        const profile = awgI1El(prefix, 'I1Profile').value;
+        const select = awgI1El(prefix, 'I1Domain');
+        const previous = select.value;
+        select.innerHTML = '';
+        awgI1DomainsFor(profile).forEach(item => {
+            select.appendChild(awgI1Option(item.domain,
+                item.domain + ' — ' + item.owner + ', ' + item.cidr));
+        });
+        select.appendChild(awgI1Option(AWG_I1_CUSTOM, _('awg_i1_domain_custom')));
+        if (previous && Array.from(select.options).some(option => option.value === previous)) {
+            select.value = previous;
+        }
+    }
+
+    function isAwgI1Custom(prefix) {
+        return awgI1El(prefix, 'I1Domain').value === AWG_I1_CUSTOM;
+    }
+
+    function onAwgI1ProfileChange(prefix) {
+        renderAwgI1Domains(prefix);
+        onAwgI1DomainChange(prefix);
+    }
+
+    function onAwgI1DomainChange(prefix) {
+        awgI1El(prefix, 'I1CustomRow').style.display = isAwgI1Custom(prefix) ? '' : 'none';
+        // In the settings modal the packet belongs to a live instance: a new
+        // domain only prepares the picker, the admin presses "Generate".
+        if (prefix === 'install') previewAwgI1(prefix);
+    }
+
+    async function initAwgI1(prefix) {
+        try {
+            await ensureAwgI1Catalog();
+        } catch (err) {
+            setAwgI1Status(prefix, err.message, true);
+            return;
+        }
+        fillAwgI1Pool(prefix);
+        renderAwgI1Domains(prefix);
+        onAwgI1DomainChange(prefix);
+    }
+
+    function setAwgI1Status(prefix, text, isError) {
+        const el = awgI1El(prefix, 'I1Status');
+        if (!el) return;
+        el.textContent = text;
+        el.style.color = isError ? 'var(--danger)' : 'var(--text-muted)';
+    }
+
+    function previewAwgI1(prefix, immediate) {
+        clearTimeout(awgI1Timer);
+        const run = async () => {
+            const custom = isAwgI1Custom(prefix);
+            const body = {
+                domain: custom ? awgI1El(prefix, 'I1Custom').value.trim()
+                               : awgI1El(prefix, 'I1Domain').value,
+                pool: custom ? (awgI1El(prefix, 'I1Pool').value || null) : null,
+            };
+            if (!body.domain) {
+                setAwgI1Status(prefix, _('awg_i1_need_domain'), true);
+                return;
+            }
+            try {
+                const res = await apiCall('/api/awg/i1/preview', 'POST', body);
+                applyAwgI1Preview(prefix, res);
+            } catch (err) {
+                setAwgI1Status(prefix, err.message, true);
+            }
+        };
+        if (immediate) run();
+        else awgI1Timer = setTimeout(run, 250);
+    }
+
+    function renderAwgI1Breakdown(target, parsed) {
+        if (!target) return;
+        if (!parsed) {
+            target.innerHTML = '';
+            return;
+        }
+        const rows = [
+            [_('awg_i1_row_id'), _('awg_i1_row_id_value')],
+            [_('awg_i1_row_flags'), '0x' + (parsed.flags || 0).toString(16).toUpperCase()],
+            [_('awg_i1_row_question'), parsed.domain + ' · A · IN'],
+            [_('awg_i1_row_answer'), 'TTL ' + parsed.ttl + ' · ' + parsed.ip +
+                (parsed.owner ? ' (' + parsed.owner + ')' : '')],
+            [_('awg_i1_row_size'), parsed.size + ' ' + _('awg_i1_bytes_unit')],
+        ];
+        target.innerHTML = '<ul class="i1-breakdown">' + rows.map(row =>
+            '<li><span class="k">' + row[0] + '</span><span class="v">' +
+            row[1] + '</span></li>').join('') + '</ul>';
+    }
+
+    function applyAwgI1Preview(prefix, res) {
+        const parsed = res.parsed || {};
+        setAwgI1Status(prefix, _('awg_i1_valid'), false);
+        const bytes = awgI1El(prefix, 'I1Bytes');
+        if (bytes) bytes.textContent = (parsed.size || 0) + ' ' + _('awg_i1_bytes_unit');
+        if (prefix === 'install') {
+            document.getElementById('installAwgI1Preview').textContent = res.i1;
+            document.getElementById('installAwgI1Memo').textContent = _('awg_i1_memo_generated')
+                .replace('{domain}', parsed.domain || '')
+                .replace('{size}', String(parsed.size || 0));
+        } else {
+            document.getElementById('awgSetI1').value = res.i1;
+            renderAwgI1Breakdown(document.getElementById('awgSetI1Breakdown'), parsed);
+            renderAwgSetI1Badge(parsed, false);
+        }
+    }
+
+    function renderAwgSetI1Badge(parsed, isDefault) {
+        const badge = document.getElementById('awgSetI1Badge');
+        const memo = document.getElementById('awgSetI1Memo');
+        if (!badge) return;
+        if (isDefault) {
+            badge.textContent = _('awg_i1_badge_default');
+            badge.className = 'badge badge-warn';
+            memo.className = 'i1-memo is-warn';
+            memo.textContent = _('awg_i1_memo_default');
+            memo.style.display = 'flex';
+        } else if (parsed) {
+            badge.textContent = _('awg_i1_badge_custom');
+            badge.className = 'badge badge-success';
+            memo.className = 'i1-memo is-ok';
+            memo.textContent = _('awg_i1_memo_generated')
+                .replace('{domain}', parsed.domain || '')
+                .replace('{size}', String(parsed.size || 0));
+            memo.style.display = 'flex';
+        } else {
+            badge.textContent = _('awg_i1_badge_unknown');
+            badge.className = 'badge badge-secondary';
+            memo.style.display = 'none';
+        }
+    }
+
+    function awgI1SizeOf(value) {
+        let size = 0;
+        const re = /<\s*([a-z]+)(?:\s+([^>]*?))?\s*>/g;
+        let match;
+        while ((match = re.exec(value || '')) !== null) {
+            const tag = match[1];
+            const arg = (match[2] || '').trim();
+            if (tag === 'b') {
+                const digits = arg.slice(0, 2).toLowerCase() === '0x' ? arg.slice(2) : '';
+                size += Math.floor(digits.length / 2);
+            } else if (tag === 't') {
+                size += 4;
+            } else {
+                const count = parseInt(arg, 10);
+                if (count > 0) size += count;
+            }
+        }
+        return size;
+    }
+
+    function onAwgSetI1Input() {
+        const value = document.getElementById('awgSetI1').value.trim();
+        const bytes = document.getElementById('awgSetI1Bytes');
+        if (bytes) bytes.textContent = awgI1SizeOf(value) + ' ' + _('awg_i1_bytes_unit');
+        renderAwgI1Breakdown(document.getElementById('awgSetI1Breakdown'), null);
+        if (!value) {
+            setAwgI1Status('awgSet', _('awg_i1_empty'), false);
+            renderAwgSetI1Badge(null, false);
+            return;
+        }
+        const badTag = value.match(/<\s*(c|d|ds|dz)\b/);
+        if (badTag) {
+            setAwgI1Status('awgSet', _('awg_i1_bad_tag').replace('{tag}', badTag[1]), true);
+            return;
+        }
+        setAwgI1Status('awgSet', _('awg_i1_valid'), false);
+    }
+
+    function generateAwgSetI1() {
+        previewAwgI1('awgSet', true);
+    }
+
+    function clearAwgSetI1() {
+        document.getElementById('awgSetI1').value = '';
+        onAwgSetI1Input();
     }
 
     function protoBase(proto) {
@@ -5047,6 +5407,9 @@
             document.getElementById('installAwgDns6').value = '2606:4700:4700::1111';
             renderInstallIpv6Note();
             resetSpecialJunkFields('installAwg');
+            const manualJunk = document.querySelector('#installAwgJunk details.i1-manual');
+            if (manualJunk) manualJunk.open = false;
+            initAwgI1('install');
         }
 
         document.getElementById('installForm').classList.remove('hidden');
@@ -5194,9 +5557,26 @@
                 params.awg_dns2 = document.getElementById('installAwgDns2').value.trim();
                 params.awg_dns6 = document.getElementById('installAwgDns6').value.trim();
                 if (protoBase(currentInstallProto) !== 'awg_legacy') {
-                    ['i1', 'i2', 'i3', 'i4', 'i5'].forEach(key => {
-                        params['awg_' + key] = specialJunkField('installAwg', key).value.trim();
-                    });
+                    const manual = document.querySelector('#installAwgJunk details.i1-manual');
+                    const typed = ['i1', 'i2', 'i3', 'i4', 'i5']
+                        .map(key => specialJunkField('installAwg', key).value.trim());
+                    if (manual && manual.open && typed.some(Boolean)) {
+                        // Explicit packets win; the backend sends exactly these.
+                        typed.forEach((value, idx) => {
+                            params['awg_' + SPECIAL_JUNK_KEYS[idx]] = value;
+                        });
+                    } else {
+                        // Otherwise the backend generates a per-instance packet
+                        // for this domain (or picks one when it is empty).
+                        const custom = isAwgI1Custom('install');
+                        const domain = custom
+                            ? document.getElementById('installAwgI1Custom').value.trim()
+                            : document.getElementById('installAwgI1Domain').value;
+                        if (domain) params.awg_i1_domain = domain;
+                        if (custom) {
+                            params.awg_i1_pool = document.getElementById('installAwgI1Pool').value || null;
+                        }
+                    }
                 }
             }
             // The POST may outlive its 120s response deadline while the worker
@@ -5499,11 +5879,23 @@
                 ipStatusCache ? ipStatusCache.can_write !== false : true,
                 ipInst ? (ipInst.blocked_reason || '') : '');
             const junkGroup = document.getElementById('awgSetJunkGroup');
-            junkGroup.style.display = data.supports_special_junk ? '' : 'none';
+            junkGroup.style.display = data.supports_special_junk ? 'block' : 'none';
             SPECIAL_JUNK_KEYS.forEach(key => {
                 const el = specialJunkField('awgSet', key);
                 if (el) el.value = data[key] || '';
             });
+            if (data.supports_special_junk) {
+                await initAwgI1('awgSet');
+                const parsed = data.i1_parsed || null;
+                renderAwgI1Breakdown(document.getElementById('awgSetI1Breakdown'), parsed);
+                renderAwgSetI1Badge(parsed, !!data.i1_is_default);
+                const bytes = document.getElementById('awgSetI1Bytes');
+                if (bytes) {
+                    const size = (parsed && parsed.size) || awgI1SizeOf(data.i1 || '');
+                    bytes.textContent = size + ' ' + _('awg_i1_bytes_unit');
+                }
+                setAwgI1Status('awgSet', data.i1 ? _('awg_i1_valid') : _('awg_i1_empty'), false);
+            }
             openModal('awgSettingsModal');
         } catch (err) {
             showToast(_('error') + ': ' + err.message, 'error');

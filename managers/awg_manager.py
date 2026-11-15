@@ -23,6 +23,17 @@ import functools
 import threading
 from contextlib import nullcontext
 
+from managers.awg_junk import (
+    DEFAULT_I1 as _DEFAULT_I1,
+    DEVICE_PROFILES,
+    catalog as junk_catalog,
+    generate_i1,
+    is_legacy_default,
+    is_valid_domain,
+    parse_i1,
+    pool_for,
+)
+
 def _awg_batch_lock_of(obj):
     """Return a usable context manager for the AWG batch lock,
     tolerating objects (Mock-based fakes) that expose a truthy but
@@ -252,12 +263,13 @@ SPECIAL_JUNK_KEYS = ('i1', 'i2', 'i3', 'i4', 'i5')
 
 # Byte-identical to protocols::awg::defaultSpecialJunk1 in the desktop client:
 # a DNS response for icloud.com preceded by a random 2-byte transaction id.
-AWG_DEFAULT_I1 = (
-    '<r 2><b 0x858000010001000000000669636c6f756403636f6d'
-    '0000010001c00c000100010000105a00044d583737>'
-)
+# Kept for reference and for instances created before per-instance
+# generation: new installs get their own value from managers.awg_junk, so
+# the 42 constant bytes of this packet are no longer shared by every
+# deployment.
+AWG_DEFAULT_I1 = _DEFAULT_I1
 
-_SPECIAL_JUNK_TAG_RE = re.compile(r'<\s*(b|c|t|r|rc|rd)(?:\s+([^>]*?))?\s*>')
+_SPECIAL_JUNK_TAG_RE = re.compile(r'<\s*(b|t|r|rc|rd)(?:\s+([^>]*?))?\s*>')
 
 # A junk packet still has to fit into one datagram.
 SPECIAL_JUNK_MAX_SIZE = 1280
@@ -268,6 +280,27 @@ def validate_special_junk(value):
     text = (value or '').strip()
     if not text:
         return 0
+    if '\n' in text or '\r' in text:
+        # The value lands in the server config as `I1 = <value>`; a line break
+        # would split it into extra lines and corrupt [Interface].
+        raise ValueError("line breaks are not allowed in the I1-I5 value")
+
+    # Only the intersection of both parsers is allowed. A tag understood by
+    # one side only makes the peer drop the whole config: amneziawg-go
+    # (device/obf.go) has b,t,r,rc,rd,d,ds,dz while the kernel module
+    # (src/junk.c) has b,t,r,rc,rd,c.
+    for match in re.finditer(r'<\s*([a-z]+)', text):
+        tag = match.group(1)
+        if tag == 'c':
+            raise ValueError(
+                "<c> is parsed by the kernel module only; a client running "
+                "amneziawg-go rejects the whole config")
+        if tag in ('d', 'ds', 'dz'):
+            raise ValueError(
+                f"<{tag}> is parsed by amneziawg-go only; the kernel module "
+                f"rejects the whole config")
+        if tag not in ('b', 't', 'r', 'rc', 'rd'):
+            raise ValueError(f"unknown tag <{tag}>")
 
     size = 0
     pos = 0
@@ -425,7 +458,8 @@ def safe_client_mtu(awg_params, link_mtu=DEFAULT_LINK_MTU):
     return max(MIN_CLIENT_MTU, link - transport_overhead(awg_params))
 
 
-def generate_awg_params(use_ranges=False, awg3=False):
+def generate_awg_params(use_ranges=False, awg3=False, i1_domain=None,
+                        i1_pool=None):
     """Generate random AWG obfuscation parameters.
     
     For AWG 2.0 (use_ranges=True): generates H1-H4 as non-overlapping
@@ -498,10 +532,13 @@ def generate_awg_params(use_ranges=False, awg3=False):
         'transport_packet_magic_header': h4,
     }
 
-    if use_ranges:
-        # The desktop client ships a special junk packet out of the box; not
-        # setting one leaves the first packet of every session recognisable.
-        params['i1'] = AWG_DEFAULT_I1
+    if use_ranges or awg3:
+        # Each instance gets its own packet. The desktop client's default
+        # (a DNS answer for icloud.com with an address from Yandex) is shared
+        # by every deployment, so keeping it makes the first packet of a
+        # session a global signature. i1_domain narrows the choice; without
+        # one a known domain is picked at random.
+        params['i1'] = generate_i1(i1_domain, i1_pool)
 
     if awg3:
         # Ranges are "min-max" (u16_range_from_string in amneziawg-tools).
@@ -2180,7 +2217,8 @@ done
 
     def install_protocol(self, protocol_type, port=None, awg_params=None,
                          mtu=None, dns=None, special_junk=None, dns6=None,
-                         progress=None, ipv6_preference=None, warp_ctx=None):
+                         progress=None, ipv6_preference=None, warp_ctx=None,
+                         i1_domain=None, i1_pool=None):
         """
         Full installation of AWG or AWG-Legacy protocol.
         Steps: install docker -> prepare host -> build container ->
@@ -2188,6 +2226,8 @@ done
 
         mtu/dns end up in the generated client configs; special_junk is an
         {'i1': ..., 'i5': ...} mapping overriding the generated I1-I5.
+        i1_domain picks the domain of the generated packet; an explicit
+        special_junk wins over it.
         """
         if port is None:
             port = AWG_DEFAULTS['port']
@@ -2201,6 +2241,10 @@ done
                 # AmneziaVPN client generates.
                 use_ranges=(base_proto in (self.AWG, self.AWG2)),
                 awg3=(base_proto == self.AWG3),
+                # None = pick a domain at random: an install that never
+                # touched the I1 UI still must not inherit the public default.
+                i1_domain=i1_domain,
+                i1_pool=i1_pool,
             )
 
         if special_junk is not None:
@@ -5030,6 +5074,13 @@ PersistentKeepalive = 25
             'dns6': self._get_dns6(protocol_type),
             'ipv6_enabled': bool(self._get_subnet_ipv6_ip(protocol_type)),
             'default_i1': AWG_DEFAULT_I1,
+            # What the stored packet actually is: domain/address/ttl, whether
+            # it still equals the shared client default, and the picker data.
+            'i1_parsed': parse_i1(params.get('i1', '')),
+            'i1_is_default': is_legacy_default(params.get('i1', '')),
+            'device_profiles': [{'key': key, 'domains': list(domains)}
+                                for key, domains in DEVICE_PROFILES],
+            'domain_catalog': junk_catalog(),
             'supports_special_junk': self._base_protocol(protocol_type) != self.AWG_LEGACY,
             # an instance behind an exit link cannot carry more than the link
             'exit_linked': bool(link_info),
@@ -5065,7 +5116,8 @@ PersistentKeepalive = 25
                 raise RuntimeError('bad_request')
         return text
 
-    def update_awg_settings(self, protocol_type, mtu=None, dns=None, special_junk=None, dns6=None):
+    def update_awg_settings(self, protocol_type, mtu=None, dns=None,
+                            special_junk=None, dns6=None, i1_value=None):
         """Rewrite MTU/DNS/I1-I5 in the server config and apply them live.
 
         I1-I5 go to the kernel through `awg syncconf`, so peers stay up; MTU
@@ -5076,7 +5128,20 @@ PersistentKeepalive = 25
         """
         if self._base_protocol(protocol_type) == self.AWG_LEGACY:
             special_junk = None
-        junk = normalize_special_junk(special_junk) if special_junk is not None else None
+            i1_value = None
+        junk = None
+        if special_junk is not None:
+            junk = normalize_special_junk(special_junk)
+        elif i1_value is not None:
+            # Replace only I1 and keep I2-I5 as they are: regenerating the
+            # first packet must not silently drop the others. The stored
+            # I2-I5 are carried over verbatim on purpose - an old value the
+            # current validator rejects (e.g. <c>) must not block the fix.
+            validate_special_junk(i1_value)
+            current = self._get_awg_params_from_config(protocol_type)
+            junk = {key: current[key] for key in SPECIAL_JUNK_KEYS
+                    if current.get(key)}
+            junk['i1'] = i1_value
 
         # Validate DNS and DNS6 before writing
         if dns is not None:

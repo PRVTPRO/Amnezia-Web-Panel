@@ -52,6 +52,14 @@ from managers.ssh_manager import SSHManager, configure_jump_resolver
 from managers import ssh_trust
 from managers import split_tunnel
 from managers.awg_manager import AWGManager, normalize_special_junk
+from managers.awg_junk import (
+    DEVICE_PROFILES as AWG_I1_DEVICE_PROFILES,
+    catalog as awg_i1_catalog,
+    generate_i1 as awg_generate_i1,
+    is_valid_domain as awg_i1_is_valid_domain,
+    parse_i1 as awg_parse_i1,
+    pool_for as awg_i1_pool_for,
+)
 from server_stats import collect_host_stats
 from managers.awg_plugin_updater import (
     COMPONENTS as AWG_PLUGIN_COMPONENTS,
@@ -1668,6 +1676,27 @@ def split_dns(dns):
     return parts[0], parts[1]
 
 
+def awg_i1_domain_from(domain, pool=None):
+    """Validate a masking domain; '' or None means "pick one at random".
+
+    A domain from the built-in catalog brings its own address pool. A custom
+    domain needs an explicit pool, otherwise the answer would pair a name with
+    an address from a foreign network - exactly the mismatch this feature is
+    meant to remove.
+    """
+    name = (domain or '').strip().lower()
+    if not name:
+        return None
+    if not awg_i1_is_valid_domain(name):
+        raise ValueError('domain must look like example.com: no scheme, no spaces')
+    pool_name = (pool or '').strip().lower()
+    if pool_name and awg_i1_pool_for(pool_name) is None:
+        raise ValueError(f'unknown address pool: {pool}')
+    if awg_i1_pool_for(name) is None and not pool_name:
+        raise ValueError('a custom domain needs an address pool')
+    return name
+
+
 def awg_special_junk_from(req):
     """Collect I1-I5 from a request, or None when the form sent none of them."""
     values = {key: getattr(req, f'awg_{key}', None) for key in ('i1', 'i2', 'i3', 'i4', 'i5')}
@@ -2777,6 +2806,10 @@ class InstallProtocolRequest(BaseModel):
     awg_i3: Optional[str] = None
     awg_i4: Optional[str] = None
     awg_i5: Optional[str] = None
+    # Masking domain for the generated I1; None/'' picks one at random, so an
+    # install that never opened the I1 block still gets its own packet.
+    awg_i1_domain: Optional[str] = None
+    awg_i1_pool: Optional[str] = None
 
 
 class AwgSettingsRequest(BaseModel):
@@ -2790,6 +2823,15 @@ class AwgSettingsRequest(BaseModel):
     i3: Optional[str] = None
     i4: Optional[str] = None
     i5: Optional[str] = None
+    # Regenerate I1 for a domain instead of pasting a literal packet.
+    i1_domain: Optional[str] = None
+    i1_pool: Optional[str] = None
+    regenerate_i1: Optional[bool] = None
+
+
+class I1PreviewRequest(BaseModel):
+    domain: Optional[str] = None
+    pool: Optional[str] = None
 
 
 class ExitPeerAddRequest(BaseModel):
@@ -7051,6 +7093,16 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
                 normalize_special_junk(awg_special_junk)
             except ValueError as e:
                 return JSONResponse({'error': str(e)}, status_code=400)
+        # Masking domain of the generated I1. Empty means "pick at random":
+        # the manager still generates a per-instance packet, so an install
+        # that never opened the I1 block cannot inherit the shared default.
+        i1_domain = None
+        if install_base in AWG_PROTOCOLS:
+            try:
+                i1_domain = awg_i1_domain_from(req.awg_i1_domain, req.awg_i1_pool)
+            except ValueError as e:
+                return JSONResponse({'error': str(e), 'code': 'bad_i1_domain'},
+                                    status_code=400)
 
         ssh = await asyncio.to_thread(get_ssh, server)
         await asyncio.to_thread(ssh.connect)
@@ -7179,6 +7231,8 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
                 special_junk=awg_special_junk,
                 dns6=req.awg_dns6,
                 ipv6_preference=ipv6_pref,
+                i1_domain=i1_domain,
+                i1_pool=(req.awg_i1_pool or '').strip().lower() or None,
             )
         else:
             install_args = (install_protocol,)
@@ -8096,6 +8150,32 @@ def api_awg_plugin_update_status(request: Request, server_id: int, op_id: str):
 
 
 
+@app.get('/api/awg/i1/catalog', tags=["Protocols"])
+def api_awg_i1_catalog(request: Request):
+    """Masking domains and device presets for the I1 picker."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    return {
+        'domains': awg_i1_catalog(),
+        'device_profiles': [{'key': key, 'domains': list(domains)}
+                            for key, domains in AWG_I1_DEVICE_PROFILES],
+    }
+
+
+@app.post('/api/awg/i1/preview', tags=["Protocols"])
+def api_awg_i1_preview(request: Request, req: I1PreviewRequest):
+    """Build one I1 packet without touching any server (live preview)."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        pool = (req.pool or '').strip().lower() or None
+        domain = awg_i1_domain_from(req.domain, pool)
+        value = awg_generate_i1(domain, pool)
+    except ValueError as e:
+        return JSONResponse({'error': str(e), 'code': 'bad_i1_domain'}, status_code=400)
+    return {'i1': value, 'parsed': awg_parse_i1(value)}
+
+
 @app.post('/api/servers/{server_id}/awg/settings', tags=["Protocols"])
 def api_awg_settings_get(request: Request, server_id: int, req: ProtocolRequest):
     """Return MTU, DNS and the special junk packets I1-I5 of an AWG server."""
@@ -8136,9 +8216,24 @@ def api_awg_settings_save(request: Request, server_id: int, req: AwgSettingsRequ
             # The warp client budget/link owns MTU and DNS while linked.
             raise SrvWarpError('srv_warp_settings_locked', 409)
         special_junk = {key: getattr(req, key) for key in ('i1', 'i2', 'i3', 'i4', 'i5')}
-        if all(value is None for value in special_junk.values()):
+        i1_value = None
+        if req.regenerate_i1:
+            # API path: generate and apply in one call. The panel UI previews
+            # the packet first and then saves the literal, so this branch is
+            # for scripted clients; it still replaces only I1.
+            try:
+                domain = awg_i1_domain_from(req.i1_domain, req.i1_pool)
+            except ValueError as e:
+                return JSONResponse({'error': str(e), 'code': 'bad_i1_domain'},
+                                    status_code=400)
+            i1_value = awg_generate_i1(domain, (req.i1_pool or '').strip().lower() or None)
+            if all(value is None for key, value in special_junk.items() if key != 'i1'):
+                special_junk = None
+            else:
+                special_junk['i1'] = i1_value
+        if special_junk is not None and all(value is None for value in special_junk.values()):
             special_junk = None
-        else:
+        elif special_junk is not None:
             # Reject a malformed packet before opening an SSH connection.
             normalize_special_junk(special_junk)
         ssh = get_ssh(server)
@@ -8156,6 +8251,7 @@ def api_awg_settings_save(request: Request, server_id: int, req: AwgSettingsRequ
                 dns=dns,
                 special_junk=special_junk,
                 dns6=req.dns6,
+                i1_value=i1_value,
             )
         finally:
             ssh.disconnect()
