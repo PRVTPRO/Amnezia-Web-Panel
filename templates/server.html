@@ -2658,6 +2658,15 @@
                 <option value="telemt">Telemt</option>
                 <option value="wireguard">WireGuard</option>
             </select>
+            <select class="form-select" id="torrentGuardSelect" onchange="saveTorrentGuard(this)"
+                style="width:auto; display:none;" title="{{ _('torrent_guard_title') }}"
+                aria-label="{{ _('torrent_guard_title') }}">
+                <option value="on">{{ _('torrent_guard_on') }}</option>
+                <option value="count">{{ _('torrent_guard_count') }}</option>
+                <option value="off">{{ _('torrent_guard_off') }}</option>
+            </select>
+            <span id="torrentGuardHealth" class="text-muted"
+                style="font-size:0.72rem; color:#f87171; display:none;"></span>
             <button class="btn btn-primary btn-sm" onclick="openAddConnectionModal()">
                 <span>＋</span> {{ _('add') }}
             </button>
@@ -7598,6 +7607,27 @@
             // Stale response: the user switched protocol while we awaited —
             // drop it, the pending re-run below will fetch the right one.
             if (proto !== document.getElementById('connProtoSelect').value) return;
+            // Режим торрент-фильтра инстанса: только там, где трафик на
+            // интерфейсе расшифрован (AWG-семейство и WireGuard).
+            const guardSelect = document.getElementById('torrentGuardSelect');
+            if (guardSelect) {
+                const guardSupported = ['awg', 'awg2', 'awg3', 'awg_legacy', 'wireguard'].includes(protoBase(proto));
+                guardSelect.style.display = guardSupported ? '' : 'none';
+                if (guardSupported && data.torrent_guard) guardSelect.value = data.torrent_guard;
+                const healthEl = document.getElementById('torrentGuardHealth');
+                if (healthEl) {
+                    const health = data.torrent_guard_health || {};
+                    if (guardSupported && health.ok === false) {
+                        healthEl.textContent = _('torrent_guard_card_degraded');
+                        healthEl.title = health.error || '';
+                        healthEl.style.display = '';
+                    } else {
+                        healthEl.textContent = '';
+                        healthEl.title = '';
+                        healthEl.style.display = 'none';
+                    }
+                }
+            }
             // The rename editor may have opened while this poll was in flight —
             // re-rendering now would destroy it mid-typing.
             if (isPoll && !force && listEl.querySelector('.rename-editor')) return;
@@ -7652,6 +7682,25 @@
                     `<button class="btn btn-secondary btn-sm btn-icon conn-warning-clear" onclick="clearConnWarnings('${escapeJs(client.clientId)}')" title="${_('clear_warnings')}" style="margin-top:4px;">${ICON_TRASH}</button></div>`;
                 }
 
+                // Торрент-активность ключа: сигнатуры протокола на интерфейсе
+                // туннеля. Метка админская, клиент её не видит.
+                let torrentHtml = '';
+                const torrentEvents = Array.isArray(client.torrentEvents) ? client.torrentEvents : [];
+                if (torrentEvents.length) {
+                    const last = torrentEvents[torrentEvents.length - 1] || {};
+                    const t = new Date((last.ts || 0) * 1000);
+                    const when = String(t.getDate()).padStart(2, '0') + '.' +
+                        String(t.getMonth() + 1).padStart(2, '0') + ' ' +
+                        String(t.getHours()).padStart(2, '0') + ':' +
+                        String(t.getMinutes()).padStart(2, '0');
+                    const sigLabel = _('torrent_sig_' + (last.sig || 'handshake'));
+                    const text = _('torrent_activity_text')
+                        .replace('{when}', when)
+                        .replace('{sig}', sigLabel)
+                        .replace('{count}', last.count);
+                    torrentHtml = `<div class="conn-warning torrent-warning">${escapeHtml(text)}` +
+                        `<button class="btn btn-secondary btn-sm btn-icon conn-warning-clear" onclick="clearTorrentEvents(this, '${escapeJs(client.clientId)}', '${escapeJs(client.torrentIp || '')}')" title="${_('clear_warnings')}" style="margin-top:4px;">${ICON_TRASH}</button></div>`;
+                }
                 // Per-peer bandwidth limit badge (AWG): ⚡∞ by default, 🐢 X Mbps when a limit is set
                 const maxSpeed = parseFloat(userData.maxSpeed || 0) || 0;
                 const createdTimestamp = Date.parse(created) || 0;
@@ -7707,8 +7756,7 @@
                             <div>
                                 <div class="client-name">${escapeHtml(name)}${ipHtml}${endpointHtml}</div>
                                 <div class="client-meta">${metaHtml || `<span class="text-muted">${_('no_data')}</span>`}</div>
-                                ${warningsHtml}
-                            </div>
+                                ${torrentHtml}                            </div>
                         </div>
                         <div class="client-actions">
                             <button class="btn btn-secondary btn-sm btn-icon" onclick="startRenameConnection('${escapeJs(client.clientId)}', this)" title="${_('rename')}">${ICON_PENCIL}</button>
@@ -7910,6 +7958,48 @@
         }
     }
 
+    // Метка торрент-активности снимается отдельно от flood-предупреждений:
+    // вторая живёт в контейнере, эта — в журнале панели (30 дней).
+    async function clearTorrentEvents(btn, clientId, ip) {
+        const proto = document.getElementById('connProtoSelect').value;
+        if (!confirm(_('torrent_clear_confirm'))) return;
+        if (btn) btn.disabled = true;
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/connections/torrent_clear`, 'POST', {
+                protocol: proto, client_id: clientId, ip: ip || '',
+            });
+            showToast(_('warnings_cleared'), 'success');
+            loadConnections();
+        } catch (err) {
+            if (btn) btn.disabled = false;
+            showToast(_('error') + ': ' + err.message, 'error');
+        }
+    }
+
+    // Режим фильтра: on (считать + DROP), count (только счётчик), off.
+    async function saveTorrentGuard(select) {
+        const proto = document.getElementById('connProtoSelect').value;
+        select.disabled = true;
+        try {
+            const res = await apiCall(`/api/servers/${SERVER_ID}/connections/torrent_guard`, 'POST', {
+                protocol: proto, mode: select.value,
+            });
+            if (res && res.apply && res.apply.error) {
+                // Сервер откатил режим: селект не должен показывать то,
+                // чего нет в правилах.
+                if (res.mode) select.value = res.mode;
+                showToast(_('error') + ': ' + res.apply.error, 'error');
+            } else {
+                showToast(_('torrent_guard_saved'), 'success');
+            }
+        } catch (err) {
+            // 400/404/500 (протокол, сервер, сеть) — селект вернём к факту.
+            showToast(_('error') + ': ' + err.message, 'error');
+            loadConnections();
+        } finally {
+            select.disabled = false;
+        }
+    }
     function startRenameConnection(clientId, btn) {
         const item = btn.closest('.client-item');
         const nameEl = item.querySelector('.client-name');

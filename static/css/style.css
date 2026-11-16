@@ -2539,6 +2539,17 @@ a:hover {
     margin-top: 3px;
     font-variant-numeric: tabular-nums;
 }
+/* Торрент-активность: сигнатуры протокола подтверждены — красный уровень */
+.torrent-warning {
+    color: #f87171;
+    background: rgba(248, 113, 113, 0.12);
+    border-color: rgba(248, 113, 113, 0.45);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+}
 
 /* ===== Header Navigation ===== */
 .header-nav {

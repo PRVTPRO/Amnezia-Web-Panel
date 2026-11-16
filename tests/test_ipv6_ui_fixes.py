@@ -92,6 +92,28 @@ NEW_KEYS = {
 # The catalogue had 1218 key names right before panel access (#305). Freeze
 # the names, not translated values: a count alone misses a removed key
 # replaced by an unrelated one. Future additions must be registered here.
+TORRENT_GUARD_KEYS = {
+    'torrent_badge',
+    'torrent_guard_title',
+    'torrent_guard_on',
+    'torrent_guard_count',
+    'torrent_guard_off',
+    'torrent_guard_saved',
+    'torrent_activity_text',
+    'torrent_sig_handshake',
+    'torrent_sig_dht_query',
+    'torrent_sig_dht_short',
+    'torrent_sig_tracker',
+    'torrent_clear_confirm',
+    'torrent_guard_card_title',
+    'torrent_guard_card_hint',
+    'torrent_guard_card_off_hint',
+    'torrent_guard_card_unsupported',
+    'torrent_guard_card_enabled',
+    'torrent_guard_card_disabled',
+    'torrent_guard_card_degraded',
+}
+
 PRE_PANEL_ACCESS_KEYS_SHA256 = 'c70dff505a825b0a8506b2d1ca7d76fca9378e3f9514cc44231f7fd2a847af36'
 # Keys of the "Copy instance" panel: a later addition, declared here so the
 # frozen catalogue hash keeps guarding the original keys.
@@ -377,6 +399,7 @@ class TestC6Translations(unittest.TestCase):
         # the ipv6 set) must NOT be subtracted again.
         previous = '\n'.join(sorted(base - PANEL_ACCESS_KEYS - SECURITY_SETUP_KEYS
                                     - CHEBURCHECK_KEYS - PROTOCOL_UNINSTALL_KEYS
+                                    - TORRENT_GUARD_KEYS
                                     - AWG_I1_KEYS - SRV_WARP_NO_AWG_KEYS
                                     - COPY_INSTANCE_KEYS - LATER_FEATURE_KEYS
                                     - RELEASE_1811_KEYS - USER_LIMIT_KEYS - TELEGRAM_ACCOUNT_KEYS))
@@ -388,7 +411,7 @@ class TestC6Translations(unittest.TestCase):
         for locale in LOCALES:
             data = translation(locale)
             for key in (NEW_KEYS | PANEL_ACCESS_KEYS | PROTOCOL_UNINSTALL_KEYS
-                        | AWG_I1_KEYS | USER_LIMIT_KEYS | TELEGRAM_ACCOUNT_KEYS):
+                        | TORRENT_GUARD_KEYS | AWG_I1_KEYS | USER_LIMIT_KEYS | TELEGRAM_ACCOUNT_KEYS):
                 self.assertIn(key, data)
                 self.assertTrue(str(data[key]).strip(), "%s empty in %s" % (key, locale))
 

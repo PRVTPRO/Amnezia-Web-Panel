@@ -22,6 +22,7 @@ import uuid
 import functools
 import threading
 from contextlib import nullcontext
+from managers.torrent_guard import TorrentGuard
 
 from managers.awg_junk import (
     DEFAULT_I1 as _DEFAULT_I1,
@@ -4624,6 +4625,22 @@ done < "$BW"
             self._save_conn_warnings(protocol_type, warnings)
         return {'status': 'success', 'cleared_ip': ip}
 
+    # ---- Torrent guard: DPI-сигнатуры торрентов на интерфейсе туннеля ----
+
+    def torrent_guard(self, protocol_type=None):
+        """Правила торрент-фильтра этого инстанса (awg0/wg0 внутри контейнера).
+
+        Протокол по умолчанию — самый первый AWG: вызывающий обычно передаёт
+        конкретный ключ протокола, но обёртка не должна падать без него.
+        """
+        proto = protocol_type or self.AWG
+        return TorrentGuard(
+            self.ssh,
+            container=self._container_name(proto),
+            iface=self._interface_name(proto),
+            show_cmd='awg show 2>/dev/null || wg show 2>/dev/null',
+            host_key=getattr(self.ssh, 'host', '') or '',
+        )
     def _wg_show(self, protocol_type):
         """Run 'wg show all' and parse output."""
         container_name = self._container_name(protocol_type)
