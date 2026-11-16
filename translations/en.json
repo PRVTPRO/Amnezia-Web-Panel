@@ -1463,5 +1463,13 @@
   "sort_total_traffic": "Total traffic",
   "sort_ip": "IP address",
   "sort_quota": "Traffic quota",
-  "sort_expiry": "Expiration date"
+  "sort_expiry": "Expiration date",
+  "lifecycle_fence_title": "Administrator recovery required",
+  "lifecycle_fence_how": "How to recover",
+  "lifecycle_fence_steps": "An unknown SSH outcome cannot be cleared automatically.\n1. Verify outside the panel (your own SSH) that the remote command is not running and the server state is reconciled.\n2. Stop the panel, keep the marker file as evidence and move it out of the data directory.\n3. Start the panel and check the server again.\nSee docs/PEER_RECOVERY.md.",
+  "lifecycle_fence_scope_global": "the whole panel",
+  "lifecycle_fence_server": "Server",
+  "lifecycle_fence_operation": "Operation",
+  "lifecycle_fence_reason": "Reason",
+  "lifecycle_fence_since": "fenced"
 }

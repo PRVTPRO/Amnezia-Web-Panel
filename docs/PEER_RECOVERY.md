@@ -212,3 +212,8 @@ Legacy markers (version 1, or anything without a readable identity) stay
 global: the panel never guesses which server they belong to. A second incident
 on another server, or an incident where the target cannot be named, widens the
 fence to global as well — the fence never narrows itself.
+
+While a fence is closed, every panel page shows a banner naming the affected
+server, the recorded operation and how long the fence has been in place, plus
+the recovery steps below. The banner is informational on purpose: there is no
+in-panel button that lifts a fence.
