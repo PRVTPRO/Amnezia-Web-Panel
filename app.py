@@ -7623,10 +7623,12 @@ def _docker_networks(ssh, container):
 
 
 def _selfsteal_dest(xray_networks, nginx_networks, nginx_container):
-    """Container-to-container Reality target. On a shared docker network
-    the NGINX name resolves via embedded DNS and survives container
-    re-creation; otherwise fall back to the current bridge IP."""
-    if set(xray_networks) & set(nginx_networks):
+    """Container-to-container Reality target. On a shared user-defined
+    docker network the NGINX name resolves via embedded DNS and survives
+    container re-creation. The default bridge has no embedded DNS —
+    there the current IP is the only working target, so fall back to it."""
+    resolvable = (set(xray_networks) & set(nginx_networks)) - {'bridge'}
+    if resolvable:
         return f"{nginx_container}:443"
     for networks in (nginx_networks, xray_networks):
         for info in networks.values():

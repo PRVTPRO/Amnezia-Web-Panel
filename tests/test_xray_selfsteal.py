@@ -113,6 +113,12 @@ class SelfstealHelpersTests(unittest.TestCase):
                                      'amnezia-nginx')
         self.assertEqual(dest, 'amnezia-nginx:443')
 
+    def test_default_bridge_has_no_embedded_dns_so_the_ip_is_used(self):
+        dest = panel._selfsteal_dest({'bridge': {'IPAddress': '172.17.0.2'}},
+                                     {'bridge': {'IPAddress': '172.17.0.3'}},
+                                     'amnezia-nginx')
+        self.assertEqual(dest, '172.17.0.3:443')
+
     def test_without_shared_network_falls_back_to_the_nginx_ip(self):
         dest = panel._selfsteal_dest({'bridge': {'IPAddress': '172.17.0.3'}},
                                      {'bridge2': {'IPAddress': '172.18.0.7'}},
