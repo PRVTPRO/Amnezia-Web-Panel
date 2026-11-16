@@ -130,6 +130,10 @@ PROTOCOL_UNINSTALL_KEYS = {
     'uninstall_archive_confirm', 'uninstall_archived',
 }
 
+# WARP refuses to install on a host without an AmneziaWG instance; the
+# marketplace badge and the operation error share this wording.
+SRV_WARP_NO_AWG_KEYS = {
+    'srv_warp_no_awg', 'srv_warp_err_no_awg',
 # Keys of later panels that were merged without registering them here; before
 # this set existed the frozen hash failed on an unchanged catalogue.
 LATER_FEATURE_KEYS = {
@@ -354,6 +358,7 @@ class TestC6Translations(unittest.TestCase):
         # the ipv6 set) must NOT be subtracted again.
         previous = '\n'.join(sorted(base - PANEL_ACCESS_KEYS - SECURITY_SETUP_KEYS
                                     - CHEBURCHECK_KEYS - PROTOCOL_UNINSTALL_KEYS
+                                    - SRV_WARP_NO_AWG_KEYS
                                     - COPY_INSTANCE_KEYS - LATER_FEATURE_KEYS
                                     - RELEASE_1811_KEYS - USER_LIMIT_KEYS - TELEGRAM_ACCOUNT_KEYS))
         self.assertEqual(hashlib.sha256(previous.encode('utf-8')).hexdigest(),

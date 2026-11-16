@@ -52,6 +52,8 @@ SRV_WARP_KEYS = {
     'srv_warp_err_tos',
     'srv_warp_err_job_busy',
     'srv_warp_err_generic',
+    'srv_warp_err_no_awg',
+    'srv_warp_no_awg',
     'srv_warp_stage_start',
     'srv_warp_stage_download',
     'srv_warp_stage_register',
@@ -176,6 +178,18 @@ class WarpStoreInstallTemplateTests(unittest.TestCase):
     def test_only_installed_warp_is_counted(self):
         self.assertIn('if (warpInstalled) installedCount++;', self.page)
         self.assertNotIn('It stays on screen even when', self.page)
+
+    def test_marketplace_refuses_install_without_an_awg_instance(self):
+        # WARP is not a host-level binary: on a server without an AmneziaWG
+        # instance (an exit-only node) the marketplace must say so and must not
+        # offer an install the backend would refuse.
+        self.assertIn('const SERVER_PROTOCOL_KEYS =', self.page)
+        self.assertIn('function warpHasTargetInstance()', self.page)
+        self.assertIn(
+            "const warpNoTarget = isWarp && !installed && "
+            "!warpHasTargetInstance();", self.page)
+        self.assertIn('warpNoTarget ? _(\'srv_warp_no_awg\')', self.page)
+        self.assertIn("srv_warp_no_targets: 'srv_warp_err_no_awg'", self.page)
 
 
 class WarpTranslationsTests(unittest.TestCase):

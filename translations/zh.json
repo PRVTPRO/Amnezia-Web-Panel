@@ -1196,6 +1196,8 @@
   "srv_warp_tos_text": "此服务器将使用 Cloudflare WARP 作为所选 AmneziaWG 实例的出口。WARP 由 Cloudflare 按其服务条款运营；继续即表示您确认为此服务器接受这些条款。",
   "srv_warp_unlink": "取消关联",
   "srv_warp_err_generic": "WARP 操作失败。",
+  "srv_warp_err_no_awg": "WARP 安装在 AmneziaWG 实例内部：此服务器没有可安装它的实例。",
+  "srv_warp_no_awg": "需要 AWG 实例",
   "srv_warp_state_error": "错误",
   "srv_warp_status_installed": "已安装",
   "srv_warp_job_running": "WARP 任务进行中：{kind}",
