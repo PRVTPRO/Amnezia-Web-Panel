@@ -550,5 +550,51 @@ class SmartRouteServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.exception.code, 'app_not_installed')
 
 
+class StatusJsonSSH:
+    """Minimal host stub whose `status.json` is the JSON we hand it."""
+
+    def __init__(self, status_json):
+        self._status_json = status_json
+
+    def run_command(self, cmd, timeout=60):
+        if 'cat /etc/smartroute/status.json' in cmd:
+            return self._status_json, '', 0
+        if 'systemctl list-timers' in cmd:
+            return '2026-10-14 11:00:00\n', '', 0
+        if 'test -f' in cmd:
+            return 'yes', '', 0
+        return '', '', 0
+
+
+class SmartRouteStatusContractTest(unittest.IsolatedAsyncioTestCase):
+    """The service must not blow up on a valid-but-non-object status.json:
+    the real manager reports it as an error instead of raising on `**status`.
+    This exercises the real SmartRouteManager (FakeSRM above is canned)."""
+
+    def _service(self, status_json):
+        store = {'data': make_data()}
+        return SmartRouteService(
+            load_data=lambda: store['data'],
+            save_data=lambda data: store.__setitem__('data', data),
+            data_lock=asyncio.Lock(),
+            get_ssh=lambda server: StatusJsonSSH(status_json),
+            awg_manager_factory=lambda ssh: FakeAWG(),
+            protocol_base=lambda p: 'awg' if p.startswith('awg') else p,
+            awg_protocols={'awg'},
+            apply_dns_via_exit=lambda *args: asyncio.sleep(0),
+        )
+
+    async def test_status_surfaces_non_object_status_json(self):
+        for raw in ('[]', '123', '"x"', 'null'):
+            with self.subTest(raw):
+                out = await self._service(raw).status(0)
+                self.assertEqual(out['status'], 'success')
+                self.assertEqual(out['host']['error'],
+                                 'status file is not a JSON object')
+                self.assertEqual(out['host']['status']['error'],
+                                 'status file is not a JSON object')
+                self.assertEqual(out['host']['next_update'], '2026-10-14 11:00:00')
+
+
 if __name__ == '__main__':
     unittest.main()

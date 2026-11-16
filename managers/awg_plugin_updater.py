@@ -44,12 +44,19 @@ KERNEL_MODULE = 'kernel_module'
 USERSPACE = 'userspace'
 COMPONENTS = (KERNEL_MODULE, USERSPACE)
 
-#: ``v3.1.20260812`` -> ``3.1.20260812``.  Anything else is not offered as an
-#: update target: release names, ``latest`` and free-form tags are rejected so
-#: a malicious or renamed tag can never be passed to a shell script.
-TAG_RE = re.compile(r'^v?(\d+\.\d+\.\d{8})$')
+#: ``v3.1.20260812`` -> ``3.1.20260812``.  Upstream also republishes a fixed
+#: build of the same date with a numeric suffix (``v3.1.20261113-02``); the
+#: suffix names a different tarball, so it must be kept — dropping it hides the
+#: rebuild and leaves servers on the broken build forever.  Anything else is
+#: not offered as an update target: release names, ``latest`` and free-form
+#: tags are rejected so a renamed tag can never reach a shell script, and the
+#: surviving character set stays ``[0-9.]`` plus one ``-<digits>``.
+TAG_RE = re.compile(r'^v?(\d+\.\d+\.\d{8})(?:-(\d+))?$')
 
-_VERSION_RE = re.compile(r'(\d+\.\d+\.\d{8})')
+#: Matches both ``3.1.20261113`` and ``3.1.20261113-02``.  The suffix matters:
+#: ``_update_kernel`` compares it against the loaded module version, and
+#: ``installed_versions`` must not report a rebuild as the base version.
+_VERSION_RE = re.compile(r'(\d+\.\d+\.\d{8}(?:-\d+)?)')
 
 #: GitHub tag listings change slowly; one lookup per component per process is
 #: plenty and keeps the status endpoint from being rate limited.
@@ -100,18 +107,33 @@ class PluginUpdateError(Exception):
 
 
 def parse_tag(tag):
-    """Return the bare version from a release tag, or ``None``."""
+    """Return the bare version from a release tag, or ``None``.
+
+    ``v3.1.20261113-02`` -> ``3.1.20261113-02``.  The numeric suffix is part
+    of the version, not decoration: it names a different source tarball and
+    has to survive into ``git clone --branch`` and into the DKMS version.
+    """
     match = TAG_RE.match((tag or '').strip())
-    return match.group(1) if match else None
+    if not match:
+        return None
+    base, build = match.group(1), match.group(2)
+    return '%s-%s' % (base, build) if build else base
 
 
 def version_tuple(version):
-    """Comparable ``(major, minor, date)`` tuple, or ``None``."""
+    """Comparable ``(major, minor, date, build)`` tuple, or ``None``.
+
+    ``build`` is ``0`` for a plain tag, so ``3.1.20261113-02`` sorts above
+    ``3.1.20261113`` and ``-10`` above ``-02``.  All tuples have the same
+    arity, so the existing ``sorted(..., key=version_tuple)`` and ``<``
+    comparisons keep working unchanged.
+    """
     parsed = parse_tag(version)
     if not parsed:
         return None
-    major, minor, date = parsed.split('.')
-    return int(major), int(minor), int(date)
+    base, _, build = parsed.partition('-')
+    major, minor, date = base.split('.')
+    return int(major), int(minor), int(date), int(build or 0)
 
 
 def pick_latest(tags):
