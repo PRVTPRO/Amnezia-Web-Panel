@@ -2991,6 +2991,12 @@ class ConnectionSpeedRequest(BaseModel):
     max_speed: float = Field(strict=True, description='Finite Mbit/s, 0..1000000 in steps of 0.1; 0 = unlimited')
 
 
+class XrayUpdateRequest(BaseModel):
+    protocol: str = 'xray'
+    # None/'' updates to the latest published release.
+    target: Optional[str] = None
+      
+      
 class XrayFingerprintRequest(BaseModel):
     protocol: str = 'xray'
     # None/'' resets to the built-in default (chrome).
@@ -7342,17 +7348,23 @@ WARP_INSTALL_STAGES = {'start': 1, 'arch': 2, 'download': 3, 'register': 4,
                        'profile': 5, 'startsh': 6, 'done': 7}
 WARP_INSTALL_TOTAL = 7
 
+XRAY_UPDATE_STAGES = {'start': 1, 'host': 2, 'version': 3, 'arch': 4,
+                      'build': 5, 'verify': 6, 'swap': 7, 'check': 8, 'done': 9}
+XRAY_UPDATE_TOTAL = 9
+
 FLOW_STAGES = {
     'protocol': PROTOCOL_INSTALL_STAGES,
     'smartroute': SMARTROUTE_INSTALL_STAGES,
     'rknblock': RKNBLOCK_INSTALL_STAGES,
     'warp': WARP_INSTALL_STAGES,
+    'xray_update': XRAY_UPDATE_STAGES,
 }
 FLOW_TOTALS = {
     'protocol': PROTOCOL_INSTALL_TOTAL,
     'smartroute': SMARTROUTE_INSTALL_TOTAL,
     'rknblock': RKNBLOCK_INSTALL_TOTAL,
     'warp': WARP_INSTALL_TOTAL,
+    'xray_update': XRAY_UPDATE_TOTAL,
 }
 
 INSTALL_OP_TTL = 60 * 60
@@ -8805,6 +8817,12 @@ def api_awg_settings_save(request: Request, server_id: int, req: AwgSettingsRequ
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
+@app.get('/api/servers/{server_id}/xray/core', tags=["Protocols"])
+async def api_xray_core_version(request: Request, server_id: int,
+                                protocol: str = 'xray'):
+    """Running Xray-core version of this connection and the latest release."""
+    
+    
 @app.get('/api/servers/{server_id}/xray/fingerprint', tags=["Protocols"])
 def api_xray_fingerprint_get(request: Request, server_id: int, protocol: str = 'xray'):
     """The Reality fingerprint VLESS links are issued with on this connection."""
@@ -8813,6 +8831,39 @@ def api_xray_fingerprint_get(request: Request, server_id: int, protocol: str = '
     if protocol_base(protocol) != 'xray':
         return JSONResponse({'error': 'Not an Xray protocol'}, status_code=400)
     data = load_data()
+    if not 0 <= server_id < len(data['servers']):
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    server = data['servers'][server_id]
+    try:
+        ssh = get_ssh(server)
+        await asyncio.to_thread(ssh.connect)
+        try:
+            manager = XrayManager(ssh, protocol)
+            current = await asyncio.to_thread(manager.get_core_version)
+        finally:
+            await asyncio.to_thread(ssh.disconnect)
+    except Exception:
+        logger.warning("Xray core version probe failed for %s",
+                       server.get('uid'), exc_info=True)
+        current = None
+    try:
+        latest = await asyncio.to_thread(_xray_latest_release)
+    except Exception:
+        logger.warning("Xray release lookup failed", exc_info=True)
+        latest = None
+    update_available = bool(latest and (not current
+                                        or current.lstrip('v') != latest.lstrip('v')))
+    return {'version': current, 'latest': latest,
+            'update_available': update_available}
+
+
+@app.post('/api/servers/{server_id}/xray/update', tags=["Protocols"])
+async def api_xray_update(request: Request, server_id: int,
+                          req: XrayUpdateRequest):
+    """Rebuild the image with a newer Xray-core and recreate the container.
+
+    Runs as an install-flow operation: a rebuild takes minutes and the page
+    watches the shared progress log. Only one server-wide operation at a time.
     if server_id < 0 or server_id >= len(data['servers']):
         return JSONResponse({'error': 'Server not found'}, status_code=404)
     server = data['servers'][server_id]
@@ -8834,6 +8885,55 @@ def api_xray_fingerprint_save(request: Request, server_id: int, req: XrayFingerp
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     if protocol_base(req.protocol) != 'xray':
         return JSONResponse({'error': 'Not an Xray protocol'}, status_code=400)
+    data = load_data()
+    if not 0 <= server_id < len(data['servers']):
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    _install_ops_load()
+    if _install_running(server_id):
+        return JSONResponse(
+            {'error': 'Another operation is running on this server',
+             'code': 'operation_in_progress'},
+            status_code=409)
+    op = op_create(server_id, 'xray_update', total=XRAY_UPDATE_TOTAL)
+    op['protocol'] = req.protocol
+    _install_ops_save()
+    asyncio.create_task(_run_xray_update(
+        op, server_id, req.protocol, (req.target or '').strip() or None))
+    return {'operation_id': op['id']}
+
+
+async def _run_xray_update(op, server_id, protocol, target):
+    data = load_data()
+    server = data['servers'][server_id]
+    ssh = get_ssh(server)
+
+    def progress(stage, message):
+        op_log(op, stage, message)
+
+    try:
+        op_log(op, 'start', f"updating Xray-core of {protocol}")
+        await asyncio.to_thread(ssh.connect)
+        manager = XrayManager(ssh, protocol)
+        if not target:
+            target = await asyncio.to_thread(_xray_latest_release)
+        if not target:
+            raise RuntimeError("cannot resolve the latest Xray-core release")
+        result = await asyncio.to_thread(
+            manager.update_core, target, progress)
+        if result.get('status') != 'success':
+            raise RuntimeError(result.get('message') or 'update failed')
+        op_log(op, 'done', f"Xray-core is now {result.get('version')}")
+        op_finish(op, 'success', result=result)
+        _invalidate_ip_status(server.get('uid'))
+    except Exception as e:
+        logger.warning("Xray core update failed: %s", e, exc_info=True)
+        op_log(op, 'error', str(e))
+        op_finish(op, 'failed', error={'code': 'update_failed', 'message': str(e)})
+    finally:
+        try:
+            await asyncio.to_thread(ssh.disconnect)
+        except Exception:
+            pass
     fp = (req.fingerprint or '').strip() or None
     if fp is not None and fp not in XRAY_FINGERPRINTS:
         return JSONResponse({'error': 'Unknown fingerprint'}, status_code=400)
@@ -8888,6 +8988,28 @@ def _awg_protocols(server):
             if protocol_base(proto) in AWG_PROTOCOLS]
 
 
+_XRAY_RELEASE_CACHE = {'ts': 0.0, 'tag': None}
+
+
+def _xray_latest_release():
+    """Latest published Xray-core tag, cached for an hour.
+
+    The GitHub API allows 60 unauthenticated requests per hour per IP, and
+    the update dialog polls it on every open — caching keeps the panel out
+    of the rate limit.
+    """
+    now = time.monotonic()
+    if _XRAY_RELEASE_CACHE['tag'] and now - _XRAY_RELEASE_CACHE['ts'] < 3600:
+        return _XRAY_RELEASE_CACHE['tag']
+    request = urllib.request.Request(
+        'https://api.github.com/repos/XTLS/Xray-core/releases/latest',
+        headers={'Accept': 'application/vnd.github+json',
+                 'User-Agent': 'Amnezia-Web-Panel'})
+    with urllib.request.urlopen(request, timeout=10) as response:
+        tag = (json.load(response) or {}).get('tag_name')
+    if tag:
+        _XRAY_RELEASE_CACHE.update(ts=now, tag=tag)
+    return _XRAY_RELEASE_CACHE['tag']
 def _xray_port_usage(ssh, server):
     """Running/client info of every xray connection, for the header IP chips.
 
