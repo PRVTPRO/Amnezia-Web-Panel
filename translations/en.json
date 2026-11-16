@@ -522,6 +522,8 @@
   "exit_obfuscation": "Obfuscate the inter-node link (AmneziaWG)",
   "exit_obfuscation_short": "Obfuscation",
   "exit_obfuscation_hint": "Enable when the hop between the nodes crosses DPI. Plain WireGuard otherwise. AmneziaWG Legacy entries can only use a non-obfuscated exit.",
+  "exit_awg3": "AmneziaWG 3.1 on the inter-node link",
+  "exit_awg3_hint": "Adds header protection, random trailers and content padding on top of the obfuscation (AmneziaWG 3.1). Entries must run AmneziaWG 3.x. The link MTU drops to 1400, so the client MTU has to be lowered to match.",
   "exit_peers": "Peers",
   "exit_peers_title": "Exit node — linked entry nodes",
   "exit_peer_name": "Entry node",
