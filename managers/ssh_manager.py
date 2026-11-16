@@ -325,9 +325,12 @@ class SSHManager:
         except Exception as e:
             # Transport can be dead while is_active() still claims otherwise
             # (silent NAT drop). Reconnect once and retry before giving up.
-            from peer_lifecycle_lock import note_ssh_uncertainty
+            from peer_lifecycle_lock import note_ssh_uncertainty, lifecycle_active
             note_ssh_uncertainty()
-            if not _retried:
+            # Повтор разрешён только вне lifecycle-интерлока: там исход уже
+            # неизвестен, и повторная отправка означала бы выполнить мутацию
+            # дважды. Забор (fence) в этом случае ставится выше.
+            if not _retried and not lifecycle_active():
                 logger.warning(f"exec failed ({e}); reconnecting and retrying once")
                 try:
                     self.connect()
