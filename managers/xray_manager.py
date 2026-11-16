@@ -527,6 +527,23 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
                         "clients": [],
                         "decryption": "none"
                     },
+                    "streamSettings": {
+                        "network": "tcp",
+                        "security": "reality",
+                        "realitySettings": {
+                            "dest": f"{site_name}:443",
+                            "serverNames": [site_name],
+                            "privateKey": priv_key,
+                            "shortIds": [short_id]
+                        }
+                    },
+                    # routeOnly: the sniffed domain feeds routing rules only,
+                    # the connection still dials the original destination.
+                    "sniffing": {
+                        "enabled": True,
+                        "destOverride": ["http", "tls", "quic"],
+                        "routeOnly": True
+                    }
                     "streamSettings": stream_settings,
                 },
                 {
@@ -537,7 +554,9 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
                     "tag": "api"
                 }
             ],
-            "outbounds": [{"protocol": "freedom"}],
+            # Pin egress to IPv4: on a dual-stack host a silent AAAA route
+            # leaks the server's second address.
+            "outbounds": [{"protocol": "freedom", "domainStrategy": "UseIPv4"}],
             "routing": {
                 "rules": [
                     {
@@ -835,7 +854,8 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         save_clients_table(self.ssh, self.container_name, self._clients_table_path(), data)
 
     def _upgrade_config_for_stats(self, config, restart=True):
-        """Injects API and Stats blocks into older Xray configs transparently."""
+        """Injects API/Stats blocks and connection hardening into older
+        Xray configs transparently."""
         dirty = False
         if 'stats' not in config:
             config['stats'] = {}
@@ -878,7 +898,25 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
                     if 'email' not in c:
                         c['email'] = c['id']
                         dirty = True
-            
+
+        # Hardening for older installs: sniffing gives domain-based routing
+        # rules the real destination even for TUN clients that dial IPs, and
+        # pinning the freedom egress to IPv4 stops a silent AAAA leak on
+        # dual-stack hosts. A sniffing block or strategy the user already
+        # set is left untouched.
+        for ib in config.get('inbounds', []):
+            if ib.get('protocol') == 'vless' and not isinstance(ib.get('sniffing'), dict):
+                ib['sniffing'] = {
+                    "enabled": True,
+                    "destOverride": ["http", "tls", "quic"],
+                    "routeOnly": True
+                }
+                dirty = True
+        for ob in config.get('outbounds', []):
+            if ob.get('protocol') == 'freedom' and 'domainStrategy' not in ob:
+                ob['domainStrategy'] = 'UseIPv4'
+                dirty = True
+
         if dirty:
             self._write_server_json(config, restart=restart)
         return dirty
