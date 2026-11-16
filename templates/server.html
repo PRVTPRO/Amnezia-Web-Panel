@@ -6254,7 +6254,7 @@
         ];
         if (host.source_v4) rows.push(`${_('smartroute_source')}: ${escapeHtml(host.source_v4)}`);
         if (host.updated_at) rows.push(`${_('smartroute_updated')}: ${escapeHtml(formatSmartRouteTime(host.updated_at))}`);
-        if (host.next_update) rows.push(`${_('smartroute_next_update')}: ${escapeHtml(host.next_update)}`);
+        if (host.next_update) rows.push(`${_('smartroute_next_update')}: ${escapeHtml(formatSmartRouteTime(host.next_update))}`);
         document.getElementById('smartRouteListsInfo').innerHTML = rows.map(r => `<div>${r}</div>`).join('');
         document.getElementById('smartRouteListsError').textContent = host.error || '';
         document.getElementById('smartRouteOwnSubnets').value = (status.own_subnets || []).join('\n');

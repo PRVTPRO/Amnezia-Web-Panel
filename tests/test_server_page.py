@@ -323,8 +323,15 @@ console.log(JSON.stringify([
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), [
             '10-11-2026 14:00:18', '10-11-2026 14:00:18', 'unknown', ''])
+        # Card: the <br> keeps "Updated" on its own line (f26e816 regression
+        # pin); whitespace around it is layout detail, so match it loosely.
+        self.assertRegex(
+            self.page,
+            r"\$\{_\('smartroute_updated'\)\}:\s*<br>\$\{escapeHtml\(formatSmartRouteTime\(host\.updated_at\)\)\}")
+        # Modal: raw ISO next_update is formatted with the same helper, so the
+        # dialog never shows two different date formats at once.
         self.assertIn(
-            "${_('smartroute_updated')}: <br>${escapeHtml(formatSmartRouteTime(host.updated_at))}",
+            "${_('smartroute_next_update')}: ${escapeHtml(formatSmartRouteTime(host.next_update))}",
             self.page)
 
     def test_card_dns_pair_inputs(self):
