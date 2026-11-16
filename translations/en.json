@@ -1290,5 +1290,20 @@
   "xray_fingerprint_label": "uTLS fingerprint",
   "xray_fingerprint_hint": "Used in every VLESS link issued for this instance. Reality accepts any fingerprint, so if the default chrome is blocked on your network, pick another one. Links already issued keep the fingerprint they were created with.",
   "xray_fingerprint_btn": "Fingerprint",
-  "xray_fingerprint_saved": "Fingerprint saved"
+  "xray_fingerprint_saved": "Fingerprint saved",
+  "sort": "Sort",
+  "sort_by": "Sort by",
+  "sort_direction": "Direction",
+  "sort_ascending": "Ascending",
+  "sort_descending": "Descending",
+  "sort_name": "Name",
+  "sort_created": "Creation date",
+  "sort_handshake": "Last handshake",
+  "sort_rx": "RX (received by server)",
+  "sort_tx": "TX (sent by server)",
+  "sort_max_speed": "Speed limit",
+  "sort_total_traffic": "Total traffic",
+  "sort_ip": "IP address",
+  "sort_quota": "Traffic quota",
+  "sort_expiry": "Expiration date"
 }

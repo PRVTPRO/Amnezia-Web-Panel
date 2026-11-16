@@ -1290,5 +1290,20 @@
   "xray_fingerprint_label": "uTLS-отпечаток",
   "xray_fingerprint_hint": "Подставляется во все VLESS-ссылки, выдаваемые для этого инстанса. Reality принимает любой отпечаток — если стандартный chrome блокируется, выберите другой. Уже выданные ссылки сохранят прежний отпечаток.",
   "xray_fingerprint_btn": "Отпечаток",
-  "xray_fingerprint_saved": "Отпечаток сохранён"
+  "xray_fingerprint_saved": "Отпечаток сохранён",
+  "sort": "Сортировка",
+  "sort_by": "Сортировать по",
+  "sort_direction": "Направление",
+  "sort_ascending": "По возрастанию",
+  "sort_descending": "По убыванию",
+  "sort_name": "Имя",
+  "sort_created": "Дата создания",
+  "sort_handshake": "Последнее рукопожатие",
+  "sort_rx": "RX (получено сервером)",
+  "sort_tx": "TX (отправлено сервером)",
+  "sort_max_speed": "Лимит скорости",
+  "sort_total_traffic": "Общий трафик",
+  "sort_ip": "IP-адрес",
+  "sort_quota": "Лимит трафика",
+  "sort_expiry": "Срок действия"
 }

@@ -1290,5 +1290,20 @@
   "xray_fingerprint_label": "اثر انگشت uTLS",
   "xray_fingerprint_hint": "در همه لینک‌های VLESS صادرشده برای این نمونه استفاده می‌شود. Reality هر اثر انگشتی را می‌پذیرد — اگر chrome پیش‌فرض در شبکه شما مسدود شده است، یکی دیگر را انتخاب کنید. لینک‌های قبلی اثر انگشت خود را حفظ می‌کنند.",
   "xray_fingerprint_btn": "اثر انگشت",
-  "xray_fingerprint_saved": "اثر انگشت ذخیره شد"
+  "xray_fingerprint_saved": "اثر انگشت ذخیره شد",
+  "sort": "مرتب‌سازی",
+  "sort_by": "مرتب‌سازی بر اساس",
+  "sort_direction": "ترتیب",
+  "sort_ascending": "صعودی",
+  "sort_descending": "نزولی",
+  "sort_name": "نام",
+  "sort_created": "تاریخ ایجاد",
+  "sort_handshake": "آخرین دست‌دهی",
+  "sort_rx": "RX (دریافت‌شده توسط سرور)",
+  "sort_tx": "TX (ارسال‌شده توسط سرور)",
+  "sort_max_speed": "محدودیت سرعت",
+  "sort_total_traffic": "ترافیک کل",
+  "sort_ip": "نشانی IP",
+  "sort_quota": "سهمیه ترافیک",
+  "sort_expiry": "تاریخ انقضا"
 }

@@ -1290,5 +1290,20 @@
   "xray_fingerprint_label": "uTLS 指纹",
   "xray_fingerprint_hint": "将用于此实例签发的所有 VLESS 链接。Reality 不限制指纹——如果默认的 chrome 在您的网络中被封锁，请选择其他指纹。已签发的链接保持原有指纹不变。",
   "xray_fingerprint_btn": "指纹",
-  "xray_fingerprint_saved": "指纹已保存"
+  "xray_fingerprint_saved": "指纹已保存",
+  "sort": "排序",
+  "sort_by": "排序依据",
+  "sort_direction": "排序方向",
+  "sort_ascending": "升序",
+  "sort_descending": "降序",
+  "sort_name": "名称",
+  "sort_created": "创建日期",
+  "sort_handshake": "最后握手时间",
+  "sort_rx": "RX（服务器接收）",
+  "sort_tx": "TX（服务器发送）",
+  "sort_max_speed": "速度限制",
+  "sort_total_traffic": "总流量",
+  "sort_ip": "IP 地址",
+  "sort_quota": "流量配额",
+  "sort_expiry": "到期日期"
 }

@@ -1290,5 +1290,20 @@
   "xray_fingerprint_label": "Empreinte uTLS",
   "xray_fingerprint_hint": "Utilisée dans tous les liens VLESS émis pour cette instance. Reality accepte n’importe quelle empreinte — si chrome est bloqué sur votre réseau, choisissez-en une autre. Les liens déjà émis conservent leur empreinte.",
   "xray_fingerprint_btn": "Empreinte",
-  "xray_fingerprint_saved": "Empreinte enregistrée"
+  "xray_fingerprint_saved": "Empreinte enregistrée",
+  "sort": "Trier",
+  "sort_by": "Trier par",
+  "sort_direction": "Ordre",
+  "sort_ascending": "Croissant",
+  "sort_descending": "Décroissant",
+  "sort_name": "Nom",
+  "sort_created": "Date de création",
+  "sort_handshake": "Dernier handshake",
+  "sort_rx": "RX (reçu par le serveur)",
+  "sort_tx": "TX (envoyé par le serveur)",
+  "sort_max_speed": "Limite de débit",
+  "sort_total_traffic": "Trafic total",
+  "sort_ip": "Adresse IP",
+  "sort_quota": "Quota de trafic",
+  "sort_expiry": "Date d’expiration"
 }
