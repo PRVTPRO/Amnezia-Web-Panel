@@ -2013,10 +2013,10 @@
     <div id="serverStatus" class="srv-header__status">
         <div class="srv-header__badges" id="statusBadges"></div>
         <div class="srv-header__actions">
-            <button class="btn btn-primary btn-sm srv-action" onclick="openMarketplaceModal()" id="marketplaceBtn" disabled>
+            <button class="btn btn-primary btn-sm srv-action" onclick="openMarketplaceModal()" id="marketplaceBtn">
                 {{ ui_icon('store', 15) }} <span>{{ _('marketplace') }}</span>
             </button>
-            <button class="btn btn-secondary btn-sm srv-action" onclick="openServerManagement()" id="managementBtn" disabled>
+            <button class="btn btn-secondary btn-sm srv-action" onclick="openServerManagement()" id="managementBtn">
                 {{ ui_icon('sliders', 15) }} <span>{{ _('management') }}</span>
             </button>
             <button class="btn btn-secondary btn-sm srv-action" onclick="openHostTuning()" id="hostTuningBtn">
@@ -5553,12 +5553,18 @@
             } else if (protoBase(proto) === 'xray') {
                 actionsEl.innerHTML = `
                     <button class="btn btn-secondary btn-sm" onclick="selectProtocolForConns('${proto}')" style="flex:1">${_('connections')}</button>
-                    <button class="btn btn-secondary btn-sm" onclick="openXrayFingerprint('${proto}')" title="${_('xray_fingerprint_hint')}">${_('xray_fingerprint_btn')}</button>
                     <button class="btn btn-secondary btn-sm" onclick="showProtocolBackups('${proto}')">${_('backup')}</button>
                     <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')">${_('uninstall')}</button>
                 `;
                 showConnectionsSection();
             } else {
+                actionsEl.innerHTML = `
+                    <button class="btn btn-secondary btn-sm" onclick="selectProtocolForConns('${proto}')" style="flex:1">${_('connections')}</button>
+                    <button class="btn btn-secondary btn-sm" onclick="showProtocolBackups('${proto}')">${_('backup')}</button>
+                    <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')">${_('uninstall')}</button>
+                `;
+                showConnectionsSection();
+            }
             // Show control buttons (stop + optional config). Services use the
             // container's own config UI (AdGuard web wizard / our SOCKS5 modal /
             // unbound's static config), so we don't expose a raw editor for them.
@@ -5587,6 +5593,9 @@
                     const selfstealBtn = protoBase(proto) === 'xray'
                         ? `<button class="btn btn-secondary btn-sm" onclick="openSelfstealModal('${proto}')" title="${_('xray_selfsteal_title')}">🎭 ${_('xray_selfsteal')}</button>`
                         : '';
+                    const fingerprintBtn = protoBase(proto) === 'xray'
+                        ? `<button class="btn btn-secondary btn-sm" onclick="openXrayFingerprint('${proto}')" title="${_('xray_fingerprint_hint')}">${_('xray_fingerprint_btn')}</button>`
+                        : '';
                     const copyBtn = COPYABLE_PROTOCOLS.includes(protoBase(proto))
                         ? `<button class="btn btn-secondary btn-sm" onclick="openCopyInstance('${proto}')" title="${_('copy_instance_title')}">${_('copy_instance_btn')}</button>`
                         : '';
@@ -5595,12 +5604,12 @@
                         ${exitBtn}
                         ${endpointBtn}
                         ${selfstealBtn}
+                        ${fingerprintBtn}
                         ${copyBtn}
                         <button class="btn btn-secondary btn-sm" onclick="showServerConfig('${proto}')" title="${_('server_config')}">${_('config_btn')}</button>
                         <button class="btn btn-danger btn-sm" onclick="toggleContainer('${proto}', true)" title="${_('stop_container_confirm').replace('{}', '')}">${_('stop_btn')}</button>
                     `;
                 }
-            }
             }
         } else if (info.container_exists) {
             installedProtocols[proto] = true;
