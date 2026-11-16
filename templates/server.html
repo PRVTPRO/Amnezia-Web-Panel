@@ -723,6 +723,10 @@
         const dot = document.getElementById('sshTrustDot');
         if (!btn || !text || !dot) return;
         btn.removeAttribute('aria-busy');
+        // Без этого атрибут data-state="loading" из разметки остаётся навсегда:
+        // его CSS-правило специфичнее is-ok/is-urgent, и точка продолжает
+        // пульсировать серым даже после того, как ответ уже пришёл.
+        btn.removeAttribute('data-state');
         btn.classList.remove('is-urgent', 'is-danger', 'is-ok');
         dot.classList.remove('is-urgent', 'is-danger', 'is-ok');
         if (state === 'changed') {
