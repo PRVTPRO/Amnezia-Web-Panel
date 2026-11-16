@@ -48,7 +48,7 @@ PAGE_HTML = (
                 '<div id="installAwgJunk">')
     + _element(r'<input[^>]*id="awgSetDns6"[^>]*>')
     + _fragment('<div class="seg-row" id="awgSetIpv6Row">',
-                '<div class="form-group" id="awgSetJunkGroup">')
+                '<div class="i1-panel" id="awgSetJunkGroup">')
 )
 
 STUBS = """

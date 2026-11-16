@@ -92,6 +92,8 @@ class FakeSSH:
         return '', '', 0
 
     def docker_container_state(self, name):
+        if isinstance(self.container_state, dict):
+            return self.container_state.get(name, (True, True))
         return self.container_state
 
 
@@ -222,15 +224,52 @@ class WarpRuntimeHarness(unittest.TestCase):
         self.assertTrue(any('MTU = 1280' in script
                             for script in self.ssh.scripts))
 
-    def test_install_skips_stopped_container(self):
+    def test_install_with_every_container_stopped_is_an_error(self):
+        # A "success" with no registered profile is what left the marketplace
+        # on "Install" after a finished install (FINN, 2026-11-15).
         self.ssh.container_state = (True, False)
-        run_coro(self.runtime.install(
-            0, 'srv-1', protocol='awg', job_id='job-stopped'))
+        with self.assertRaises(ws.SrvWarpError) as ctx:
+            run_coro(self.runtime.install(
+                0, 'srv-1', protocol='awg', job_id='job-stopped'))
 
+        self.assertEqual(ctx.exception.code, 'srv_warp_no_targets')
         self.assertNotIn('wgcf register --accept-tos',
                          '\n'.join(self.ssh.commands))
         self.assertEqual(self.manager.writes, [])
-        self.assertFalse(self.data['servers'][0]['warp']['installed'])
+        self.assertFalse(self.data['servers'][0].get('warp') or {})
+
+    def test_install_without_an_awg_instance_is_an_error(self):
+        self.data['servers'][0]['protocols'] = {'exit': {'installed': True}}
+        with self.assertRaises(ws.SrvWarpError) as ctx:
+            run_coro(self.runtime.install(0, 'srv-1', job_id='job-no-targets'))
+
+        self.assertEqual(ctx.exception.code, 'srv_warp_no_targets')
+        # Nothing may be attempted over SSH on a host without a target.
+        self.assertEqual(self.ssh.commands, [])
+        self.assertFalse(self.data['servers'][0].get('warp') or {})
+
+    def test_install_for_a_missing_instance_is_an_error(self):
+        with self.assertRaises(ws.SrvWarpError) as ctx:
+            run_coro(self.runtime.install(
+                0, 'srv-1', protocol='awg3', job_id='job-missing'))
+
+        self.assertEqual(ctx.exception.code, 'srv_warp_no_targets')
+        self.assertEqual(self.ssh.commands, [])
+
+    def test_install_reports_a_skipped_stopped_instance(self):
+        self.ssh.container_state = {
+            'amnezia-awg': (True, True),
+            'amnezia-awg2': (True, False),
+        }
+        stages = []
+        run_coro(self.runtime.install(
+            0, 'srv-1', job_id='job-partial',
+            progress=lambda stage, msg: stages.append(stage)))
+
+        self.assertIn('skip', stages)
+        self.assertTrue(self.record('awg')['warp']['registered'])
+        self.assertFalse(self.record('awg2')['warp']['registered'])
+        self.assertTrue(self.data['servers'][0]['warp']['installed'])
 
     # ----- sanitizer -------------------------------------------------------
 

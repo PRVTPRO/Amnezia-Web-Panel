@@ -58,7 +58,8 @@ class TestTelegramLanguagePreference(unittest.IsolatedAsyncioTestCase):
         text = self.api.send_message.call_args[0][1]
         markup = self.api.send_message.call_args.kwargs['reply_markup']
         buttons = [button for row in markup['inline_keyboard'] for button in row]
-        self.assertIn('Choose language', text)
+        self.assertIn(tg_bot._tt('ru', 'language_prompt'), text)
+        self.assertNotIn('Choose language', text)
         self.assertNotIn('Привет', text)
         self.assertEqual({button['callback_data'] for button in buttons},
                          {'lang:en', 'lang:fa', 'lang:fr', 'lang:ru', 'lang:zh'})
@@ -303,10 +304,14 @@ class TestUserSlashCommands(unittest.IsolatedAsyncioTestCase):
         self.api.answer_callback = AsyncMock()
 
     async def test_connect_command_starts_create_flow(self):
+        self.data['servers'].append(dict(self.data['servers'][0], name='Server 3'))
+        service = MagicMock()
+        service.get_self_service_options = AsyncMock(return_value={'remaining_connections': 5})
         msg = _text_message(chat_id=111, from_id=111, text='/connect')
 
-        await _dispatch_message_with_service(self.api, msg, self.load_data, MagicMock())
+        await _dispatch_message_with_service(self.api, msg, self.load_data, service)
 
+        service.get_self_service_options.assert_awaited_once_with('user-1', 'telegram')
         self.api.send_message.assert_called()
         text = self.api.send_message.call_args[0][1]
         reply_markup = self.api.send_message.call_args[1].get('reply_markup', {})
@@ -423,6 +428,7 @@ class TestUserCreateCallback(unittest.IsolatedAsyncioTestCase):
         self.api.answer_callback = AsyncMock()
 
     async def test_user_create_shows_servers_for_eligible_user(self):
+        self.data['servers'].append(dict(self.data['servers'][0], name='Server 3'))
         msg = _callback_update(chat_id=111, from_id=111, data_str='user_create')
         await _dispatch_callback(self.api, msg, self.load_data)
         self.api.edit_message.assert_called()
@@ -430,12 +436,14 @@ class TestUserCreateCallback(unittest.IsolatedAsyncioTestCase):
         reply_markup = call_kwargs[1].get('reply_markup', {})
         keyboard_text = json.dumps(reply_markup)
         self.assertIn('Server 1', keyboard_text)
+        self.assertIn('Server 3', keyboard_text)
+        self.assertNotIn('Server 2', keyboard_text)
         # Verify there are callback buttons (resolved refs)
         self.assertIn('callback_data', keyboard_text)
 
     async def test_user_create_reports_disabled_account_before_showing_wizard(self):
         self.data['users'][0]['enabled'] = False
-        msg = _callback_update(chat_id=111, from_id=111, data_str='user_create')
+        msg = _callback_update(chat_id=111, from_id=111, data_str='user_create', language_code='ru')
 
         await _dispatch_callback(self.api, msg, self.load_data)
 
@@ -446,7 +454,7 @@ class TestUserCreateCallback(unittest.IsolatedAsyncioTestCase):
 
     async def test_user_create_skips_server_and_protocol_when_only_one_choice(self):
         self.data['settings']['self_service']['allowed_protocols'] = ['awg']
-        msg = _callback_update(chat_id=111, from_id=111, data_str='user_create')
+        msg = _callback_update(chat_id=111, from_id=111, data_str='user_create', language_code='ru')
 
         await _dispatch_callback(self.api, msg, self.load_data)
 
@@ -462,7 +470,7 @@ class TestUserCreateCallback(unittest.IsolatedAsyncioTestCase):
     async def test_user_create_server_skips_protocol_when_only_one_choice(self):
         self.data['settings']['self_service']['allowed_protocols'] = ['awg']
         ref_key = tg_bot._ref('user_create_server', {'sid': 0})
-        msg = _callback_update(chat_id=111, from_id=111, data_str=ref_key)
+        msg = _callback_update(chat_id=111, from_id=111, data_str=ref_key, language_code='ru')
 
         await _dispatch_callback(self.api, msg, self.load_data)
 
@@ -488,7 +496,7 @@ class TestUserCreateCallback(unittest.IsolatedAsyncioTestCase):
         msg = _callback_update(chat_id=111, from_id=111, data_str='user_create', language_code='ru')
         await _dispatch_callback(self.api, msg, self.load_data)
         text = self.api.edit_message.call_args[0][2]
-        self.assertIn('Создать подключение', text)
+        self.assertIn('Server 1', text)
         self.assertIn('Выберите протокол', text)
         self.assertNotIn('Выберите сервер', text)
         self.assertNotIn('Create connection', text)

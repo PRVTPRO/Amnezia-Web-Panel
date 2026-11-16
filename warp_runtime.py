@@ -191,7 +191,12 @@ class WarpRuntime:
         if protocol:
             if _protocol_base(protocol) not in self.awg_protocols:
                 raise ws.SrvWarpError('srv_warp_protocol_unsupported', 409)
-            return [protocol] if protocol in known else []
+            if protocol not in known:
+                # The instance was deleted after the request was queued (or
+                # the record never existed): an empty target list used to be
+                # a silent no-op that still reported success.
+                raise ws.SrvWarpError('srv_warp_no_targets', 409)
+            return [protocol]
         return self._awg_protocols(server)
 
     @staticmethod
@@ -386,13 +391,22 @@ class WarpRuntime:
             if idx is None:
                 raise ws.SrvWarpError('srv_warp_identity_mismatch', 409)
             protocols = self._targets(server, protocol)
-            manager = await self._awg(server) if protocols else None
+            if not protocols:
+                # WARP has no host-level binary: wgcf and warp0.conf live inside
+                # an AmneziaWG container. A host without an AWG instance (an
+                # exit-only node, for example) has nothing to install into, and
+                # reporting success there left the marketplace on "Install"
+                # with no explanation.
+                raise ws.SrvWarpError('srv_warp_no_targets', 409)
+            manager = await self._awg(server)
 
             done = []
             for proto in protocols:
                 if not self._container_running(manager, proto):
                     logger.info("warp install: %s/%s container is not running",
                                 uid, proto)
+                    report('skip', 'skipped %s: container is not running'
+                           % proto)
                     continue
                 report('download', 'downloading the wgcf client')
                 await asyncio.to_thread(self._ensure_wgcf, manager, proto)
@@ -407,6 +421,11 @@ class WarpRuntime:
                 await asyncio.to_thread(
                     manager._write_start_script, proto, config_path, None)
                 done.append(proto)
+
+            if not done:
+                # Every target container is stopped: no profile was registered,
+                # so this is not an install and must not be reported as one.
+                raise ws.SrvWarpError('srv_warp_no_targets', 409)
 
             await self._mutate_data(
                 lambda current: self._server_warp_installed(

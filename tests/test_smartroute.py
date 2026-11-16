@@ -21,6 +21,13 @@ from managers.smartroute_manager import (
 
 
 class FakeSSH:
+    # Overridable so subclasses can exercise one host answer without
+    # re-implementing the whole fake.
+    status_json = ('{"prefixes_v4": 8000, "prefixes_v6": 300, "source_v4": "ipdeny", '
+                   '"updated_at": "2026-10-14T10:00:00", "error": null}')
+    list_timers_out = '2026-10-14 11:00:00\n'
+    list_timers_code = 0
+
     def __init__(self):
         self.commands = []
         self.uploads = []
@@ -45,10 +52,9 @@ class FakeSSH:
         if 'test -f' in cmd and 'smartroute-update.sh' in cmd:
             return 'yes', '', 0
         if 'cat /etc/smartroute/status.json' in cmd:
-            return ('{"prefixes_v4": 8000, "prefixes_v6": 300, "source_v4": "ipdeny", '
-                    '"updated_at": "2026-10-14T10:00:00", "error": null}'), '', 0
+            return self.status_json, '', 0
         if 'systemctl list-timers' in cmd:
-            return 'Fri 2026-10-14 11:00:00 UTC  1h left', '', 0
+            return self.list_timers_out, '', self.list_timers_code
         if 'ls /etc/smartroute/instances' in cmd:
             return 'amnezia-awg2\namnezia-awg3\n', '', 0
         if 'iptables -t mangle -L' in cmd:
@@ -391,8 +397,58 @@ class ManagerFlowTests(unittest.TestCase):
         self.assertEqual(status['prefixes_v4'], 8000)
         self.assertEqual(status['prefixes_v6'], 300)
         self.assertEqual(status['updated_at'], '2026-10-14T10:00:00')
-        self.assertEqual(status['next_update'], status['next_run'])
+        self.assertEqual(status['next_run'], '2026-10-14 11:00:00')
+        self.assertEqual(status['next_update'], '2026-10-14 11:00:00')
         self.assertEqual(status['instances'], ['amnezia-awg2', 'amnezia-awg3'])
+
+    def test_host_status_timer_command_prints_date_and_time(self):
+        # list-timers prints "WEEKDAY DATE TIME"; the panel wants DATE TIME,
+        # so awk must drop exactly the weekday column. A silent return of
+        # "{print $1, $2}" used to surface as "Next update: Fri".
+        self.mgr.host_status()
+        timer_cmd = next(c for c in self.ssh.commands if 'list-timers' in c)
+        self.assertIn("awk '{print $2, $3}'", timer_cmd)
+        self.assertNotIn('print $1, $2', timer_cmd)
+
+    def test_host_status_timer_output_variants(self):
+        cases = [
+            ('no timer (empty output)', '', ''),
+            ('n/a placeholder', 'n/a\n', ''),
+            ('weekday only', 'Fri\n', ''),
+            ('raw systemctl line rejected',
+             'Fri 2026-10-14 11:00:00 UTC  1h left\n', ''),
+            ('multiline keeps the first line',
+             '2026-10-14 11:00:00\n2026-10-15 11:00:00\n', '2026-10-14 11:00:00'),
+        ]
+        for label, out, expected in cases:
+            with self.subTest(label):
+                ssh = FakeSSH()
+                ssh.list_timers_out = out
+                status = SmartRouteManager(ssh).host_status()
+                self.assertEqual(status['next_run'], expected)
+                self.assertEqual(status['next_update'], expected)
+
+    def test_host_status_timer_failure_is_contractual(self):
+        # In the `systemctl | awk` pipeline the exit code belongs to awk, so a
+        # non-zero code is the contract for "timer could not be read".
+        ssh = FakeSSH()
+        ssh.list_timers_out = '2026-10-14 11:00:00\n'
+        ssh.list_timers_code = 1
+        status = SmartRouteManager(ssh).host_status()
+        self.assertEqual(status['next_run'], '')
+        self.assertEqual(status['next_update'], '')
+
+    def test_host_status_non_object_json_reports_error(self):
+        # A valid JSON that is not an object used to crash `**status` (500).
+        for raw in ('[]', '123', '"x"', 'null'):
+            with self.subTest(raw):
+                ssh = FakeSSH()
+                ssh.status_json = raw
+                status = SmartRouteManager(ssh).host_status()
+                self.assertEqual(status['error'], 'status file is not a JSON object')
+                self.assertEqual(status['status']['error'],
+                                 'status file is not a JSON object')
+                self.assertTrue(status['installed'])
 
     def test_counters_read(self):
         out = self.mgr.instance_counters('amnezia-awg2', '/opt/amnezia/awg/awg0.conf', '10.8.0.0/24')
