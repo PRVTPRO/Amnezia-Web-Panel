@@ -171,6 +171,27 @@ class NonAwgInstallGateTests(InstallGateBase):
             self.calls.append(kwargs)
             return {'status': 'success', 'log': []}
 
+    def setUp(self):
+        super().setUp()
+        # Журнал установок — глобальное состояние панели: без изоляции
+        # завершённая операция из этого теста видна соседним тестам
+        # (test_public_endpoint ждёт 404 на неизвестную операцию xray).
+        self._ops = dict(panel._INSTALL_OPS)
+        self._active = dict(panel._INSTALL_ACTIVE)
+        self._loaded = dict(panel._INSTALL_OPS_LOADED)
+        panel._INSTALL_OPS.clear()
+        panel._INSTALL_ACTIVE.clear()
+        panel._INSTALL_OPS_LOADED['done'] = False
+        self.addCleanup(self._restore_install_ops)
+
+    def _restore_install_ops(self):
+        panel._INSTALL_OPS.clear()
+        panel._INSTALL_OPS.update(self._ops)
+        panel._INSTALL_ACTIVE.clear()
+        panel._INSTALL_ACTIVE.update(self._active)
+        panel._INSTALL_OPS_LOADED.clear()
+        panel._INSTALL_OPS_LOADED.update(self._loaded)
+
     def _patches_without_probe(self):
         manager = self._ManagerWithoutIpv6Probe()
         patches = [
