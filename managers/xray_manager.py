@@ -3,13 +3,18 @@ import os
 import uuid
 import logging
 import base64
+import functools
 import re
 import shlex
+import threading
 from datetime import datetime
 import urllib.parse
 from managers import docker_image_cleanup
 
 from managers.awg_manager import AWGManager
+
+from managers.awg_manager import AWGManager
+from managers.clients_table import save_clients_table
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +22,27 @@ XRAY_CORE_VERSION = "v26.10.31"
 
 # uname -m -> asset suffix of the Xray-core Linux release archive
 XRAY_ARCH_ZIPS = {'x86_64': '64', 'aarch64': 'arm64-v8a', 'armv7l': 'arm32-v7a'}
+
+# Panel-side serialization for clientsTable read-modify-write: the page polls
+# get_clients while add/toggle/rename run, and the last save wins with a
+# stale snapshot unless the whole RMW holds one lock (see wireguard_manager).
+_XRAY_TABLE_LOCKS = {}
+_XRAY_TABLE_LOCKS_GUARD = threading.Lock()
+
+
+def _xray_clients_table_lock(host, container_name):
+    with _XRAY_TABLE_LOCKS_GUARD:
+        return _XRAY_TABLE_LOCKS.setdefault((host, container_name), threading.Lock())
+
+
+def _serialized_table_write(method):
+    """Hold the per-container table lock for the whole read-modify-write."""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        host = getattr(self.ssh, 'host', '') or 'unknown'
+        with _xray_clients_table_lock(host, self.container_name):
+            return method(self, *args, **kwargs)
+    return wrapper
 # uTLS client hello fingerprints a VLESS link may request. The Reality server
 # does not pin this value, so it is a per-link property, not a container
 # setting; chrome stays the historical default.
@@ -469,14 +495,16 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         self.ssh.run_sudo_command(f"mkdir -p {config_dir}")
         self.ssh.upload_file_sudo(json.dumps(server_json, indent=2), f"{config_dir}/server.json")
         # Native layout — separate key files matching the official Amnezia client install.
+        # Everything lands in THIS instance's config_dir: a second instance
+        # (xray__2 -> /opt/amnezia/xray-2) must not share the base keys.
         # See client/server_scripts/xray/configure_container.sh for the canonical layout.
-        self.ssh.upload_file_sudo(priv_key + '\n', "/opt/amnezia/xray/xray_private.key")
-        self.ssh.upload_file_sudo(pub_key + '\n', "/opt/amnezia/xray/xray_public.key")
-        self.ssh.upload_file_sudo(short_id + '\n', "/opt/amnezia/xray/xray_short_id.key")
+        self.ssh.upload_file_sudo(priv_key + '\n', f"{config_dir}/xray_private.key")
+        self.ssh.upload_file_sudo(pub_key + '\n', f"{config_dir}/xray_public.key")
+        self.ssh.upload_file_sudo(short_id + '\n', f"{config_dir}/xray_short_id.key")
         # xray_uuid.key marks the install-time "default" client whose ID gets skipped on
         # auto-import. Panel installs do not reserve such a client, so we leave it empty.
-        self.ssh.upload_file_sudo('\n', "/opt/amnezia/xray/xray_uuid.key")
-        self.ssh.upload_file_sudo("[]", "/opt/amnezia/xray/clientsTable")
+        self.ssh.upload_file_sudo('\n', f"{config_dir}/xray_uuid.key")
+        self.ssh.upload_file_sudo("[]", f"{config_dir}/clientsTable")
 
         # Host-level BBR (same routine as AWG installs): the container's own
         # start.sh sets congestion control in its network namespace, but that
@@ -740,18 +768,14 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         return []
 
     def _save_clients_table(self, data):
-        """Write clientsTable to the file matching the current layout, in both
-        the container and the host bind-mount.
+        """Write clientsTable to the file matching the current layout, in the
+        container and on the host bind-mount.
+
+        Delegated to the shared checked writer (private host staging, atomic
+        rename inside the container, one previous snapshot kept as
+        <path>.panel-backup). Callers hold the per-container table lock.
         """
-        path = self._clients_table_path()
-        tmp_file = "/tmp/_xray_clients.json"
-        self.ssh.upload_file_sudo(json.dumps(data, indent=2), tmp_file)
-        self.ssh.run_sudo_command(
-            f"docker cp {tmp_file} {self.container_name}:{path}"
-        )
-        self.ssh.run_sudo_command(
-            f"cp {tmp_file} {path} 2>/dev/null || true"
-        )
+        save_clients_table(self.ssh, self.container_name, self._clients_table_path(), data)
 
     def _upgrade_config_for_stats(self, config, restart=True):
         """Injects API and Stats blocks into older Xray configs transparently."""
@@ -847,7 +871,11 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
             v = int(v)
         return f"{v} {powers.get(n, 'B')}"
 
-    def get_clients(self, protocol=None, strict=False):
+    @_serialized_table_write
+    def get_clients(self, protocol=None, strict=True):
+        # strict by default: this read feeds auto-import and lastSeen
+        # persistence, and a transient SSH failure answered with an empty
+        # table would be written back over the real one (issue #182).
         config = self._get_server_json()
         if not config:
             if strict:
@@ -929,6 +957,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
 
         return clients_table
 
+
     def get_client_config(self, protocol, client_id, server_host, port, public_port=None,
                           fingerprint=None):
         clients = self._get_clients_table()
@@ -967,6 +996,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         )
         return url
 
+    @_serialized_table_write
     def add_client(self, protocol, client_name, server_host, port, public_port=None,
                    warp_ctx=None, fingerprint=None):
         client_id = str(uuid.uuid4())
@@ -997,7 +1027,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         self._write_server_json(config, restart=False)
 
         # Update table
-        clients_table = self._get_clients_table()
+        clients_table = self._get_clients_table(strict=True)
         clients_table.append({
             'clientId': client_id,
             'userData': {
@@ -1014,6 +1044,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
                                              fingerprint=fingerprint)
         }
 
+    @_serialized_table_write
     def toggle_client(self, protocol, client_id, enable):
         config = self._get_server_json()
         self._upgrade_config_for_stats(config, restart=False)
@@ -1040,12 +1071,13 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
 
         self._write_server_json(config, restart=False)
 
-        clients_table = self._get_clients_table()
+        clients_table = self._get_clients_table(strict=True)
         for c in clients_table:
             if c['clientId'] == client_id:
                 c.setdefault('userData', {})['enabled'] = enable
         self._save_clients_table(clients_table)
 
+    @_serialized_table_write
     def remove_client(self, protocol, client_id):
         config = self._get_server_json()
         self._upgrade_config_for_stats(config, restart=False)
@@ -1058,17 +1090,26 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         inbound['settings']['clients'] = [c for c in clients_node if c['id'] != client_id]
         self._write_server_json(config, restart=False)
 
-        clients_table = self._get_clients_table()
+        clients_table = self._get_clients_table(strict=True)
         clients_table = [c for c in clients_table if c['clientId'] != client_id]
         self._save_clients_table(clients_table)
         return True
 
+    @_serialized_table_write
     def rename_client(self, protocol, client_id, new_name):
         """Rename a client. The display name lives in clientsTable
         (userData.clientName) and is embedded into the VLESS URL fragment on
         the fly, so updating the table is enough — UUID, keys and server.json
-        stay untouched and existing links keep working."""
-        clients_table = self._get_clients_table()
+        stay untouched and existing links keep working.
+
+        The shared writer commits with `docker exec`, so a stopped instance
+        is rejected up front with a clear message instead of a generic
+        staging failure.
+        """
+        if not self.check_container_running():
+            raise RuntimeError(
+                'Xray container is not running - start the instance to rename its clients')
+        clients_table = self._get_clients_table(strict=True)
         client = next((c for c in clients_table if c.get('clientId') == client_id), None)
         if client is None:
             raise RuntimeError('Client not found')

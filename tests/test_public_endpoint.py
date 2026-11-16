@@ -82,7 +82,7 @@ class ClientConfigTests(unittest.TestCase):
 
     def wireguard(self):
         mgr = WireGuardManager(ssh_manager=mock.Mock())
-        mgr._get_clients_table = lambda: [{'clientId': 'peer', 'userData': {
+        mgr._get_clients_table = lambda **kwargs: [{'clientId': 'peer', 'userData': {
             'clientPrivateKey': 'priv', 'clientIp': '10.8.0.6', 'psk': 'psk'}}]
         mgr._get_server_public_key = lambda: 'serverpub'
         mgr._get_server_psk = lambda: 'serverpsk'
@@ -92,7 +92,7 @@ class ClientConfigTests(unittest.TestCase):
 
     def awg(self):
         mgr = AWGManager(mock.Mock())
-        mgr._get_clients_table = lambda proto: [{'clientId': 'peer', 'userData': {
+        mgr._get_clients_table = lambda proto, **kwargs: [{'clientId': 'peer', 'userData': {
             'clientPrivateKey': 'priv', 'clientIp': '10.8.1.6', 'psk': 'psk'}}]
         mgr._get_client_ipv6 = lambda proto, ip: ''
         mgr._get_server_public_key = lambda proto: 'serverpub'
@@ -104,7 +104,7 @@ class ClientConfigTests(unittest.TestCase):
 
     def xray(self):
         mgr = XrayManager(mock.Mock())
-        mgr._get_clients_table = lambda: [{'clientId': 'uuid-1',
+        mgr._get_clients_table = lambda **kwargs: [{'clientId': 'uuid-1',
                                           'userData': {'clientName': 'laptop'}}]
         mgr._get_meta_json = lambda: {'port': 443, 'public_key': 'pbk', 'short_id': 'sid',
                                       'site_name': 'yahoo.com'}
