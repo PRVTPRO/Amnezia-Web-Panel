@@ -7,6 +7,7 @@ fallback for unknown values.
 """
 
 import json
+import shlex
 import re
 import unittest
 
@@ -64,6 +65,10 @@ class FakeSSH:
             '/opt/amnezia/xray/xray_uuid.key': '\n',
         }
         self.last_upload = None
+        self._stage_dirs = []
+
+    def upload_file(self, content, remote_path):
+        return self.upload_file_sudo(content, remote_path)
 
     def upload_file_sudo(self, content, remote_path):
         self.files[remote_path] = content
@@ -82,12 +87,29 @@ class FakeSSH:
             if self.last_upload:
                 self.files[dest] = self.last_upload[0]
             return ('', '', 0)
+        if 'sh -c' in cmd and 'mv -f --' in cmd:
+            # Simulate the clientsTable commit script: its final
+            # "mv -f -- <staged> <live>" lands the new table contents.
+            tokens = shlex.split(cmd)
+            script = tokens[tokens.index('-c') + 1]
+            for line in script.splitlines():
+                parts = line.split()
+                if parts[:3] == ['mv', '-f', '--'] and len(parts) == 5:
+                    self.files[parts[4]] = self.files.get(parts[3], '')
         if ' cat ' in cmd:
             path = cmd.rsplit(' cat ', 1)[-1].split(' 2>', 1)[0].strip()
             return (self.files.get(path, ''), '', 0)
         return ('', '', 0)
 
     def run_command(self, command, **kwargs):
+        cmd = command.strip()
+        if cmd.startswith('mktemp -d /tmp/amnezia-clients'):
+            # clients_table.save_clients_table stages through a private dir
+            directory = '/tmp/amnezia-clients.stage%d' % (len(self._stage_dirs),)
+            self._stage_dirs.append(directory)
+            return (directory, '', 0)
+        if cmd.startswith('rm -rf -- /tmp/amnezia-clients.'):
+            return ('', '', 0)
         return ('', '', 0)
 
 

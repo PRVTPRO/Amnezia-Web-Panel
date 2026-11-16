@@ -364,7 +364,6 @@ class XrayManager:
             'log': [f"updated {current or '?'} -> {target_release}"],
         }
 
-    def _dockerfile_content(self, release=None, arch='64'):
     def get_port_usage(self):
         """Running state and client count for the server header IP chips.
 
@@ -374,9 +373,9 @@ class XrayManager:
         return {'running': running,
                 'clients': len(self._get_clients_table()) if running else 0}
 
-    def _dockerfile_content(self):
-        config_dir = self._config_dir()
+    def _dockerfile_content(self, release=None, arch='64'):
         release = release or XRAY_CORE_VERSION
+        config_dir = self._config_dir()
         return f"""FROM alpine:3.15
 RUN apk add --no-cache curl unzip bash openssl netcat-openbsd dumb-init rng-tools xz iptables ip6tables
 RUN apk --update upgrade --no-cache
@@ -527,16 +526,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
                         "clients": [],
                         "decryption": "none"
                     },
-                    "streamSettings": {
-                        "network": "tcp",
-                        "security": "reality",
-                        "realitySettings": {
-                            "dest": f"{site_name}:443",
-                            "serverNames": [site_name],
-                            "privateKey": priv_key,
-                            "shortIds": [short_id]
-                        }
-                    },
+                    "streamSettings": stream_settings,
                     # routeOnly: the sniffed domain feeds routing rules only,
                     # the connection still dials the original destination.
                     "sniffing": {
@@ -544,7 +534,6 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
                         "destOverride": ["http", "tls", "quic"],
                         "routeOnly": True
                     }
-                    "streamSettings": stream_settings,
                 },
                 {
                     "listen": "127.0.0.1",
@@ -1072,6 +1061,11 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
             except Exception:
                 pass
 
+        # The instance-level fingerprint chosen in the panel beats the default;
+        # an unknown value (hand-edited data.json) falls back instead of
+        # reaching the link.
+        fp = fingerprint if fingerprint in XRAY_FINGERPRINTS else XRAY_DEFAULT_FINGERPRINT
+
         # The link is derived from the live server.json streamSettings, so a
         # transport the panel did not install (hand-edited config) still
         # produces a usable link. vision only exists on raw TCP.
@@ -1080,7 +1074,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
             "security=reality",
             f"pbk={meta['public_key']}",
             f"sni={urllib.parse.quote(sni, safe='')}",
-            "fp=chrome",
+            f"fp={fp}",
             f"sid={meta['short_id']}",
             "spx=%2F",
         ]
@@ -1101,21 +1095,13 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
             params.insert(0, "type=" + urllib.parse.quote(str(network), safe=''))
             if network == 'tcp':
                 params.append("flow=xtls-rprx-vision")
-        # Format URL
-        # vless://{id}@{host}:{port}?type=tcp&security=reality&pbk={public_key}&sni={sni}&fp=chrome&sid={short_id}&spx=%2F&flow=xtls-rprx-vision#{name}
-
         name = client.get('userData', {}).get('clientName', 'vpn')
         encoded_name = urllib.parse.quote(name)
-
-        # The instance-level fingerprint chosen in the panel beats the default;
-        # an unknown value (hand-edited data.json) falls back instead of
-        # reaching the link.
-        fp = fingerprint if fingerprint in XRAY_FINGERPRINTS else XRAY_DEFAULT_FINGERPRINT
 
         url = (
             # meta.json is synced from the live server.json, so it beats the
             # port the panel remembers; an explicit public port beats both.
-            # only vlees f"vless://{client_id}@{server_host}:{public_port or meta.get('port', port)}"
+            f"vless://{client_id}@{server_host}:{public_port or meta.get('port', port)}"
             f"?{'&'.join(params)}#{encoded_name}"
         )
         return url
@@ -1162,12 +1148,6 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
             stream.setdefault('xhttpSettings', {})['host'] = domain
         self._write_server_json(config, restart=True)
         return {'dest': dest, 'sni': domain, 'network': stream.get('network', 'tcp')}
-
-            f"?type=tcp&security=reality&pbk={meta['public_key']}"
-            f"&sni={sni}&fp={fp}&sid={meta['short_id']}"
-            f"&spx=%2F&flow=xtls-rprx-vision#{encoded_name}"
-        )
-        return url
 
     @_serialized_table_write
     def add_client(self, protocol, client_name, server_host, port, public_port=None,

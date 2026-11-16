@@ -601,8 +601,9 @@ class PublicPortForwardTests(PublicEndpointApiTests):
             self.assertFalse(ssh.requests)
             # Restore this test's synthetic fixture for the next subcase.
             with open(panel.DATA_FILE, 'w', encoding='utf-8') as f:
-                json.dump({'servers':[server_with({'awg2':{'installed':True,'port':'55424'}})],
-                           'users':[], 'user_connections':[]}, f)
+                json.dump({'servers': [server_with({'awg2': {'installed': True, 'port': '55424'}})],
+                           'users': [{'id': 'admin-id', 'username': 'admin', 'password_hash': panel.hash_password('admin'), 'role': 'admin', 'enabled': True}],
+                           'user_connections': []}, f)
 
     def test_ssh_error_warns_and_disconnects_without_losing_setting(self):
         client = self.client(); ssh = self.ssh_recorder()
@@ -633,8 +634,6 @@ class RestoreForwardTests(unittest.TestCase):
                     'wireguard': {'installed': True, 'port': '51820'},  # no public port
                 }),
                 dict(server_with({}), uid='other-server'),  # nothing to forward
-            ], 'users': [], 'user_connections': []}, f)
-                server_with({}),  # nothing to forward
             ], 'users': [{'id': 'admin-id', 'username': 'admin', 'password_hash': panel.hash_password('admin'), 'role': 'admin', 'enabled': True}], 'user_connections': []}, f)
         self._monitor_flag = panel._conn_monitor_started
         panel._conn_monitor_started = True

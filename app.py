@@ -84,6 +84,7 @@ from managers.torrent_guard import (
     DEFAULT_MODE as TORRENT_DEFAULT_MODE,
     MODES as TORRENT_MODES,
     normalize_mode as normalize_torrent_mode,
+)
 from managers.instance_copy import (
     COPY_STEPS as INSTANCE_COPY_STEPS,
     CopyCancelled,
@@ -9326,11 +9327,6 @@ def api_awg_settings_save(request: Request, server_id: int, req: AwgSettingsRequ
 async def api_xray_core_version(request: Request, server_id: int,
                                 protocol: str = 'xray'):
     """Running Xray-core version of this connection and the latest release."""
-    
-    
-@app.get('/api/servers/{server_id}/xray/fingerprint', tags=["Protocols"])
-def api_xray_fingerprint_get(request: Request, server_id: int, protocol: str = 'xray'):
-    """The Reality fingerprint VLESS links are issued with on this connection."""
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     if protocol_base(protocol) != 'xray':
@@ -9362,13 +9358,14 @@ def api_xray_fingerprint_get(request: Request, server_id: int, protocol: str = '
             'update_available': update_available}
 
 
-@app.post('/api/servers/{server_id}/xray/update', tags=["Protocols"])
-async def api_xray_update(request: Request, server_id: int,
-                          req: XrayUpdateRequest):
-    """Rebuild the image with a newer Xray-core and recreate the container.
-
-    Runs as an install-flow operation: a rebuild takes minutes and the page
-    watches the shared progress log. Only one server-wide operation at a time.
+@app.get('/api/servers/{server_id}/xray/fingerprint', tags=["Protocols"])
+def api_xray_fingerprint_get(request: Request, server_id: int, protocol: str = 'xray'):
+    """The Reality fingerprint VLESS links are issued with on this connection."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if protocol_base(protocol) != 'xray':
+        return JSONResponse({'error': 'Not an Xray protocol'}, status_code=400)
+    data = load_data()
     if server_id < 0 or server_id >= len(data['servers']):
         return JSONResponse({'error': 'Server not found'}, status_code=404)
     server = data['servers'][server_id]
@@ -9378,13 +9375,13 @@ async def api_xray_update(request: Request, server_id: int,
     }
 
 
-@app.post('/api/servers/{server_id}/xray/fingerprint', tags=["Protocols"])
-def api_xray_fingerprint_save(request: Request, server_id: int, req: XrayFingerprintRequest):
-    """Remember the Reality fingerprint VLESS links are issued with.
+@app.post('/api/servers/{server_id}/xray/update', tags=["Protocols"])
+async def api_xray_update(request: Request, server_id: int,
+                          req: XrayUpdateRequest):
+    """Rebuild the image with a newer Xray-core and recreate the container.
 
-    Panel-side only (a protocol record field in data.json): Reality does not
-    pin the client hello, so the node is not touched and links already issued
-    keep working. fingerprint=None resets to the built-in default.
+    Runs as an install-flow operation: a rebuild takes minutes and the page
+    watches the shared progress log. Only one server-wide operation at a time.
     """
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -9405,6 +9402,45 @@ def api_xray_fingerprint_save(request: Request, server_id: int, req: XrayFingerp
     asyncio.create_task(_run_xray_update(
         op, server_id, req.protocol, (req.target or '').strip() or None))
     return {'operation_id': op['id']}
+
+
+@app.post('/api/servers/{server_id}/xray/fingerprint', tags=["Protocols"])
+def api_xray_fingerprint_save(request: Request, server_id: int, req: XrayFingerprintRequest):
+    """Remember the Reality fingerprint VLESS links are issued with.
+
+    Panel-side only (a protocol record field in data.json): Reality does not
+    pin the client hello, so the node is not touched and links already issued
+    keep working. fingerprint=None resets to the built-in default.
+    """
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if protocol_base(req.protocol) != 'xray':
+        return JSONResponse({'error': 'Not an Xray protocol'}, status_code=400)
+    fp = (req.fingerprint or '').strip() or None
+    if fp is not None and fp not in XRAY_FINGERPRINTS:
+        return JSONResponse({'error': 'Unknown fingerprint'}, status_code=400)
+    try:
+        data = load_data()
+        if server_id < 0 or server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        # Never mint a protocol record from this endpoint: saving a
+        # fingerprint for an uninstalled instance would leave a phantom
+        # "installed but stopped" entry (multi-instance records survive
+        # /check pruning).
+        if req.protocol not in server.get('protocols', {}):
+            return JSONResponse({'error': 'Protocol not found'}, status_code=404)
+        record = server['protocols'][req.protocol]
+        if fp is None:
+            record.pop('fingerprint', None)
+        else:
+            record['fingerprint'] = fp
+        save_data(data)
+        return {'status': 'success', 'fingerprint': fp or XRAY_DEFAULT_FINGERPRINT}
+    except Exception:
+        logger.exception("Error saving Xray fingerprint")
+        return JSONResponse({'error': 'internal_error', 'code': 'internal_error'},
+                            status_code=500)
 
 
 async def _run_xray_update(op, server_id, protocol, target):
