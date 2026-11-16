@@ -192,11 +192,23 @@ the single dead-transport retry in `SSHManager` applies only outside a lifecycle
 operation, because re-sending a mutation with an unknown outcome would execute
 it twice. The fence is what protects that case.
 
-A lost command reply persists `DATA_FILE.lifecycle-uncertain.json`; it is a
-logical admission fence even after the local worker exits/restarts. Subsequent
-lifecycle/SSH work fails closed. Do not clear it on a timer or HTTP disconnect.
-An administrator must independently establish remote quiescence, stop the panel,
-retain this marker as incident evidence, and only then archive it before restart.
-If the marker could not be persisted, keep the panel offline after shutdown.
+A lost command reply persists `DATA_FILE.lifecycle-uncertain.json`. Since marker
+version 2 it records the affected server's identity (`server_uid`, `host`,
+`ssh_port`, `username`) and the operation label when the SSH layer knows them,
+so the fence covers that server and the servers whose lifecycle operations
+touch it (exit-link pairs) instead of the whole panel. Unrelated healthy servers
+keep answering checks and accepting their own operations. The marker never
+stores credentials, commands or tracebacks.
+
+The fence is still a logical admission fence even after the local worker
+exits/restarts. Do not clear it on a timer or HTTP disconnect. An administrator
+must independently establish remote quiescence, stop the panel, retain this
+marker as incident evidence, and only then archive it before restart. If the
+marker could not be persisted, keep the panel offline after shutdown.
 Transport timeouts cannot guarantee when a remote shell actually stops; no
 automatic finalization/unlock or accurate final-counter claim is made.
+
+Legacy markers (version 1, or anything without a readable identity) stay
+global: the panel never guesses which server they belong to. A second incident
+on another server, or an incident where the target cannot be named, widens the
+fence to global as well — the fence never narrows itself.

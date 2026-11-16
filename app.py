@@ -505,6 +505,61 @@ from peer_finalization import (
 )
 
 peer_lifecycle_lock.configure(DATA_FILE)
+
+
+def _ssh_scope_for(server):
+    """Identity the lifecycle fence compares against (never credentials)."""
+    return {'server_uid': server.get('uid'),
+            'host': server.get('host'),
+            'ssh_port': server.get('ssh_port', 22),
+            'username': server.get('username')}
+
+
+def _lifecycle_identity_for(server_id):
+    """Identity of the server an endpoint targets, by inventory index.
+
+    Returning None makes the fence behave as global for that call: an endpoint
+    that cannot name its target is never assumed to be unaffected.
+    """
+    try:
+        data = load_data()
+        if not 0 <= int(server_id) < len(data.get('servers', [])):
+            return None
+        return _ssh_scope_for(data['servers'][int(server_id)])
+    except Exception:
+        logger.warning('Cannot resolve the lifecycle target %s', server_id, exc_info=True)
+        return None
+
+
+def _lifecycle_dependents(server_uid):
+    """Servers whose lifecycle operations touch this server (exit links).
+
+    A fence on an exit node also covers the entries linked to it, and a fence
+    on an entry covers its exit: relink/detach on either side rewrites the
+    other side's configuration.
+    """
+    try:
+        data = load_data()
+    except Exception:
+        return ()
+    uid = str(server_uid or '')
+    if not uid:
+        return ()
+    linked = set()
+    for server in data.get('servers', []):
+        own = str(server.get('uid') or '')
+        for record in (server.get('protocols') or {}).values():
+            exit_uid = str(((record or {}).get('exit_link') or {}).get('exit_uid') or '')
+            if not exit_uid:
+                continue
+            if exit_uid == uid and own and own != uid:
+                linked.add(own)
+            if own == uid:
+                linked.add(exit_uid)
+    return tuple(sorted(linked))
+
+
+peer_lifecycle_lock.configure_resolvers(_lifecycle_identity_for, _lifecycle_dependents)
 _panel_lease = None
 
 DATA_LOCK = asyncio.Lock()
@@ -724,6 +779,7 @@ def _ssh_manager_for(server, data, *, allow_jump=True):
         private_key=private_key,
         connect_cooldown_base=float(server.get('ssh_cooldown_base') or 30),
         jump_manager=jump_manager,
+        server_scope=_ssh_scope_for(server),
     )
 
 
@@ -776,6 +832,7 @@ def get_ssh(server):
             _SSH_POOL[key] = ssh
         # Apply edits without dropping the pooled connection.
         ssh._connect_cooldown_base = cooldown_base
+        ssh.server_scope = _ssh_scope_for(server)
         ssh.pooled = True
     ssh.ensure_connected()
     return ssh

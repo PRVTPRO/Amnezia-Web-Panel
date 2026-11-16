@@ -33,11 +33,21 @@ def _conn_lock_of(obj):
 class SSHManager:
     """Manages SSH connections and command execution on remote servers."""
 
+    # Class-level default: tests build managers via __new__() without __init__,
+    # and a missing identity must mean "unknown target" (the fence then behaves
+    # globally) rather than an AttributeError on every command.
+    server_scope = None
+
     def __init__(self, host, port, username, password=None, private_key=None,
-                 connect_cooldown_base=30.0, jump_manager=_DEFAULT_JUMP):
+                 connect_cooldown_base=30.0, jump_manager=_DEFAULT_JUMP,
+                 server_scope=None):
         self.host = host
         self.port = int(port)
         self.username = username
+        # Identity used by the lifecycle fence: a fence recorded for this
+        # server must block its commands, while an unrelated server keeps
+        # working. Refreshed by app.get_ssh() when a pooled manager is reused.
+        self.server_scope = server_scope
         self.password = password
         self.private_key = private_key
         self.jump_manager = (_JUMP_RESOLVER(host, int(port), username)
@@ -305,7 +315,7 @@ class SSHManager:
         eviction) cannot tear down the transport mid-command.
         """
         from peer_lifecycle_lock import check_remote_fence
-        check_remote_fence()
+        check_remote_fence(self.server_scope)
         with self._exec_lock, _conn_lock_of(self):
             return self._run_command_locked(command, timeout, _retried, stdin_input)
 
@@ -326,7 +336,7 @@ class SSHManager:
             # Transport can be dead while is_active() still claims otherwise
             # (silent NAT drop). Reconnect once and retry before giving up.
             from peer_lifecycle_lock import note_ssh_uncertainty, lifecycle_active
-            note_ssh_uncertainty()
+            note_ssh_uncertainty(self.server_scope)
             # Повтор разрешён только вне lifecycle-интерлока: там исход уже
             # неизвестен, и повторная отправка означала бы выполнить мутацию
             # дважды. Забор (fence) в этом случае ставится выше.
@@ -361,7 +371,7 @@ class SSHManager:
             err = stderr.read().decode('utf-8', errors='replace').strip()
         except Exception as e:
             from peer_lifecycle_lock import note_ssh_uncertainty
-            note_ssh_uncertainty()
+            note_ssh_uncertainty(self.server_scope)
             logger.error(f"Command timed out or failed to read: {e}")
             out, err, exit_code = "", f"SSH connection lost while running the command ({self._reason(e)})", -1
 
@@ -424,6 +434,8 @@ class SSHManager:
 
     def upload_file(self, content, remote_path):
         """Upload text content to a remote file via SFTP."""
+        from peer_lifecycle_lock import check_remote_fence
+        check_remote_fence(self.server_scope)
         with self._exec_lock, _conn_lock_of(self):
             return self._upload_file_locked(content, remote_path)
 
@@ -466,6 +478,8 @@ class SSHManager:
 
     def download_file(self, remote_path):
         """Download text content from a remote file."""
+        from peer_lifecycle_lock import check_remote_fence
+        check_remote_fence(self.server_scope)
         with self._exec_lock, _conn_lock_of(self):
             return self._download_file_locked(remote_path)
 
@@ -481,6 +495,8 @@ class SSHManager:
 
     def file_exists(self, remote_path):
         """Check if a remote file exists."""
+        from peer_lifecycle_lock import check_remote_fence
+        check_remote_fence(self.server_scope)
         with self._exec_lock, _conn_lock_of(self):
             return self._file_exists_locked(remote_path)
 
