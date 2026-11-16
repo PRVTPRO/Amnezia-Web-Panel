@@ -8174,7 +8174,13 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
         if (will_link_default or carries_exit_link) and ipv6_pref is not False:
             ipv6_pref = False
             forced_ipv6_off = True
-        if ipv6_pref is True and env_pref != 'off':
+        # IPv6 is an AWG-only instance property: the preference never reaches
+        # the install call of any other protocol, and only AWGManager knows how
+        # to probe Docker for it. Probing unconditionally crashed installs of
+        # telemt / socks5 / xray / exit nodes with
+        # "'<Manager>' object has no attribute '_docker_ipv6_info'" whenever the
+        # server preference was "on" or AWG_IPV6=on.
+        if ipv6_pref is True and env_pref != 'off' and install_base in AWG_PROTOCOLS:
             docker_info = await asyncio.to_thread(manager._docker_ipv6_info)
             if not docker_info.get('ipv6_enabled'):
                 ssh.disconnect()
