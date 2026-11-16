@@ -5003,6 +5003,9 @@
         html += row('amneziawg module', h.awg_module ? `kernel v${h.awg_module}` : 'userspace (amneziawg-go)');
         for (const c of (t.containers || [])) {
             html += `<div style="font-weight:600;margin:12px 0 2px;">🐳 ${esc(c.name)} ${c.running ? '<span style="color:var(--success,#3fb950)">● online</span>' : '<span style="color:var(--danger,#f85149)">● stopped</span>'}</div>`;
+            if (c.version) {
+                html += row('xray core', c.version);
+            }
             if (c.running && c.ct) {
                 html += row('rmem_max / wmem_max', `${c.ct['net.core.rmem_max'] || '—'} / ${c.ct['net.core.wmem_max'] || '—'}`);
                 html += row('tcp_fastopen', c.ct['net.ipv4.tcp_fastopen']);
