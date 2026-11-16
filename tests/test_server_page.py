@@ -287,6 +287,85 @@ class SmartRouteUiWiringTests(unittest.TestCase):
         self.assertIn('smartroute/status', self.page)
         self.assertIn('smart_route_lost', self.page)
 
+    def test_exit_node_button_shows_the_split_mark(self):
+        # The mode has to be readable next to the node name without opening
+        # the modal, so the mark is rendered inside the exit-node button.
+        idx = self.page.index("const exitBtn = AWG_PROTOCOLS.includes(protoBase(proto))")
+        button = self.page[idx:idx + 600]
+        self.assertIn('exit-link-btn', button)
+        self.assertIn('smartRouteMark(info.exit_link)', button)
+        self.assertIn('function smartRouteMark(', self.page)
+        self.assertIn('function smartRouteMarkState(', self.page)
+        # painted after the parallel probe settles, repainted after actions
+        self.assertIn('smartRouteStatus = await smartRouteProbe;', self.page)
+        self.assertIn('refreshExitMarks();', self.page)
+        self.assertIn('refreshExitMark(currentExitLinkProto, state);', self.page)
+        self.assertIn('smart_route_lost = true;', self.page)
+
+    def test_lost_mark_wins_over_off(self):
+        # Uninstall writes smart_route=false + smart_route_lost=true; the
+        # warning must still appear, not disappear with the "off" state.
+        fn = self.page[self.page.index('function smartRouteMarkState('):]
+        fn = fn[:fn.index('\n    }')]
+        self.assertLess(fn.index('smart_route_lost'), fn.index('!link.smart_route'))
+
+    def test_split_mark_translations_in_all_languages(self):
+        # The hint key is built dynamically, so the generic scanner cannot see
+        # it: verify the exact keys and their placeholder here.
+        keys = {f'smartroute_mark_{state}{suffix}'
+                for state in ('on', 'paused', 'lost') for suffix in ('', '_hint')}
+        self.assertIn('smartroute_mark_${state}_hint', self.page)
+        for lang in ('en', 'ru', 'fr', 'fa', 'zh'):
+            data = json.loads(read('translations', f'{lang}.json'))
+            missing = sorted(k for k in keys if k not in data)
+            self.assertEqual(missing, [], f'{lang}: {missing}')
+            for state in ('on', 'paused', 'lost'):
+                self.assertIn('{name}', data[f'smartroute_mark_{state}_hint'], f'{lang}: {state}')
+
+    def test_split_mark_styles_defined(self):
+        css = read('static', 'css', 'style.css')
+        for cls in ('.sr-mark {', '.sr-mark--on', '.sr-mark--paused', '.sr-mark--lost'):
+            self.assertIn(cls, css)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node.js required')
+    def test_split_mark_state_matrix(self):
+        state_fn = re.search(r'    function smartRouteMarkState\(link\) \{.*?\n    \}', self.page, re.S).group()
+        mark_fn = re.search(r'    function smartRouteMark\(link\) \{.*?\n    \}', self.page, re.S).group()
+        script = '''
+const _ = key => 'hint:' + key + ':{name}';
+const escapeHtml = value => String(value).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+let smartRouteStatus = null;
+''' + state_fn + mark_fn + '''
+const out = [];
+const push = (link, status) => {
+  smartRouteStatus = status;
+  const state = smartRouteMarkState(link);
+  out.push([state, smartRouteMark(link)]);
+};
+const installed = {installed: true, enabled: true};
+push({}, installed);
+push({smart_route: false}, installed);
+push({smart_route: true, exit_name: 'GARAGE'}, installed);
+push({smart_route: true, exit_name: 'GARAGE'}, {installed: true, enabled: false});
+push({smart_route: true, exit_name: 'GARAGE'}, null);
+push({smart_route: true, smart_route_lost: true, exit_name: 'GARAGE'}, installed);
+push({smart_route: false, smart_route_lost: true, exit_name: 'GARAGE'}, installed);
+console.log(JSON.stringify(out));
+'''
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = json.loads(result.stdout)
+        self.assertEqual([row[0] for row in out],
+                         [None, None, 'on', 'paused', 'lost', 'lost', 'lost'])
+        self.assertEqual(out[0][1], '')
+        self.assertEqual(out[1][1], '')
+        self.assertIn('sr-mark--on', out[2][1])
+        self.assertIn('title="hint:smartroute_mark_on_hint:GARAGE"', out[2][1])
+        self.assertIn('sr-mark--paused', out[3][1])
+        self.assertIn('sr-mark--lost', out[4][1])
+        self.assertIn('sr-mark--lost', out[5][1])
+        self.assertIn('sr-mark--lost', out[6][1])
+
     def test_translations_carry_smartroute_keys_in_all_languages(self):
         keys = set(re.findall(r"_\('(smartroute_[a-z0-9_]+)'\)", self.page))
         keys |= set(re.findall(r"\{\{ _\('(smartroute_[a-z0-9_]+)'\) \}\}", self.page))
@@ -323,8 +402,15 @@ console.log(JSON.stringify([
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), [
             '10-11-2026 14:00:18', '10-11-2026 14:00:18', 'unknown', ''])
+        # Card: the <br> keeps "Updated" on its own line (f26e816 regression
+        # pin); whitespace around it is layout detail, so match it loosely.
+        self.assertRegex(
+            self.page,
+            r"\$\{_\('smartroute_updated'\)\}:\s*<br>\$\{escapeHtml\(formatSmartRouteTime\(host\.updated_at\)\)\}")
+        # Modal: raw ISO next_update is formatted with the same helper, so the
+        # dialog never shows two different date formats at once.
         self.assertIn(
-            "${_('smartroute_updated')}: <br>${escapeHtml(formatSmartRouteTime(host.updated_at))}",
+            "${_('smartroute_next_update')}: ${escapeHtml(formatSmartRouteTime(host.next_update))}",
             self.page)
 
     def test_card_dns_pair_inputs(self):
