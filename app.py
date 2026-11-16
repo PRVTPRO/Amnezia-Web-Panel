@@ -1870,6 +1870,20 @@ def build_xray_client_config(link):
             stream.setdefault('grpcSettings', {})['serviceName'] = query['serviceName']
         if 'mode' in query:
             stream.setdefault('grpcSettings', {})['multiMode'] = query['mode'] == 'multi'
+    elif network == 'xhttp':
+        settings = stream.setdefault('xhttpSettings', {})
+        if query.get('path', '/') != '/':
+            settings['path'] = query['path']
+        if 'host' in query:
+            settings['host'] = query['host']
+        if 'mode' in query:
+            settings['mode'] = query['mode']
+        if 'extra' in query:
+            # extra rides on the link as compact, percent-encoded JSON
+            try:
+                settings['extra'] = json.loads(query['extra'])
+            except ValueError:
+                pass
 
     security = query.get('security', 'none')
     tls_key = 'xtlsSettings' if security == 'xtls' else ('tlsSettings' if security == 'tls' else 'realitySettings')
@@ -2832,6 +2846,9 @@ class InstallProtocolRequest(BaseModel):
     # NGINX
     nginx_domain: Optional[str] = None
     nginx_email: Optional[str] = None
+    # Xray
+    xray_transport: Optional[str] = None  # 'tcp' (legacy) or 'xhttp'
+    xray_domain: Optional[str] = None     # optional SNI/domain; empty keeps the default
     # Exit node
     exit_subnet: Optional[str] = None       # transit subnet, default 10.9.0.0/24
     exit_obfuscation: Optional[bool] = None  # AmneziaWG obfuscation on the transit link
@@ -7581,6 +7598,154 @@ def api_used_ports(request: Request, server_id: int):
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
+# ===== Xray self-steal: mask under the local NGINX site =====
+
+class XraySelfstealRequest(BaseModel):
+    protocol: str = 'xray'
+    nginx_protocol: str = 'nginx'
+
+
+def _docker_networks(ssh, container):
+    out, _, code = ssh.run_sudo_command(
+        f"docker inspect {shlex.quote(str(container))} "
+        f"--format '{{{{json .NetworkSettings.Networks}}}}' 2>/dev/null")
+    if code != 0:
+        return {}
+    try:
+        networks = json.loads(out.strip() or '{}')
+    except ValueError:
+        return {}
+    return networks if isinstance(networks, dict) else {}
+
+
+def _selfsteal_dest(xray_networks, nginx_networks, nginx_container):
+    """Container-to-container Reality target. On a shared docker network
+    the NGINX name resolves via embedded DNS and survives container
+    re-creation; otherwise fall back to the current bridge IP."""
+    if set(xray_networks) & set(nginx_networks):
+        return f"{nginx_container}:443"
+    for networks in (nginx_networks, xray_networks):
+        for info in networks.values():
+            ip = (info or {}).get('IPAddress')
+            if ip:
+                return f"{ip}:443"
+    return None
+
+
+def _selfsteal_site_ok(ssh, domain, port):
+    """The mask only holds while the site answers with a valid
+    certificate for the domain — verified from the host itself. DNS may
+    point anywhere (relays included); --resolve forces the local hop."""
+    out, _, code = ssh.run_command(
+        f"curl -s 2>/dev/null --resolve {shlex.quote(f'{domain}:{port}:127.0.0.1')} "
+        f"{shlex.quote('https://' + domain + '/')} -o /dev/null "
+        f"-w '%{{http_code}}' --max-time 8")
+    return code == 0 and bool(re.fullmatch(r'\d{3}', out.strip()))
+
+
+@app.get('/api/servers/{server_id}/xray/selfsteal/plan', tags=["Protocols"])
+def api_xray_selfsteal_plan(request: Request, server_id: int, protocol: str = 'xray'):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        protocols = server.get('protocols') or {}
+        if protocol_base(protocol) != 'xray' or protocol not in protocols:
+            return JSONResponse({'error': 'Xray instance not found'}, status_code=404)
+        ssh = get_ssh(server)
+        ssh.connect()
+        manager = get_protocol_manager(ssh, protocol)
+        xray_running = manager.check_container_running()
+        state = manager.get_reality_state() if xray_running else None
+
+        xray_container = (protocols.get(protocol) or {}).get('container_name') \
+            or manager.container_name
+        xray_networks = _docker_networks(ssh, xray_container) if xray_running else {}
+        options = []
+        for key in protocols:
+            if protocol_base(key) != 'nginx':
+                continue
+            nginx = get_protocol_manager(ssh, key)
+            status = nginx.get_server_status(key)
+            if not status.get('domain') or not status.get('container_running'):
+                continue
+            dest = _selfsteal_dest(
+                xray_networks,
+                _docker_networks(ssh, status['container_name']),
+                status['container_name'])
+            options.append({
+                'protocol': key,
+                'domain': status['domain'],
+                'container_name': status['container_name'],
+                'port': int(status.get('port') or 443),
+                'dest': dest,
+                'site_ok': bool(dest) and _selfsteal_site_ok(
+                    ssh, status['domain'], int(status.get('port') or 443)),
+            })
+        return {
+            'xray_running': xray_running,
+            'network': (state or {}).get('network'),
+            'current_dest': (state or {}).get('dest'),
+            'current_sni': (state or {}).get('sni'),
+            'options': options,
+        }
+    except Exception as e:
+        logger.exception("Error building the xray selfsteal plan")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/xray/selfsteal', tags=["Protocols"])
+def api_xray_selfsteal_apply(request: Request, server_id: int, req: XraySelfstealRequest):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        protocols = server.get('protocols') or {}
+        if protocol_base(req.protocol) != 'xray' or req.protocol not in protocols:
+            return JSONResponse({'error': 'Xray instance not found'}, status_code=404)
+        if protocol_base(req.nginx_protocol) != 'nginx' or req.nginx_protocol not in protocols:
+            return JSONResponse({'error': 'NGINX instance not found'}, status_code=404)
+        ssh = get_ssh(server)
+        ssh.connect()
+        manager = get_protocol_manager(ssh, req.protocol)
+        if not manager.check_container_running():
+            return JSONResponse({'error': 'The Xray container is not running'},
+                                status_code=409)
+        nginx = get_protocol_manager(ssh, req.nginx_protocol)
+        status = nginx.get_server_status(req.nginx_protocol)
+        domain = status.get('domain')
+        if not domain or not status.get('container_running'):
+            return JSONResponse({'error': 'The NGINX site is not ready'},
+                                status_code=409)
+        port = int(status.get('port') or 443)
+        dest = _selfsteal_dest(
+            _docker_networks(
+                ssh, (protocols.get(req.protocol) or {}).get('container_name')
+                or manager.container_name),
+            _docker_networks(ssh, status['container_name']),
+            status['container_name'])
+        if not dest:
+            return JSONResponse({'error': 'No route from the Xray container to NGINX'},
+                                status_code=409)
+        if not _selfsteal_site_ok(ssh, domain, port):
+            return JSONResponse(
+                {'error': 'The site does not answer with a valid certificate '
+                          'for the domain yet — issue the certificate first'},
+                status_code=409)
+        result = manager.apply_selfsteal(domain, dest)
+        result['protocol'] = req.protocol
+        return result
+    except Exception as e:
+        logger.exception("Error applying the xray selfsteal")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
 # ===== staged install operations (marketplace apps and protocols) =====
 #
 # Every long install (protocol, Smart Route, RKN Block) runs as a background
@@ -8032,7 +8197,11 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
             )
         elif install_base == 'xray':
             install_args = ()
-            install_kwargs = dict(port=req.port)
+            install_kwargs = dict(
+                port=req.port,
+                transport=req.xray_transport or 'tcp',
+                site_name=(req.xray_domain or '').strip() or 'yahoo.com',
+            )
         elif install_base == 'wireguard':
             install_args = ()
             install_kwargs = dict(port=req.port)

@@ -1,5 +1,6 @@
 import json
 import os
+import random
 import uuid
 import logging
 import base64
@@ -19,6 +20,39 @@ from managers.clients_table import save_clients_table
 logger = logging.getLogger(__name__)
 
 XRAY_CORE_VERSION = "v26.10.31"
+
+
+def _random_range(low_min, low_max, span_min, span_max):
+    """A "low-high" range string whose bounds are drawn per install."""
+    low = random.randint(low_min, low_max)
+    return f"{low}-{low + random.randint(span_min, span_max)}"
+
+
+def _xhttp_extra():
+    """XHTTP tuning per the XTLS guidance: express every knob the core
+    accepts as a range, and shift the bounds per install so servers do
+    not share one padding/multiplexing profile. hKeepAlivePeriod is the
+    one field that rejects ranges; maxConnections conflicts with
+    maxConcurrency and stays off."""
+    return {
+        "xPaddingBytes": _random_range(50, 300, 500, 1200),
+        "scStreamUpServerSecs": _random_range(10, 30, 40, 60),
+        "xmux": {
+            "maxConcurrency": _random_range(8, 16, 4, 16),
+            "maxConnections": 0,
+            "cMaxReuseTimes": 0,
+            "hMaxRequestTimes": _random_range(400, 800, 200, 400),
+            "hMaxReusableSecs": _random_range(1200, 2400, 600, 1200),
+            "hKeepAlivePeriod": 0,
+        },
+    }
+
+
+def _client_flow(stream_settings):
+    """xtls-rprx-vision only rides on raw TCP; other transports must
+    leave the flow empty — Xray rejects vision over anything else."""
+    network = (stream_settings or {}).get('network', 'tcp')
+    return "xtls-rprx-vision" if network == 'tcp' else ""
 
 # uname -m -> asset suffix of the Xray-core Linux release archive
 XRAY_ARCH_ZIPS = {'x86_64': '64', 'aarch64': 'arm64-v8a', 'armv7l': 'arm32-v7a'}
@@ -387,8 +421,14 @@ RUN echo '#!/bin/bash' > /opt/amnezia/start.sh && \\
 ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
 """
 
-    def install_protocol(self, port=443, site_name='yahoo.com'):
-        """Full installation of Xray."""
+    def install_protocol(self, port=443, site_name='yahoo.com', transport='tcp'):
+        """Full installation of Xray.
+
+        transport: 'tcp' keeps the legacy TCP+Vision preset, 'xhttp' moves
+        the traffic onto the XHTTP transport (plain HTTP/2 requests).
+        """
+        if transport not in ('tcp', 'xhttp'):
+            raise ValueError(f"Unsupported Xray transport: {transport}")
         results = []
 
         if not self.check_docker_installed():
@@ -436,6 +476,32 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         short_id = out_sid.strip()
 
         # Generate initial server.json with Stats and API enabled
+        reality_settings = {
+            "dest": f"{site_name}:443",
+            "serverNames": [site_name],
+            "privateKey": priv_key,
+            "shortIds": [short_id]
+        }
+        # XHTTP presents the traffic as ordinary HTTP/2 requests instead of
+        # a raw TCP stream; the path is randomized per install as well.
+        if transport == 'xhttp':
+            stream_settings = {
+                "network": "xhttp",
+                "security": "reality",
+                "xhttpSettings": {
+                    "path": '/' + uuid.uuid4().hex[:16],
+                    "host": site_name,
+                    "mode": "auto",
+                    "extra": _xhttp_extra(),
+                },
+                "realitySettings": reality_settings,
+            }
+        else:
+            stream_settings = {
+                "network": "tcp",
+                "security": "reality",
+                "realitySettings": reality_settings,
+            }
         server_json = {
             "log": {"loglevel": "error"},
             "stats": {},
@@ -461,16 +527,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
                         "clients": [],
                         "decryption": "none"
                     },
-                    "streamSettings": {
-                        "network": "tcp",
-                        "security": "reality",
-                        "realitySettings": {
-                            "dest": f"{site_name}:443",
-                            "serverNames": [site_name],
-                            "privateKey": priv_key,
-                            "shortIds": [short_id]
-                        }
-                    }
+                    "streamSettings": stream_settings,
                 },
                 {
                     "listen": "127.0.0.1",
@@ -969,12 +1026,43 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
 
         config = self._get_server_json()
         sni = meta.get('site_name', 'yahoo.com')
+        stream = {}
         if config:
             try:
-                sni = config['inbounds'][0]['streamSettings']['realitySettings']['serverNames'][0]
+                stream = config['inbounds'][0].get('streamSettings', {}) or {}
+                sni = stream['realitySettings']['serverNames'][0]
             except Exception:
                 pass
 
+        # The link is derived from the live server.json streamSettings, so a
+        # transport the panel did not install (hand-edited config) still
+        # produces a usable link. vision only exists on raw TCP.
+        network = stream.get('network', 'tcp')
+        params = [
+            "security=reality",
+            f"pbk={meta['public_key']}",
+            f"sni={urllib.parse.quote(sni, safe='')}",
+            "fp=chrome",
+            f"sid={meta['short_id']}",
+            "spx=%2F",
+        ]
+
+        if network == 'xhttp':
+            settings = stream.get('xhttpSettings', {}) or {}
+            params.insert(0, "type=xhttp")
+            params.append("path=" + urllib.parse.quote(settings.get('path', '/') or '/', safe=''))
+            params.append("host=" + urllib.parse.quote(settings.get('host') or sni, safe=''))
+            if settings.get('mode'):
+                params.append("mode=" + urllib.parse.quote(str(settings['mode']), safe=''))
+            extra = settings.get('extra')
+            if extra:
+                # Share links carry extra as compact, percent-encoded JSON.
+                params.append("extra=" + urllib.parse.quote(
+                    json.dumps(extra, separators=(',', ':')), safe=''))
+        else:
+            params.insert(0, "type=" + urllib.parse.quote(str(network), safe=''))
+            if network == 'tcp':
+                params.append("flow=xtls-rprx-vision")
         # Format URL
         # vless://{id}@{host}:{port}?type=tcp&security=reality&pbk={public_key}&sni={sni}&fp=chrome&sid={short_id}&spx=%2F&flow=xtls-rprx-vision#{name}
 
@@ -989,7 +1077,54 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         url = (
             # meta.json is synced from the live server.json, so it beats the
             # port the panel remembers; an explicit public port beats both.
-            f"vless://{client_id}@{server_host}:{public_port or meta.get('port', port)}"
+            # only vlees f"vless://{client_id}@{server_host}:{public_port or meta.get('port', port)}"
+            f"?{'&'.join(params)}#{encoded_name}"
+        )
+        return url
+
+    def get_reality_state(self):
+        """Current transport and Reality target of the VLESS inbound."""
+        config = self._get_server_json()
+        if not config:
+            return None
+        inbound = self._get_vless_inbound(config)
+        if not inbound:
+            return None
+        stream = inbound.get('streamSettings', {}) or {}
+        reality = stream.get('realitySettings', {}) or {}
+        names = reality.get('serverNames') or []
+        return {
+            'network': stream.get('network', 'tcp'),
+            'dest': reality.get('dest'),
+            'sni': names[0] if names else None,
+        }
+
+    def apply_selfsteal(self, domain, dest):
+        """Point Reality at the local NGINX site (self-steal SNI).
+
+        The site must already answer with a valid certificate for the
+        domain — failed probes are forwarded there, so the mask only
+        holds while the site is real. dest uses the docker name when the
+        containers share a network, so it survives re-creation.
+        """
+        config = self._get_server_json()
+        if not config:
+            raise RuntimeError("Xray server config not found.")
+        inbound = self._get_vless_inbound(config)
+        if not inbound:
+            raise RuntimeError("Xray VLESS inbound not found.")
+        stream = inbound.get('streamSettings', {}) or {}
+        reality = stream.get('realitySettings') or {}
+        if not reality:
+            raise RuntimeError("Reality is not configured on this instance.")
+        reality['dest'] = dest
+        reality['serverNames'] = [domain]
+        # XHTTP carries the mask in the Host header as well.
+        if stream.get('network') == 'xhttp':
+            stream.setdefault('xhttpSettings', {})['host'] = domain
+        self._write_server_json(config, restart=True)
+        return {'dest': dest, 'sni': domain, 'network': stream.get('network', 'tcp')}
+
             f"?type=tcp&security=reality&pbk={meta['public_key']}"
             f"&sni={sni}&fp={fp}&sid={meta['short_id']}"
             f"&spx=%2F&flow=xtls-rprx-vision#{encoded_name}"
@@ -1014,7 +1149,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         clients_node = inbound.setdefault('settings', {}).setdefault('clients', [])
         client = {
             "id": client_id,
-            "flow": "xtls-rprx-vision",
+            "flow": _client_flow(inbound.get('streamSettings')),
             "email": client_id
         }
         if not self._xray_api_add_user(config, client):
@@ -1058,7 +1193,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
             if not any(c['id'] == client_id for c in clients_node):
                 client = {
                     "id": client_id,
-                    "flow": "xtls-rprx-vision",
+                    "flow": _client_flow(inbound.get('streamSettings')),
                     "email": client_id
                 }
                 if not self._xray_api_add_user(config, client):

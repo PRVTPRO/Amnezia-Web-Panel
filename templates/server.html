@@ -2786,6 +2786,25 @@
     </div>
 </div>
 
+<!-- ===== Xray Self-steal Modal ===== -->
+<div class="modal-backdrop" id="xraySelfstealModal">
+    <div class="modal" style="max-width: 520px;">
+        <div class="modal-header">
+            <div>
+                <h2 class="modal-title">🎭 {{ _('xray_selfsteal') }}</h2>
+                <div class="text-muted text-sm">{{ _('xray_selfsteal_hint') }}</div>
+            </div>
+            <button class="modal-close" onclick="closeModal('xraySelfstealModal')">×</button>
+        </div>
+        <div class="modal-body" id="selfstealBody">
+            <div class="text-muted text-sm">…</div>
+        </div>
+        <div class="modal-footer" id="selfstealFooter">
+            <button class="btn btn-secondary" onclick="closeModal('xraySelfstealModal')">{{ _('cancel') }}</button>
+        </div>
+    </div>
+</div>
+
 <div class="modal-backdrop" id="marketplaceModal">
     <div class="modal">
         <div class="modal-header">
@@ -3026,6 +3045,23 @@
                     <input class="form-input" type="email" id="installNginxEmail" placeholder="admin@example.com">
                 </div>
                 <div class="form-hint">{{ _('nginx_install_hint') }}</div>
+            </div>
+
+            <div id="xrayOptions"
+                style="display:none; padding: var(--space-md); background: rgba(0,0,0,0.03); border-radius: var(--radius-md); margin-bottom: var(--space-md);">
+                <div class="form-group">
+                    <label class="form-label">{{ _('xray_transport') }}</label>
+                    <select class="form-input" id="installXrayTransport">
+                        <option value="xhttp">{{ _('xray_transport_xhttp') }}</option>
+                        <option value="tcp">{{ _('xray_transport_tcp') }}</option>
+                    </select>
+                    <div class="form-hint">{{ _('xray_transport_hint') }}</div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">{{ _('xray_domain') }}</label>
+                    <input class="form-input" type="text" id="installXrayDomain" placeholder="yahoo.com" spellcheck="false">
+                    <div class="form-hint">{{ _('xray_domain_hint') }}</div>
+                </div>
             </div>
 
             <div class="modal-footer">
@@ -5548,6 +5584,8 @@
                     const endpointBtn = ENDPOINT_PROTOCOLS.includes(protoBase(proto))
                         ? `<button class="btn btn-secondary btn-sm" onclick="openPublicEndpointModal('${proto}')" title="${_('public_endpoint_title')}">🌐${ep ? ' ' + escapeHtml(publicEndpointLabel(ep)) : ''}</button>`
                         : '';
+                    const selfstealBtn = protoBase(proto) === 'xray'
+                        ? `<button class="btn btn-secondary btn-sm" onclick="openSelfstealModal('${proto}')" title="${_('xray_selfsteal_title')}">🎭 ${_('xray_selfsteal')}</button>`
                     const copyBtn = COPYABLE_PROTOCOLS.includes(protoBase(proto))
                         ? `<button class="btn btn-secondary btn-sm" onclick="openCopyInstance('${proto}')" title="${_('copy_instance_title')}">${_('copy_instance_btn')}</button>`
                         : '';
@@ -5555,6 +5593,7 @@
                         ${awgBtn}
                         ${exitBtn}
                         ${endpointBtn}
+                        ${selfstealBtn}
                         ${copyBtn}
                         <button class="btn btn-secondary btn-sm" onclick="showServerConfig('${proto}')" title="${_('server_config')}">${_('config_btn')}</button>
                         <button class="btn btn-danger btn-sm" onclick="toggleContainer('${proto}', true)" title="${_('stop_container_confirm').replace('{}', '')}">${_('stop_btn')}</button>
@@ -6076,6 +6115,77 @@
         }
     }
 
+    // ===== Xray self-steal: mask under the local NGINX site =====
+    function selfstealErrorText(err) {
+        return (err && err.payload && err.payload.error) || (err && err.message) || '';
+    }
+
+    function openSelfstealModal(proto) {
+        openModal('xraySelfstealModal');
+        document.getElementById('selfstealBody').innerHTML = '<div class="text-muted text-sm">…</div>';
+        document.getElementById('selfstealFooter').innerHTML =
+            `<button class="btn btn-secondary" onclick="closeModal('xraySelfstealModal')">${_('cancel')}</button>`;
+        apiCall(`/api/servers/${SERVER_ID}/xray/selfsteal/plan?protocol=${encodeURIComponent(proto)}`)
+            .then(plan => renderSelfstealPlan(proto, plan))
+            .catch(err => {
+                document.getElementById('selfstealBody').innerHTML =
+                    `<div class="text-muted text-sm">❌ ${escapeHtml(selfstealErrorText(err))}</div>`;
+            });
+    }
+
+    function renderSelfstealPlan(proto, plan) {
+        const body = document.getElementById('selfstealBody');
+        const footer = document.getElementById('selfstealFooter');
+        if (!plan.xray_running) {
+            body.innerHTML = `<div class="text-muted text-sm">${_('xray_selfsteal_not_running')}</div>`;
+            return;
+        }
+        if (!plan.options.length) {
+            body.innerHTML = `<div class="text-muted text-sm">${_('xray_selfsteal_empty')}</div>`;
+            return;
+        }
+        let html = '';
+        if (plan.current_sni || plan.current_dest) {
+            html += `<div class="text-muted text-sm" style="margin-bottom: var(--space-md);">
+                ${_('xray_selfsteal_current')}: <strong>${escapeHtml(plan.current_sni || '—')}</strong>
+                <span class="text-muted">(${escapeHtml(plan.current_dest || '—')})</span></div>`;
+        }
+        plan.options.forEach((opt, i) => {
+            const checked = i === 0 ? ' checked' : '';
+            const siteBadge = opt.site_ok ? '✓' : '✗';
+            html += `
+            <label class="form-group" style="display:flex; align-items:flex-start; gap:var(--space-sm); cursor:pointer;">
+                <input type="radio" name="selfstealNginx" value="${escapeHtml(opt.protocol)}"${checked} style="margin-top:3px;">
+                <span><strong>${escapeHtml(opt.domain)}</strong> ${siteBadge}
+                <div class="text-muted text-sm">${_('xray_selfsteal_target')}: ${escapeHtml(opt.dest || '—')}</div></span>
+            </label>`;
+        });
+        html += `<div class="form-hint" style="margin-top: var(--space-md);">${_('xray_selfsteal_note')}</div>`;
+        body.innerHTML = html;
+        footer.innerHTML = `
+            <button class="btn btn-secondary" onclick="closeModal('xraySelfstealModal')">${_('cancel')}</button>
+            <button class="btn btn-primary" onclick="applySelfsteal('${proto}')">${_('xray_selfsteal_apply')}</button>`;
+    }
+
+    function applySelfsteal(proto) {
+        const chosen = document.querySelector('input[name="selfstealNginx"]:checked');
+        if (!chosen) return;
+        document.getElementById('selfstealFooter').innerHTML =
+            `<button class="btn btn-secondary" onclick="closeModal('xraySelfstealModal')">${_('cancel')}</button>`;
+        apiCall(`/api/servers/${SERVER_ID}/xray/selfsteal`, 'POST', {
+            protocol: proto, nginx_protocol: chosen.value,
+        }).then(result => {
+            document.getElementById('selfstealBody').innerHTML =
+                `<div class="text-muted text-sm">✓ ${_('xray_selfsteal_success')}</div>
+                 <div class="text-muted text-sm" style="margin-top: var(--space-sm);">
+                 ${_('xray_selfsteal_target')}: <strong>${escapeHtml(result.sni || '')}</strong>
+                 <span class="text-muted">(${escapeHtml(result.dest || '')})</span></div>`;
+        }).catch(err => {
+            document.getElementById('selfstealBody').innerHTML =
+                `<div class="text-muted text-sm">❌ ${escapeHtml(selfstealErrorText(err))}</div>`;
+        });
+    }
+
     // ========== Protocol Installation ==========
     function updateNginxDnsHint() {
         const input = document.getElementById('installNginxDomain');
@@ -6101,6 +6211,7 @@
         const nginxOpts = document.getElementById('nginxOptions');
         const awgOpts = document.getElementById('awgOptions');
         const exitOpts = document.getElementById('exitOptions');
+        const xrayOpts = document.getElementById('xrayOptions');
 
         telemtOpts.style.display = 'none';
         socks5Opts.style.display = 'none';
@@ -6108,6 +6219,7 @@
         nginxOpts.style.display = 'none';
         awgOpts.style.display = 'none';
         exitOpts.style.display = 'none';
+        xrayOpts.style.display = 'none';
 
         if (base === 'dns') {
             portLabel.textContent = _('port') + ' (Internal)';
@@ -6119,6 +6231,9 @@
             portInput.disabled = false;
             portInput.value = currentInstallAnother ? nextSuggestedPort(currentInstallProto, 443) : '443';
             portHint.textContent = currentInstallAnother ? _('port_next_instance_hint') : _('port_xray_hint');
+            xrayOpts.style.display = 'block';
+            document.getElementById('installXrayTransport').value = 'xhttp';
+            document.getElementById('installXrayDomain').value = '';
         } else if (base === 'telemt') {
             portLabel.textContent = _('port') + ' (TCP)';
             portInput.value = currentInstallAnother ? nextSuggestedPort(currentInstallProto, 443) : '443';
@@ -6313,6 +6428,9 @@
             } else if (protoBase(currentInstallProto) === 'nginx') {
                 params.nginx_domain = document.getElementById('installNginxDomain').value.trim();
                 params.nginx_email = document.getElementById('installNginxEmail').value.trim();
+            } else if (protoBase(currentInstallProto) === 'xray') {
+                params.xray_transport = document.getElementById('installXrayTransport').value;
+                params.xray_domain = document.getElementById('installXrayDomain').value.trim();
             } else if (protoBase(currentInstallProto) === 'exit') {
                 params.exit_subnet = document.getElementById('installExitSubnet').value.trim();
                 params.exit_obfuscation = document.getElementById('installExitObfuscation').checked;
