@@ -130,12 +130,31 @@ PROTOCOL_UNINSTALL_KEYS = {
     'uninstall_archive_confirm', 'uninstall_archived',
 }
 
+# I1 masking block (per-instance special-junk packet): install and settings.
+AWG_I1_KEYS = {
+    'awg_i1_ascii_only', 'awg_i1_auto_badge', 'awg_i1_bad_tag',
+    'awg_i1_badge_custom', 'awg_i1_canonical_tag',
+    'awg_i1_badge_default', 'awg_i1_badge_unknown', 'awg_i1_bytes_unit',
+    'awg_i1_clear', 'awg_i1_custom_domain', 'awg_i1_domain',
+    'awg_i1_domain_custom', 'awg_i1_domain_hint', 'awg_i1_empty',
+    'awg_i1_extra_hint', 'awg_i1_generate', 'awg_i1_install_memo',
+    'awg_i1_install_status', 'awg_i1_intro', 'awg_i1_manual',
+    'awg_i1_manual_hint', 'awg_i1_memo_default', 'awg_i1_memo_generated',
+    'awg_i1_need_domain', 'awg_i1_packet', 'awg_i1_pool',
+    'awg_i1_pool_hint', 'awg_i1_profile', 'awg_i1_profile_android',
+    'awg_i1_profile_any', 'awg_i1_profile_apple', 'awg_i1_profile_hint',
+    'awg_i1_profile_linux', 'awg_i1_profile_windows', 'awg_i1_regenerate',
+    'awg_i1_row_answer', 'awg_i1_row_flags', 'awg_i1_row_id',
+    'awg_i1_row_id_value', 'awg_i1_row_question', 'awg_i1_row_size',
+    'awg_i1_settings_status', 'awg_i1_title', 'awg_i1_valid',
+}
 # WARP refuses to install on a host without an AmneziaWG instance; the
 # marketplace badge and the operation error share this wording.
 SRV_WARP_NO_AWG_KEYS = {
     'srv_warp_no_awg', 'srv_warp_err_no_awg',
 # Keys of later panels that were merged without registering them here; before
 # this set existed the frozen hash failed on an unchanged catalogue.
+}
 LATER_FEATURE_KEYS = {
     'exit_awg3', 'exit_awg3_hint',
     'max_connections_per_user_hint', 'max_connections_per_user_label',
@@ -358,7 +377,7 @@ class TestC6Translations(unittest.TestCase):
         # the ipv6 set) must NOT be subtracted again.
         previous = '\n'.join(sorted(base - PANEL_ACCESS_KEYS - SECURITY_SETUP_KEYS
                                     - CHEBURCHECK_KEYS - PROTOCOL_UNINSTALL_KEYS
-                                    - SRV_WARP_NO_AWG_KEYS
+                                    - AWG_I1_KEYS - SRV_WARP_NO_AWG_KEYS
                                     - COPY_INSTANCE_KEYS - LATER_FEATURE_KEYS
                                     - RELEASE_1811_KEYS - USER_LIMIT_KEYS - TELEGRAM_ACCOUNT_KEYS))
         self.assertEqual(hashlib.sha256(previous.encode('utf-8')).hexdigest(),
@@ -369,7 +388,7 @@ class TestC6Translations(unittest.TestCase):
         for locale in LOCALES:
             data = translation(locale)
             for key in (NEW_KEYS | PANEL_ACCESS_KEYS | PROTOCOL_UNINSTALL_KEYS
-                        | USER_LIMIT_KEYS | TELEGRAM_ACCOUNT_KEYS):
+                        | AWG_I1_KEYS | USER_LIMIT_KEYS | TELEGRAM_ACCOUNT_KEYS):
                 self.assertIn(key, data)
                 self.assertTrue(str(data[key]).strip(), "%s empty in %s" % (key, locale))
 
