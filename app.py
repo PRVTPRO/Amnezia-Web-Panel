@@ -39,7 +39,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi import FastAPI, Request, Query, UploadFile, File, Form
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
-from starlette.middleware.gzip import GZipMiddleware
+from starlette.datastructures import Headers, MutableHeaders
 from starlette.middleware.sessions import SessionMiddleware
 from pydantic import BaseModel, Field, StrictBool, constr, conint
 from typing import Optional, List
@@ -433,7 +433,102 @@ class CompressionGate:
         await self.app(scope, receive, send)
 
 
-app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
+class _GzipResponder:
+    """Потоковый gzip через zlib (заголовок gzip без mtime)."""
+
+    def __init__(self, app, minimum_size, compresslevel):
+        self.app = app
+        self.minimum_size = minimum_size
+        self.compresslevel = compresslevel
+        self.send = None
+        self.start = None
+        self.started = False
+        self.skip = False
+        self.passthrough = False
+        self.compressor = None
+
+    async def __call__(self, scope, receive, send):
+        self.send = send
+        await self.app(scope, receive, self.send_with_compression)
+
+    async def send_with_compression(self, message):
+        kind = message['type']
+        if kind == 'http.response.start':
+            headers = Headers(raw=message['headers'])
+            # Уже сжатое, поток событий и «пустые» статусы не трогаем.
+            self.skip = ('content-encoding' in headers
+                         or headers.get('content-type', '').startswith('text/event-stream')
+                         or message['status'] in (204, 304))
+            self.start = message
+            return
+        if kind != 'http.response.body':
+            await self.send(message)
+            return
+        if self.passthrough:
+            await self.send(message)
+            return
+        if self.started:
+            await self.send_body(message)
+            return
+        self.started = True
+        body = message.get('body', b'')
+        more = message.get('more_body', False)
+        if self.skip or (not more and len(body) < self.minimum_size):
+            self.passthrough = True
+            await self.send(self.start)
+            await self.send(message)
+            return
+        self.start_stream()
+        await self.send(self.start)
+        await self.send_body(message)
+
+    def start_stream(self):
+        headers = MutableHeaders(raw=self.start['headers'])
+        headers.add_vary_header('Accept-Encoding')
+        headers['Content-Encoding'] = 'gzip'
+        if 'content-length' in headers:
+            del headers['Content-Length']
+        # wbits=31 — gzip-обёртка zlib: заголовок с mtime=0, без обращения
+        # к системным часам (stock GZipMiddleware падает, если часы сдвинуты).
+        self.compressor = zlib.compressobj(
+            self.compresslevel, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
+
+    async def send_body(self, message):
+        body = message.get('body', b'')
+        more = message.get('more_body', False)
+        out = self.compressor.compress(body) if body else b''
+        if not more:
+            out += self.compressor.flush()
+        await self.send({'type': 'http.response.body', 'body': out,
+                         'more_body': more})
+
+
+class TextGZipMiddleware:
+    """gzip для текстовых ответов без зависимости от системных часов.
+
+    Starlette'овский GZipMiddleware пишет в gzip-заголовок текущее время
+    (gzip.GzipFile по умолчанию), поэтому запрос при сдвинутых часах —
+    например, в тестах с `mock.patch(time.time)` — падает на struct.pack.
+    """
+
+    def __init__(self, app, minimum_size=1024, compresslevel=6):
+        self.app = app
+        self.minimum_size = minimum_size
+        self.compresslevel = compresslevel
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] != 'http':
+            await self.app(scope, receive, send)
+            return
+        headers = Headers(scope=scope)
+        if 'gzip' not in headers.get('accept-encoding', '').lower():
+            await self.app(scope, receive, send)
+            return
+        responder = _GzipResponder(self.app, self.minimum_size, self.compresslevel)
+        await responder(scope, receive, send)
+
+
+app.add_middleware(TextGZipMiddleware, minimum_size=1024, compresslevel=6)
 app.add_middleware(CompressionGate)
 
 class CachedStaticFiles(StaticFiles):
