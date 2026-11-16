@@ -11,6 +11,8 @@
     </h1>
 </div>
 
+{# Read-only S3 storage card: s3 mode only, and never for support (bucket/endpoint are admin data). #}
+{% set show_storage_card = storage_status and storage_status.backend == 's3' and current_user and current_user.role == 'admin' %}
 <div id="settings-nav-anchor" aria-hidden="true"></div>
 <nav class="settings-nav" aria-label="{{ _('settings_title') }}">
     <a href="#settings-appearance">{{ _('appearance') }}</a>
@@ -24,6 +26,9 @@
     <a href="#settings-duckdns">{{ _('duckdns_title') }}</a>
     <a href="#settings-import">{{ _('import_users_title') }}</a>
     <a href="#settings-backup">{{ _('backup_title') }}</a>
+    {% if show_storage_card %}
+    <a href="#settings-storage">{{ _('storage_title') }}</a>
+    {% endif %}
     <a href="#settings-tokens">{{ _('api_tokens_title') }}</a>
     <a href="#settings-exit-nodes">{{ _('exit_defaults_title') }}</a>
     <a href="#settings-self-service">{{ _('self_service_title') }}</a>
@@ -665,6 +670,71 @@
                 {{ _('restore_confirm') }}
             </p>
         </div>
+
+        {% if show_storage_card %}
+        {% set s3 = storage_status %}
+        <!-- BLOCK: S3 storage (read-only, configured by environment variables) -->
+        <div class="card" id="settings-storage" style="margin-top: var(--space-lg);">
+            <h3 class="card-title" style="margin-bottom: var(--space-lg);"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="margin-right: 6px; vertical-align: -2px;"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>{{ _('storage_title') }}</h3>
+            {% if s3.fenced %}
+            <p class="form-hint" style="margin-bottom: var(--space-md); color: var(--danger);">{{ _('storage_fenced_warning') }}</p>
+            {% endif %}
+            {# Names and codes are case-sensitive: keep the badge from upper-casing them, and let long ones wrap. #}
+            {% set value_style = 'text-transform: none; overflow-wrap: anywhere; max-width: 100%;' %}
+            <div style="display: flex; flex-direction: column;">
+                <div class="row-between" style="padding: var(--space-sm) 0; border-bottom: 1px solid var(--border-color);">
+                    <span style="font-weight: 500;">{{ _('storage_bucket') }}</span>
+                    <span class="badge badge-secondary" style="{{ value_style }}">{{ s3.bucket or '—' }}</span>
+                </div>
+                <div class="row-between" style="padding: var(--space-sm) 0; border-bottom: 1px solid var(--border-color);">
+                    <span style="font-weight: 500;">{{ _('storage_prefix') }}</span>
+                    <span class="badge badge-secondary" style="{{ value_style }}">{{ s3.prefix or _('storage_prefix_root') }}</span>
+                </div>
+                <div class="row-between" style="padding: var(--space-sm) 0; border-bottom: 1px solid var(--border-color);">
+                    <span style="font-weight: 500;">{{ _('storage_endpoint') }}</span>
+                    <span class="badge badge-secondary" style="{{ value_style }}">{{ s3.endpoint or _('storage_endpoint_default') }}</span>
+                </div>
+                <div class="row-between" style="padding: var(--space-sm) 0; border-bottom: 1px solid var(--border-color);">
+                    <span style="font-weight: 500;">{{ _('storage_region') }}</span>
+                    <span class="badge badge-secondary" style="{{ value_style }}">{{ s3.region or '—' }}</span>
+                </div>
+                <div class="row-between" style="padding: var(--space-sm) 0; border-bottom: 1px solid var(--border-color);">
+                    <span style="font-weight: 500;">{{ _('storage_fencing') }}</span>
+                    {% if s3.fencing == 'enforced' %}
+                    <span class="badge badge-success" style="{{ value_style }}">{{ _('storage_fencing_enforced') }}</span>
+                    {% elif s3.fencing == 'unfenced' %}
+                    <span class="badge badge-warn" style="{{ value_style }}">{{ _('storage_fencing_unfenced') }}</span>
+                    {% else %}
+                    <span class="badge badge-secondary">—</span>
+                    {% endif %}
+                </div>
+                <div class="row-between" style="padding: var(--space-sm) 0; border-bottom: 1px solid var(--border-color);">
+                    <span style="font-weight: 500;">{{ _('storage_generation') }}</span>
+                    <span class="badge badge-info">{{ s3.generation if s3.generation is not none else '—' }}</span>
+                </div>
+                <div class="row-between" style="padding: var(--space-sm) 0; border-bottom: 1px solid var(--border-color);">
+                    <span style="font-weight: 500;">{{ _('storage_files') }}</span>
+                    <span class="badge badge-secondary" style="{{ value_style }}">{{ s3.files or 0 }} · {{ (s3.bytes or 0) | filesizeformat }}</span>
+                </div>
+                <div class="row-between" style="padding: var(--space-sm) 0; border-bottom: 1px solid var(--border-color);">
+                    <span style="font-weight: 500;">{{ _('storage_last_sync') }}</span>
+                    <span class="badge badge-secondary" style="{{ value_style }}">{% if s3.last_commit_at %}{{ s3.last_commit_at | replace('T', ' ') | replace('Z', ' UTC') }}{% else %}{{ _('storage_never') }}{% endif %}</span>
+                </div>
+                <div class="row-between" style="padding: var(--space-sm) 0;">
+                    <span style="font-weight: 500;">{{ _('storage_last_error') }}</span>
+                    {% if s3.last_error %}
+                    <span class="badge badge-danger" style="{{ value_style }}">{{ s3.last_error }}{% if s3.last_error_at %} · {{ s3.last_error_at | replace('T', ' ') | replace('Z', ' UTC') }}{% endif %}</span>
+                    {% else %}
+                    <span class="badge badge-success" style="{{ value_style }}">{{ _('storage_no_error') }}</span>
+                    {% endif %}
+                </div>
+            </div>
+            {% if s3.fencing == 'unfenced' %}
+            <p class="form-hint" style="margin-top: var(--space-sm); color: var(--warning);">{{ _('storage_unfenced_hint') }}</p>
+            {% endif %}
+            <p class="form-hint" style="margin-top: var(--space-sm);">{{ _('storage_env_hint') }}</p>
+        </div>
+        {% endif %}
 
         <!-- BLOCK: API Tokens -->
         <div class="card" id="settings-tokens" style="margin-top: var(--space-lg);">

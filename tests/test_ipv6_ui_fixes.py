@@ -147,6 +147,15 @@ TELEGRAM_ACCOUNT_KEYS = {
     'telegram_webapp_auth_invalid', 'telegram_webapp_auth_unavailable',
     'telegram_webapp_account_not_found',
 }
+# Read-only S3 storage card on the Settings page (docs/S3_STORAGE.md).
+STORAGE_KEYS = {
+    'storage_title', 'storage_bucket', 'storage_prefix', 'storage_prefix_root',
+    'storage_endpoint', 'storage_endpoint_default', 'storage_region',
+    'storage_fencing', 'storage_fencing_enforced', 'storage_fencing_unfenced',
+    'storage_unfenced_hint', 'storage_generation', 'storage_files',
+    'storage_last_sync', 'storage_never', 'storage_last_error', 'storage_no_error',
+    'storage_fenced_warning', 'storage_env_hint',
+}
 
 PROTOCOL_UNINSTALL_KEYS = {
     'uninstall_archive_confirm', 'uninstall_archived',
@@ -425,7 +434,8 @@ class TestC6Translations(unittest.TestCase):
                                     - TORRENT_GUARD_KEYS
                                     - AWG_I1_KEYS - SRV_WARP_NO_AWG_KEYS
                                     - COPY_INSTANCE_KEYS - LATER_FEATURE_KEYS
-                                    - RELEASE_1811_KEYS - USER_LIMIT_KEYS - TELEGRAM_ACCOUNT_KEYS))
+                                    - RELEASE_1811_KEYS - USER_LIMIT_KEYS - TELEGRAM_ACCOUNT_KEYS
+                                    - STORAGE_KEYS))
         self.assertEqual(hashlib.sha256(previous.encode('utf-8')).hexdigest(),
                          PRE_PANEL_ACCESS_KEYS_SHA256,
                          'Existing catalogue changed outside the declared additions')
