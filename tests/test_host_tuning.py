@@ -27,6 +27,11 @@ HOST_AWG_MODULE=3.1.20260812
 CT_NAME=amnezia-awg2
 CT_RUNNING=1
 CTK_net.core.rmem_max=26214400
+CT_NAME=amnezia-xray
+CT_RUNNING=1
+CT_VERSION=26.10.31
+CT_NAME=amnezia-xray-2
+CT_RUNNING=0
 CT_NAME=amnezia-exit
 CT_RUNNING=0
 """
@@ -41,13 +46,21 @@ class HostTuningTests(unittest.TestCase):
         self.assertEqual([kind for kind, _ in ssh.calls], ['script'])
         script = ssh.calls[0][1]
         self.assertIn('HOST_AWG_MODULE=', script)
-        self.assertIn("grep -E '^amnezia-(awg|exit)'", script)
+        self.assertIn("grep -E '^amnezia-(awg|exit|xray)'", script)
+        # xray containers report their core version instead of sysctls
+        self.assertIn('/usr/bin/xray version', script)
 
         self.assertEqual(info['host']['cc'], 'bbr')
         self.assertEqual(info['host']['awg_module'], '3.1.20260812')
         self.assertEqual([(c['name'], c['running']) for c in info['containers']],
-                         [('amnezia-awg2', True), ('amnezia-exit', False)])
+                         [('amnezia-awg2', True), ('amnezia-xray', True),
+                          ('amnezia-xray-2', False), ('amnezia-exit', False)])
         self.assertEqual(info['containers'][0]['ct'], {'net.core.rmem_max': '26214400'})
+        # the version only exists for a running xray container
+        self.assertEqual(info['containers'][1]['version'], '26.10.31')
+        self.assertEqual(info['containers'][1]['ct'], {})
+        self.assertEqual(info['containers'][2].get('version'), None)
+        self.assertEqual(info['containers'][3].get('version'), None)
 
     def test_empty_output_is_not_an_error(self):
         self.assertEqual(AWGManager(FakeSSH()).get_host_tuning(), {'host': {}, 'containers': []})
