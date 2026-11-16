@@ -21,6 +21,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 from managers.clients_table import save_clients_table
 from managers import split_tunnel
+from managers import docker_image_cleanup
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +229,7 @@ iptables -C FORWARD -j DOCKER-USER 2>/dev/null || iptables -A FORWARD -j DOCKER-
         self.ssh.run_sudo_command(f"mkdir -p {dockerfile_folder}")
         self.ssh.upload_file_sudo(dockerfile_content, f"{dockerfile_folder}/Dockerfile")
 
+        old_image_id = docker_image_cleanup.image_id(self.ssh, self.CONTAINER_NAME)
         out, err, code = self.ssh.run_sudo_command(
             f"docker build --no-cache --pull -t {self.CONTAINER_NAME} {dockerfile_folder}",
             timeout=300
@@ -235,6 +237,9 @@ iptables -C FORWARD -j DOCKER-USER 2>/dev/null || iptables -A FORWARD -j DOCKER-
         if code != 0:
             raise RuntimeError(f"Failed to build container: {err}")
         results.append("Docker image built successfully")
+        # A rebuild under the same tag leaves the old image as <none>:<none>.
+        docker_image_cleanup.drop_replaced_image(
+            self.ssh, self.CONTAINER_NAME, old_image_id)
 
         # Step 5: Run container
         results.append("Starting container...")
@@ -399,8 +404,17 @@ tail -f /dev/null
     def remove_container(self):
         """Remove WireGuard container."""
         self.ssh.run_sudo_command(f"docker stop {self.CONTAINER_NAME}")
-        self.ssh.run_sudo_command(f"docker rm -fv {self.CONTAINER_NAME}")
+        out, err, code = self.ssh.run_sudo_command(f"docker rm -fv {self.CONTAINER_NAME}")
+        detail = ((err or out) or '').strip()
+        container_gone = code == 0 or 'no such container' in detail.lower()
         self.ssh.run_sudo_command(f"docker rmi {self.CONTAINER_NAME}")
+        # Remove the generated build context as well: it only ever holds the
+        # Dockerfile that the next install rewrites, so leaving it behind turns
+        # every uninstall into a leftover /opt/amnezia/amnezia-wireguard dir.
+        # Peer state (wg0.conf, clientsTable) is read through the container and
+        # is not kept here.
+        if container_gone:
+            self.ssh.run_sudo_command(f"rm -rf /opt/amnezia/{self.CONTAINER_NAME}")
         return True
 
     # ===================== CLIENT MANAGEMENT =====================
