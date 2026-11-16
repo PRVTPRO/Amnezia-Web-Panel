@@ -37,6 +37,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi import FastAPI, Request, Query, UploadFile, File, Form
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
+from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from pydantic import BaseModel, Field, StrictBool, constr, conint
 from typing import Optional, List
@@ -362,6 +363,49 @@ async def panel_access_middleware(request, call_next):
 # Sessions must wrap every other middleware: the auth middleware above
 # reads request.session, so SessionMiddleware has to sit outside it.
 app.add_middleware(SessionMiddleware, secret_key=os.environ.get('SECRET_KEY', secrets.token_hex(32)))
+# Публичный порт держит panel_front.py - это релей байтов, он ничего не
+# сжимает. Без gzip страница сервера уходит по проводу как есть: HTML
+# /server/N ~800 КБ (вместе со словарём локали), CodeMirror 170 КБ, CSS 90 КБ.
+# GZipMiddleware сжимает текстовые ответы; гейт ниже не даёт ему трогать
+# уже сжатые бинарные (PNG-капча, zip-архив бэкапа, иконки, шрифты).
+COMPRESS_SKIP_PATHS = ('/api/auth/captcha', '/api/settings/backup/archive')
+COMPRESS_SKIP_SUFFIXES = (
+    '/backups/download',
+    '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.svgz',
+    '.woff', '.woff2', '.ttf', '.zip', '.gz', '.tgz', '.bz2', '.xz',
+    '.7z', '.pdf', '.mp4', '.webm',
+)
+
+
+def _compression_skipped(scope):
+    """True for responses that must reach the client uncompressed."""
+    path = str(scope.get('path') or '').lower()
+    if path in COMPRESS_SKIP_PATHS:
+        return True
+    return path.endswith(COMPRESS_SKIP_SUFFIXES)
+
+
+class CompressionGate:
+    """Снимает Accept-Encoding с запросов к бинарным ответам.
+
+    Порядок важен: гейт добавляется последним, поэтому он внешний по
+    отношению к GZipMiddleware и видит запрос раньше него. Ответ без
+    Accept-Encoding middleware отдаёт как есть - без повторного gzip.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] == 'http' and _compression_skipped(scope):
+            scope = dict(scope, headers=[
+                (name, value) for name, value in scope['headers']
+                if name.lower() != b'accept-encoding'])
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
+app.add_middleware(CompressionGate)
 
 class CachedStaticFiles(StaticFiles):
     """Static assets that carry ?v=<static mtime> (see static_version()) change
@@ -2629,6 +2673,19 @@ def cheburcheck_enabled(data=None):
     return bool((data.get('settings') or {}).get('cheburcheck', {}).get('enabled'))
 
 
+def _script_json(value):
+    """JSON для вставки в <script> как готовый JS-объект.
+
+    ensure_ascii=False почти вдвое уменьшает русскую и персидскую локаль
+    (escaped JSON: 290 КБ против 128 КБ). `</` экранируется, иначе перевод
+    с `</script>` закрыл бы тег раньше времени; U+2028/U+2029 в JS-строках
+    недопустимы, хотя в JSON валидны.
+    """
+    return (json.dumps(value, ensure_ascii=False)
+            .replace('</', '<\\/')
+            .replace('\u2028', '\\u2028')
+            .replace('\u2029', '\\u2029'))
+
 def tpl(request, template, **kwargs):
     data = load_data()
     lang = request.cookies.get('lang', 'en')
@@ -2647,24 +2704,22 @@ def tpl(request, template, **kwargs):
         'bot_running': tg_bot.is_running(),
         'lang': lang,
         '_': lambda text_id: _t(text_id, lang),
-        'translations_json': json.dumps(TRANSLATIONS.get(lang, TRANSLATIONS.get('en', {}))),
+        'translations_json': _script_json(TRANSLATIONS.get(lang, TRANSLATIONS.get('en', {}))),
         # The login page is the only public page; it must not dump the whole
         # UI dictionary (a feature showcase of the panel) into view-source.
-        'login_translations_json': json.dumps({
+        'login_translations_json': _script_json({
             k: _t(k, lang) for k in ('login', 'logging_in', 'login_error',
                                      'setup_submit', 'setup_creating', 'setup_error',
                                      'telegram_webapp_auth_invalid',
                                      'telegram_webapp_account_not_found',
                                      'telegram_webapp_auth_unavailable')
         }),
-        'all_translations_json': json.dumps(TRANSLATIONS),
         'cheburcheck_enabled': cheburcheck_enabled(data),
         'telegram_webapp_auth_enabled': bool(
             data.get('users')
             and (data.get('settings', {}).get('telegram') or {}).get('webapp_initdata_auth')
             and (data.get('settings', {}).get('telegram') or {}).get('token')
         ),
-        'all_translations_json': json.dumps(TRANSLATIONS)
     }
     ctx.update(kwargs)
     return templates.TemplateResponse(template, ctx)
@@ -6464,6 +6519,33 @@ async def _rkn_migration_finish(pending):
         save_data(data)
 
 
+# Последний ответ /check - чтобы первая отрисовка не ждала SSH. Страница
+# просит его с ?boot=1 и получает снимок сразу, а свежую проверку запускает
+# фоном. Мутации кэш не сбрасывают: снимок живёт только до ответа фоновой
+# проверки, а ручная проверка кнопкой идёт без boot и всегда свежая.
+_CHECK_CACHE = {}
+_CHECK_CACHE_LOCK = threading.Lock()
+_CHECK_CACHE_MAX_AGE = 900.0
+
+
+def _check_cache_get(server_uid):
+    with _CHECK_CACHE_LOCK:
+        entry = _CHECK_CACHE.get(server_uid)
+    if not entry:
+        return None
+    stamp, payload = entry
+    if time.time() - stamp > _CHECK_CACHE_MAX_AGE:
+        return None
+    return stamp, payload
+
+
+def _check_cache_put(server_uid, payload):
+    if not server_uid:
+        return
+    with _CHECK_CACHE_LOCK:
+        _CHECK_CACHE[server_uid] = (time.time(), payload)
+
+
 @app.post('/api/servers/{server_id}/check', tags=["Servers"])
 def api_check_server(request: Request, server_id: int):
     if not _check_admin(request):
@@ -6473,6 +6555,16 @@ def api_check_server(request: Request, server_id: int):
         if server_id >= len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
+        server_uid = server.get('uid') or f'#{server_id}'
+        boot = str(request.query_params.get('boot') or '').lower() in ('1', 'true', 'yes')
+        if boot:
+            cached = _check_cache_get(server_uid)
+            if cached is not None:
+                stamp, payload = cached
+                snapshot = dict(payload)
+                snapshot['cached'] = True
+                snapshot['cached_age'] = round(time.time() - stamp, 1)
+                return snapshot
         ssh = get_ssh(server)
         ssh.connect()
         # Just use awg's docker checker since it uses the same command
@@ -6568,6 +6660,19 @@ def api_check_server(request: Request, server_id: int):
                 return proto, merge_saved_protocol_status(proto, {}, str(e)), str(e)
 
         protocols_to_check = list(dict.fromkeys(BASE_PROTOCOLS + list(server.get('protocols', {}).keys())))
+        # Снимок docker ps -a: если контейнера протокола нет ни в снимке, ни в
+        # data.json, отдельная SSH-команда всё равно вернёт "не установлен".
+        # Раньше на каждый такой протокол уходил круг SSH, и /check держал
+        # первую отрисовку несколько секунд. Команду берём только когда есть
+        # что пропускать: на полностью укомплектованном сервере она лишняя.
+        docker_snapshot = None
+        if any(p not in server.get('protocols', {}) for p in protocols_to_check):
+            try:
+                docker_snapshot = ssh.docker_ps_snapshot()
+            except Exception:
+                docker_snapshot = None
+            if not isinstance(docker_snapshot, dict):
+                docker_snapshot = None
         # One batched round trip for all AWG containers (ps snapshot + configs
         # + clientsTables) instead of 3-5 SSH commands per instance - this is
         # what made /check take seconds on high-latency servers.
@@ -6581,6 +6686,14 @@ def api_check_server(request: Request, server_id: int):
         # checking them in parallel through one SSH object can produce false
         # negatives and previously caused dynamic AWG instances to be removed.
         for proto in protocols_to_check:
+            container_name = protocol_container_name(proto)
+            if (docker_snapshot is not None
+                    and container_name
+                    and container_name not in docker_snapshot
+                    and proto not in server.get('protocols', {})):
+                status['protocols'][proto] = merge_saved_protocol_status(
+                    proto, {'container_exists': False, 'container_running': False})
+                continue
             proto, result, err = check_proto(proto)
             status['protocols'][proto] = result
             if err:
@@ -6646,7 +6759,8 @@ def api_check_server(request: Request, server_id: int):
                 
         if changed:
             save_data(data)
-            
+
+        _check_cache_put(server_uid, status)
         ssh.disconnect()
         return status
     except Exception as e:
@@ -8229,7 +8343,17 @@ def _ip_status_cache_put(server_uid, payload):
 
 
 def _invalidate_ip_status(server_uid=None):
-    """Drop one cached status, or all of them after a global change."""
+    """Drop one cached status, or all of them after a global change.
+
+    Снимок /check (?boot=1) инвалидируется вместе с ip-status: после
+    установки, удаления или переключения протокола страница не должна
+    показывать состояние до мутации.
+    """
+    with _CHECK_CACHE_LOCK:
+        if server_uid is None:
+            _CHECK_CACHE.clear()
+        else:
+            _CHECK_CACHE.pop(server_uid, None)
     if server_uid is None:
         _IP_STATUS_CACHE.clear()
     else:

@@ -4,6 +4,7 @@ No SSH and no network: every remote read is served by a fake ssh object or by
 a patched manager method. The tests pin the IPv6 status contract the panel
 header, the statistics page and /ip-status rely on.
 """
+import re
 import unittest
 from unittest.mock import Mock
 
@@ -29,6 +30,32 @@ class FakeSSH:
         return '', '', 0
 
 
+class CompositeFakeSSH:
+    """Отвечает на композитные команды панели (host/docker IPv6-пробы).
+
+    Тесты задают значения секций, а терминаторы собирает сам фейк: маркер
+    случайный, но он есть внутри текста команды, поэтому его можно вынуть.
+    """
+
+    def __init__(self, sections, codes=None, fallback=None):
+        self.sections = sections
+        self.codes = codes or {}
+        self.fallback = fallback if fallback is not None else ('', '', 0)
+        self.commands = []
+
+    def run_sudo_command(self, command, *args, **kwargs):
+        self.commands.append(command)
+        match = re.search(r'@@[A-Z0-9]+_[0-9a-f]+@@', command or '')
+        if not match:
+            return self.fallback
+        marker = match.group(0)
+        lines = []
+        for name, text in self.sections.items():
+            lines.append(text)
+            lines.append('%s!%s %s' % (marker, name, self.codes.get(name, 0)))
+        return '\n'.join(lines), '', 0
+
+
 def host_info(address='2001:db8::1', ipv4='203.0.113.5',
               default_route=True, disabled=False):
     return {'address': address, 'ipv4': ipv4, 'default_route': default_route,
@@ -51,12 +78,12 @@ def status_manager(host, instances, docker=None):
 
 class HostIpv6InfoTests(unittest.TestCase):
     def _info(self, route_get='', default='', ipv4='', sysctl='', cmdline=''):
-        ssh = FakeSSH({
-            'ip -6 route get': route_get,
-            'ip -6 route show default': default,
-            'ip route get 1.1.1.1': ipv4,
-            'disable_ipv6': sysctl,
-            'ipv6.disable=1': cmdline,
+        ssh = CompositeFakeSSH({
+            'V6ROUTE': route_get,
+            'V6DEF': default,
+            'V4ROUTE': ipv4,
+            'SYSCTL': sysctl,
+            'CMDLINE': cmdline,
         })
         return AWGManager(ssh)._host_ipv6_info()
 
@@ -99,16 +126,17 @@ class HostIpv6InfoTests(unittest.TestCase):
 class DockerIpv6InfoTests(unittest.TestCase):
     def _info(self, installed='yes', present='yes', bridge='false',
               daemon_ipv6='', ip6tables='yes', version_code=0, flags=''):
-        ssh = FakeSSH(
-            outputs={
-                'command -v docker': installed,
-                'test -f /etc/docker/daemon.json': present,
-                'docker network inspect bridge': bridge,
-                '"ipv6"': daemon_ipv6,
-                'ip6tables -t nat': ip6tables,
-                'systemctl cat docker': flags,
+        ssh = CompositeFakeSSH(
+            sections={
+                'DAEMON': present,
+                'BRIDGE': bridge,
+                'DAEMONJSON': daemon_ipv6,
+                'IP6T': ip6tables,
+                'VERSION': '',
+                'FLAGS': flags,
             },
-            codes={'docker version': version_code},
+            codes={'VERSION': version_code},
+            fallback=(installed, '', 0),
         )
         return AWGManager(ssh)._docker_ipv6_info()
 
