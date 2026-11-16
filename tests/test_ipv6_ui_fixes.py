@@ -56,12 +56,55 @@ NEW_KEYS = {
     "cheburcheck_none_enabled",
     "cheburcheck_running_all",
     "cheburcheck_banned_count",
+    "cheburcheck_target",
+    "cheburcheck_status",
+    "cheburcheck_regions_short",
+    "cheburcheck_partial",
+    "cheburcheck_no_targets",
+    "cheburcheck_targets_intro",
+    "cheburcheck_targets_show",
+    "cheburcheck_restrictions",
+    "cheburcheck_remarks_badge",
+    "cheburcheck_remarks_only",
+    "cheburcheck_remarks_found",
+    "cheburcheck_static_hit",
+    "cheburcheck_static_rkn",
+    "cheburcheck_override_toggle",
+    "cheburcheck_override_placeholder",
+    "cheburcheck_probe_no_data",
+    "cheburcheck_token_label",
+    "cheburcheck_token_placeholder",
+    "cheburcheck_token_set",
+    "cheburcheck_token_not_set",
+    "cheburcheck_token_hint",
+    "cheburcheck_token_check",
+    "cheburcheck_token_ok",
+    "cheburcheck_token_failed",
+    "cheburcheck_token_required",
+    "cheburcheck_token_open_settings",
+    "cheburcheck_token_docs",
+    "cheburcheck_token_basic_only",
+    "cheburcheck_token_docs_link",
+    "cheburcheck_static_only",
+    "cheburcheck_static_only_note",
 }
 
 # The catalogue had 1218 key names right before panel access (#305). Freeze
 # the names, not translated values: a count alone misses a removed key
 # replaced by an unrelated one. Future additions must be registered here.
 PRE_PANEL_ACCESS_KEYS_SHA256 = 'c70dff505a825b0a8506b2d1ca7d76fca9378e3f9514cc44231f7fd2a847af36'
+# Keys of the "Copy instance" panel: a later addition, declared here so the
+# frozen catalogue hash keeps guarding the original keys.
+COPY_INSTANCE_KEYS = {
+    "copy_instance_btn", "copy_instance_title", "copy_instance_desc",
+    "copy_instance_source", "copy_instance_target", "copy_instance_target_missing",
+    "copy_instance_checking", "copy_instance_preview", "copy_instance_port_busy",
+    "copy_instance_image", "copy_instance_key_warning", "copy_instance_start",
+    "copy_instance_running", "copy_instance_step", "copy_instance_success",
+    "copy_instance_failed", "copy_instance_cancelled", "copy_instance_cancel",
+    "copy_instance_close", "copy_instance_log", "copy_instance_connections",
+    "copy_instance_disk_low",
+}
 PANEL_ACCESS_KEYS = {
     'panel_access_title',
     'panel_access_intro',
@@ -73,6 +116,16 @@ PANEL_ACCESS_KEYS = {
     'panel_access_domain_label',
 }
 
+# Explicit additions from #319; keep the pre-existing catalogue fingerprint.
+USER_LIMIT_KEYS = {'max_connections_per_user_label', 'max_connections_per_user_hint'}
+TELEGRAM_ACCOUNT_KEYS = {
+    'telegram_auto_create_users', 'telegram_auto_create_users_desc',
+    'telegram_create_users_disabled', 'telegram_create_users_disabled_desc',
+    'telegram_webapp_auth', 'telegram_webapp_auth_desc',
+    'telegram_webapp_auth_invalid', 'telegram_webapp_auth_unavailable',
+    'telegram_webapp_account_not_found',
+}
+
 PROTOCOL_UNINSTALL_KEYS = {
     'uninstall_archive_confirm', 'uninstall_archived',
 }
@@ -81,6 +134,21 @@ PROTOCOL_UNINSTALL_KEYS = {
 # marketplace badge and the operation error share this wording.
 SRV_WARP_NO_AWG_KEYS = {
     'srv_warp_no_awg', 'srv_warp_err_no_awg',
+# Keys of later panels that were merged without registering them here; before
+# this set existed the frozen hash failed on an unchanged catalogue.
+LATER_FEATURE_KEYS = {
+    'exit_awg3', 'exit_awg3_hint',
+    'max_connections_per_user_hint', 'max_connections_per_user_label',
+}
+# Added by the v1.8.11 release (max connections per user + Telegram WebApp auth).
+# Registered here so the frozen catalogue hash keeps checking the older keys.
+RELEASE_1811_KEYS = {
+    'max_connections_per_user_label', 'max_connections_per_user_hint',
+    'telegram_auto_create_users', 'telegram_auto_create_users_desc',
+    'telegram_create_users_disabled', 'telegram_create_users_disabled_desc',
+    'telegram_webapp_account_not_found', 'telegram_webapp_auth',
+    'telegram_webapp_auth_desc', 'telegram_webapp_auth_invalid',
+    'telegram_webapp_auth_unavailable',
 }
 
 
@@ -108,6 +176,28 @@ CHEBURCHECK_KEYS = {
     'cheburcheck_still_running',
     'cheburcheck_button', 'cheburcheck_quiet_enable', 'cheburcheck_quiet_hint',
     'cheburcheck_quiet_from', 'cheburcheck_quiet_to',
+    'cheburcheck_target', 'cheburcheck_status', 'cheburcheck_regions_short',
+    'cheburcheck_partial', 'cheburcheck_no_targets', 'cheburcheck_targets_intro',
+    'cheburcheck_targets_show',
+    'cheburcheck_restrictions',
+    'cheburcheck_remarks_badge',
+    'cheburcheck_remarks_only',
+    'cheburcheck_remarks_found',
+    'cheburcheck_static_hit',
+    'cheburcheck_static_rkn',
+    'cheburcheck_override_toggle',
+    'cheburcheck_override_placeholder',
+    'cheburcheck_probe_no_data',
+    'cheburcheck_token_label', 'cheburcheck_token_placeholder',
+    'cheburcheck_token_set', 'cheburcheck_token_not_set',
+    'cheburcheck_token_hint', 'cheburcheck_token_check',
+    'cheburcheck_token_ok', 'cheburcheck_token_failed',
+    'cheburcheck_token_required', 'cheburcheck_token_open_settings',
+    'cheburcheck_token_docs',
+    'cheburcheck_token_basic_only', 'cheburcheck_token_docs_link',
+    'cheburcheck_static_only', 'cheburcheck_static_only_note',
+    'cheburcheck_progress',
+    'cheburcheck_token_ok_free', 'cheburcheck_token_credits_hint',
 }
 
 
@@ -268,7 +358,9 @@ class TestC6Translations(unittest.TestCase):
         # the ipv6 set) must NOT be subtracted again.
         previous = '\n'.join(sorted(base - PANEL_ACCESS_KEYS - SECURITY_SETUP_KEYS
                                     - CHEBURCHECK_KEYS - PROTOCOL_UNINSTALL_KEYS
-                                    - SRV_WARP_NO_AWG_KEYS))
+                                    - SRV_WARP_NO_AWG_KEYS
+                                    - COPY_INSTANCE_KEYS - LATER_FEATURE_KEYS
+                                    - RELEASE_1811_KEYS - USER_LIMIT_KEYS - TELEGRAM_ACCOUNT_KEYS))
         self.assertEqual(hashlib.sha256(previous.encode('utf-8')).hexdigest(),
                          PRE_PANEL_ACCESS_KEYS_SHA256,
                          'Existing catalogue changed outside the declared additions')
@@ -276,7 +368,8 @@ class TestC6Translations(unittest.TestCase):
     def test_new_keys_present_in_every_locale(self):
         for locale in LOCALES:
             data = translation(locale)
-            for key in NEW_KEYS | PANEL_ACCESS_KEYS | PROTOCOL_UNINSTALL_KEYS:
+            for key in (NEW_KEYS | PANEL_ACCESS_KEYS | PROTOCOL_UNINSTALL_KEYS
+                        | USER_LIMIT_KEYS | TELEGRAM_ACCOUNT_KEYS):
                 self.assertIn(key, data)
                 self.assertTrue(str(data[key]).strip(), "%s empty in %s" % (key, locale))
 

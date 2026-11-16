@@ -12,7 +12,11 @@ from managers.awg_manager import (
     EXIT_HANDSHAKE_UP_SECONDS,
     EXIT_KEY,
     ENTRY_PRIVATE_KEY_PLACEHOLDER,
+    AWG3_USERSPACE_GUARD,
     AWGManager,
+    generate_transit_params,
+    is_awg31_params,
+    transit_mtu,
 )
 
 LINK = {
@@ -148,6 +152,54 @@ class ExitConfBodyTests(unittest.TestCase):
 
     def test_dns_via_exit_marker(self):
         self.assertIn('# DnsViaExit = on\n', AWGManager._exit_conf_body(dict(LINK, dns_via_exit=True)))
+
+
+class TransitAwg31Tests(unittest.TestCase):
+    """AWG 3.1 on the exit-node transit link."""
+
+    def test_generator_emits_the_full_31_set(self):
+        params = generate_transit_params(awg3=True)
+        self.assertTrue(is_awg31_params(params))
+        for key in ('header_protection_key', 'content_padding_addition',
+                    'random_trailers', 'disable_cookies',
+                    'cookie_reply_packet_junk_size', 'transport_packet_junk_size',
+                    'rekey_after_time', 'max_handshake_attempts', 'i1'):
+            self.assertIn(key, params)
+        # Header protection turns the custom-header mechanism off.
+        for key in ('init_packet_magic_header', 'response_packet_magic_header',
+                    'underload_packet_magic_header', 'transport_packet_magic_header'):
+            self.assertIn(params[key], ('1', '2', '3', '4'))
+        self.assertEqual(params['content_padding_addition'], '8-24')
+        self.assertEqual(params['cookie_reply_packet_junk_size'], '12')
+        self.assertEqual(params['transport_packet_junk_size'], '12')
+        self.assertEqual(params['random_trailers'], 'on')
+
+    def test_generator_keeps_the_20_link_unchanged(self):
+        params = generate_transit_params()
+        self.assertFalse(is_awg31_params(params))
+        for key in ('cookie_reply_packet_junk_size', 'transport_packet_junk_size',
+                    'header_protection_key', 'content_padding_addition', 'i1'):
+            self.assertNotIn(key, params)
+
+    def test_mtu_pays_for_the_padding(self):
+        self.assertEqual(transit_mtu({}), 1420)
+        params = generate_transit_params(awg3=True)
+        self.assertEqual(transit_mtu(params), 1400)
+
+    def test_exit_conf_carries_the_31_set_and_the_link_mtu(self):
+        params = generate_transit_params(awg3=True)
+        link = dict(LINK, obfuscation=True, awg_params=params, mtu=1396)
+        conf = AWGManager._exit_conf_body(link)
+        interface = conf.split('[Peer]')[0]
+        for key in ('HeaderProtectionKey', 'ContentPaddingAddition', 'RandomTrailers',
+                    'DisableCookies', 'S3', 'S4', 'I1'):
+            self.assertRegex(interface, rf'(?m)^{key} = \S')
+        self.assertIn('MTU = 1396\n', conf)
+        self.assertIn('RandomTrailers = on\n', conf)
+
+    def test_awg2_never_forces_userspace(self):
+        self.assertEqual(AWGManager(None)._userspace_guard('awg2'), '')
+        self.assertIn(AWG3_USERSPACE_GUARD, AWGManager(None)._userspace_guard('awg3'))
 
 
 class ExitLinkMethodsTests(unittest.TestCase):
