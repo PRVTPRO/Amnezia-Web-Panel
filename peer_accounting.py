@@ -63,6 +63,13 @@ def ownership_rows(data, *, server_id=None, protocol=None, client_id=None,
             continue
         if user_ids is not None and conn.get('user_id') not in user_ids:
             continue
+        # A copied peer starts with no traffic history of its own: there is
+        # nothing to finalize until the target actually observes bytes. Once any
+        # sample lands (last_bytes/epoch/gap) the row is ownership again.
+        if (conn.get('accounting_unowned') and not conn.get('last_bytes')
+                and not conn.get('traffic_counter_epoch')
+                and not conn.get('traffic_accounting_gap')):
+            continue
         matched.append(conn)
     return matched
 

@@ -112,6 +112,35 @@ class AdminCreateLifecycle(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.remote.peers, {})
         self.assertEqual(result.status_code, 409)
 
+    async def test_expected_server_uid_is_checked_before_intent_or_ssh(self):
+        for uid in ('', 'another-node'):
+            with self.assertRaises(panel.PeerCreateError) as error:
+                await self.service.create('u', 0, 'awg3', 'device', self.op_id,
+                                          expected_server_uid=uid)
+            self.assertEqual(error.exception.status_code, 409)
+            self.assertFalse(self.path.exists())
+            self.assertEqual(self.remote.peers, {})
+
+    async def test_uid_bound_missing_instance_never_persists_intent_or_opens_ssh(self):
+        with patch.object(self.service, 'get_ssh') as ssh:
+            with self.assertRaises(panel.PeerCreateError) as error:
+                await self.service.create('u', 0, 'awg3__2', 'device', self.op_id,
+                                          expected_server_uid='node')
+            self.assertEqual(error.exception.status_code, 409)
+            self.assertFalse(self.path.exists())
+            self.assertEqual(self.remote.peers, {})
+            ssh.assert_not_called()
+
+    async def test_uid_bound_server_bounds_never_persist_intent(self):
+        for index in (-1, 1):
+            with self.subTest(index=index), patch.object(self.service, 'get_ssh') as ssh:
+                with self.assertRaises(panel.PeerCreateError) as error:
+                    await self.service.create('u', index, 'awg3', 'device', self.op_id,
+                                              expected_server_uid='node')
+                self.assertEqual(error.exception.status_code, 404)
+                self.assertFalse(self.path.exists())
+                ssh.assert_not_called()
+
     async def test_journal_is_durable_before_any_remote_action(self):
         self.remote.release.clear()
         task = asyncio.create_task(self.create())

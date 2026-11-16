@@ -12,7 +12,7 @@ def protocol_display_name(protocol, header_protection=False, protocol_version=No
         'awg3': 'AmneziaWG 3.1', 'awg_legacy': 'AmneziaWG Legacy',
         'xray': 'Xray', 'telemt': 'Telemt', 'dns': 'AmneziaDNS',
         'wireguard': 'WireGuard', 'socks5': 'SOCKS5', 'adguard': 'AdGuard Home',
-        'nginx': 'NGINX', 'exit': 'Exit Node',
+        'nginx': 'NGINX', 'haproxy': 'HAProxy', 'exit': 'Exit Node',
     }
     name = names.get(base, base)
     if base == 'awg2':

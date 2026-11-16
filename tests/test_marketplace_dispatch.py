@@ -123,6 +123,7 @@ document.body.dataset.serverUid='fixture-node';
 const _=key=>key, escapeHtml=value=>String(value), protoDomKey=value=>value, protoBase=value=>value.split('__')[0], protoInstance=()=>1;
 const isMultiInstanceBase=()=>false, isAppInstalled=()=>false, orderedProtocolEntries=()=>[], baseInstalled=()=>false;
 const applyCustomTitles=()=>{},renderSmartRouteCard=()=>{},showToast=()=>{},openModal=()=>{},closeModal=()=>{},hideConnectionsSection=()=>{};
+const refreshExitMarks=()=>{};
 // The store flow hands installs to the shared progress modal; in this harness
 // it simply refreshes the card from the (stubbed) API.
 function renderInstallOpProgress(opId, flow) { calls.push(['op', flow, opId]); rknBlockBusy = false; loadRknBlock(); }

@@ -377,6 +377,49 @@ class ProtocolProgressTests(EngineCase):
         self.assertEqual(res.status_code, 404)
         self.assertEqual(res.json()['code'], 'install_not_found')
 
+    def test_progress_finds_a_new_instance_by_base_name(self):
+        """A new instance is polled by its base name: the derived key
+        ("awg3__6") is unknown until the install response arrives."""
+        self.write_data()
+        op = panel.op_create(0, 'protocol', panel.PROTOCOL_INSTALL_TOTAL)
+        op['protocol'] = 'awg3__6'
+        panel.op_log(op, 'start', 'installing AmneziaWG 3.1 #6')
+        client = self.admin()
+        res = client.get('/api/servers/0/install/progress',
+                         params={'protocol': 'awg3'})
+        self.assertEqual(res.status_code, 200, res.text)
+        payload = res.json()
+        self.assertEqual(payload['state'], 'running')
+        self.assertEqual(payload['operation_id'], op['id'])
+        self.assertEqual(payload['protocol'], 'awg3')
+
+    def test_progress_base_name_prefers_the_newest_instance(self):
+        self.write_data()
+        old = panel.op_create(0, 'protocol', panel.PROTOCOL_INSTALL_TOTAL)
+        old['protocol'] = 'awg3'
+        panel.op_finish(old, 'success', {'protocol': 'awg3'})
+        new = panel.op_create(0, 'protocol', panel.PROTOCOL_INSTALL_TOTAL)
+        new['protocol'] = 'awg3__3'
+        client = self.admin()
+        payload = client.get('/api/servers/0/install/progress',
+                             params={'protocol': 'awg3'}).json()
+        self.assertEqual(payload['operation_id'], new['id'])
+        self.assertEqual(payload['state'], 'running')
+
+    def test_progress_instance_key_matches_only_itself(self):
+        self.write_data()
+        op = panel.op_create(0, 'protocol', panel.PROTOCOL_INSTALL_TOTAL)
+        op['protocol'] = 'awg3__3'
+        client = self.admin()
+        hit = client.get('/api/servers/0/install/progress',
+                         params={'protocol': 'awg3__3'})
+        self.assertEqual(hit.status_code, 200, hit.text)
+        self.assertEqual(hit.json()['operation_id'], op['id'])
+        miss = client.get('/api/servers/0/install/progress',
+                          params={'protocol': 'awg3__2'})
+        self.assertEqual(miss.status_code, 404)
+        self.assertEqual(miss.json()['code'], 'install_not_found')
+
 
 if __name__ == '__main__':
     unittest.main()

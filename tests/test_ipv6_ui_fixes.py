@@ -56,12 +56,77 @@ NEW_KEYS = {
     "cheburcheck_none_enabled",
     "cheburcheck_running_all",
     "cheburcheck_banned_count",
+    "cheburcheck_target",
+    "cheburcheck_status",
+    "cheburcheck_regions_short",
+    "cheburcheck_partial",
+    "cheburcheck_no_targets",
+    "cheburcheck_targets_intro",
+    "cheburcheck_targets_show",
+    "cheburcheck_restrictions",
+    "cheburcheck_remarks_badge",
+    "cheburcheck_remarks_only",
+    "cheburcheck_remarks_found",
+    "cheburcheck_static_hit",
+    "cheburcheck_static_rkn",
+    "cheburcheck_override_toggle",
+    "cheburcheck_override_placeholder",
+    "cheburcheck_probe_no_data",
+    "cheburcheck_token_label",
+    "cheburcheck_token_placeholder",
+    "cheburcheck_token_set",
+    "cheburcheck_token_not_set",
+    "cheburcheck_token_hint",
+    "cheburcheck_token_check",
+    "cheburcheck_token_ok",
+    "cheburcheck_token_failed",
+    "cheburcheck_token_required",
+    "cheburcheck_token_open_settings",
+    "cheburcheck_token_docs",
+    "cheburcheck_token_basic_only",
+    "cheburcheck_token_docs_link",
+    "cheburcheck_static_only",
+    "cheburcheck_static_only_note",
 }
 
 # The catalogue had 1218 key names right before panel access (#305). Freeze
 # the names, not translated values: a count alone misses a removed key
 # replaced by an unrelated one. Future additions must be registered here.
+TORRENT_GUARD_KEYS = {
+    'torrent_badge',
+    'torrent_guard_title',
+    'torrent_guard_on',
+    'torrent_guard_count',
+    'torrent_guard_off',
+    'torrent_guard_saved',
+    'torrent_activity_text',
+    'torrent_sig_handshake',
+    'torrent_sig_dht_query',
+    'torrent_sig_dht_short',
+    'torrent_sig_tracker',
+    'torrent_clear_confirm',
+    'torrent_guard_card_title',
+    'torrent_guard_card_hint',
+    'torrent_guard_card_off_hint',
+    'torrent_guard_card_unsupported',
+    'torrent_guard_card_enabled',
+    'torrent_guard_card_disabled',
+    'torrent_guard_card_degraded',
+}
+
 PRE_PANEL_ACCESS_KEYS_SHA256 = 'c70dff505a825b0a8506b2d1ca7d76fca9378e3f9514cc44231f7fd2a847af36'
+# Keys of the "Copy instance" panel: a later addition, declared here so the
+# frozen catalogue hash keeps guarding the original keys.
+COPY_INSTANCE_KEYS = {
+    "copy_instance_btn", "copy_instance_title", "copy_instance_desc",
+    "copy_instance_source", "copy_instance_target", "copy_instance_target_missing",
+    "copy_instance_checking", "copy_instance_preview", "copy_instance_port_busy",
+    "copy_instance_image", "copy_instance_key_warning", "copy_instance_start",
+    "copy_instance_running", "copy_instance_step", "copy_instance_success",
+    "copy_instance_failed", "copy_instance_cancelled", "copy_instance_cancel",
+    "copy_instance_close", "copy_instance_log", "copy_instance_connections",
+    "copy_instance_disk_low",
+}
 PANEL_ACCESS_KEYS = {
     'panel_access_title',
     'panel_access_intro',
@@ -73,8 +138,81 @@ PANEL_ACCESS_KEYS = {
     'panel_access_domain_label',
 }
 
+# Explicit additions from #319; keep the pre-existing catalogue fingerprint.
+USER_LIMIT_KEYS = {'max_connections_per_user_label', 'max_connections_per_user_hint'}
+TELEGRAM_ACCOUNT_KEYS = {
+    'telegram_auto_create_users', 'telegram_auto_create_users_desc',
+    'telegram_create_users_disabled', 'telegram_create_users_disabled_desc',
+    'telegram_webapp_auth', 'telegram_webapp_auth_desc',
+    'telegram_webapp_auth_invalid', 'telegram_webapp_auth_unavailable',
+    'telegram_webapp_account_not_found',
+}
+
 PROTOCOL_UNINSTALL_KEYS = {
     'uninstall_archive_confirm', 'uninstall_archived',
+}
+
+# I1 masking block (per-instance special-junk packet): install and settings.
+AWG_I1_KEYS = {
+    'awg_i1_ascii_only', 'awg_i1_auto_badge', 'awg_i1_bad_tag',
+    'awg_i1_badge_custom', 'awg_i1_canonical_tag',
+    'awg_i1_badge_default', 'awg_i1_badge_unknown', 'awg_i1_bytes_unit',
+    'awg_i1_clear', 'awg_i1_custom_domain', 'awg_i1_domain',
+    'awg_i1_domain_custom', 'awg_i1_domain_hint', 'awg_i1_empty',
+    'awg_i1_extra_hint', 'awg_i1_generate', 'awg_i1_install_memo',
+    'awg_i1_install_status', 'awg_i1_intro', 'awg_i1_manual',
+    'awg_i1_manual_hint', 'awg_i1_memo_default', 'awg_i1_memo_generated',
+    'awg_i1_need_domain', 'awg_i1_packet', 'awg_i1_pool',
+    'awg_i1_pool_hint', 'awg_i1_profile', 'awg_i1_profile_android',
+    'awg_i1_profile_any', 'awg_i1_profile_apple', 'awg_i1_profile_hint',
+    'awg_i1_profile_linux', 'awg_i1_profile_windows', 'awg_i1_regenerate',
+    'awg_i1_row_answer', 'awg_i1_row_flags', 'awg_i1_row_id',
+    'awg_i1_row_id_value', 'awg_i1_row_question', 'awg_i1_row_size',
+    'awg_i1_settings_status', 'awg_i1_title', 'awg_i1_valid',
+}
+# WARP refuses to install on a host without an AmneziaWG instance; the
+# marketplace badge and the operation error share this wording.
+SRV_WARP_NO_AWG_KEYS = {
+    'srv_warp_no_awg', 'srv_warp_err_no_awg',
+# Keys of later panels that were merged without registering them here; before
+# this set existed the frozen hash failed on an unchanged catalogue.
+}
+LATER_FEATURE_KEYS = {
+    'exit_awg3', 'exit_awg3_hint',
+    'max_connections_per_user_hint', 'max_connections_per_user_label',
+    'haproxy_desc', 'haproxy_port_hint', 'last_seen',
+    'smartroute_mark_lost', 'smartroute_mark_lost_hint',
+    'smartroute_mark_on', 'smartroute_mark_on_hint',
+    'smartroute_mark_paused', 'smartroute_mark_paused_hint',
+    'sort', 'sort_ascending', 'sort_by', 'sort_created',
+    'sort_descending', 'sort_direction', 'sort_expiry', 'sort_handshake',
+    'sort_ip', 'sort_max_speed', 'sort_name', 'sort_quota', 'sort_rx',
+    'sort_total_traffic', 'sort_tx',
+    'xray_domain', 'xray_domain_hint',
+    'xray_fingerprint_btn', 'xray_fingerprint_hint',
+    'xray_fingerprint_label', 'xray_fingerprint_saved',
+    'xray_fingerprint_title',
+    'xray_selfsteal', 'xray_selfsteal_apply', 'xray_selfsteal_current',
+    'xray_selfsteal_empty', 'xray_selfsteal_hint',
+    'xray_selfsteal_not_running', 'xray_selfsteal_note',
+    'xray_selfsteal_success', 'xray_selfsteal_target', 'xray_selfsteal_title',
+    'xray_transport', 'xray_transport_hint', 'xray_transport_tcp',
+    'xray_transport_xhttp', 'xray_update_hint',
+    'xray_update_stage_arch', 'xray_update_stage_build',
+    'xray_update_stage_check', 'xray_update_stage_done',
+    'xray_update_stage_host', 'xray_update_stage_start',
+    'xray_update_stage_swap', 'xray_update_stage_verify',
+    'xray_update_stage_version',
+}
+# Added by the v1.8.11 release (max connections per user + Telegram WebApp auth).
+# Registered here so the frozen catalogue hash keeps checking the older keys.
+RELEASE_1811_KEYS = {
+    'max_connections_per_user_label', 'max_connections_per_user_hint',
+    'telegram_auto_create_users', 'telegram_auto_create_users_desc',
+    'telegram_create_users_disabled', 'telegram_create_users_disabled_desc',
+    'telegram_webapp_account_not_found', 'telegram_webapp_auth',
+    'telegram_webapp_auth_desc', 'telegram_webapp_auth_invalid',
+    'telegram_webapp_auth_unavailable',
 }
 
 
@@ -102,6 +240,28 @@ CHEBURCHECK_KEYS = {
     'cheburcheck_still_running',
     'cheburcheck_button', 'cheburcheck_quiet_enable', 'cheburcheck_quiet_hint',
     'cheburcheck_quiet_from', 'cheburcheck_quiet_to',
+    'cheburcheck_target', 'cheburcheck_status', 'cheburcheck_regions_short',
+    'cheburcheck_partial', 'cheburcheck_no_targets', 'cheburcheck_targets_intro',
+    'cheburcheck_targets_show',
+    'cheburcheck_restrictions',
+    'cheburcheck_remarks_badge',
+    'cheburcheck_remarks_only',
+    'cheburcheck_remarks_found',
+    'cheburcheck_static_hit',
+    'cheburcheck_static_rkn',
+    'cheburcheck_override_toggle',
+    'cheburcheck_override_placeholder',
+    'cheburcheck_probe_no_data',
+    'cheburcheck_token_label', 'cheburcheck_token_placeholder',
+    'cheburcheck_token_set', 'cheburcheck_token_not_set',
+    'cheburcheck_token_hint', 'cheburcheck_token_check',
+    'cheburcheck_token_ok', 'cheburcheck_token_failed',
+    'cheburcheck_token_required', 'cheburcheck_token_open_settings',
+    'cheburcheck_token_docs',
+    'cheburcheck_token_basic_only', 'cheburcheck_token_docs_link',
+    'cheburcheck_static_only', 'cheburcheck_static_only_note',
+    'cheburcheck_progress',
+    'cheburcheck_token_ok_free', 'cheburcheck_token_credits_hint',
 }
 
 
@@ -261,7 +421,11 @@ class TestC6Translations(unittest.TestCase):
         # PANEL_ACCESS_KEYS does. The keys already inside the frozen hash (e.g.
         # the ipv6 set) must NOT be subtracted again.
         previous = '\n'.join(sorted(base - PANEL_ACCESS_KEYS - SECURITY_SETUP_KEYS
-                                    - CHEBURCHECK_KEYS - PROTOCOL_UNINSTALL_KEYS))
+                                    - CHEBURCHECK_KEYS - PROTOCOL_UNINSTALL_KEYS
+                                    - TORRENT_GUARD_KEYS
+                                    - AWG_I1_KEYS - SRV_WARP_NO_AWG_KEYS
+                                    - COPY_INSTANCE_KEYS - LATER_FEATURE_KEYS
+                                    - RELEASE_1811_KEYS - USER_LIMIT_KEYS - TELEGRAM_ACCOUNT_KEYS))
         self.assertEqual(hashlib.sha256(previous.encode('utf-8')).hexdigest(),
                          PRE_PANEL_ACCESS_KEYS_SHA256,
                          'Existing catalogue changed outside the declared additions')
@@ -269,7 +433,8 @@ class TestC6Translations(unittest.TestCase):
     def test_new_keys_present_in_every_locale(self):
         for locale in LOCALES:
             data = translation(locale)
-            for key in NEW_KEYS | PANEL_ACCESS_KEYS | PROTOCOL_UNINSTALL_KEYS:
+            for key in (NEW_KEYS | PANEL_ACCESS_KEYS | PROTOCOL_UNINSTALL_KEYS
+                        | TORRENT_GUARD_KEYS | AWG_I1_KEYS | USER_LIMIT_KEYS | TELEGRAM_ACCOUNT_KEYS):
                 self.assertIn(key, data)
                 self.assertTrue(str(data[key]).strip(), "%s empty in %s" % (key, locale))
 
