@@ -2512,6 +2512,30 @@
         </div>
     </div>
 
+    <!-- HAProxy Card -->
+    <div class="card card-hover protocol-card protocol-haproxy" id="proto-haproxy">
+        <div class="protocol-card-head">
+            <div class="protocol-icon">⚖️</div>
+            <div class="protocol-name">HAProxy</div>
+        </div>
+        <div class="flex gap-sm protocol-ctrl" id="haproxy-ctrl" style="display:none!important;"></div>
+        <div class="protocol-desc">
+            {{ _('haproxy_desc') }}
+        </div>
+        <div class="protocol-status" id="haproxy-status">
+            <span class="badge badge-warn"><span class="badge-dot"></span> {{ _('not_checked') }}</span>
+        </div>
+        <div id="haproxy-info" class="hidden">
+            <div class="protocol-info" id="haproxy-info-grid"></div>
+        </div>
+        <div class="flex gap-sm" id="haproxy-actions">
+            <button class="btn btn-primary btn-sm" onclick="openInstallModal('haproxy')" id="haproxy-install-btn"
+                style="flex:1">
+                {{ _('install') }}
+            </button>
+        </div>
+    </div>
+
     <!-- ===== Reverse Proxy teaser (locked, full grid width) ===== -->
     <div class="promo-block promo-revproxy" aria-disabled="true" role="article">
         <div class="promo-grid-bg" aria-hidden="true"></div>
@@ -3603,6 +3627,7 @@
         { proto: 'warp', category: 'services', icon: '☁️', title: 'Cloudflare WARP', descKey: 'srv_warp_card_desc' },
         { proto: 'rknblock', category: 'services', icon: '🌈', title: 'RKN Block (C24Be)', descKey: 'rknblock_desc' },
         { proto: 'nginx', category: 'web_servers', icon: '🌐', title: 'NGINX', descKey: 'nginx_desc' },
+        { proto: 'haproxy', category: 'web_servers', icon: '⚖️', title: 'HAProxy', descKey: 'haproxy_desc' },
     ];
     const MARKETPLACE_CATEGORIES = [
         { id: 'protocols', icon: '🔐', titleKey: 'protocols' },
@@ -4887,7 +4912,7 @@
 
     // Services that don't have per-user "connections" — they expose a single
     // shared endpoint (DNS/proxy/admin UI) rather than per-client configs.
-    const SERVICE_PROTOS = ['dns', 'socks5', 'adguard', 'nginx', 'exit'];
+    const SERVICE_PROTOS = ['dns', 'socks5', 'adguard', 'nginx', 'haproxy', 'exit'];
 
     function buildServiceInfoGrid(proto, info) {
         // Custom info-grid markup for non-VPN services. Returns HTML for the grid body.
@@ -4924,6 +4949,9 @@
                 <div class="protocol-info-item"><span class="protocol-info-label">${_('exit_obfuscation_short')}</span><span class="protocol-info-value">${info.obfuscation ? (info.protocol_version || _('on')) : _('off')}</span></div>
                 <div class="protocol-info-item"><span class="protocol-info-label">${_('exit_public_key')}</span><span class="protocol-info-value">${key}</span></div>
             `;
+        }
+        if (base === 'haproxy') {
+            return `<div class="protocol-info-item"><span class="protocol-info-label">${_('port')}</span><span class="protocol-info-value">${info.port || 8080}/TCP</span></div>`;
         }
         if (base === 'nginx') {
             const domain = info.domain || '—';
@@ -5049,6 +5077,11 @@
                     <button class="btn btn-secondary btn-sm" onclick="showProtocolBackups('${proto}')">${_('backup')}</button>
                     <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')">${_('uninstall')}</button>
                 `;
+            } else if (protoBase(proto) === 'haproxy') {
+                actionsEl.innerHTML = `
+                    <button class="btn btn-secondary btn-sm" onclick="showProtocolBackups('${proto}')" style="flex:1">${_('backup')}</button>
+                    <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')">${_('uninstall')}</button>
+                `;
             } else if (protoBase(proto) === 'dns') {
                 actionsEl.innerHTML = `
                     <button class="btn btn-secondary btn-sm" onclick="showProtocolBackups('${proto}')" style="flex:1">${_('backup')}</button>
@@ -5074,7 +5107,7 @@
             // unbound's static config), so we don't expose a raw editor for them.
             if (ctrlEl) {
                 ctrlEl.style.cssText = '';
-                if (protoBase(proto) === 'nginx') {
+                if (['nginx', 'haproxy'].includes(protoBase(proto))) {
                     ctrlEl.innerHTML = `
                         <button class="btn btn-secondary btn-sm" onclick="showServerConfig('${proto}')" title="${_('server_config')}">${_('config_btn')}</button>
                         <button class="btn btn-danger btn-sm" onclick="toggleContainer('${proto}', true)" title="${_('stop_container_confirm').replace('{}', '')}">${_('stop_btn')}</button>
@@ -5125,7 +5158,7 @@
             }
             if (ctrlEl) {
                 ctrlEl.style.cssText = '';
-                if (protoBase(proto) === 'nginx') {
+                if (['nginx', 'haproxy'].includes(protoBase(proto))) {
                     ctrlEl.innerHTML = `
                         <button class="btn btn-secondary btn-sm" onclick="showServerConfig('${proto}')" title="${_('server_config')}">${_('config_btn')}</button>
                         <button class="btn btn-primary btn-sm" onclick="toggleContainer('${proto}', false)" title="${_('start_container_confirm').replace('{}', '')}">${_('start_btn')}</button>
@@ -5683,6 +5716,11 @@
             portInput.disabled = false;
             portHint.textContent = _('adguard_dns_port_hint');
             adguardOpts.style.display = 'block';
+        } else if (base === 'haproxy') {
+            portLabel.textContent = _('port') + ' (TCP)';
+            portInput.value = currentInstallAnother ? nextSuggestedPort(currentInstallProto, 8080) : '8080';
+            portInput.disabled = false;
+            portHint.textContent = currentInstallAnother ? _('port_next_instance_hint') : _('haproxy_port_hint');
         } else if (base === 'nginx') {
             portLabel.textContent = _('port') + ' (HTTPS/TCP)';
             portInput.value = '443';

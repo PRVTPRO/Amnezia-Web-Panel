@@ -1322,6 +1322,8 @@
   "telegram_webapp_auth_invalid": "Telegram authorization data is invalid or expired. Please use the regular login form or reopen the app from Telegram.",
   "telegram_webapp_account_not_found": "No panel account is linked to this Telegram account. Contact your administrator or enable automatic user creation.",
   "telegram_webapp_auth_unavailable": "Telegram WebApp authorization is not configured. Please use regular login.",
+  "haproxy_desc": "TCP/HTTP load balancer in a container. Edit haproxy.cfg with the Config button — the config is validated before it is applied and the container restarts to pick it up.",
+  "haproxy_port_hint": "Port of the default HAProxy frontend. Real frontends/backends are configured in haproxy.cfg via the Config button.",
   "xray_update_hint": "Updating rebuilds the container image and recreates the container; active connections drop for a few seconds. Keys and settings are preserved. If the new core fails to start, the panel rolls back to the previous one.",
   "xray_update_stage_host": "Applying host network tuning",
   "xray_update_stage_start": "Starting the update",
