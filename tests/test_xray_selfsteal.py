@@ -122,14 +122,23 @@ class SelfstealHelpersTests(unittest.TestCase):
     def test_no_networks_yields_no_dest(self):
         self.assertIsNone(panel._selfsteal_dest({}, {}, 'amnezia-nginx'))
 
-    def test_site_check_demands_a_three_digit_curl_answer(self):
+    def test_site_check_probes_the_dest_from_inside_the_xray_container(self):
         ssh = Mock()
-        ssh.run_command.return_value = ('200', '', 0)
-        self.assertTrue(panel._selfsteal_site_ok(ssh, 'own.example', 443))
-        ssh.run_command.return_value = ('', '', 1)
-        self.assertFalse(panel._selfsteal_site_ok(ssh, 'own.example', 443))
-        ssh.run_command.return_value = ('', '', 0)
-        self.assertFalse(panel._selfsteal_site_ok(ssh, 'own.example', 443))
+        ssh.run_sudo_command.return_value = ('200', '', 0)
+        self.assertTrue(panel._selfsteal_site_ok(
+            ssh, 'amnezia-xray', 'own.example', 'amnezia-nginx:443'))
+        command = ssh.run_sudo_command.call_args[0][0]
+        self.assertIn('docker exec amnezia-xray', command)
+        self.assertIn('--resolve', command)
+        self.assertIn('own.example:443:amnezia-nginx', command)
+        ssh.run_sudo_command.return_value = ('', '', 1)
+        self.assertFalse(panel._selfsteal_site_ok(
+            ssh, 'amnezia-xray', 'own.example', 'amnezia-nginx:443'))
+        ssh.run_sudo_command.return_value = ('', '', 0)
+        self.assertFalse(panel._selfsteal_site_ok(
+            ssh, 'amnezia-xray', 'own.example', 'amnezia-nginx:443'))
+        self.assertFalse(panel._selfsteal_site_ok(
+            ssh, 'amnezia-xray', 'own.example', 'amnezia-nginx'))
 
 
 if __name__ == '__main__':

@@ -7636,12 +7636,19 @@ def _selfsteal_dest(xray_networks, nginx_networks, nginx_container):
     return None
 
 
-def _selfsteal_site_ok(ssh, domain, port):
+def _selfsteal_site_ok(ssh, xray_container, domain, dest):
     """The mask only holds while the site answers with a valid
-    certificate for the domain — verified from the host itself. DNS may
+    certificate for the domain. Probe from inside the Xray container
+    against the exact dest that will be written — the container-to-
+    container hop is the path Reality actually uses, so host-side port
+    publishing, proxy env and CA bundles cannot skew the result. DNS may
     point anywhere (relays included); --resolve forces the local hop."""
-    out, _, code = ssh.run_command(
-        f"curl -s 2>/dev/null --resolve {shlex.quote(f'{domain}:{port}:127.0.0.1')} "
+    dest_host, _, dest_port = str(dest).rpartition(':')
+    if not dest_host:
+        return False
+    out, _, code = ssh.run_sudo_command(
+        f"docker exec {shlex.quote(str(xray_container))} "
+        f"curl -s 2>/dev/null --resolve {shlex.quote(f'{domain}:{dest_port or 443}:{dest_host}')} "
         f"{shlex.quote('https://' + domain + '/')} -o /dev/null "
         f"-w '%{{http_code}}' --max-time 8")
     return code == 0 and bool(re.fullmatch(r'\d{3}', out.strip()))
@@ -7687,7 +7694,7 @@ def api_xray_selfsteal_plan(request: Request, server_id: int, protocol: str = 'x
                 'port': int(status.get('port') or 443),
                 'dest': dest,
                 'site_ok': bool(dest) and _selfsteal_site_ok(
-                    ssh, status['domain'], int(status.get('port') or 443)),
+                    ssh, xray_container, status['domain'], dest),
             })
         return {
             'xray_running': xray_running,
@@ -7727,17 +7734,16 @@ def api_xray_selfsteal_apply(request: Request, server_id: int, req: XraySelfstea
         if not domain or not status.get('container_running'):
             return JSONResponse({'error': 'The NGINX site is not ready'},
                                 status_code=409)
-        port = int(status.get('port') or 443)
+        xray_container = (protocols.get(req.protocol) or {}).get('container_name') \
+            or manager.container_name
         dest = _selfsteal_dest(
-            _docker_networks(
-                ssh, (protocols.get(req.protocol) or {}).get('container_name')
-                or manager.container_name),
+            _docker_networks(ssh, xray_container),
             _docker_networks(ssh, status['container_name']),
             status['container_name'])
         if not dest:
             return JSONResponse({'error': 'No route from the Xray container to NGINX'},
                                 status_code=409)
-        if not _selfsteal_site_ok(ssh, domain, port):
+        if not _selfsteal_site_ok(ssh, xray_container, domain, dest):
             return JSONResponse(
                 {'error': 'The site does not answer with a valid certificate '
                           'for the domain yet — issue the certificate first'},
