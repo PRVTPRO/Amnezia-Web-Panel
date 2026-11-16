@@ -114,7 +114,7 @@ class ServerPageTests(unittest.TestCase):
 
     def seed(self, header_protection):
         with open(panel.DATA_FILE, 'w', encoding='utf-8') as f:
-            json.dump({'servers': seed_servers(header_protection), 'users': [], 'user_connections': []}, f)
+            json.dump({'servers': seed_servers(header_protection), 'users': [{'id': 'admin-id', 'username': 'admin', 'password_hash': panel.hash_password('admin'), 'role': 'admin', 'enabled': True}], 'user_connections': []}, f)
 
     def login(self, client):
         login = client.post('/api/auth/login', json={'username': 'admin', 'password': 'admin'})

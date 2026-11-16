@@ -123,7 +123,7 @@ class ConnectionService:
         user = self._get_eligible_user(data, user_id)
         self._validate_channel(settings, source)
         user_connections = self._user_connections(data, user['id'])
-        max_connections = int(settings.get('max_connections_per_user', 5))
+        max_connections = self._effective_max_connections(user, settings)
         remaining = max(0, max_connections - len(user_connections))
         allowed_bases = sanitize_allowed_protocols(settings.get('allowed_protocols'))
         servers = []
@@ -144,6 +144,7 @@ class ConnectionService:
         return {
             'enabled': True,
             'max_connections_per_user': max_connections,
+            'connections_count': len(user_connections),
             'remaining_connections': remaining,
             'servers': servers,
         }
@@ -288,11 +289,20 @@ class ConnectionService:
             raise SelfServiceError('User quota is exhausted', status_code=403, forbidden=True)
         return user
 
+    def _effective_max_connections(self, user, settings):
+        try:
+            user_limit = max(0, min(100, int(user.get('max_connections') or 0)))
+        except (TypeError, ValueError, OverflowError):
+            user_limit = 0
+        if user_limit > 0:
+            return user_limit
+        return max(0, min(100, int(settings.get('max_connections_per_user', 5))))
+
     def _validate_create_request(self, data, settings, user_id, server_id, protocol, name, source):
         self._validate_channel(settings, source)
         user = self._get_eligible_user(data, user_id)
         user_connections = self._user_connections(data, user_id)
-        max_connections = int(settings.get('max_connections_per_user', 5))
+        max_connections = self._effective_max_connections(user, settings)
         if len(user_connections) >= max_connections:
             raise SelfServiceError('Maximum self-service connections reached', status_code=403, forbidden=True)
         if any(c.get('name') == name for c in user_connections):

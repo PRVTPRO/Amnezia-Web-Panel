@@ -140,7 +140,10 @@ class OrphanRecovery(unittest.IsolatedAsyncioTestCase):
         conn = data['user_connections'][0]
         self.assertEqual((conn['user_id'], conn['last_bytes'], conn['baseline']), ('owner', 60, {'month': 31}))
         record = json.loads((pathlib.Path(str(self.path) + '.recovery') / (req.operation_id + '.json')).read_bytes())
-        self.assertEqual(__import__('base64').b64decode(record['before_base64']), self.before)
+        from credential_store import CredentialStore, default_key_path
+        snapshot = CredentialStore(default_key_path(self.path)).open_bytes(
+            record['before_sealed'], 'recovery-before')
+        self.assertEqual(snapshot, self.before)
         self.assertEqual(record['phase'], 'committed')
         self.assertFalse(record['counters_verified_final'])
         self.assertNotIn('SYNTHETIC-SECRET', json.dumps(record['audit']))
@@ -369,7 +372,10 @@ class OfflineRestore(unittest.TestCase):
         result = self.run_restore()
         self.assertFalse(result['counters_verified_final'])
         record = json.loads((pathlib.Path(str(self.path) + '.recovery') / ('b' * 32 + '.json')).read_bytes())
-        self.assertEqual(__import__('base64').b64decode(record['before_base64']), self.before)
+        from credential_store import CredentialStore, default_key_path
+        snapshot = CredentialStore(default_key_path(self.path)).open_bytes(
+            record['before_sealed'], 'recovery-before')
+        self.assertEqual(snapshot, self.before)
         data = json.loads(self.path.read_bytes())
         expected = json.loads(self.backup.read_bytes())
         self.assertEqual(data['users'], expected['users'])
@@ -455,7 +461,10 @@ class OfflineRestore(unittest.TestCase):
         self.run_restore()
         self.assertEqual(journal.read_bytes(), before)
         record = json.loads((pathlib.Path(str(self.path) + '.recovery') / ('b' * 32 + '.json')).read_bytes())
-        self.assertEqual(__import__('base64').b64decode(record['peer_creates_snapshot']['base64']), before)
+        from credential_store import CredentialStore, default_key_path
+        snapshot = CredentialStore(default_key_path(self.path)).open_bytes(
+            record['peer_creates_snapshot']['sealed'], 'peer-creates-snapshot')
+        self.assertEqual(snapshot, before)
 
 
 class InterlockBudgets(unittest.IsolatedAsyncioTestCase):

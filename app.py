@@ -1,9 +1,11 @@
 import os
 import sys
 import json
+import copy as copy_module
 import logging
 import base64
 import hashlib
+import hmac
 import ipaddress
 import secrets
 import uuid
@@ -17,6 +19,7 @@ import tempfile
 import subprocess
 import tarfile
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 import urllib.parse
 import urllib.request
@@ -41,7 +44,7 @@ from pydantic import BaseModel, Field, StrictBool, constr, conint
 from typing import Optional, List
 import uvicorn
 import httpx
-
+import cheburcheck
 try:
     from multicolorcaptcha import CaptchaGenerator
 except ImportError:
@@ -52,6 +55,15 @@ from managers.ssh_manager import SSHManager, configure_jump_resolver
 from managers import ssh_trust
 from managers import split_tunnel
 from managers.awg_manager import AWGManager, normalize_special_junk
+from managers.awg_junk import (
+    DEVICE_PROFILES as AWG_I1_DEVICE_PROFILES,
+    catalog as awg_i1_catalog,
+    generate_i1 as awg_generate_i1,
+    is_valid_domain as awg_i1_is_valid_domain,
+    parse_i1 as awg_parse_i1,
+    pool_for as awg_i1_pool_for,
+)
+from managers.awg_manager import AWGManager, ICMP_ECHO_ALLOW_SCRIPT, normalize_special_junk
 from server_stats import collect_host_stats
 from managers.awg_plugin_updater import (
     COMPONENTS as AWG_PLUGIN_COMPONENTS,
@@ -60,9 +72,25 @@ from managers.awg_plugin_updater import (
     PluginUpdateError,
     stage_step as awg_plugin_stage_step,
 )
-from managers.xray_manager import XrayManager
+from managers.xray_manager import (
+    XrayManager,
+    XRAY_DEFAULT_FINGERPRINT,
+    XRAY_FINGERPRINTS,
+)
 from managers.wireguard_manager import WireGuardManager
 from managers.backup_manager import BackupManager
+from managers import torrent_events
+from managers.torrent_guard import (
+    DEFAULT_MODE as TORRENT_DEFAULT_MODE,
+    MODES as TORRENT_MODES,
+    normalize_mode as normalize_torrent_mode,
+from managers.instance_copy import (
+    COPY_STEPS as INSTANCE_COPY_STEPS,
+    CopyCancelled,
+    InstanceCopier,
+    InstanceCopyError,
+    proto_base as instance_copy_base,
+)
 import telegram_bot as tg_bot
 
 from exit_link_service import ExitLinkError, ExitLinkService
@@ -92,6 +120,7 @@ from mail_service import (
 from protocol_names import protocol_display_name, server_protocol_names
 from pwa import build_manifest
 from captcha_challenges import captcha_challenges
+from credential_store import CredentialError, CredentialStore, default_key_path
 from user_state import reconcile_user_state, apply_traffic_samples, traffic_server_identity
 from connection_service import (
     ConnectionService,
@@ -396,7 +425,7 @@ DATA_FILE = os.path.abspath(os.path.expanduser(
 ssh_trust.configure(DATA_FILE)
 # Client configs read the bypass list from whatever DATA_FILE is at call time.
 split_tunnel.configure(lambda: DATA_FILE)
-CURRENT_VERSION = "v1.8.9"
+CURRENT_VERSION = "v1.8.11"
 
 # Authoritative operational state for WARP lives outside data.json: dozens of
 # panel writers save their own snapshots and would overwrite it.
@@ -461,7 +490,8 @@ from ipv6_operations import OperationStore
 import peer_lifecycle_lock
 from peer_accounting import guard_user_deletions, ownership_rows
 from peer_recovery import (RecoveryStore, RecoveryError, PanelLease, STATE_FILE_LOCK,
-                           GENERATION, digest as recovery_digest, orphan_scope, validate_backup)
+                           GENERATION, digest as recovery_digest, orphan_scope, validate_backup,
+                           migrate_recovery_snapshots)
 from peer_recovery import verify_awg_peer_absent, check_create_journal, require_repair_target, DISASTER_HOLD
 from peer_finalization import (
     FinalizationError,
@@ -551,6 +581,12 @@ def srv_warp_ctx(server, protocol):
 warp_proto_record = proto_record
 
 
+def _credential_store():
+    # Resolve from the current DATA_FILE so tests and restored trees never use
+    # another installation's key by accident.
+    return CredentialStore(default_key_path(DATA_FILE))
+
+
 def load_data():
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, 'r', encoding='utf-8') as f:
@@ -561,6 +597,8 @@ def load_data():
     data.setdefault('users', [])
     data.setdefault('user_connections', [])
     data.setdefault('api_tokens', [])
+    # Legacy users inherit the configured limit through ConnectionService.
+    # A read must not migrate unrelated users or persist defaults on denial.
     settings = data.setdefault('settings', {})
     settings.setdefault('appearance', {
         'title': 'Amnezia',
@@ -579,7 +617,12 @@ def load_data():
     settings.setdefault('captcha', {'enabled': False})
     settings.setdefault('exit_nodes', {'default_exit_uid': ''})
     settings.setdefault('ssh_jump', {'jump_host_uid': ''})
-    settings.setdefault('telegram', {'token': '', 'enabled': False})
+    telegram_settings = settings.setdefault('telegram', {'token': '', 'enabled': False})
+    if not isinstance(telegram_settings, dict):
+        telegram_settings = settings['telegram'] = {'token': '', 'enabled': False}
+    telegram_settings.setdefault('auto_create_users', False)
+    telegram_settings.setdefault('create_users_disabled', False)
+    telegram_settings.setdefault('webapp_initdata_auth', False)
     mail = settings.setdefault('mail', dict(DEFAULT_MAIL_SETTINGS))
     for key, value in DEFAULT_MAIL_SETTINGS.items():
         mail.setdefault(key, value)
@@ -618,6 +661,15 @@ def load_data():
         # (server['rknblock']). The old flag is dropped so every server shows
         # "not installed" until the app is installed from the store.
         server.pop('rkn_block_enabled', None)
+    # Transparent upgrade: legacy plaintext SSH fields are sealed atomically on
+    # first read, then only the AES-GCM envelope is kept on disk.
+    needs_save = False
+    if any(isinstance(s, dict) and ('password' in s or 'private_key' in s)
+           for s in data.get('servers', [])):
+        from credential_store import CredentialStore, default_key_path
+        needs_save = CredentialStore(default_key_path(DATA_FILE)).seal_document(data) or needs_save
+    if needs_save:
+        save_data(data)
     return data
 
 
@@ -631,6 +683,10 @@ def save_data(data):
             if generation and data.get(GENERATION) != generation:
                 raise RecoveryError('stale_snapshot_after_recovery')
         os.makedirs(os.path.dirname(DATA_FILE) or '.', exist_ok=True)
+        # Last line of defense for every writer (including Telegram/import):
+        # plaintext SSH credentials must never reach the JSON document.
+        from credential_store import CredentialStore, default_key_path
+        CredentialStore(default_key_path(DATA_FILE)).seal_document(data)
         atomic_json(DATA_FILE, data)
 
 
@@ -659,10 +715,12 @@ def _ssh_jump_server(data, target):
 def _ssh_manager_for(server, data, *, allow_jump=True):
     jump = _ssh_jump_server(data, server) if allow_jump else None
     jump_manager = (_ssh_manager_for(jump, data, allow_jump=False) if jump else None)
+    from credential_store import CredentialStore, default_key_path
+    password, private_key = CredentialStore(default_key_path(DATA_FILE)).resolve(server)
     return SSHManager(
         host=server['host'], port=server.get('ssh_port', 22),
-        username=server['username'], password=server.get('password'),
-        private_key=server.get('private_key'),
+        username=server['username'], password=password,
+        private_key=private_key,
         connect_cooldown_base=float(server.get('ssh_cooldown_base') or 30),
         jump_manager=jump_manager,
     )
@@ -1391,7 +1449,7 @@ async def wait_for_tunnel_url(provider: str, seconds: int = 20):
     return get_tunnel_status(provider)
 
 
-BASE_PROTOCOLS = ['awg', 'awg2', 'awg3', 'awg_legacy', 'xray', 'telemt', 'dns', 'wireguard', 'socks5', 'adguard', 'nginx', 'exit']
+BASE_PROTOCOLS = ['awg', 'awg2', 'awg3', 'awg_legacy', 'xray', 'telemt', 'dns', 'wireguard', 'socks5', 'adguard', 'nginx', 'haproxy', 'exit']
 MULTI_INSTANCE_PROTOCOLS = {'awg', 'awg2', 'awg3', 'awg_legacy', 'xray', 'telemt', 'socks5'}
 
 
@@ -1475,6 +1533,7 @@ def protocol_container_name(protocol: str) -> Optional[str]:
         'socks5': 'amnezia-socks5proxy',
         'adguard': 'amnezia-adguard',
         'nginx': 'amnezia-nginx',
+        'haproxy': 'amnezia-haproxy',
         'exit': 'amnezia-exit',
     }
     name = base_names.get(base)
@@ -1510,6 +1569,9 @@ def get_protocol_manager(ssh, protocol: str):
     elif base == 'nginx':
         from managers.nginx_manager import NginxManager
         return NginxManager(ssh, protocol)
+    elif base == 'haproxy':
+        from managers.haproxy_manager import HaproxyManager
+        return HaproxyManager(ssh, protocol)
     elif base == 'exit':
         from managers.exit_manager import ExitManager
         return ExitManager(ssh, protocol)
@@ -1630,6 +1692,32 @@ def split_dns(dns):
     return parts[0], parts[1]
 
 
+def awg_i1_domain_from(domain, pool=None):
+    """Validate a masking domain; '' or None means "pick one at random".
+
+    A domain from the built-in catalog brings its own address pool. A custom
+    domain needs an explicit pool, otherwise the answer would pair a name with
+    an address from a foreign network - exactly the mismatch this feature is
+    meant to remove.
+    """
+    name = (domain or '').strip().lower()
+    if not name:
+        return None
+    if not awg_i1_is_valid_domain(name):
+        raise ValueError('domain must look like example.com: ASCII letters, '
+                         'digits and hyphens only, no scheme, no spaces')
+    pool_name = (pool or '').strip().lower()
+    if pool_name and awg_i1_pool_for(pool_name) is None:
+        raise ValueError(f'unknown address pool: {pool}')
+    if awg_i1_pool_for(name) is not None and pool_name and pool_name != name:
+        # The catalog already knows this domain's network; a different pool
+        # would silently produce a packet from a foreign network.
+        raise ValueError(f'{name} already has its own address pool')
+    if awg_i1_pool_for(name) is None and not pool_name:
+        raise ValueError('a custom domain needs an address pool')
+    return name
+
+
 def awg_special_junk_from(req):
     """Collect I1-I5 from a request, or None when the form sent none of them."""
     values = {key: getattr(req, f'awg_{key}', None) for key in ('i1', 'i2', 'i3', 'i4', 'i5')}
@@ -1670,6 +1758,7 @@ def protocol_short_name(protocol: str, header_protection=False, protocol_version
         'dns': 'DNS',
         'adguard': 'AdGuard',
         'nginx': 'NGINX',
+        'haproxy': 'HAProxy',
         'exit': 'Exit',
     }
     name = names.get(base, base.upper())
@@ -1782,6 +1871,20 @@ def build_xray_client_config(link):
             stream.setdefault('grpcSettings', {})['serviceName'] = query['serviceName']
         if 'mode' in query:
             stream.setdefault('grpcSettings', {})['multiMode'] = query['mode'] == 'multi'
+    elif network == 'xhttp':
+        settings = stream.setdefault('xhttpSettings', {})
+        if query.get('path', '/') != '/':
+            settings['path'] = query['path']
+        if 'host' in query:
+            settings['host'] = query['host']
+        if 'mode' in query:
+            settings['mode'] = query['mode']
+        if 'extra' in query:
+            # extra rides on the link as compact, percent-encoded JSON
+            try:
+                settings['extra'] = json.loads(query['extra'])
+            except ValueError:
+                pass
 
     security = query.get('security', 'none')
     tls_key = 'xtlsSettings' if security == 'xtls' else ('tlsSettings' if security == 'tls' else 'realitySettings')
@@ -1829,6 +1932,24 @@ def build_amnezia_xray_config(config_text, description):
         'description': description,
         'hostName': client_config['outbounds'][0]['settings']['vnext'][0]['address'],
     }
+
+
+def xray_stored_fingerprint(server, protocol):
+    """The Reality fingerprint the panel remembers for this xray connection
+    (a protocol record field in data.json), or None for the built-in default."""
+    if protocol_base(protocol) != 'xray':
+        return None
+    record = (server.get('protocols') or {}).get(protocol) or {}
+    fp = record.get('fingerprint')
+    return fp if fp in XRAY_FINGERPRINTS else None
+
+
+def xray_fp_kwargs(server, protocol):
+    """Keyword args carrying the stored fingerprint into XrayManager link
+    builders; empty for every other protocol so managers keep their signature."""
+    if protocol_base(protocol) != 'xray':
+        return {}
+    return {'fingerprint': xray_stored_fingerprint(server, protocol)}
 
 
 def build_amnezia_config(config_text, description):
@@ -2160,7 +2281,7 @@ def verify_password(password: str, password_hash: str) -> bool:
     try:
         salt, h = password_hash.split('$', 1)
         new_h = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 100000)
-        return new_h.hex() == h
+        return secrets.compare_digest(new_h.hex(), h)
     except Exception:
         return False
 
@@ -2580,6 +2701,17 @@ def static_version():
     return str(int(newest))
 
 
+def cheburcheck_enabled(data=None):
+    """Master switch for the Cheburcheck feature.
+
+    Off by default: nothing (badges, header button, popup, background checks)
+    is rendered or started until an administrator turns it on.
+    """
+    if data is None:
+        data = load_data()
+    return bool((data.get('settings') or {}).get('cheburcheck', {}).get('enabled'))
+
+
 def tpl(request, template, **kwargs):
     data = load_data()
     lang = request.cookies.get('lang', 'en')
@@ -2602,8 +2734,19 @@ def tpl(request, template, **kwargs):
         # The login page is the only public page; it must not dump the whole
         # UI dictionary (a feature showcase of the panel) into view-source.
         'login_translations_json': json.dumps({
-            k: _t(k, lang) for k in ('login', 'logging_in', 'login_error')
+            k: _t(k, lang) for k in ('login', 'logging_in', 'login_error',
+                                     'setup_submit', 'setup_creating', 'setup_error',
+                                     'telegram_webapp_auth_invalid',
+                                     'telegram_webapp_account_not_found',
+                                     'telegram_webapp_auth_unavailable')
         }),
+        'all_translations_json': json.dumps(TRANSLATIONS),
+        'cheburcheck_enabled': cheburcheck_enabled(data),
+        'telegram_webapp_auth_enabled': bool(
+            data.get('users')
+            and (data.get('settings', {}).get('telegram') or {}).get('webapp_initdata_auth')
+            and (data.get('settings', {}).get('telegram') or {}).get('token')
+        ),
         'all_translations_json': json.dumps(TRANSLATIONS)
     }
     ctx.update(kwargs)
@@ -2638,10 +2781,20 @@ def service_worker():
 
 # ======================== Pydantic Models ========================
 
+class TelegramWebAppAuthRequest(BaseModel):
+    init_data: str = Field(..., min_length=1, max_length=16384)
+
+
 class LoginRequest(BaseModel):
     username: str
     password: str
     captcha: Optional[str] = None
+
+
+class InitialSetupRequest(BaseModel):
+    username: str
+    password: str
+    password_confirm: str
 
 
 class AddServerRequest(BaseModel):
@@ -2694,9 +2847,13 @@ class InstallProtocolRequest(BaseModel):
     # NGINX
     nginx_domain: Optional[str] = None
     nginx_email: Optional[str] = None
+    # Xray
+    xray_transport: Optional[str] = None  # 'tcp' (legacy) or 'xhttp'
+    xray_domain: Optional[str] = None     # optional SNI/domain; empty keeps the default
     # Exit node
     exit_subnet: Optional[str] = None       # transit subnet, default 10.9.0.0/24
     exit_obfuscation: Optional[bool] = None  # AmneziaWG obfuscation on the transit link
+    exit_awg3: Optional[bool] = None         # ...and use the AWG 3.1 key set
     # AmneziaWG: values that end up in the generated client configs
     awg_mtu: Optional[str] = None
     awg_dns1: Optional[str] = None
@@ -2707,6 +2864,10 @@ class InstallProtocolRequest(BaseModel):
     awg_i3: Optional[str] = None
     awg_i4: Optional[str] = None
     awg_i5: Optional[str] = None
+    # Masking domain for the generated I1; None/'' picks one at random, so an
+    # install that never opened the I1 block still gets its own packet.
+    awg_i1_domain: Optional[str] = None
+    awg_i1_pool: Optional[str] = None
 
 
 class AwgSettingsRequest(BaseModel):
@@ -2720,6 +2881,15 @@ class AwgSettingsRequest(BaseModel):
     i3: Optional[str] = None
     i4: Optional[str] = None
     i5: Optional[str] = None
+    # Regenerate I1 for a domain instead of pasting a literal packet.
+    i1_domain: Optional[str] = None
+    i1_pool: Optional[str] = None
+    regenerate_i1: Optional[bool] = None
+
+
+class I1PreviewRequest(BaseModel):
+    domain: Optional[str] = None
+    pool: Optional[str] = None
 
 
 class ExitPeerAddRequest(BaseModel):
@@ -2883,6 +3053,18 @@ class ConnectionActionRequest(BaseModel):
     allow_unverified: bool = False
 
 
+class TorrentGuardRequest(BaseModel):
+    """Режим торрент-фильтра инстанса: on / count / off."""
+    protocol: str = 'awg'
+    mode: str = 'on'
+
+
+class TorrentClearRequest(BaseModel):
+    """Снятие метки торрент-активности: ключ (client_id) или адрес пира."""
+    protocol: str = ''
+    client_id: str = ''
+    ip: str = ''
+
 class RenameConnectionRequest(BaseModel):
     protocol: str = 'awg'
     client_id: str = ''
@@ -2896,6 +3078,19 @@ class ConnectionSpeedRequest(BaseModel):
     # Validate numeric bounds in the handler so non-standard JSON NaN/Infinity
     # also receive a JSON error without serializing the invalid number back.
     max_speed: float = Field(strict=True, description='Finite Mbit/s, 0..1000000 in steps of 0.1; 0 = unlimited')
+
+
+class XrayUpdateRequest(BaseModel):
+    protocol: str = 'xray'
+    # None/'' updates to the latest published release.
+    target: Optional[str] = None
+      
+      
+class XrayFingerprintRequest(BaseModel):
+    protocol: str = 'xray'
+    # None/'' resets to the built-in default (chrome).
+    fingerprint: Optional[str] = None
+
 
 class SaveConnectionConfigRequest(BaseModel):
     protocol: str = 'awg'
@@ -2930,6 +3125,7 @@ class AddUserRequest(BaseModel):
     telemt_secret: Optional[str] = None
     telemt_ad_tag: Optional[str] = None
     telemt_max_conns: Optional[int] = None
+    max_connections: int = Field(0, ge=0, le=100)
 
 
 
@@ -2946,6 +3142,11 @@ class NginxSiteSaveRequest(BaseModel):
 class BackupDownloadRequest(BaseModel):
     protocol: str
     filename: str
+
+
+class InstanceCopyRequest(BaseModel):
+    protocol: str
+    target_server_id: int
 
 
 class AppearanceSettings(BaseModel):
@@ -2990,6 +3191,9 @@ class DuckDNSApplyRequest(BaseModel):
 class TelegramSettings(BaseModel):
     token: str = ''
     enabled: bool = False
+    auto_create_users: bool = False
+    create_users_disabled: bool = False
+    webapp_initdata_auth: bool = False
 
 
 class MailSettings(BaseModel):
@@ -3015,7 +3219,7 @@ class SelfServiceSettings(BaseModel):
     enabled: bool = False
     web_enabled: bool = True
     telegram_enabled: bool = True
-    max_connections_per_user: int = Field(5, ge=1, le=100)
+    max_connections_per_user: int = Field(5, ge=0, le=100)
     rate_limit_count: int = Field(3, ge=1, le=100)
     rate_limit_window_seconds: int = Field(60, ge=1, le=86400)
     allowed_protocols: List[str] = Field(default_factory=lambda: ['awg', 'awg2'])
@@ -3030,6 +3234,7 @@ class SelfServiceConnectionRequest(BaseModel):
 
 
 class UpdateUserRequest(BaseModel):
+    max_connections: Optional[int] = Field(None, ge=0, le=100)
     username: Optional[str] = None
     telegramId: Optional[str] = None
     email: Optional[str] = None
@@ -3145,23 +3350,215 @@ class TunnelStartRequest(BaseModel):
 CONN_MONITOR_INTERVAL = 600
 
 
+
+# Журнал торрент-событий живёт в панели, а не в контейнере: пересоздание
+# инстанса стирает правила, но не факт нарушения (нужен для разбора жалоб).
+TORRENT_EVENTS_FILE = os.path.join(os.path.dirname(DATA_FILE), 'torrent_events.json')
+_TORRENT_EVENTS_LOCK = threading.Lock()
+
+# Кэш журнала: читаем файл только когда он реально изменился (mtime+size).
+# Иначе каждый опрос плитки (раз в минуту на вкладку) и каждая страница
+# сервера заново читали и санитизировали весь JSON.
+_TORRENT_JOURNAL_CACHE = {'stamp': None, 'data': None}
+
+# Последнее состояние фильтра по (server_key, protocol) для UI: без него
+# админ видел «включено», даже когда правила не встали.
+_TORRENT_HEALTH = {}
+_TORRENT_HEALTH_LOCK = threading.Lock()
+
+# Протоколы, где трафик на интерфейсе уже расшифрован: сигнатуры видны.
+TORRENT_GUARD_PROTOCOLS = ('awg', 'awg2', 'awg3', 'awg_legacy', 'wireguard')
+
+
+def _torrent_mode_of(server, proto):
+    """Режим фильтра инстанса. По умолчанию — защита включена."""
+    entry = (server.get('protocols') or {}).get(proto) or {}
+    if not isinstance(entry, dict):
+        return TORRENT_DEFAULT_MODE
+    return normalize_torrent_mode(entry.get('torrent_guard') or TORRENT_DEFAULT_MODE)
+
+
+def _torrent_journal():
+    """Один снимок журнала на запрос; перечитываем только при изменении файла."""
+    with _TORRENT_EVENTS_LOCK:
+        try:
+            stat = os.stat(TORRENT_EVENTS_FILE)
+            stamp = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            stamp = None
+        if stamp is not None and _TORRENT_JOURNAL_CACHE['stamp'] == stamp:
+            return _TORRENT_JOURNAL_CACHE['data']
+        data = torrent_events.load(TORRENT_EVENTS_FILE)
+        _TORRENT_JOURNAL_CACHE['stamp'] = stamp
+        _TORRENT_JOURNAL_CACHE['data'] = data
+        return data
+
+
+def _torrent_set_health(server, proto, result):
+    """Запоминает последний результат коллектора для UI (без SSH на GET)."""
+    key = torrent_events.server_key(server)
+    if not key:
+        return
+    error = (result or {}).get('error') or ''
+    with _TORRENT_HEALTH_LOCK:
+        bucket = _TORRENT_HEALTH.setdefault(key, {})
+        bucket[proto] = {'ok': not error, 'error': error,
+                         'ts': int(time.time())}
+
+
+def _torrent_health_for(server):
+    """Сводка здоровья фильтра по серверу для карточки и списка подключений."""
+    key = torrent_events.server_key(server)
+    if not key:
+        return {}
+    with _TORRENT_HEALTH_LOCK:
+        bucket = dict(_TORRENT_HEALTH.get(key) or {})
+    if not bucket:
+        return {}
+    errors = [item['error'] for item in bucket.values() if item.get('error')]
+    latest = max(int(item.get('ts') or 0) for item in bucket.values())
+    return {'ok': not errors, 'error': errors[0] if errors else '',
+            'ts': latest, 'protocols': bucket}
+
+
+def _torrent_summary_for(server, proto=None, journal=None):
+    """Сводка журнала по серверу (или по одному протоколу)."""
+    key = torrent_events.server_key(server)
+    if not key:
+        return {}
+    if journal is None:
+        journal = _torrent_journal()
+    summary = torrent_events.summary(journal, key)
+    if proto:
+        item = summary.get(proto)
+        return {proto: item} if item else {}
+    return summary
+
+
+def _torrent_peer_buckets(server, proto, journal=None):
+    """События по адресам пиров одного инстанса (для страницы сервера)."""
+    key = torrent_events.server_key(server)
+    if not key:
+        return {}
+    if journal is None:
+        journal = _torrent_journal()
+    return torrent_events.peer_buckets(journal, key, proto)
+
+
+def _torrent_record_events(server, proto, events, manager=None):
+    """Пишет события коллектора в журнал панели (TTL 30 дней, 20 на пира).
+
+    Событие приходит по tunnel-IP; чтобы плитка могла дать deep link сразу до
+    ключа, адрес переводится в client_id через clientsTable. Лишний SSH-заход
+    делается только когда события реально есть, то есть редко.
+    """
+    key = torrent_events.server_key(server)
+    events = list(events or ())
+    if not key or not events:
+        return 0
+    ip_map = {}
+    if manager is not None:
+        try:
+            clients = _manager_call(manager, 'get_clients', proto) or []
+            for client in clients:
+                user_data = client.get('userData') or {}
+                ip = user_data.get('clientIp') or ''
+                if not ip:
+                    m = re.search(r'(\d+\.\d+\.\d+\.\d+)',
+                                  user_data.get('allowedIps') or '')
+                    ip = m.group(1) if m else ''
+                if ip:
+                    ip_map[ip] = client.get('clientId') or ''
+        except Exception as e:
+            logger.warning('torrent journal: client map failed: %s', e)
+    added = 0
+    with _TORRENT_EVENTS_LOCK:
+        journal = torrent_events.load(TORRENT_EVENTS_FILE)
+        torrent_events.prune(journal)
+        for event in events:
+            ip = event.get('ip')
+            added += torrent_events.record(
+                journal, key, proto, ip, [event], client_id=ip_map.get(ip, ''))
+        if added:
+            try:
+                torrent_events.save(TORRENT_EVENTS_FILE, journal)
+            except OSError as e:
+                logger.warning('torrent journal save failed: %s', e)
+    return added
+
+
+def _torrent_prune():
+    """Снимает просроченные события независимо от прихода новых."""
+    with _TORRENT_EVENTS_LOCK:
+        journal = torrent_events.load(TORRENT_EVENTS_FILE)
+        removed = torrent_events.prune(journal)
+        if removed:
+            try:
+                torrent_events.save(TORRENT_EVENTS_FILE, journal)
+            except OSError as e:
+                logger.warning('torrent journal prune save failed: %s', e)
+        return removed
+
+
+def _conn_monitor_once(data):
+    """Один проход по всем инстансам: flood-статистика + торрент-фильтр.
+
+    Инстансы обходятся параллельно (4 потока): раньше зависшая нода съедала
+    до 300 с на протокол и остальные ноды всё это время не восстанавливали
+    правила после перезагрузки.
+    """
+    tasks = []
+    for server in data.get('servers', []):
+        protocols = server.get('protocols') or {}
+        for proto, entry in protocols.items():
+            if protocol_base(proto) not in TORRENT_GUARD_PROTOCOLS:
+                continue
+            if not isinstance(entry, dict) or entry.get('installed') is False:
+                continue
+            tasks.append((server, proto))
+
+    def work(item):
+        server, proto = item
+        try:
+            manager = get_protocol_manager(get_ssh(server), proto)
+            # Flood-мониторинг остаётся там же, где был: только AWG.
+            if protocol_base(proto) in ('awg', 'awg2', 'awg3'):
+                try:
+                    manager.collect_conn_stats(proto)
+                except Exception as e:                  # noqa: BLE001
+                    logger.warning(
+                        f"conn monitor: {server.get('host')} {proto}: {e}")
+            guard_factory = getattr(manager, 'torrent_guard', None)
+            if not callable(guard_factory):
+                return
+            result = guard_factory(proto).collect(_torrent_mode_of(server, proto))
+            _torrent_set_health(server, proto, result)
+            if result.get('error'):
+                logger.warning(
+                    f"torrent guard: {server.get('host')} {proto}: "
+                    f"{result['error']}")
+            elif result.get('events'):
+                _torrent_record_events(server, proto, result['events'], manager)
+        except Exception as e:                          # noqa: BLE001
+            _torrent_set_health(server, proto, {'error': str(e)})
+            logger.warning(
+                f"conn monitor: {server.get('host')} {proto}: {e}")
+
+    if tasks:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(work, tasks))
+
+
 def _conn_monitor_loop():
-    from managers.awg_manager import AWGManager
     while True:
         try:
-            data = load_data()
-            for server in data.get('servers', []):
-                protocols = server.get('protocols', {}) or {}
-                for proto in list(protocols):
-                    if protocol_base(proto) not in ('awg', 'awg2', 'awg3'):
-                        continue
-                    try:
-                        AWGManager(get_ssh(server)).collect_conn_stats(proto)
-                    except Exception as e:
-                        logger.warning(
-                            f"conn monitor: {server.get('host')} {proto}: {e}")
+            _conn_monitor_once(load_data())
         except Exception as e:
             logger.warning(f"conn monitor loop: {e}")
+        try:
+            _torrent_prune()
+        except Exception as e:
+            logger.warning(f"torrent journal prune: {e}")
         time.sleep(CONN_MONITOR_INTERVAL)
 
 
@@ -3190,18 +3587,9 @@ async def startup():
     _start_conn_monitor()
     _start_duckdns_monitor()
     changed = False
-    if not data.get('users'):
-        data['users'] = [{
-            'id': str(uuid.uuid4()),
-            'username': 'admin',
-            'password_hash': hash_password('admin'),
-            'role': 'admin',
-            'enabled': True,
-            'created_at': datetime.now().isoformat(),
-        }]
-        changed = True
-        logger.info("Default admin created (admin / admin)")
-    
+    # No fixed credentials are created. A fresh installation stays at the
+    # first-run setup form until an administrator is explicitly registered.
+
     # Migration for sharing fields and traffic reset strategy
     for u in data['users']:
         migrated = False
@@ -3267,6 +3655,16 @@ async def startup():
 
     if changed:
         save_data(data)
+    # Cheburcheck (block checks from Russia) settings.
+    # Only a real, name-keyed block is migrated here; missing keys are defaulted
+    # on read instead of written at startup, so a fresh install stays untouched
+    # until an administrator actually saves the settings.
+    if _cheburcheck_migrate_settings(data):
+        changed = True
+        logger.info('Cheburcheck: per-server flags moved from names to uids')
+
+    if migrate_recovery_snapshots(DATA_FILE):
+        logger.info('Encrypted legacy recovery snapshots')
 
     # A Docker restart or a rebuild that was running when the panel died
     # cannot be finished or verified: report it as interrupted.
@@ -3276,8 +3674,13 @@ async def startup():
         logger.warning("Could not mark stale IPv6 operations", exc_info=True)
 
     # Start periodic background tasks
+    try:
+        _cheburcheck_startup_cache(data)
+    except Exception:
+        logger.warning('Cheburcheck: cache load/migration failed', exc_info=True)
     asyncio.create_task(periodic_background_tasks())
     asyncio.create_task(exit_failover_background_loop())
+    asyncio.create_task(cheburcheck_background_loop())
 
     # Re-apply public-port forwards on the fleet: hand-made iptables rules do
     # not survive reboots on their own, and only some hosts persist them.
@@ -3287,12 +3690,16 @@ async def startup():
     # One-shot: old RKN installs have no [Install] in the unit and lose their
     # rules at reboot. Runs in the background, never blocks startup.
     asyncio.create_task(rkn_boot_restore_migration())
+    # One-shot: older panels dropped ICMP echo-request on INPUT, which made
+    # hosts unpingable and hid tunnel ICMP. New installs are fixed; this
+    # clears the rule on hosts provisioned before the fix.
+    asyncio.create_task(icmp_echo_unblock_migration())
 
     # Start Telegram bot if enabled
     tg_cfg = data.get('settings', {}).get('telegram', {})
     if tg_cfg.get('enabled') and tg_cfg.get('token'):
         logger.info("Starting Telegram bot from saved settings...")
-        tg_bot.launch_bot(tg_cfg['token'], load_data, generate_vpn_link, save_data, self_service_svc=self_service_connections)
+        tg_bot.launch_bot(tg_cfg['token'], load_data, generate_vpn_link, save_data, self_service_svc=self_service_connections, credential_resolver=lambda server: _credential_store().resolve(server))
 
 
 def _auto_backup_due(auto_backup: dict, now: Optional[datetime] = None) -> bool:
@@ -3494,6 +3901,510 @@ async def sync_user_traffic_and_state():
             await asyncio.gather(*(perform_toggle_user({}, uid, False) for uid in pending))
 
 
+CHEBURCHECK_CACHE = {}                  # uid -> {target: record}
+CHEBURCHECK_CACHE_LOCK = asyncio.Lock()
+_CHEBURCHECK_TASK = None
+# server uid -> asyncio.Task for one-shot runs started from the UI
+_CHEBURCHECK_RUNNING = {}
+_CHEBURCHECK_SPACING = 13               # seconds between any two checks
+# Прогресс пакетного прогона для интерфейса настроек: сколько серверов уже
+# проверено из запущенных. Пишется только в _cheburcheck_run_batch.
+_CHEBURCHECK_PROGRESS = {'running': False, 'done': 0, 'total': 0, 'current': ''}
+
+# Client-facing protocols whose public endpoints are worth checking. Infrastructure
+# protocols (nginx/adguard/dns/exit, ...) never enter the automatic resolution.
+CHEBURCHECK_CLIENT_PROTOCOLS = ('awg', 'awg2', 'awg3', 'awg_legacy', 'xray',
+                                'wireguard', 'telemt', 'socks5')
+
+
+def _cheburcheck_cache_path():
+    # Resolved at call time: tests and operators repoint DATA_FILE.
+    return DATA_FILE + '.cheburcheck_cache.json'
+
+
+def _cheburcheck_legacy_path():
+    return os.path.join(os.path.dirname(DATA_FILE), 'state', 'cheburcheck.json')
+
+
+def _cheburcheck_normalize_targets(values):
+    """Validated, deduplicated, sorted target list. Raises ValueError."""
+    out = set()
+    for value in values:
+        host = normalize_public_host(value)
+        if not host:
+            raise ValueError('empty target')
+        out.add(host)
+    return sorted(out)
+
+
+def _cheburcheck_override(cfg, uid):
+    if uid is None:
+        return None
+    override = (cfg.get('targets') or {}).get(uid)
+    return list(override) if override else None
+
+
+def cheburcheck_targets(server, cfg=None):
+    """Addresses to check for one server.
+
+    Always includes the server's own (SSH) address and the public endpoint of
+    every installed client protocol instance. A per-server extra list adds
+    domains on top of that set; it does not replace it.
+    """
+    if cfg is None:
+        cfg = (load_data().get('settings') or {}).get('cheburcheck') or {}
+    out = set()
+    host = str(server.get('host') or '').strip()
+    if host:
+        out.add(host)
+    protocols = server.get('protocols')
+    if isinstance(protocols, dict):
+        for proto, record in protocols.items():
+            if not isinstance(record, dict):
+                continue
+            if not record.get('installed', True):
+                continue
+            if protocol_base(str(proto)) not in CHEBURCHECK_CLIENT_PROTOCOLS:
+                continue
+            target, _port = protocol_public_endpoint(server, proto)
+            target = str(target or '').strip()
+            if target:
+                out.add(target)
+    override = _cheburcheck_override(cfg, server.get('uid'))
+    if override:
+        try:
+            out.update(_cheburcheck_normalize_targets(override))
+        except ValueError as exc:
+            # A hand-edited data.json must not break the whole page/API.
+            logger.warning("Cheburcheck: ignoring invalid extra addresses for %s: %s",
+                           server.get('uid'), exc)
+    return sorted(out)
+
+
+def _cheburcheck_enabled_servers(cfg=None, require_master=True):
+    """Server dicts whose cheburcheck checkbox is on.
+
+    Keyed by server uid: renaming a server must not lose its setting.
+    """
+    data = load_data()
+    if cfg is None:
+        cfg = (data.get('settings') or {}).get('cheburcheck') or {}
+    if require_master and not cfg.get('enabled'):
+        return []
+    flags = cfg.get('servers') or {}
+    out = []
+    for srv in data.get('servers', []):
+        uid = srv.get('uid')
+        if uid is not None and flags.get(uid):
+            out.append(srv)
+    return out
+
+
+def _cheburcheck_reserve(uid):
+    """Atomically claim a server. Must run synchronously before create_task."""
+    if uid is None:
+        return True
+    if uid in _CHEBURCHECK_RUNNING:
+        return False
+    _CHEBURCHECK_RUNNING[uid] = None
+    return True
+
+
+def _cheburcheck_release(uid):
+    if uid is not None:
+        _CHEBURCHECK_RUNNING.pop(uid, None)
+
+
+async def _cheburcheck_wait_out_quiet_hours():
+    """Sleep while the quiet window is open.
+
+    Returns True when the loop should restart (settings changed or the window
+    is still open after one sleep chunk) and False when checks may run.
+    """
+    for _ in range(6):                      # 6 x 5 min = one chunk
+        cfg = (load_data().get('settings') or {}).get('cheburcheck') or {}
+        if not cfg.get('enabled'):
+            return True
+        if not cheburcheck.in_quiet_hours(cfg):
+            return False
+        await asyncio.sleep(300)
+    return True
+
+
+async def cheburcheck_background_loop():
+    """Periodically check servers enabled in settings.cheburcheck from Russia."""
+    await asyncio.sleep(120)
+    while True:
+        try:
+            data = load_data()
+            cfg = (data.get('settings') or {}).get('cheburcheck') or {}
+            if not cfg.get('enabled'):
+                await asyncio.sleep(300)
+                continue
+            interval = max(1, int(cfg.get('interval_hours') or 1)) * 3600
+            if await _cheburcheck_wait_out_quiet_hours():
+                continue        # the window just changed; re-read settings
+            for srv in _cheburcheck_enabled_servers(cfg):
+                targets = cheburcheck_targets(srv, cfg)
+                if not targets:
+                    continue
+                if not _cheburcheck_reserve(srv.get('uid')):
+                    continue
+                await _cheburcheck_run_server(srv, targets)
+                await asyncio.sleep(_CHEBURCHECK_SPACING)
+            await asyncio.sleep(interval)
+        except Exception as e:
+            logger.error(f"cheburcheck_background_loop error: {e}")
+            await asyncio.sleep(300)
+
+
+async def _cheburcheck_run_batch(prepared):
+    """Проверить зарезервированные серверы по очереди, ведя прогресс для UI.
+
+    ``prepared`` — список пар (srv, targets); uid уже зарезервирован
+    вызывающим кодом. Прогресс читается из /api/servers/cheburcheck_flags.
+    """
+    total = len(prepared)
+    _CHEBURCHECK_PROGRESS.update({'running': True, 'done': 0, 'total': total,
+                                  'current': ''})
+    try:
+        for index, (srv, targets) in enumerate(prepared):
+            _CHEBURCHECK_PROGRESS['current'] = srv.get('name') or ''
+            try:
+                await _cheburcheck_run_server(srv, targets)
+            except Exception as e:
+                # Один сбойный сервер не должен обрывать пакетный прогон.
+                logger.error(f"Cheburcheck batch failed for {srv.get('name')}: {e}")
+            finally:
+                # Счётчик растёт даже при ошибке: иначе прогресс застрянет.
+                _CHEBURCHECK_PROGRESS['done'] = index + 1
+            if index < total - 1:
+                await asyncio.sleep(_CHEBURCHECK_SPACING)
+    finally:
+        _CHEBURCHECK_PROGRESS.update({'running': False, 'current': ''})
+
+
+async def _cheburcheck_run_server(srv, targets):
+    """Check every target of one server sequentially.
+
+    The caller reserved the uid synchronously before starting this coroutine;
+    it only releases the reservation, so two tasks can never race for a server.
+    """
+    uid = srv.get('uid')
+    try:
+        for index, target in enumerate(targets):
+            try:
+                await _run_cheburcheck_one(srv, target, targets)
+            except Exception as e:
+                logger.error(f"Cheburcheck run failed for {srv.get('name')} "
+                             f"({target}): {e}")
+            if index < len(targets) - 1:
+                await asyncio.sleep(_CHEBURCHECK_SPACING)
+    finally:
+        _cheburcheck_release(uid)
+
+
+async def _run_cheburcheck_one(srv, target, targets=None):
+    """Check one target and always store a record, even when the check fails.
+
+    Without this a transient 429 leaves yesterday's verdict on screen and the
+    UI cannot tell "clean" from "check broken". `targets` is the server's full
+    resolved list as of the run start; it is passed to the persister so a
+    settings change mid-run cannot prune targets that are still being checked.
+    """
+    uid = srv.get('uid')
+    target = str(target or '').strip()
+    if not target:
+        # Runners never pass an empty target; readers synthesise the "" record
+        # (C2). The cache itself must not keep the service key (A4).
+        logger.warning("Cheburcheck: empty target for %s skipped", srv.get('name'))
+        return
+    logger.info(f"cheburcheck: {target} for {srv.get('name')} started")
+    error = None
+    static = None
+    try:
+        static = await cheburcheck.fetch_check(target)
+    except Exception as e:
+        error = f"check failed: {e}"
+    probe = None
+    if static and static.get('id'):
+        try:
+            # Сканеры cheburcheck требуют API-токен: берём его из настроек
+            # (в памяти процесса, не в логах) и передаём в модуль.
+            cfg = (load_data().get('settings') or {}).get('cheburcheck') or {}
+            cheburcheck.set_api_token(cfg.get('api_token'))
+            probe = await cheburcheck.fetch_probe(static['id'])
+        except cheburcheck.CheburcheckApiError as e:
+            # Человекочитаемый текст вместо «probe failed: HTTP 403».
+            error = e.user_message
+        except Exception as e:
+            error = f"probe failed: {e}"
+    # Режим проверки: без проб (нет токена, 429, сеть) доступны только списки.
+    online = (probe or {}).get('online_probes')
+    answered = int((probe or {}).get('response_count') or 0)
+    if static is None:
+        scan_mode = 'failed'
+    elif probe is None:
+        scan_mode = 'static_only'
+    elif online and answered < int(online):
+        scan_mode = 'partial'
+    else:
+        scan_mode = 'full'
+    summary = cheburcheck.build_summary(target, static, probe, error=error)
+    summary['scan_mode'] = scan_mode
+    async with CHEBURCHECK_CACHE_LOCK:
+        CHEBURCHECK_CACHE.setdefault(uid, {})[target] = summary
+    logger.info(f"cheburcheck: {target} for {srv.get('name')} finished "
+                f"({summary.get('status')})")
+    try:
+        _cheburcheck_persist(uid, targets)
+    except Exception as e:
+        logger.warning(f"Cheburcheck persist failed: {e}")
+
+
+def _cheburcheck_migrate_settings(data):
+    """Move settings.cheburcheck.servers from server names to uids."""
+    cfg = (data.get('settings') or {}).get('cheburcheck')
+    if not cfg:
+        return False
+    flags = cfg.get('servers') or {}
+    if not flags:
+        return False
+    by_name = {s.get('name'): s for s in data.get('servers', [])}
+    if all(k in [s.get('uid') for s in data.get('servers', [])] for k in flags):
+        return False            # already uid-keyed
+    changed = False
+    new_flags = {}
+    for key, value in flags.items():
+        srv = by_name.get(key)
+        if srv is not None:
+            new_flags[srv.get('uid')] = bool(value)
+            changed = True
+        # unknown names are dropped: the server is gone
+    cfg['servers'] = new_flags
+    return changed
+
+
+def _cheburcheck_startup_cache(data):
+    """Load the persisted cache at startup and migrate the legacy layout.
+
+    Records whose target changed stay until the next real check for that uid,
+    so the reader can still tell "target changed" from "not checked yet". A
+    consumed legacy file is always written back to the sibling path, otherwise
+    a restart before the next check would lose the cache.
+    """
+    had_legacy = os.path.exists(_cheburcheck_legacy_path())
+    # API-токен для сканеров: кладём в память модуля при старте, чтобы
+    # фоновый цикл и ручной запуск работали без открытия настроек.
+    cheburcheck.set_api_token(
+        ((data.get('settings') or {}).get('cheburcheck') or {}).get('api_token'))
+    loaded = _cheburcheck_load_cache()
+    uids = {s.get('uid') for s in data.get('servers', []) if s.get('uid')}
+    clean = {uid: records for uid, records in loaded.items()
+             if uid in uids and isinstance(records, dict)}
+    if len(clean) != len(loaded):
+        logger.info('Cheburcheck: dropped %d orphaned cache records' %
+                    (len(loaded) - len(clean)))
+    CHEBURCHECK_CACHE.update(clean)
+    if clean != loaded or had_legacy:
+        _cheburcheck_persist()
+
+
+def _cheburcheck_synthetic(target, error):
+    """Unsaved placeholder for a target that has no record yet (C2)."""
+    return {
+        'target': target,
+        'status': 'unknown',
+        'checked_at': None,
+        'error': error,
+        'static': {'blocked': False, 'blocked_subnets': [], 'cdn_providers': [],
+                   'geo': {}, 'whitelist': None, 'complaints_14d': 0,
+                   'reverse_lookup': []},
+        'probe': {'online_probes': None, 'response_count': 0,
+                  'verdict_counts': {}, 'blocking_regions': 0,
+                  'restricted_regions': 0, 'static_hit': False,
+                  'clear_regions': 0},
+        'partial': False,
+        # Записи ещё нет: режим проверки неизвестен (UI не показывает бейдж).
+        'scan_mode': None,
+    }
+
+
+def _cheburcheck_persist(uid=None, targets=None):
+    """Persist the cache atomically; prune targets outside `targets` for `uid`.
+
+    Pruning happens only when both the uid and its resolved targets are given,
+    so the startup write (no arguments) never drops records that C2 still
+    needs to tell "target changed" from "not checked yet".
+    """
+    if uid is not None and targets is not None:
+        entries = CHEBURCHECK_CACHE.get(uid)
+        if isinstance(entries, dict):
+            keep = set(targets)
+            for stale in [t for t in entries if t not in keep]:
+                entries.pop(stale, None)
+    tmp = _cheburcheck_cache_path() + '.tmp'
+    os.makedirs(os.path.dirname(_cheburcheck_cache_path()), exist_ok=True)
+    try:
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(CHEBURCHECK_CACHE, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, _cheburcheck_cache_path())
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
+def _cheburcheck_load_cache():
+    """Read the cache from the sibling file, migrating legacy layouts.
+
+    New file wins over `<data dir>/state/cheburcheck.json`. Both the legacy
+    flat ``{uid: record}`` shape and the nested one are accepted; a record
+    without a target is dropped (it cannot be matched to a resolved target).
+    """
+    source = None
+    cache_path = _cheburcheck_cache_path()
+    legacy_path = _cheburcheck_legacy_path()
+    raw = None
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, encoding='utf-8') as f:
+                raw = json.load(f)
+        except Exception:
+            logger.warning('Cheburcheck: sibling cache is corrupt, trying legacy',
+                           exc_info=True)
+            raw = None
+        if raw is not None:
+            source = cache_path
+    if raw is None and os.path.exists(legacy_path):
+        try:
+            with open(legacy_path, encoding='utf-8') as f:
+                raw = json.load(f)
+            source = legacy_path
+        except Exception:
+            logger.warning('Cheburcheck: legacy cache is corrupt, starting empty',
+                           exc_info=True)
+            return {}
+    if raw is None or not isinstance(raw, dict):
+        return {}
+    nested = {}
+    for uid, value in raw.items():
+        if not isinstance(value, dict):
+            continue
+        if 'target' in value and 'status' in value:
+            target = str(value.get('target') or '')
+            if target:
+                nested.setdefault(uid, {})[target] = value
+            else:
+                logger.info('Cheburcheck: dropped a cache record without target')
+            continue
+        nested[uid] = {}
+        dropped = 0
+        for target, rec in value.items():
+            if not isinstance(rec, dict) or not rec.get('target'):
+                dropped += 1
+                continue
+            nested[uid][str(target)] = rec
+        if dropped:
+            logger.info('Cheburcheck: dropped %d nested cache records without target',
+                        dropped)
+    if source == legacy_path:
+        try:
+            os.remove(legacy_path)
+        except OSError:
+            pass
+    elif os.path.exists(legacy_path):
+        # Sibling file is the source of truth; drop the migrated legacy copy.
+        try:
+            os.remove(legacy_path)
+        except OSError:
+            pass
+    return nested
+
+
+def _cheburcheck_records_for(server, cfg, cache):
+    """Per-target records for one server, with synthetic entries (C2)."""
+    uid = server.get('uid')
+    resolved = cheburcheck_targets(server, cfg)
+    stored = cache.get(uid) or {}
+    if not isinstance(stored, dict):
+        stored = {}
+    if not resolved:
+        return {'': _cheburcheck_synthetic('', 'no target configured')}
+    records = {}
+    for target in resolved:
+        record = stored.get(target)
+        if isinstance(record, dict):
+            records[target] = record
+        else:
+            error = ('target changed, re-check required' if stored
+                     else 'not checked yet')
+            records[target] = _cheburcheck_synthetic(target, error)
+    return records
+
+
+def _cheburcheck_aggregate(records):
+    """One summary for a server: worst verdict wins, probe counters sum up."""
+    if not records:
+        records = {'': _cheburcheck_synthetic('', 'no target configured')}
+    rank = {'banned': 3, 'unknown': 2, 'clean': 1}
+    statuses = [record.get('status') or 'unknown' for record in records.values()]
+    if 'banned' in statuses:
+        status = 'banned'
+    elif 'unknown' in statuses:
+        status = 'unknown'
+    else:
+        status = 'clean'
+    worst = sorted(records.items(),
+                   key=lambda item: (-rank.get(item[1].get('status'), 0), item[0]))[0]
+    blocking = sum(int((record.get('probe') or {}).get('blocking_regions') or 0)
+                   for record in records.values())
+    restricted = sum(int((record.get('probe') or {}).get('restricted_regions') or 0)
+                     for record in records.values())
+    clear = sum(int((record.get('probe') or {}).get('clear_regions') or 0)
+                for record in records.values())
+    response = sum(int((record.get('probe') or {}).get('response_count') or 0)
+                   for record in records.values())
+    errors = []
+    for record in records.values():
+        error = record.get('error')
+        if error and str(error) not in errors:
+            errors.append(str(error))
+    checked = [record.get('checked_at') for record in records.values()
+               if record.get('checked_at')]
+    static_hit = any(
+        bool((record.get('static') or {}).get('blocked'))
+        or bool((record.get('static') or {}).get('cdn_providers'))
+        for record in records.values())
+    # Режим агрегата: полный отчёт только если пробы отработали у всех целей.
+    modes = [record.get('scan_mode') or 'failed' for record in records.values()]
+    if all(mode == 'full' for mode in modes):
+        scan_mode = 'full'
+    elif all(mode == 'static_only' for mode in modes):
+        scan_mode = 'static_only'
+    elif all(mode == 'failed' for mode in modes):
+        scan_mode = 'failed'
+    else:
+        scan_mode = 'partial'
+    return {
+        'checked_at': max(checked) if checked else None,
+        'status': status,
+        'target': worst[0],
+        'static_hit': static_hit,
+        'scan_mode': scan_mode,
+        # A static list hit counts as one more remark beside the probe
+        # restrictions, so the card can show "замечания (N)".
+        'remarks': restricted + (1 if static_hit else 0),
+        'probe': {'response_count': response,
+                  'blocking_regions': blocking,
+                  'restricted_regions': restricted,
+                  'clear_regions': clear},
+        'error': '; '.join(errors) if errors else None,
+    }
+
+
 async def periodic_background_tasks():
     """Background task to sync traffic limits and Remnawave every 10 minutes"""
     while True:
@@ -3551,7 +4462,7 @@ async def exit_failover_background_loop():
 def login_page(request: Request):
     if get_current_user(request):
         return RedirectResponse(url='/', status_code=302)
-    return tpl(request, 'login.html')
+    return tpl(request, 'login.html', setup_required=not load_data().get('users'))
 
 
 @app.get("/set_lang/{lang}", tags=["System Templates"])
@@ -3623,7 +4534,8 @@ async def server_detail(request: Request, server_id: int):
             save_data(data)
     server = data['servers'][server_id]
     users_list = data.get('users', [])
-    return tpl(request, 'server.html', server=server, server_id=server_id, users=users_list)
+    return tpl(request, 'server.html', server=server, server_id=server_id,
+               users=users_list, copy_targets=_instance_copy_targets(data, server_id))
 
 
 @app.get('/users', response_class=HTMLResponse, tags=["System Templates"])
@@ -3662,6 +4574,68 @@ def my_connections_page(request: Request):
 
 # ======================== AUTH API ========================
 
+def _same_origin_request(request):
+    headers = getattr(request, 'headers', {}) or {}
+    origin = headers.get('origin')
+    fetch_site = headers.get('sec-fetch-site')
+    base_url = str(getattr(request, 'base_url', '') or '')
+    if origin and fetch_site != 'same-origin' and \
+            origin.rstrip('/') != base_url.rstrip('/'):
+        return False
+    return fetch_site not in ('cross-site', 'same-site')
+
+
+@app.post('/api/auth/setup', tags=["Authentication"])
+async def api_initial_setup(request: Request, req: InitialSetupRequest):
+    """One-time creation of the first administrator; never a public signup."""
+    if not _same_origin_request(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    lang = request.cookies.get('lang', 'en')
+    username = req.username.strip()
+    if not username or len(username) > 64:
+        return JSONResponse({'error': _t('setup_username_invalid', lang)}, status_code=400)
+    if len(req.password) < 12 or len(req.password) > 256:
+        return JSONResponse({'error': _t('setup_password_short', lang)}, status_code=400)
+    if req.password != req.password_confirm:
+        return JSONResponse({'error': _t('setup_password_mismatch', lang)}, status_code=400)
+
+    password_hash = await asyncio.to_thread(hash_password, req.password)
+    async with DATA_LOCK:
+        data = load_data()
+        # Any existing record (including disabled/external/none) closes setup.
+        if data.get('users'):
+            return JSONResponse({'error': _t('setup_already_completed', lang)},
+                                status_code=409)
+        now = datetime.now().isoformat()
+        user = {
+            'id': str(uuid.uuid4()),
+            'username': username,
+            'password_hash': password_hash,
+            'role': 'admin',
+            'telegramId': None,
+            'email': None,
+            'description': '',
+            'traffic_limit': 0,
+            'traffic_reset_strategy': 'never',
+            'traffic_used': 0,
+            'traffic_total': 0,
+            'last_reset_at': now,
+            'expiration_date': None,
+            'enabled': True,
+            'created_at': now,
+            'remnawave_uuid': None,
+            'share_enabled': False,
+            'share_token': secrets.token_urlsafe(16),
+            'share_password_hash': None,
+        }
+        data['users'].append(user)
+        save_data(data)
+
+    request.session.clear()
+    request.session['user_id'] = user['id']
+    return JSONResponse({'status': 'success', 'role': 'admin'}, status_code=201)
+
+
 @app.get('/api/auth/captcha', tags=["Authentication"])
 def api_captcha(request: Request):
     if not CaptchaGenerator:
@@ -3679,6 +4653,82 @@ def api_captcha(request: Request):
     img_bytes.seek(0)
     
     return StreamingResponse(img_bytes, media_type="image/png")
+
+
+def _verify_telegram_webapp_init_data(init_data: str, bot_token: str, now: Optional[int] = None) -> dict:
+    """Validate Telegram Mini App initData and return its authenticated user."""
+    if not isinstance(init_data, str) or not init_data or len(init_data) > 16384:
+        raise ValueError('invalid_init_data')
+    try:
+        pairs = urllib.parse.parse_qsl(init_data, keep_blank_values=True, strict_parsing=True)
+    except (ValueError, UnicodeError):
+        raise ValueError('invalid_init_data')
+    values = {}
+    for key, value in pairs:
+        if key in values:
+            raise ValueError('invalid_init_data')
+        values[key] = value
+    received_hash = values.pop('hash', '')
+    if not re.fullmatch(r'[0-9a-fA-F]{64}', received_hash):
+        raise ValueError('invalid_init_data')
+    auth_date_raw = values.get('auth_date', '')
+    try:
+        auth_date = int(auth_date_raw)
+    except (TypeError, ValueError):
+        raise ValueError('invalid_init_data')
+    current_time = int(time.time()) if now is None else int(now)
+    if auth_date > current_time + 60 or current_time - auth_date > 86400:
+        raise ValueError('expired_init_data')
+    user_raw = values.get('user', '')
+    try:
+        telegram_user = json.loads(user_raw)
+    except (TypeError, ValueError):
+        raise ValueError('invalid_init_data')
+    if not isinstance(telegram_user, dict) or not str(telegram_user.get('id') or '').isdigit():
+        raise ValueError('invalid_init_data')
+    data_check_string = '\n'.join(f'{key}={values[key]}' for key in sorted(values))
+    secret_key = hmac.new(b'WebAppData', bot_token.encode('utf-8'), hashlib.sha256).digest()
+    calculated_hash = hmac.new(secret_key, data_check_string.encode('utf-8'), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(calculated_hash, received_hash.lower()):
+        raise ValueError('invalid_init_data')
+    return telegram_user
+
+
+@app.post('/api/auth/telegram-webapp', tags=["Authentication"])
+async def api_telegram_webapp_auth(request: Request, req: TelegramWebAppAuthRequest):
+    lang = request.cookies.get('lang', 'en')
+    data = load_data()
+    telegram_settings = (data.get('settings') or {}).get('telegram') or {}
+    bot_token = str(telegram_settings.get('token') or '').strip()
+    if telegram_settings.get('webapp_initdata_auth') is not True or not bot_token:
+        return JSONResponse({'error': _t('telegram_webapp_auth_unavailable', lang)}, status_code=403)
+    try:
+        telegram_user = _verify_telegram_webapp_init_data(req.init_data, bot_token)
+    except ValueError as exc:
+        key = 'telegram_webapp_auth_invalid'
+        if str(exc) == 'expired_init_data':
+            key = 'telegram_webapp_auth_invalid'
+        return JSONResponse({'error': _t(key, lang)}, status_code=401)
+
+    telegram_id = str(telegram_user['id'])
+    async with DATA_LOCK:
+        data = load_data()
+        users = data.get('users', [])
+        user = next((item for item in users
+                     if str(item.get('telegramId') or '').strip() == telegram_id), None)
+        if user is None and (data.get('settings', {}).get('telegram') or {}).get('auto_create_users') is True:
+            created = tg_bot._auto_create_telegram_user(data, telegram_user, save_data)
+            if created:
+                user = created[0]
+        if user is None:
+            return JSONResponse({'error': _t('telegram_webapp_account_not_found', lang)}, status_code=403)
+        if user.get('role') == 'none':
+            return JSONResponse({'error': _t('telegram_webapp_account_not_found', lang)}, status_code=403)
+        if not user.get('enabled', True):
+            return JSONResponse({'error': _t('account_disabled', lang)}, status_code=403)
+        request.session.clear()
+        request.session['user_id'] = user['id']
+    return {'status': 'success', 'role': user.get('role', 'user')}
 
 
 @app.post('/api/auth/login', tags=["Authentication"])
@@ -4222,6 +5272,8 @@ async def api_edit_server(request: Request, server_id: int, req: EditServerReque
     if error is not None:
         return error
     uid = selected['uid']
+    from credential_store import CredentialStore, default_key_path
+    store = CredentialStore(default_key_path(DATA_FILE))
 
     async def edit():
         async with SERVER_MUTATION_LOCK:
@@ -4240,7 +5292,7 @@ async def api_edit_server(request: Request, server_id: int, req: EditServerReque
                 elif req.password:
                     new_pass, new_key = req.password, ''
                 else:
-                    new_pass, new_key = server.get('password', ''), server.get('private_key', '')
+                    new_pass, new_key = store.resolve(server)
                 if not new_pass and not new_key:
                     return JSONResponse({'error': 'Password or SSH key is required'}, status_code=400)
 
@@ -4260,11 +5312,16 @@ async def api_edit_server(request: Request, server_id: int, req: EditServerReque
                     data = load_data()
                     _, current = find_server_by_uid(data, uid)
                     if current is None or any(current.get(k) != server.get(k) for k in
-                                              ('host', 'ssh_port', 'username', 'password', 'private_key')):
+                                              ('host', 'ssh_port', 'username', 'password', 'private_key', 'ssh_credentials')):
                         return JSONResponse({'error': 'Server changed during verification'}, status_code=409)
                     current.update(name=new_name, host=new_host, ssh_port=new_port,
-                                   username=new_user, password=new_pass, private_key=new_key,
-                                   server_info=server_info)
+                                   username=new_user, server_info=server_info)
+                    current.pop('password', None)
+                    current.pop('private_key', None)
+                    # Re-seal under the new endpoint AAD after successful SSH
+                    # verification; ciphertext cannot be replayed to another host.
+                    current['ssh_credentials'] = store.seal(
+                        current, new_pass, new_key)
                     if req.self_service_enabled is not None:
                         current['self_service_enabled'] = bool(req.self_service_enabled)
                     save_data(data)
@@ -4780,7 +5837,7 @@ def _rkn_server_index(data, server_id, server_uid, expected=None):
         return None
     idx = matches[0]
     if expected is not None and any(servers[idx].get(k) != expected.get(k)
-                                   for k in ('uid', 'host', 'ssh_port', 'username', 'password', 'private_key')):
+                                   for k in ('uid', 'host', 'ssh_port', 'username', 'password', 'private_key', 'ssh_credentials')):
         return None
     return idx
 
@@ -5775,6 +6832,329 @@ async def api_rkn_scan_flags(request: Request):
     return {str(i): s for i, s in results if s}
 
 
+# --- Cheburcheck (block check from Russia) ----------------------------------
+
+def _cheburcheck_server_index(server_id, data):
+    servers = data.get('servers', [])
+    if 0 <= server_id < len(servers):
+        return server_id
+    for i, s in enumerate(servers):
+        if str(s.get('uid')) == str(server_id):
+            return i
+    return None
+
+
+def _cheburcheck_targets_context(data):
+    """uid -> resolved targets for every server (settings page, A6)."""
+    cfg = (data.get('settings') or {}).get('cheburcheck') or {}
+    return {srv.get('uid'): cheburcheck_targets(srv, cfg)
+            for srv in data.get('servers', [])}
+
+
+def _cheburcheck_flagged(server, cfg):
+    return bool((cfg.get('servers') or {}).get(server.get('uid')))
+
+
+def _cheburcheck_summary_for(server, cfg, cache):
+    """Aggregate + per-target records for one server (C2 synthetic included)."""
+    records = _cheburcheck_records_for(server, cfg, cache)
+    return _cheburcheck_aggregate(records), records
+
+
+@app.post('/api/servers/cheburcheck/run_all', tags=["Servers"])
+async def api_cheburcheck_run_all(request: Request):
+    global _CHEBURCHECK_TASK
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    data = load_data()
+    cfg = (data.get('settings') or {}).get('cheburcheck') or {}
+    if not cfg.get('enabled'):
+        return {'ok': True, 'started': 0, 'reason': 'disabled'}
+    if _CHEBURCHECK_TASK is not None and not _CHEBURCHECK_TASK.done():
+        return {'ok': True, 'already_running': True}
+    flagged = [srv for srv in data.get('servers', [])
+               if _cheburcheck_flagged(srv, cfg)]
+    if not flagged:
+        return {'ok': True, 'started': 0, 'reason': 'no_servers'}
+    prepared = []
+    for srv in flagged:
+        targets = cheburcheck_targets(srv, cfg)
+        if targets:
+            prepared.append((srv, targets))
+    if not prepared:
+        return {'ok': True, 'started': 0, 'reason': 'no_targets'}
+    reserved = []
+    for srv, targets in prepared:
+        if _cheburcheck_reserve(srv.get('uid')):
+            reserved.append((srv, targets))
+    if not reserved:
+        return {'ok': True, 'started': 0, 'reason': 'nothing_started'}
+
+    async def runner():
+        await _cheburcheck_run_batch(reserved)
+
+    _CHEBURCHECK_TASK = asyncio.create_task(runner())
+    return {'ok': True, 'started': len(reserved)}
+
+
+@app.get('/api/servers/cheburcheck_flags', tags=["Servers"])
+async def api_cheburcheck_flags(request: Request):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    data = load_data()
+    cfg = (data.get('settings') or {}).get('cheburcheck') or {}
+    enabled = bool(cfg.get('enabled'))
+    async with CHEBURCHECK_CACHE_LOCK:
+        cache = {uid: dict(records) for uid, records in CHEBURCHECK_CACHE.items()
+                 if isinstance(records, dict)}
+    out = {}
+    for i, srv in enumerate(data.get('servers', [])):
+        if not _cheburcheck_flagged(srv, cfg):
+            continue          # synthetic entries are for enabled servers only
+        summary, _records = _cheburcheck_summary_for(srv, cfg, cache)
+        out[str(i)] = {'status': summary['status'],
+                       'probe': summary['probe'],
+                       'remarks': summary['remarks'],
+                       'static_hit': summary['static_hit'],
+                       'scan_mode': summary['scan_mode'],
+                       'enabled': True}
+    return {'enabled': enabled,
+            'running': bool(_CHEBURCHECK_TASK is not None and not _CHEBURCHECK_TASK.done()),
+            'progress': dict(_CHEBURCHECK_PROGRESS),
+            'flags': out}
+
+
+@app.get('/api/servers/{server_id}/cheburcheck', tags=["Servers"])
+async def api_cheburcheck_get(request: Request, server_id: int):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    data = load_data()
+    idx = _cheburcheck_server_index(server_id, data)
+    if idx is None:
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    srv = data['servers'][idx]
+    uid = srv.get('uid')
+    cfg = (data.get('settings') or {}).get('cheburcheck') or {}
+    async with CHEBURCHECK_CACHE_LOCK:
+        cache = {key: dict(records) for key, records in CHEBURCHECK_CACHE.items()
+                 if isinstance(records, dict)}
+    summary, records = _cheburcheck_summary_for(srv, cfg, cache)
+    return {
+        'enabled_for_server': _cheburcheck_flagged(srv, cfg),
+        'global_enabled': bool(cfg.get('enabled')),
+        'interval_hours': cfg.get('interval_hours', 1),
+        'running': uid in _CHEBURCHECK_RUNNING,
+        'checked_at': summary['checked_at'],
+        'status': summary['status'],
+        'target': summary['target'],
+        'probe': summary['probe'],
+        'remarks': summary['remarks'],
+        'static_hit': summary['static_hit'],
+        'scan_mode': summary['scan_mode'],
+        'error': summary['error'],
+        'targets': records,
+    }
+
+
+@app.post('/api/servers/{server_id}/cheburcheck/run', tags=["Servers"])
+async def api_cheburcheck_run(request: Request, server_id: int):
+    """Start a one-shot check of every target of the server in the background.
+
+    A full check takes 15-60s (static + 40 probes). Holding the HTTP request
+    for that long lets a proxy or the browser abort it, which looks like
+    "nothing happened". The caller polls the GET endpoint instead.
+    """
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    data = load_data()
+    idx = _cheburcheck_server_index(server_id, data)
+    if idx is None:
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    srv = data['servers'][idx]
+    uid = srv.get('uid')
+    cfg = (data.get('settings') or {}).get('cheburcheck') or {}
+    if not cfg.get('enabled'):
+        return {'ok': True, 'started': 0, 'reason': 'disabled'}
+    if uid in _CHEBURCHECK_RUNNING:
+        return {'ok': True, 'already_running': True}
+    targets = cheburcheck_targets(srv, cfg)
+    if not targets:
+        return {'ok': True, 'started': 0, 'reason': 'no_targets'}
+    if not _cheburcheck_reserve(uid):
+        return {'ok': True, 'already_running': True}
+    _CHEBURCHECK_RUNNING[uid] = asyncio.create_task(
+        _cheburcheck_run_server(srv, targets))
+    return {'ok': True, 'started': 1}
+
+
+@app.get('/api/settings/cheburcheck', tags=["Settings"])
+async def api_cheburcheck_settings_get(request: Request):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    data = load_data()
+    cfg = (data.get('settings') or {}).get('cheburcheck') or {}
+    srv_map = dict(cfg.get('servers') or {})
+    known = set()
+    resolved = {}
+    for s in data.get('servers', []):
+        uid = s.get('uid')
+        if uid is None:
+            continue
+        known.add(uid)
+        srv_map.setdefault(uid, False)
+        resolved[uid] = cheburcheck_targets(s, cfg)
+    targets = {uid: list(values)
+               for uid, values in (cfg.get('targets') or {}).items()
+               if uid in known and values}
+    token = str(cfg.get('api_token') or '')
+    return {
+        'enabled': bool(cfg.get('enabled')),
+        'interval_hours': int(cfg.get('interval_hours') or 1),
+        'quiet_enabled': bool(cfg.get('quiet_enabled')),
+        'quiet_start': cfg.get('quiet_start', 0),
+        'quiet_end': cfg.get('quiet_end', 0),
+        'servers': srv_map,
+        'targets': targets,
+        'targets_resolved': resolved,
+        # Только признак и хвост токена: сам токен не отдаём ни в каком виде.
+        'api_token_set': bool(token),
+        'api_token_hint': ('••••' + token[-4:]) if token else '',
+    }
+
+
+class CheburcheckSettingsRequest(BaseModel):
+    enabled: Optional[bool] = None
+    interval_hours: Optional[int] = None
+    quiet_enabled: Optional[bool] = None
+    quiet_start: Optional[int] = None
+    quiet_end: Optional[int] = None
+    servers: Optional[dict] = None
+    targets: Optional[object] = None
+    # None / отсутствие поля — «не менять»; "" — удалить; иначе — сохранить.
+    api_token: Optional[str] = None
+
+
+class CheburcheckTokenCheckRequest(BaseModel):
+    api_token: Optional[str] = None
+
+
+@app.post('/api/settings/cheburcheck', tags=["Settings"])
+async def api_cheburcheck_settings_set(request: Request, req: CheburcheckSettingsRequest):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    data = load_data()
+    cfg = data.setdefault('settings', {}).setdefault('cheburcheck', {})
+    known = {s.get('uid') for s in data.get('servers', []) if s.get('uid')}
+    # Validate the override map before touching anything: a bad payload must
+    # leave data.json unchanged (the typed Optional[Dict[str, List[str]]] model
+    # gives 422 and accepts null, so this field is validated by hand).
+    targets_supplied = 'targets' in getattr(req, 'model_fields_set', set())
+    normalized_targets = None
+    if targets_supplied:
+        raw_targets = req.targets
+        if raw_targets is None or not isinstance(raw_targets, dict):
+            return JSONResponse({'error': 'targets must be an object'},
+                                status_code=400)
+        normalized_targets = {}
+        try:
+            for key, values in raw_targets.items():
+                if key not in known:
+                    continue
+                if not isinstance(values, list):
+                    raise ValueError('each value must be a list')
+                addresses = _cheburcheck_normalize_targets(values)
+                if addresses:
+                    normalized_targets[key] = addresses
+        except (TypeError, ValueError) as exc:
+            return JSONResponse({'error': f'invalid targets: {exc}'},
+                                status_code=400)
+    # API-токен: None/отсутствие поля — «не менять», "" — «удалить»,
+    # непустая строка — сохранить. Длина проверяется до любых изменений.
+    token_supplied = ('api_token' in getattr(req, 'model_fields_set', set())
+                      and req.api_token is not None)
+    new_token = None
+    if token_supplied:
+        candidate = str(req.api_token).strip()
+        if candidate and not (8 <= len(candidate) <= 512):
+            return JSONResponse({'error': 'api_token must be 8..512 characters'},
+                                status_code=400)
+        new_token = candidate or None
+    if req.enabled is not None:
+        cfg['enabled'] = bool(req.enabled)
+    if req.interval_hours is not None:
+        cfg['interval_hours'] = max(1, min(24, int(req.interval_hours)))
+    if req.quiet_enabled is not None:
+        cfg['quiet_enabled'] = bool(req.quiet_enabled)
+    if req.quiet_start is not None:
+        cfg['quiet_start'] = max(0, min(23, int(req.quiet_start)))
+    if req.quiet_end is not None:
+        cfg['quiet_end'] = max(0, min(23, int(req.quiet_end)))
+    # An empty window (start == end) is not "always quiet"; drop the flag
+    # instead of blocking every check.
+    if cfg.get('quiet_enabled') and cfg.get('quiet_start') == cfg.get('quiet_end'):
+        cfg['quiet_enabled'] = False
+    cfg.setdefault('servers', {})
+    if req.servers is not None:
+        cur = cfg['servers']
+        for k, v in req.servers.items():
+            # Accept only uids of servers that exist: a stale name from an old
+            # tab must not resurrect a flag for a server that was renamed.
+            if k in known:
+                cur[k] = bool(v)
+    # keep the list in sync with the current fleet (new servers unchecked)
+    for uid in known:
+        cfg['servers'].setdefault(uid, False)
+    if targets_supplied:
+        merged = {key: value
+                  for key, value in (cfg.get('targets') or {}).items()
+                  if key in known and value}
+        for key, values in normalized_targets.items():
+            merged[key] = values
+        for key, values in raw_targets.items():
+            if key in known and isinstance(values, list) and not values:
+                merged.pop(key, None)       # explicit [] removes the override
+        cfg['targets'] = merged
+    if token_supplied:
+        if new_token:
+            cfg['api_token'] = new_token
+        else:
+            cfg.pop('api_token', None)
+    save_data(data)
+    # Применяем сразу, без рестарта: следующий прогон уже видит новый токен.
+    cheburcheck.set_api_token(cfg.get('api_token'))
+    return {'ok': True}
+
+
+@app.post('/api/settings/cheburcheck/token_check', tags=["Settings"])
+async def api_cheburcheck_token_check(request: Request,
+                                      req: Optional[CheburcheckTokenCheckRequest] = None):
+    """Проверить API-токен через GET /api/v1/credits (только админ).
+
+    Токен из тела запроса не сохраняется и в ответ не попадает: наружу уходит
+    только остаток кредитов либо текст ошибки сервиса.
+    """
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    cfg = (load_data().get('settings') or {}).get('cheburcheck') or {}
+    token = None
+    if req is not None and req.api_token is not None:
+        token = str(req.api_token).strip() or None
+    if not token:
+        token = str(cfg.get('api_token') or '').strip() or None
+    if not token:
+        return {'ok': False, 'error': cheburcheck.NO_TOKEN_MESSAGE}
+    try:
+        credits = await cheburcheck.fetch_credits(token)
+    except cheburcheck.CheburcheckApiError as exc:
+        return {'ok': False, 'error': exc.user_message}
+    except Exception as exc:
+        # Сетевой сбой или неожиданный ответ: панель не роняем.
+        logger.warning('cheburcheck token_check failed: %s', exc)
+        return {'ok': False,
+                'error': 'не удалось проверить токен: {}'.format(exc)[:300]}
+    return {'ok': True, 'credits': credits}
+
+
 # --- one-shot boot-restore migration ----------------------------------------
 # Hosts installed before the unit gained [Install] report is-enabled=static and
 # never run `boot`, so their iptables rules vanish at reboot. New installs are
@@ -5896,6 +7276,82 @@ async def _rkn_migration_finish(pending):
         save_data(data)
 
 
+# --- one-shot ICMP echo-unblock migration -----------------------------------
+# Older panels added `-p icmp --icmp-type echo-request -j DROP` to INPUT in
+# setup_firewall(). The host itself stopped answering ping, and ICMP that
+# arrived through a tunnel died after decryption, so diagnostics lied. New
+# installs remove the rule instead; this clears it on hosts provisioned by an
+# older panel after a panel upgrade.
+AWP_ICMP_ECHO_MIGRATION = os.environ.get(
+    'AWP_ICMP_ECHO_MIGRATION', '1').lower() not in ('0', 'false', 'no', 'off')
+AWP_ICMP_ECHO_DELAY = 15  # let the panel start serving first; tests patch to 0
+AWP_ICMP_ECHO_TIMEOUT = 120
+AWP_ICMP_ECHO_KEY = 'icmp_echo_unblock_v1'
+
+
+def _icmp_echo_migration_record(data):
+    return (data.setdefault('panel_migrations', {})
+            .setdefault(AWP_ICMP_ECHO_KEY, {}))
+
+
+async def icmp_echo_unblock_migration():
+    """Remove the legacy ICMP echo DROP rule on every host, once.
+
+    Never raises: one unreachable host must not affect the others or the
+    panel. A failed host leaves the migration incomplete, so the next panel
+    restart retries it; the script itself is idempotent, so hosts that are
+    already clean are a no-op.
+    """
+    if not AWP_ICMP_ECHO_MIGRATION:
+        logger.info("ICMP echo migration disabled by AWP_ICMP_ECHO_MIGRATION")
+        return
+    await asyncio.sleep(AWP_ICMP_ECHO_DELAY)
+    try:
+        data = load_data()
+    except Exception as e:
+        logger.warning(f"ICMP echo migration: cannot read data: {e}")
+        return
+    if _icmp_echo_migration_record(data).get('done_at'):
+        return
+    servers = list(data.get('servers') or [])
+    if not servers:
+        await _icmp_echo_migration_finish(0)
+        return
+
+    pending = 0
+    for srv in servers:
+        label = srv.get('name') or srv.get('host') or srv.get('uid')
+        try:
+            err = await _rkn_ssh_run(srv, ICMP_ECHO_ALLOW_SCRIPT,
+                                     AWP_ICMP_ECHO_TIMEOUT)
+            if err is not None:
+                detail = 'unblock failed'
+                try:
+                    detail = json.loads(err.body).get('error', detail)[:500]
+                except Exception:
+                    pass
+                pending += 1
+                logger.warning(f"ICMP echo migration failed on {label}: {detail}")
+                continue
+            logger.info(f"ICMP echo rule cleared on {label}")
+        except Exception as e:
+            pending += 1
+            logger.warning(f"ICMP echo migration failed on {label}: {e}")
+
+    await _icmp_echo_migration_finish(pending)
+
+
+async def _icmp_echo_migration_finish(pending):
+    async with DATA_LOCK:
+        data = load_data()
+        rec = _icmp_echo_migration_record(data)
+        rec['last_attempt_at'] = datetime.now(timezone.utc).isoformat()
+        rec['pending'] = pending
+        if pending == 0:
+            rec['done_at'] = rec['last_attempt_at']
+        save_data(data)
+
+
 @app.post('/api/servers/{server_id}/check', tags=["Servers"])
 def api_check_server(request: Request, server_id: int):
     if not _check_admin(request):
@@ -5954,6 +7410,8 @@ def api_check_server(request: Request, server_id: int):
                 for key in ('domain', 'email', 'site_url'):
                     if db_proto.get(key) not in (None, ''):
                         merged[key] = db_proto[key]
+            if protocol_base(proto) == 'xray' and db_proto.get('fingerprint'):
+                merged['fingerprint'] = db_proto['fingerprint']
             if protocol_base(proto) == 'exit':
                 for key in ('subnet', 'public_key', 'obfuscation'):
                     if db_proto.get(key) not in (None, ''):
@@ -6121,6 +7579,7 @@ INSTALL_PORT_TRANSPORT = {
     'awg': 'udp', 'awg2': 'udp', 'awg3': 'udp', 'awg_legacy': 'udp',
     'wireguard': 'udp', 'exit': 'udp',
     'xray': 'tcp', 'telemt': 'tcp', 'socks5': 'tcp', 'nginx': 'tcp',
+    'haproxy': 'tcp',
 }
 
 
@@ -6137,6 +7596,154 @@ def api_used_ports(request: Request, server_id: int):
         return get_used_ports(ssh)
     except Exception as e:
         logger.exception("Error getting used ports")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+# ===== Xray self-steal: mask under the local NGINX site =====
+
+class XraySelfstealRequest(BaseModel):
+    protocol: str = 'xray'
+    nginx_protocol: str = 'nginx'
+
+
+def _docker_networks(ssh, container):
+    out, _, code = ssh.run_sudo_command(
+        f"docker inspect {shlex.quote(str(container))} "
+        f"--format '{{{{json .NetworkSettings.Networks}}}}' 2>/dev/null")
+    if code != 0:
+        return {}
+    try:
+        networks = json.loads(out.strip() or '{}')
+    except ValueError:
+        return {}
+    return networks if isinstance(networks, dict) else {}
+
+
+def _selfsteal_dest(xray_networks, nginx_networks, nginx_container):
+    """Container-to-container Reality target. On a shared docker network
+    the NGINX name resolves via embedded DNS and survives container
+    re-creation; otherwise fall back to the current bridge IP."""
+    if set(xray_networks) & set(nginx_networks):
+        return f"{nginx_container}:443"
+    for networks in (nginx_networks, xray_networks):
+        for info in networks.values():
+            ip = (info or {}).get('IPAddress')
+            if ip:
+                return f"{ip}:443"
+    return None
+
+
+def _selfsteal_site_ok(ssh, domain, port):
+    """The mask only holds while the site answers with a valid
+    certificate for the domain — verified from the host itself. DNS may
+    point anywhere (relays included); --resolve forces the local hop."""
+    out, _, code = ssh.run_command(
+        f"curl -s 2>/dev/null --resolve {shlex.quote(f'{domain}:{port}:127.0.0.1')} "
+        f"{shlex.quote('https://' + domain + '/')} -o /dev/null "
+        f"-w '%{{http_code}}' --max-time 8")
+    return code == 0 and bool(re.fullmatch(r'\d{3}', out.strip()))
+
+
+@app.get('/api/servers/{server_id}/xray/selfsteal/plan', tags=["Protocols"])
+def api_xray_selfsteal_plan(request: Request, server_id: int, protocol: str = 'xray'):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        protocols = server.get('protocols') or {}
+        if protocol_base(protocol) != 'xray' or protocol not in protocols:
+            return JSONResponse({'error': 'Xray instance not found'}, status_code=404)
+        ssh = get_ssh(server)
+        ssh.connect()
+        manager = get_protocol_manager(ssh, protocol)
+        xray_running = manager.check_container_running()
+        state = manager.get_reality_state() if xray_running else None
+
+        xray_container = (protocols.get(protocol) or {}).get('container_name') \
+            or manager.container_name
+        xray_networks = _docker_networks(ssh, xray_container) if xray_running else {}
+        options = []
+        for key in protocols:
+            if protocol_base(key) != 'nginx':
+                continue
+            nginx = get_protocol_manager(ssh, key)
+            status = nginx.get_server_status(key)
+            if not status.get('domain') or not status.get('container_running'):
+                continue
+            dest = _selfsteal_dest(
+                xray_networks,
+                _docker_networks(ssh, status['container_name']),
+                status['container_name'])
+            options.append({
+                'protocol': key,
+                'domain': status['domain'],
+                'container_name': status['container_name'],
+                'port': int(status.get('port') or 443),
+                'dest': dest,
+                'site_ok': bool(dest) and _selfsteal_site_ok(
+                    ssh, status['domain'], int(status.get('port') or 443)),
+            })
+        return {
+            'xray_running': xray_running,
+            'network': (state or {}).get('network'),
+            'current_dest': (state or {}).get('dest'),
+            'current_sni': (state or {}).get('sni'),
+            'options': options,
+        }
+    except Exception as e:
+        logger.exception("Error building the xray selfsteal plan")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/xray/selfsteal', tags=["Protocols"])
+def api_xray_selfsteal_apply(request: Request, server_id: int, req: XraySelfstealRequest):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        protocols = server.get('protocols') or {}
+        if protocol_base(req.protocol) != 'xray' or req.protocol not in protocols:
+            return JSONResponse({'error': 'Xray instance not found'}, status_code=404)
+        if protocol_base(req.nginx_protocol) != 'nginx' or req.nginx_protocol not in protocols:
+            return JSONResponse({'error': 'NGINX instance not found'}, status_code=404)
+        ssh = get_ssh(server)
+        ssh.connect()
+        manager = get_protocol_manager(ssh, req.protocol)
+        if not manager.check_container_running():
+            return JSONResponse({'error': 'The Xray container is not running'},
+                                status_code=409)
+        nginx = get_protocol_manager(ssh, req.nginx_protocol)
+        status = nginx.get_server_status(req.nginx_protocol)
+        domain = status.get('domain')
+        if not domain or not status.get('container_running'):
+            return JSONResponse({'error': 'The NGINX site is not ready'},
+                                status_code=409)
+        port = int(status.get('port') or 443)
+        dest = _selfsteal_dest(
+            _docker_networks(
+                ssh, (protocols.get(req.protocol) or {}).get('container_name')
+                or manager.container_name),
+            _docker_networks(ssh, status['container_name']),
+            status['container_name'])
+        if not dest:
+            return JSONResponse({'error': 'No route from the Xray container to NGINX'},
+                                status_code=409)
+        if not _selfsteal_site_ok(ssh, domain, port):
+            return JSONResponse(
+                {'error': 'The site does not answer with a valid certificate '
+                          'for the domain yet — issue the certificate first'},
+                status_code=409)
+        result = manager.apply_selfsteal(domain, dest)
+        result['protocol'] = req.protocol
+        return result
+    except Exception as e:
+        logger.exception("Error applying the xray selfsteal")
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
@@ -6171,17 +7778,23 @@ WARP_INSTALL_STAGES = {'start': 1, 'arch': 2, 'download': 3, 'register': 4,
                        'profile': 5, 'startsh': 6, 'done': 7}
 WARP_INSTALL_TOTAL = 7
 
+XRAY_UPDATE_STAGES = {'start': 1, 'host': 2, 'version': 3, 'arch': 4,
+                      'build': 5, 'verify': 6, 'swap': 7, 'check': 8, 'done': 9}
+XRAY_UPDATE_TOTAL = 9
+
 FLOW_STAGES = {
     'protocol': PROTOCOL_INSTALL_STAGES,
     'smartroute': SMARTROUTE_INSTALL_STAGES,
     'rknblock': RKNBLOCK_INSTALL_STAGES,
     'warp': WARP_INSTALL_STAGES,
+    'xray_update': XRAY_UPDATE_STAGES,
 }
 FLOW_TOTALS = {
     'protocol': PROTOCOL_INSTALL_TOTAL,
     'smartroute': SMARTROUTE_INSTALL_TOTAL,
     'rknblock': RKNBLOCK_INSTALL_TOTAL,
     'warp': WARP_INSTALL_TOTAL,
+    'xray_update': XRAY_UPDATE_TOTAL,
 }
 
 INSTALL_OP_TTL = 60 * 60
@@ -6337,9 +7950,24 @@ def op_finish(op, state, result=None, error=None):
 
 
 def _install_op_for_protocol(server_id, protocol):
-    """Newest operation of one protocol instance on one server."""
+    """Newest operation of a protocol on one server.
+
+    A concrete instance key ("awg3__2") matches only itself. A base request
+    ("awg3") also matches instances derived from it: a new instance is
+    polled by the base name, because the panel only learns its key
+    ("awg3__6") from the install response, not from the request.
+    """
+    allow_base = '__' not in str(protocol or '')
+    base = protocol_base(protocol)
     for op in reversed(list(_INSTALL_OPS.values())):
-        if op.get('server_id') == server_id and op.get('protocol') == protocol:
+        if op.get('server_id') != server_id:
+            continue
+        op_protocol = op.get('protocol')
+        if not op_protocol:
+            continue
+        if op_protocol == protocol:
+            return op
+        if allow_base and protocol_base(op_protocol) == base:
             return op
     return None
 
@@ -6483,6 +8111,16 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
                 normalize_special_junk(awg_special_junk)
             except ValueError as e:
                 return JSONResponse({'error': str(e)}, status_code=400)
+        # Masking domain of the generated I1. Empty means "pick at random":
+        # the manager still generates a per-instance packet, so an install
+        # that never opened the I1 block cannot inherit the shared default.
+        i1_domain = None
+        if install_base in AWG_PROTOCOLS:
+            try:
+                i1_domain = awg_i1_domain_from(req.awg_i1_domain, req.awg_i1_pool)
+            except ValueError as e:
+                return JSONResponse({'error': str(e), 'code': 'bad_i1_domain'},
+                                    status_code=400)
 
         ssh = await asyncio.to_thread(get_ssh, server)
         await asyncio.to_thread(ssh.connect)
@@ -6560,7 +8198,11 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
             )
         elif install_base == 'xray':
             install_args = ()
-            install_kwargs = dict(port=req.port)
+            install_kwargs = dict(
+                port=req.port,
+                transport=req.xray_transport or 'tcp',
+                site_name=(req.xray_domain or '').strip() or 'yahoo.com',
+            )
         elif install_base == 'wireguard':
             install_args = ()
             install_kwargs = dict(port=req.port)
@@ -6601,6 +8243,8 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
                 port=req.port,
                 subnet=req.exit_subnet,
                 obfuscation=bool(req.exit_obfuscation),
+                # None = auto: 3.1 when the kernel module supports it.
+                awg3=req.exit_awg3,
             )
         elif install_base in AWG_PROTOCOLS:
             install_args = (install_protocol,)
@@ -6611,6 +8255,8 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
                 special_junk=awg_special_junk,
                 dns6=req.awg_dns6,
                 ipv6_preference=ipv6_pref,
+                i1_domain=i1_domain,
+                i1_pool=(req.awg_i1_pool or '').strip().lower() or None,
             )
         else:
             install_args = (install_protocol,)
@@ -6661,6 +8307,7 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
             proto_record['subnet'] = result.get('subnet')
             proto_record['public_key'] = result.get('public_key')
             proto_record['obfuscation'] = result.get('obfuscation')
+            proto_record['protocol_version'] = result.get('protocol_version')
         proto_record['base_protocol'] = install_base
         proto_record['instance'] = protocol_instance(install_protocol)
         proto_record['display_name'] = protocol_display_name(install_protocol)
@@ -6912,6 +8559,28 @@ async def api_exit_link(request: Request, server_id: int, req: ExitLinkRequest):
         return _exit_link_error(e)
     except Exception as e:
         logger.exception("Error linking to exit node")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+class ExitTransitVersionRequest(BaseModel):
+    awg3: bool = True
+
+
+@app.post('/api/exit-nodes/{exit_uid}/transit-version', tags=["Protocols"])
+@serialize_peer_lifecycle
+async def api_exit_transit_version(request: Request, exit_uid: str,
+                                   req: ExitTransitVersionRequest):
+    """Switch an exit and every entry linked to it between the AWG 3.1 and 2.0
+    transit parameter sets in place. Keys, PSKs, transit addresses and the peer
+    list are preserved, so nothing has to be re-linked."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        return await exit_link_svc.set_transit_version(exit_uid.strip(), bool(req.awg3))
+    except ExitLinkError as e:
+        return _exit_link_error(e)
+    except Exception as e:
+        logger.exception("Error switching the transit AWG version")
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
@@ -7528,6 +9197,32 @@ def api_awg_plugin_update_status(request: Request, server_id: int, op_id: str):
 
 
 
+@app.get('/api/awg/i1/catalog', tags=["Protocols"])
+def api_awg_i1_catalog(request: Request):
+    """Masking domains and device presets for the I1 picker."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    return {
+        'domains': awg_i1_catalog(),
+        'device_profiles': [{'key': key, 'domains': list(domains)}
+                            for key, domains in AWG_I1_DEVICE_PROFILES],
+    }
+
+
+@app.post('/api/awg/i1/preview', tags=["Protocols"])
+def api_awg_i1_preview(request: Request, req: I1PreviewRequest):
+    """Build one I1 packet without touching any server (live preview)."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        pool = (req.pool or '').strip().lower() or None
+        domain = awg_i1_domain_from(req.domain, pool)
+        value = awg_generate_i1(domain, pool)
+    except ValueError as e:
+        return JSONResponse({'error': str(e), 'code': 'bad_i1_domain'}, status_code=400)
+    return {'i1': value, 'parsed': awg_parse_i1(value)}
+
+
 @app.post('/api/servers/{server_id}/awg/settings', tags=["Protocols"])
 def api_awg_settings_get(request: Request, server_id: int, req: ProtocolRequest):
     """Return MTU, DNS and the special junk packets I1-I5 of an AWG server."""
@@ -7568,9 +9263,24 @@ def api_awg_settings_save(request: Request, server_id: int, req: AwgSettingsRequ
             # The warp client budget/link owns MTU and DNS while linked.
             raise SrvWarpError('srv_warp_settings_locked', 409)
         special_junk = {key: getattr(req, key) for key in ('i1', 'i2', 'i3', 'i4', 'i5')}
-        if all(value is None for value in special_junk.values()):
+        i1_value = None
+        if req.regenerate_i1:
+            # API path: generate and apply in one call. The panel UI previews
+            # the packet first and then saves the literal, so this branch is
+            # for scripted clients; it still replaces only I1.
+            try:
+                domain = awg_i1_domain_from(req.i1_domain, req.i1_pool)
+            except ValueError as e:
+                return JSONResponse({'error': str(e), 'code': 'bad_i1_domain'},
+                                    status_code=400)
+            i1_value = awg_generate_i1(domain, (req.i1_pool or '').strip().lower() or None)
+            if all(value is None for key, value in special_junk.items() if key != 'i1'):
+                special_junk = None
+            else:
+                special_junk['i1'] = i1_value
+        if special_junk is not None and all(value is None for value in special_junk.values()):
             special_junk = None
-        else:
+        elif special_junk is not None:
             # Reject a malformed packet before opening an SSH connection.
             normalize_special_junk(special_junk)
         ssh = get_ssh(server)
@@ -7588,6 +9298,7 @@ def api_awg_settings_save(request: Request, server_id: int, req: AwgSettingsRequ
                 dns=dns,
                 special_junk=special_junk,
                 dns6=req.dns6,
+                i1_value=i1_value,
             )
         finally:
             ssh.disconnect()
@@ -7607,6 +9318,150 @@ def api_awg_settings_save(request: Request, server_id: int, req: AwgSettingsRequ
     except Exception as e:
         logger.exception("Error saving AWG settings")
         return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.get('/api/servers/{server_id}/xray/core', tags=["Protocols"])
+async def api_xray_core_version(request: Request, server_id: int,
+                                protocol: str = 'xray'):
+    """Running Xray-core version of this connection and the latest release."""
+    
+    
+@app.get('/api/servers/{server_id}/xray/fingerprint', tags=["Protocols"])
+def api_xray_fingerprint_get(request: Request, server_id: int, protocol: str = 'xray'):
+    """The Reality fingerprint VLESS links are issued with on this connection."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if protocol_base(protocol) != 'xray':
+        return JSONResponse({'error': 'Not an Xray protocol'}, status_code=400)
+    data = load_data()
+    if not 0 <= server_id < len(data['servers']):
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    server = data['servers'][server_id]
+    try:
+        ssh = get_ssh(server)
+        await asyncio.to_thread(ssh.connect)
+        try:
+            manager = XrayManager(ssh, protocol)
+            current = await asyncio.to_thread(manager.get_core_version)
+        finally:
+            await asyncio.to_thread(ssh.disconnect)
+    except Exception:
+        logger.warning("Xray core version probe failed for %s",
+                       server.get('uid'), exc_info=True)
+        current = None
+    try:
+        latest = await asyncio.to_thread(_xray_latest_release)
+    except Exception:
+        logger.warning("Xray release lookup failed", exc_info=True)
+        latest = None
+    update_available = bool(latest and (not current
+                                        or current.lstrip('v') != latest.lstrip('v')))
+    return {'version': current, 'latest': latest,
+            'update_available': update_available}
+
+
+@app.post('/api/servers/{server_id}/xray/update', tags=["Protocols"])
+async def api_xray_update(request: Request, server_id: int,
+                          req: XrayUpdateRequest):
+    """Rebuild the image with a newer Xray-core and recreate the container.
+
+    Runs as an install-flow operation: a rebuild takes minutes and the page
+    watches the shared progress log. Only one server-wide operation at a time.
+    if server_id < 0 or server_id >= len(data['servers']):
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    server = data['servers'][server_id]
+    return {
+        'fingerprint': xray_stored_fingerprint(server, protocol) or XRAY_DEFAULT_FINGERPRINT,
+        'choices': list(XRAY_FINGERPRINTS),
+    }
+
+
+@app.post('/api/servers/{server_id}/xray/fingerprint', tags=["Protocols"])
+def api_xray_fingerprint_save(request: Request, server_id: int, req: XrayFingerprintRequest):
+    """Remember the Reality fingerprint VLESS links are issued with.
+
+    Panel-side only (a protocol record field in data.json): Reality does not
+    pin the client hello, so the node is not touched and links already issued
+    keep working. fingerprint=None resets to the built-in default.
+    """
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if protocol_base(req.protocol) != 'xray':
+        return JSONResponse({'error': 'Not an Xray protocol'}, status_code=400)
+    data = load_data()
+    if not 0 <= server_id < len(data['servers']):
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    _install_ops_load()
+    if _install_running(server_id):
+        return JSONResponse(
+            {'error': 'Another operation is running on this server',
+             'code': 'operation_in_progress'},
+            status_code=409)
+    op = op_create(server_id, 'xray_update', total=XRAY_UPDATE_TOTAL)
+    op['protocol'] = req.protocol
+    _install_ops_save()
+    asyncio.create_task(_run_xray_update(
+        op, server_id, req.protocol, (req.target or '').strip() or None))
+    return {'operation_id': op['id']}
+
+
+async def _run_xray_update(op, server_id, protocol, target):
+    data = load_data()
+    server = data['servers'][server_id]
+    ssh = get_ssh(server)
+
+    def progress(stage, message):
+        op_log(op, stage, message)
+
+    try:
+        op_log(op, 'start', f"updating Xray-core of {protocol}")
+        await asyncio.to_thread(ssh.connect)
+        manager = XrayManager(ssh, protocol)
+        if not target:
+            target = await asyncio.to_thread(_xray_latest_release)
+        if not target:
+            raise RuntimeError("cannot resolve the latest Xray-core release")
+        result = await asyncio.to_thread(
+            manager.update_core, target, progress)
+        if result.get('status') != 'success':
+            raise RuntimeError(result.get('message') or 'update failed')
+        op_log(op, 'done', f"Xray-core is now {result.get('version')}")
+        op_finish(op, 'success', result=result)
+        _invalidate_ip_status(server.get('uid'))
+    except Exception as e:
+        logger.warning("Xray core update failed: %s", e, exc_info=True)
+        op_log(op, 'error', str(e))
+        op_finish(op, 'failed', error={'code': 'update_failed', 'message': str(e)})
+    finally:
+        try:
+            await asyncio.to_thread(ssh.disconnect)
+        except Exception:
+            pass
+    fp = (req.fingerprint or '').strip() or None
+    if fp is not None and fp not in XRAY_FINGERPRINTS:
+        return JSONResponse({'error': 'Unknown fingerprint'}, status_code=400)
+    try:
+        data = load_data()
+        if server_id < 0 or server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        # Never mint a protocol record from this endpoint: saving a
+        # fingerprint for an uninstalled instance would leave a phantom
+        # "installed but stopped" entry (multi-instance records survive
+        # /check pruning).
+        if req.protocol not in server.get('protocols', {}):
+            return JSONResponse({'error': 'Protocol not found'}, status_code=404)
+        record = server['protocols'][req.protocol]
+        if fp is None:
+            record.pop('fingerprint', None)
+        else:
+            record['fingerprint'] = fp
+        save_data(data)
+        return {'status': 'success', 'fingerprint': fp or XRAY_DEFAULT_FINGERPRINT}
+    except Exception:
+        logger.exception("Error saving Xray fingerprint")
+        return JSONResponse({'error': 'internal_error', 'code': 'internal_error'},
+                            status_code=500)
 
 
 IPV6_CONFLICT_CODES = frozenset({
@@ -7634,6 +9489,45 @@ def _awg_protocols(server):
     """AWG protocols that exist on this server, in stable order."""
     return [proto for proto in (server.get('protocols') or {})
             if protocol_base(proto) in AWG_PROTOCOLS]
+
+
+_XRAY_RELEASE_CACHE = {'ts': 0.0, 'tag': None}
+
+
+def _xray_latest_release():
+    """Latest published Xray-core tag, cached for an hour.
+
+    The GitHub API allows 60 unauthenticated requests per hour per IP, and
+    the update dialog polls it on every open — caching keeps the panel out
+    of the rate limit.
+    """
+    now = time.monotonic()
+    if _XRAY_RELEASE_CACHE['tag'] and now - _XRAY_RELEASE_CACHE['ts'] < 3600:
+        return _XRAY_RELEASE_CACHE['tag']
+    request = urllib.request.Request(
+        'https://api.github.com/repos/XTLS/Xray-core/releases/latest',
+        headers={'Accept': 'application/vnd.github+json',
+                 'User-Agent': 'Amnezia-Web-Panel'})
+    with urllib.request.urlopen(request, timeout=10) as response:
+        tag = (json.load(response) or {}).get('tag_name')
+    if tag:
+        _XRAY_RELEASE_CACHE.update(ts=now, tag=tag)
+    return _XRAY_RELEASE_CACHE['tag']
+def _xray_port_usage(ssh, server):
+    """Running/client info of every xray connection, for the header IP chips.
+
+    A failure on one connection is skipped, not fatal: the AWG part of the
+    payload stays valid and the chip simply undercounts.
+    """
+    usage = []
+    for proto in (server.get('protocols') or {}):
+        if protocol_base(proto) != 'xray':
+            continue
+        try:
+            usage.append(XrayManager(ssh, proto).get_port_usage())
+        except Exception:
+            logger.warning("Xray port usage failed for %s", proto, exc_info=True)
+    return usage
 
 
 def _ip_status_cache_ttl(payload):
@@ -7723,7 +9617,8 @@ def _ipv6_error(exc, default='state_unreadable'):
 
 @app.get('/api/servers/{server_id}/ip-status', tags=["Protocols"])
 def api_ip_status(request: Request, server_id: int):
-    """IPv4/IPv6 state of the host, Docker and every AWG instance.
+    """IPv4/IPv6 state of the host, Docker, every AWG instance and the
+    xray connections (as port usage: a running instance uses the host IP).
 
     Cached for 20 s per server: the page polls it and every miss costs several
     SSH round-trips. Mutations drop the entry themselves.
@@ -7741,7 +9636,8 @@ def api_ip_status(request: Request, server_id: int):
             ssh = get_ssh(server)
             ssh.connect()
             try:
-                status = AWGManager(ssh).get_ip_status(_awg_protocols(server))
+                status = AWGManager(ssh).get_ip_status(
+                    _awg_protocols(server), port_usage=_xray_port_usage(ssh, server))
             finally:
                 ssh.disconnect()
             _ip_status_cache_put(uid, status)
@@ -7993,7 +9889,8 @@ def api_ipv6_operation(request: Request, server_id: int, op_id: str):
 
 @app.post('/api/servers/{server_id}/uninstall', tags=["Protocols"])
 @serialize_peer_lifecycle
-async def api_uninstall_protocol(request: Request, server_id: int, req: ProtocolRequest):
+async def api_uninstall_protocol(request: Request, server_id: int, req: ProtocolRequest,
+                                 archive_blocking: bool = False):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
@@ -8001,7 +9898,7 @@ async def api_uninstall_protocol(request: Request, server_id: int, req: Protocol
         if server_id < 0 or server_id >= len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         guard = _traffic_removal_guard(data, server_id=server_id, protocol=req.protocol)
-        if guard is not None:
+        if guard is not None and (not archive_blocking or protocol_base(req.protocol) != 'xray'):
             return guard
         server = data['servers'][server_id]
         if srv_warp_ctx(server, req.protocol).get('active'):
@@ -8009,6 +9906,31 @@ async def api_uninstall_protocol(request: Request, server_id: int, req: Protocol
             # tear down a container whose egress rules are still applied.
             raise SrvWarpError('srv_warp_xor_conflict', 409)
         base = protocol_base(req.protocol)
+        blocked = (ownership_rows(data, server_id=server_id, protocol=req.protocol)
+                   if archive_blocking else [])
+        archive_states = {}
+        archive_baselines = {c.get('id'): c.get('last_bytes') for c in blocked}
+        for conn in blocked:
+            observed, quiescent = await asyncio.to_thread(_probe_blocking_peer, server, conn)
+            if not quiescent:
+                return JSONResponse({
+                    'error': 'A peer linked to this protocol is still active; '
+                             'stop or remove it before archiving its accounting.',
+                    'code': 'blocked_peer_still_active',
+                    'blocking': [_blocking_row_public(conn)],
+                }, status_code=409)
+            archive_states[conn.get('id')] = observed
+        if blocked:
+            async with DATA_LOCK:
+                current = load_data()
+                current_blocked = ownership_rows(
+                    current, server_id=server_id, protocol=req.protocol)
+                if [c.get('id') for c in current_blocked] != [c.get('id') for c in blocked]:
+                    return JSONResponse({
+                        'error': 'Connection accounting changed; refresh the server page and retry.',
+                        'code': 'traffic_finalization_required',
+                        'blocking': [_blocking_row_public(c) for c in current_blocked],
+                    }, status_code=409)
         if base in AWG_PROTOCOLS and ((server.get('protocols') or {}).get(req.protocol) or {}).get('exit_link'):
             # Drop our peer on the exit while the container still exists
             try:
@@ -8024,20 +9946,59 @@ async def api_uninstall_protocol(request: Request, server_id: int, req: Protocol
             await asyncio.to_thread(manager.remove_container)
         else:
             await asyncio.to_thread(manager.remove_container, req.protocol)
-        if req.protocol in server.get('protocols', {}):
-            del server['protocols'][req.protocol]
+        archived = 0
+        if blocked:
+            async with DATA_LOCK:
+                with STATE_FILE_LOCK:
+                    data = load_data()
+                    current = data['servers'][server_id]
+                    current_blocked = ownership_rows(
+                        data, server_id=server_id, protocol=req.protocol)
+                    if (current.get('uid') != server.get('uid')
+                            or [c.get('id') for c in current_blocked] != [c.get('id') for c in blocked]):
+                        return JSONResponse({
+                            'error': 'Connection accounting changed; refresh the server page and retry.',
+                            'code': 'traffic_finalization_required',
+                            'blocking': [_blocking_row_public(c) for c in current_blocked],
+                        }, status_code=409)
+                    before = pathlib_read_data_bytes()
+                    operation_id = uuid.uuid4().hex
+                    actor = _actor_id(request, True)
+                    for conn in current_blocked:
+                        observed = archive_states.get(conn.get('id'))
+                        if conn.get('last_bytes') != archive_baselines.get(conn.get('id')):
+                            # A newer accounting scrape owns this baseline now. Never
+                            # reinterpret the older probe as a counter reset.
+                            observed = None
+                        finalize_connection_record(
+                            data, conn, current, observed,
+                            time.time(), 'protocol_uninstall_absent', operation_id, True)
+                    if req.protocol in current.get('protocols', {}):
+                        del current['protocols'][req.protocol]
+                    commit_finalize(
+                        DATA_FILE, operation_id, actor, 'protocol_archive_uninstall',
+                        recovery_digest({'server_uid': current.get('uid'),
+                                         'protocol': req.protocol,
+                                         'mode': 'protocol_uninstall_absent'}),
+                        before, data)
+                    archived = len(current_blocked)
+                    server = current
+                    _invalidate_ip_status(server.get('uid'))
+        else:
+            if req.protocol in server.get('protocols', {}):
+                del server['protocols'][req.protocol]
+                save_data(data)
+                _invalidate_ip_status(server.get('uid'))
+            # The instance is gone: its peers are gone with it, so connections
+            # pointing at this (server, protocol) would dangle forever — the
+            # modal would list a phantom that errors with 'Client not found'
+            # on every action. Purge them like server/user deletion does.
+            data['user_connections'] = [
+                c for c in data.get('user_connections', [])
+                if not (c.get('server_id') == server_id
+                        and c.get('protocol') == req.protocol)
+            ]
             save_data(data)
-            _invalidate_ip_status(server.get('uid'))
-        # The instance is gone: its peers are gone with it, so connections
-        # pointing at this (server, protocol) would dangle forever — the
-        # modal would list a phantom that errors with 'Client not found'
-        # on every action. Purge them like server/user deletion does.
-        data['user_connections'] = [
-            c for c in data.get('user_connections', [])
-            if not (c.get('server_id') == server_id
-                    and c.get('protocol') == req.protocol)
-        ]
-        save_data(data)
         ssh.disconnect()
         if base == 'exit':
             detached = await exit_link_svc.detach_entries_for_exit(server.get('uid'), 'exit_uninstalled')
@@ -8047,7 +10008,10 @@ async def api_uninstall_protocol(request: Request, server_id: int, req: Protocol
             restored = await exit_link_svc.disable_dns_via_exit_for_exit(server.get('uid'))
             if restored:
                 return {'status': 'success', 'dns_restored': restored}
-        return {'status': 'success'}
+        response = {'status': 'success'}
+        if archived:
+            response['archived'] = archived
+        return response
     except SrvWarpError:
         raise
     except Exception as e:
@@ -8067,6 +10031,7 @@ CONTAINER_NAMES = {
     'socks5': 'amnezia-socks5proxy',
     'adguard': 'amnezia-adguard',
     'nginx': 'amnezia-nginx',
+    'haproxy': 'amnezia-haproxy',
 }
 
 
@@ -8321,6 +10286,408 @@ def api_protocol_backup_delete(request: Request, server_id: int, req: BackupDown
             ssh.disconnect()
 
 
+# ===== Copy one AWG instance to another server =====
+INSTANCE_COPY_TTL = 60 * 60
+INSTANCE_COPY_KEEP = 20
+_inst_copy_ops = {}
+_inst_copy_active = {'op_id': None}
+_inst_copy_loaded = {'done': False}
+
+
+def _instance_copy_store_path():
+    return os.path.join(os.path.dirname(DATA_FILE), 'instance_copy_ops.json')
+
+
+def _instance_copy_save():
+    path = _instance_copy_store_path()
+    # Unique temp name: the worker (event loop) and the start handler
+    # (threadpool) can save at the same time and must not overwrite each other.
+    tmp = '%s.%s.tmp' % (path, uuid.uuid4().hex)
+    try:
+        with open(tmp, 'w', encoding='utf-8') as handle:
+            json.dump(list(_inst_copy_ops.values()), handle, ensure_ascii=False)
+        os.replace(tmp, path)
+    except Exception:
+        logger.warning("Cannot persist instance copy operations", exc_info=True)
+
+
+def _instance_copy_prune():
+    now = datetime.now().timestamp()
+    for op_id, op in list(_inst_copy_ops.items()):
+        if op.get('finished_ts') and now - op['finished_ts'] > INSTANCE_COPY_TTL:
+            _inst_copy_ops.pop(op_id, None)
+    if len(_inst_copy_ops) > INSTANCE_COPY_KEEP:
+        finished = sorted(
+            (op for op in _inst_copy_ops.values() if op.get('finished_ts')),
+            key=lambda op: op['finished_ts'],
+        )
+        for op in finished[:len(_inst_copy_ops) - INSTANCE_COPY_KEEP]:
+            _inst_copy_ops.pop(op['id'], None)
+
+
+def _instance_copy_load():
+    if _inst_copy_loaded['done']:
+        return
+    _inst_copy_loaded['done'] = True
+    try:
+        with open(_instance_copy_store_path(), encoding='utf-8') as handle:
+            stored = json.load(handle)
+    except Exception:
+        return
+    for op in stored if isinstance(stored, list) else []:
+        if not isinstance(op, dict) or not op.get('id'):
+            continue
+        if op.get('state') == 'running':
+            # The process that owned the SSH session is gone.
+            op['state'] = 'failed'
+            op['error'] = {
+                'code': 'interrupted',
+                'message': 'the panel restarted during the copy; check the target server',
+            }
+            op.setdefault('lines', []).append({
+                'ts': datetime.now().isoformat(timespec='seconds'),
+                'stage': 'error',
+                'text': 'panel restarted before the operation finished',
+            })
+            op['finished_at'] = datetime.now().isoformat(timespec='seconds')
+            op['finished_ts'] = datetime.now().timestamp()
+        _inst_copy_ops[op['id']] = op
+    _instance_copy_prune()
+
+
+def _instance_copy_error(exc, status_code=400):
+    return JSONResponse({'error': exc.message, 'code': exc.code}, status_code=status_code)
+
+
+def _instance_copy_targets(data, server_id):
+    return [
+        {'id': index, 'name': server.get('name') or server.get('host'),
+         'host': server.get('host')}
+        for index, server in enumerate(data.get('servers', []))
+        if index != server_id
+    ]
+
+
+def _instance_copy_source(data, server_id, protocol):
+    """(server, protocol_key, panel_entry, container) or raises InstanceCopyError."""
+    if server_id < 0 or server_id >= len(data.get('servers', [])):
+        raise InstanceCopyError('server_not_found', 'Server not found')
+    server = data['servers'][server_id]
+    protocols = server.get('protocols') or {}
+    entry = protocols.get(protocol)
+    if not isinstance(entry, dict):
+        raise InstanceCopyError('protocol_not_found', 'Protocol is not installed on this server')
+    if instance_copy_base(protocol) not in ('awg', 'awg2', 'awg3'):
+        raise InstanceCopyError('unsupported', 'Only AmneziaWG instances can be copied')
+    container = entry.get('container_name') or protocol_container_name(protocol)
+    if not container:
+        raise InstanceCopyError('unsupported', 'Unknown container for this protocol')
+    return server, entry, container
+
+
+def _instance_copy_apply(plan, source_server_id, target_server_id, source_protocol):
+    """Write the copied instance and its user bindings into data.json."""
+    data = load_data()
+    if target_server_id < 0 or target_server_id >= len(data.get('servers', [])):
+        raise InstanceCopyError('server_not_found', 'Target server not found')
+    source_entry = data['servers'][source_server_id]['protocols'][source_protocol]
+    target = data['servers'][target_server_id]
+    protocols = target.setdefault('protocols', {})
+    if plan['target_key'] in protocols:
+        raise InstanceCopyError('name_taken', 'Target instance name is already in use')
+
+    entry = copy_module.deepcopy(source_entry)
+    entry['container_name'] = plan['target_container']
+    entry['instance'] = plan['target_index']
+    entry['port'] = str(plan['port'])
+    params = entry.get('awg_params')
+    if isinstance(params, dict):
+        params['port'] = str(plan['port'])
+    entry['public_host'] = None
+    entry['public_port'] = None
+    entry['installed'] = True
+    display = str(entry.get('display_name') or '').strip()
+    if plan['target_index'] > 1 and '#' not in display:
+        display = ('%s #%d' % (display, plan['target_index'])).strip()
+    entry['display_name'] = display or plan['target_key']
+    protocols[plan['target_key']] = entry
+
+    now = datetime.now().isoformat(timespec='seconds')
+    connections = data.setdefault('user_connections', [])
+    copied = 0
+    for connection in list(connections):
+        if (connection.get('server_id') != source_server_id
+                or connection.get('protocol') != source_protocol):
+            continue
+        connections.append({
+            'id': str(uuid.uuid4()),
+            'user_id': connection.get('user_id'),
+            'server_id': target_server_id,
+            'protocol': plan['target_key'],
+            'client_id': connection.get('client_id'),
+            'name': connection.get('name'),
+            'created_at': connection.get('created_at') or now,
+            # Traffic belongs to the source host; the copy starts at zero.
+            'last_bytes': 0,
+            'last_rx_bytes': 0,
+            'last_tx_bytes': 0,
+            # Nothing to finalize on the copy until it actually carries traffic:
+            # without this flag the usage-accounting guard blocks uninstalling
+            # the instance the copy just created (peer_accounting.ownership_rows).
+            'accounting_unowned': True,
+        })
+        copied += 1
+    save_data(data)
+    return copied
+
+
+def _instance_copy_rollback_panel(plan, target_server_id):
+    try:
+        data = load_data()
+        target = data['servers'][target_server_id]
+        protocols = target.get('protocols') or {}
+        entry = protocols.get(plan['target_key'])
+        if (isinstance(entry, dict)
+                and entry.get('container_name') != plan['target_container']):
+            # A concurrent install took the same key after planning: that
+            # instance is not ours, so keep it and its user bindings.
+            return
+        protocols.pop(plan['target_key'], None)
+        connections = data.get('user_connections') or []
+        data['user_connections'] = [
+            connection for connection in connections
+            if not (connection.get('server_id') == target_server_id
+                    and connection.get('protocol') == plan['target_key'])
+        ]
+        save_data(data)
+    except Exception:
+        logger.warning("instance copy: cannot roll back data.json", exc_info=True)
+
+
+async def _run_instance_copy(op_id):
+    """Worker: SSH work in a thread, panel state on the event loop."""
+    op = _inst_copy_ops[op_id]
+    source_ssh = target_ssh = None
+    plan = None
+    copier = None
+    stage_steps = {
+        'planning': (1, 12), 'inspecting': (2, 25), 'patching': (2, 32),
+        'image': (3, 45), 'creating': (4, 55), 'uploading': (5, 70),
+        'starting': (6, 80), 'verifying': (7, 90), 'tools': (7, 93),
+        'done': (8, 100),
+    }
+
+    def log(stage, text):
+        step, percent = stage_steps.get(stage, (op.get('step', 0), op.get('percent', 0)))
+        op['step'] = max(op.get('step', 0), step)
+        op['percent'] = max(op.get('percent', 0), percent)
+        op['lines'].append({
+            'ts': datetime.now().isoformat(timespec='seconds'),
+            'stage': stage,
+            'text': text,
+        })
+
+    try:
+        data = load_data()
+        source_server, _entry, container = _instance_copy_source(
+            data, op['source_server_id'], op['protocol'])
+        if op['target_server_id'] < 0 or op['target_server_id'] >= len(data.get('servers') or []):
+            # The panel state may change between the start request and the
+            # worker (a server removed in between must not crash the task).
+            raise InstanceCopyError('server_not_found', 'Target server not found')
+        target_server = data['servers'][op['target_server_id']]
+        log('planning', 'connecting to %s and %s' % (
+            source_server.get('name') or source_server['host'],
+            target_server.get('name') or target_server['host']))
+        source_ssh = await asyncio.to_thread(get_ssh, source_server)
+        await asyncio.to_thread(source_ssh.connect)
+        target_ssh = await asyncio.to_thread(get_ssh, target_server)
+        await asyncio.to_thread(target_ssh.connect)
+
+        copier = InstanceCopier(source_ssh, target_ssh)
+        plan = await asyncio.to_thread(
+            copier.plan, op['protocol'], container, target_server.get('protocols') or {})
+        op['target_key'] = plan['target_key']
+        op['target_container'] = plan['target_container']
+        op['port'] = plan['port']
+        log('planning', 'target instance %s, port %d, %d peers' % (
+            plan['target_key'], plan['port'], plan['peers']))
+
+        result = await asyncio.to_thread(
+            copier.execute, plan, log, lambda: bool(op.get('cancel_requested')))
+
+        try:
+            # Hold the panel write lock across load_data/save_data: a traffic
+            # update landing in between would otherwise be overwritten by the
+            # copy snapshot.
+            async with DATA_LOCK:
+                copied = await asyncio.to_thread(
+                    _instance_copy_apply, plan, op['source_server_id'],
+                    op['target_server_id'], op['protocol'])
+        except Exception:
+            # The container exists but the panel cannot record it: drop the
+            # partial panel entry under the same lock the successful write
+            # uses (a traffic update must not be overwritten by the snapshot),
+            # then remove the container.
+            async with DATA_LOCK:
+                await asyncio.to_thread(
+                    _instance_copy_rollback_panel, plan, op['target_server_id'])
+            await asyncio.to_thread(copier.destroy, plan)
+            raise
+        result['connections'] = copied
+        op['result'] = result
+        op['state'] = 'success'
+        op['step'] = op['total']
+        op['percent'] = 100
+        log('done', 'instance %s is ready on %s' % (
+            plan['target_key'], target_server.get('name') or target_server['host']))
+    except CopyCancelled:
+        op['state'] = 'cancelled'
+        log('error', 'copy cancelled; the target container was removed')
+    except InstanceCopyError as exc:
+        op['state'] = 'failed'
+        op['error'] = {'code': exc.code, 'message': exc.message}
+        log('error', exc.message)
+    except Exception as exc:
+        logger.exception("Instance copy failed")
+        op['state'] = 'failed'
+        op['error'] = {'code': 'internal_error', 'message': str(exc)}
+        log('error', 'unexpected error: %s' % exc)
+    finally:
+        op['finished_at'] = datetime.now().isoformat(timespec='seconds')
+        op['finished_ts'] = datetime.now().timestamp()
+        _inst_copy_active['op_id'] = None
+        _instance_copy_save()
+        for ssh in (source_ssh, target_ssh):
+            if ssh:
+                try:
+                    ssh.disconnect()
+                except Exception:
+                    logger.debug("instance copy: disconnect failed", exc_info=True)
+
+
+@app.post('/api/servers/{server_id}/copy/preflight', tags=["Protocols"])
+def api_instance_copy_preflight(request: Request, server_id: int, req: InstanceCopyRequest):
+    """Resolve the target instance name, port and warnings. Changes nothing."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if req.target_server_id == server_id:
+        return JSONResponse({'error': 'Choose another server', 'code': 'same_server'},
+                            status_code=400)
+    source_ssh = target_ssh = None
+    try:
+        data = load_data()
+        _server, _entry, container = _instance_copy_source(data, server_id, req.protocol)
+        if req.target_server_id < 0 or req.target_server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Target server not found', 'code': 'server_not_found'},
+                                status_code=404)
+        target = data['servers'][req.target_server_id]
+        source_ssh = get_ssh(data['servers'][server_id])
+        source_ssh.connect()
+        target_ssh = get_ssh(target)
+        target_ssh.connect()
+        plan = InstanceCopier(source_ssh, target_ssh).plan(
+            req.protocol, container, target.get('protocols') or {})
+        payload = dict(plan)
+        payload['status'] = 'ok'
+        payload['protocol'] = req.protocol
+        return payload
+    except InstanceCopyError as e:
+        return _instance_copy_error(e)
+    except Exception as e:
+        logger.exception("Error planning instance copy")
+        return JSONResponse({'error': str(e), 'code': 'internal_error'}, status_code=500)
+    finally:
+        for ssh in (source_ssh, target_ssh):
+            if ssh:
+                ssh.disconnect()
+
+
+@app.post('/api/servers/{server_id}/copy', tags=["Protocols"])
+async def api_instance_copy_start(request: Request, server_id: int, req: InstanceCopyRequest):
+    """Start copying one instance; only one copy runs in the whole panel."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if req.target_server_id == server_id:
+        return JSONResponse({'error': 'Choose another server', 'code': 'same_server'},
+                            status_code=400)
+    _instance_copy_load()
+    _instance_copy_prune()
+    if _inst_copy_active['op_id']:
+        return JSONResponse(
+            {'error': 'Another instance copy is already running', 'code': 'copy_in_progress'},
+            status_code=409)
+    try:
+        data = load_data()
+        _instance_copy_source(data, server_id, req.protocol)
+        if req.target_server_id < 0 or req.target_server_id >= len(data['servers']):
+            raise InstanceCopyError('server_not_found', 'Target server not found')
+    except InstanceCopyError as e:
+        return _instance_copy_error(e)
+
+    op_id = uuid.uuid4().hex
+    op = {
+        'id': op_id,
+        'source_server_id': server_id,
+        'target_server_id': req.target_server_id,
+        'protocol': req.protocol,
+        'state': 'running',
+        'lines': [],
+        'result': None,
+        'error': None,
+        'cancel_requested': False,
+        'step': 0,
+        'total': INSTANCE_COPY_STEPS,
+        'percent': 0,
+        'started_at': datetime.now().isoformat(timespec='seconds'),
+    }
+    _inst_copy_ops[op_id] = op
+    _instance_copy_save()
+    _inst_copy_active['op_id'] = op_id
+    asyncio.create_task(_run_instance_copy(op_id))
+    return {'operation_id': op_id}
+
+
+@app.get('/api/servers/{server_id}/copy/{op_id}', tags=["Protocols"])
+async def api_instance_copy_status(request: Request, server_id: int, op_id: str, offset: int = 0):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    _instance_copy_load()
+    op = _inst_copy_ops.get(op_id)
+    if not op:
+        return JSONResponse({'error': 'Operation not found', 'code': 'not_found'}, status_code=404)
+    lines = op.get('lines') or []
+    offset = max(0, min(int(offset or 0), len(lines)))
+    return {
+        'operation_id': op_id,
+        'state': op.get('state'),
+        'step': op.get('step', 0),
+        'total': op.get('total', INSTANCE_COPY_STEPS),
+        'percent': op.get('percent', 0),
+        'lines': lines[offset:],
+        'next_offset': len(lines),
+        'result': op.get('result'),
+        'error': op.get('error'),
+        'target_key': op.get('target_key'),
+        'target_container': op.get('target_container'),
+        'port': op.get('port'),
+    }
+
+
+@app.post('/api/servers/{server_id}/copy/{op_id}/cancel', tags=["Protocols"])
+async def api_instance_copy_cancel(request: Request, server_id: int, op_id: str):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    _instance_copy_load()
+    op = _inst_copy_ops.get(op_id)
+    if not op:
+        return JSONResponse({'error': 'Operation not found', 'code': 'not_found'}, status_code=404)
+    if op.get('state') == 'running':
+        op['cancel_requested'] = True
+        return {'status': 'cancelling'}
+    return {'status': op.get('state')}
+
+
 @app.post('/api/servers/{server_id}/container/toggle', tags=["Protocols"])
 def api_container_toggle(request: Request, server_id: int, req: ContainerToggleRequest):
     """Start or stop a protocol Docker container. Stopping an exit node that
@@ -8401,6 +10768,10 @@ def api_server_config(request: Request, server_id: int, req: ProtocolRequest, se
         elif protocol_base(req.protocol) == 'nginx':
             from managers.nginx_manager import NginxManager
             mgr = NginxManager(ssh, req.protocol)
+            config = mgr._get_server_config(req.protocol)
+        elif protocol_base(req.protocol) == 'haproxy':
+            from managers.haproxy_manager import HaproxyManager
+            mgr = HaproxyManager(ssh, req.protocol)
             config = mgr._get_server_config(req.protocol)
         else:
             mgr = AWGManager(ssh)
@@ -8644,7 +11015,7 @@ async def api_set_protocol_public_endpoint(request: Request, server_id: int, req
 # TCP for the rest. DNS resolvers and the exit node have nothing to publish.
 PUBLIC_FORWARD_L4 = {
     'udp': ('awg', 'awg2', 'awg3', 'awg_legacy', 'wireguard'),
-    'tcp': ('xray', 'telemt', 'socks5', 'nginx'),
+    'tcp': ('xray', 'telemt', 'socks5', 'nginx', 'haproxy'),
 }
 
 # Seconds before the startup re-apply touches SSH, so the panel is serving
@@ -9099,6 +11470,10 @@ def api_server_config_save(request: Request, server_id: int, req: ServerConfigSa
             from managers.nginx_manager import NginxManager
             mgr = NginxManager(ssh, req.protocol)
             mgr.save_server_config(req.protocol, req.config)
+        elif protocol_base(req.protocol) == 'haproxy':
+            from managers.haproxy_manager import HaproxyManager
+            mgr = HaproxyManager(ssh, req.protocol)
+            mgr.save_server_config(req.protocol, req.config)
         elif protocol_base(req.protocol) == 'exit':
             # The exit container has its own path/template; AWGManager would
             # write into the awg container instead.
@@ -9212,7 +11587,31 @@ def api_get_connections(request: Request, server_id: int, protocol: str = Query(
                         client['assigned_user'] = u['username']
                         client['assigned_user_id'] = uid
                     break
-        return {'clients': clients}
+        # Торрент-активность: события из журнала панели, привязка по tunnel-IP.
+        journal = _torrent_journal()
+        buckets = _torrent_peer_buckets(server, protocol, journal)
+        torrent_mode = _torrent_mode_of(server, protocol)
+        for client in clients:
+            user_data = client.get('userData') or {}
+            ip = user_data.get('clientIp') or ''
+            if not ip:
+                m = re.search(r'(\d+\.\d+\.\d+\.\d+)',
+                              user_data.get('allowedIps') or '')
+                ip = m.group(1) if m else ''
+            bucket = buckets.get(ip) or {}
+            owner = bucket.get('client_id') or ''
+            cid = client.get('clientId') or ''
+            # Адрес переиспользуется: удалили ключ — адрес выдали новому.
+            # История прежнего владельца новому не показывается.
+            if owner and cid and owner != cid:
+                bucket = {}
+            events = (bucket.get('events') or []) if ip else []
+            if events:
+                client['torrentEvents'] = events
+                client['torrentIp'] = ip
+            client['torrentGuard'] = torrent_mode
+        return {'clients': clients, 'torrent_guard': torrent_mode,
+                'torrent_guard_health': _torrent_health_for(server)}
     except Exception as e:
         logger.exception("Error getting connections")
         return JSONResponse({'error': str(e)}, status_code=500)
@@ -9247,6 +11646,11 @@ def api_add_connection(request: Request, server_id: int, req: AddConnectionReque
             )
         elif protocol_base(req.protocol) == 'wireguard':
             result = manager.add_client(req.name, pub_host, public_port=pub_port)
+        elif protocol_base(req.protocol) == 'xray':
+            result = manager.add_client(req.protocol, req.name, pub_host, port,
+                                        public_port=pub_port,
+                                        fingerprint=xray_stored_fingerprint(server, req.protocol),
+                                        warp_ctx=srv_warp_ctx(server, req.protocol))
         else:
             result = manager.add_client(req.protocol, req.name, pub_host, port,
                                         public_port=pub_port,
@@ -9419,6 +11823,228 @@ def api_clear_conn_warnings(request: Request, server_id: int, req: ConnectionAct
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
+
+
+class TorrentGuardServerRequest(BaseModel):
+    """Тумблер в карточке сервера: включить/выключить фильтр на всех инстансах."""
+    enabled: bool = True
+
+@app.get('/api/servers/torrent_flags', tags=["Servers"])
+def api_torrent_flags(request: Request):
+    """Метки торрент-активности по серверам — для плиток на главной.
+
+    Синхронный (не async): чтение data.json и журнала блокировало бы event loop.
+    Отдаём только серверы, где есть события: пустые плитке не нужны.
+    """
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    data = load_data()
+    journal = _torrent_journal()
+    out = {}
+    for idx, server in enumerate(data.get('servers', [])):
+        summary = _torrent_summary_for(server, journal=journal)
+        if summary:
+            out[str(idx)] = summary
+    return {'flags': out}
+
+
+@app.post('/api/servers/{server_id}/connections/torrent_guard', tags=["Connections"])
+def api_set_torrent_guard(request: Request, server_id: int, req: TorrentGuardRequest):
+    """Режим фильтра инстанса: on (считать+DROP) / count / off."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if server_id < 0 or server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        proto = req.protocol or 'awg'
+        if protocol_base(proto) not in TORRENT_GUARD_PROTOCOLS:
+            return JSONResponse(
+                {'error': 'Protocol does not support torrent guard'},
+                status_code=400)
+        raw_mode = str(req.mode or '').strip().lower()
+        if raw_mode not in TORRENT_MODES:
+            # Иначе опечатка вроде "disable" молча включала бы блокировку.
+            return JSONResponse({'error': 'Unknown mode'}, status_code=400)
+        entry = (server.get('protocols') or {}).get(proto)
+        if not isinstance(entry, dict):
+            return JSONResponse({'error': 'Protocol not found'}, status_code=404)
+        mode = normalize_torrent_mode(raw_mode)
+        prev_mode = normalize_torrent_mode(
+            entry.get('torrent_guard') or TORRENT_DEFAULT_MODE)
+        entry['torrent_guard'] = mode
+        save_data(data)
+        apply_info = {'applied': False, 'error': ''}
+        ssh = None
+        try:
+            ssh = get_ssh(server)
+            ssh.connect()
+            manager = get_protocol_manager(ssh, proto)
+            guard_factory = getattr(manager, 'torrent_guard', None)
+            if callable(guard_factory):
+                report = guard_factory(proto).apply(mode)
+                apply_info = {'applied': not report.get('error'),
+                              'error': report.get('error') or ''}
+            else:
+                apply_info['error'] = 'manager does not support torrent guard'
+        except Exception as e:                          # noqa: BLE001
+            # Исключение (нода недоступна, обрыв SFTP, sudo не принял пароль)
+            # не должно оставлять в data.json режим, которого нет в правилах.
+            logger.warning('torrent guard apply failed: %s', e)
+            apply_info = {'applied': False, 'error': str(e)}
+        finally:
+            if ssh is not None:
+                try:
+                    ssh.disconnect()
+                except Exception:                       # noqa: BLE001
+                    pass
+        if apply_info['error']:
+            # В data.json не должен остаться режим, который не применился:
+            # иначе селект показывает «включено», а правил нет.
+            fresh = load_data()
+            if server_id < len(fresh.get('servers', [])):
+                current = ((fresh['servers'][server_id].get('protocols')
+                            or {}).get(proto))
+                if isinstance(current, dict):
+                    current['torrent_guard'] = prev_mode
+                    save_data(fresh)
+            return {'status': 'error', 'mode': prev_mode, 'apply': apply_info}
+        return {'status': 'success', 'mode': mode, 'apply': apply_info}
+    except Exception as e:
+        logger.exception("Error setting torrent guard")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/connections/torrent_clear', tags=["Connections"])
+def api_clear_torrent_events(request: Request, server_id: int,
+                             req: TorrentClearRequest):
+    """Снимает метку торрент-активности: по ключу, адресу или инстансу."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if server_id < 0 or server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        key = torrent_events.server_key(server)
+        if not key:
+            return JSONResponse({'error': 'Server has no uid/host'},
+                                status_code=400)
+        with _TORRENT_EVENTS_LOCK:
+            journal = torrent_events.load(TORRENT_EVENTS_FILE)
+            removed = torrent_events.clear(
+                journal, key, req.protocol, ip=req.ip,
+                client_id=req.client_id)
+            if removed:
+                torrent_events.save(TORRENT_EVENTS_FILE, journal)
+        return {'status': 'success', 'removed': removed}
+    except Exception as e:
+        logger.exception("Error clearing torrent events")
+        return JSONResponse({'error': str(e)}, status_code=500)
+def _torrent_capable_protocols(server):
+    """Протоколы сервера, где фильтр вообще может работать (AWG/WG)."""
+    protocols = server.get('protocols') or {}
+    return [proto for proto, entry in protocols.items()
+            if protocol_base(proto) in TORRENT_GUARD_PROTOCOLS
+            and isinstance(entry, dict)]
+
+
+@app.get('/api/servers/{server_id}/torrent_guard', tags=["Servers"])
+def api_torrent_guard_state(request: Request, server_id: int):
+    """Состояние тумблера в карточке сервера (модалка управления)."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    data = load_data()
+    if server_id < 0 or server_id >= len(data['servers']):
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    server = data['servers'][server_id]
+    protos = _torrent_capable_protocols(server)
+    modes = {proto: _torrent_mode_of(server, proto) for proto in protos}
+    enabled = (bool(server.get('torrent_guard_enabled', True))
+               and any(mode != 'off' for mode in modes.values()))
+    return {'server_id': server_id, 'supported': bool(protos),
+            'enabled': enabled, 'protocols': modes,
+            'health': _torrent_health_for(server)}
+
+
+@app.post('/api/servers/{server_id}/torrent_guard', tags=["Servers"])
+def api_torrent_guard_set(request: Request, server_id: int,
+                          req: TorrentGuardServerRequest):
+    """Включает/выключает фильтр на всех инстансах сервера одним тумблером.
+
+    Выключение снимает правила (режим off) со всех AWG/WG-инстансов: метки
+    перестают появляться, DROP не работает. Включение возвращает режим on.
+    """
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if server_id < 0 or server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        protos = _torrent_capable_protocols(server)
+        if not protos:
+            return JSONResponse(
+                {'error': 'Server has no AWG/WireGuard instances'},
+                status_code=400)
+        mode = 'on' if req.enabled else 'off'
+        previous = {proto: _torrent_mode_of(server, proto) for proto in protos}
+        for proto in protos:
+            server['protocols'][proto]['torrent_guard'] = mode
+        server['torrent_guard_enabled'] = bool(req.enabled)
+        save_data(data)
+        applied = 0
+        errors = []
+        ssh = None
+        try:
+            ssh = get_ssh(server)
+            ssh.connect()
+            for proto in protos:
+                try:
+                    manager = get_protocol_manager(ssh, proto)
+                    factory = getattr(manager, 'torrent_guard', None)
+                    if not callable(factory):
+                        errors.append('%s: not supported' % proto)
+                        continue
+                    report = factory(proto).apply(mode)
+                    if report.get('error'):
+                        errors.append('%s: %s' % (proto, report['error']))
+                        _torrent_set_health(server, proto, report)
+                    else:
+                        applied += 1
+                except Exception as e:                  # noqa: BLE001
+                    errors.append('%s: %s' % (proto, e))
+        except Exception as e:                          # noqa: BLE001
+            errors.append(str(e))
+        finally:
+            if ssh is not None:
+                try:
+                    ssh.disconnect()
+                except Exception:                       # noqa: BLE001
+                    pass
+        if errors and not applied:
+            # Ни один инстанс не принял режим — возвращаем прежнее состояние,
+            # чтобы карточка не показывала «выключено» без реального эффекта.
+            fresh = load_data()
+            if server_id < len(fresh.get('servers', [])):
+                target = fresh['servers'][server_id]
+                for proto, prev in previous.items():
+                    entry = (target.get('protocols') or {}).get(proto)
+                    if isinstance(entry, dict):
+                        entry['torrent_guard'] = prev
+                target['torrent_guard_enabled'] = bool(
+                    any(prev != 'off' for prev in previous.values()))
+                save_data(fresh)
+            return JSONResponse({'status': 'error', 'enabled': req.enabled,
+                                 'applied': 0, 'errors': errors},
+                                status_code=502)
+        return {'status': 'success', 'enabled': req.enabled,
+                'applied': applied, 'errors': errors,
+                'health': _torrent_health_for(server)}
+    except Exception as e:
+        logger.exception("Error toggling torrent guard for server")
+        return JSONResponse({'error': str(e)}, status_code=500)
 @app.post('/api/servers/{server_id}/connections/rename', tags=["Connections"])
 @serialize_peer_lifecycle
 async def api_rename_connection(request: Request, server_id: int, req: RenameConnectionRequest):
@@ -9590,7 +12216,7 @@ def api_get_connection_config(request: Request, server_id: int, req: ConnectionA
         ssh = get_ssh(server)
         ssh.connect()
         manager = get_protocol_manager(ssh, req.protocol)
-        config = _manager_call(manager, 'get_client_config', req.protocol, req.client_id, pub_host, port, public_port=pub_port)
+        config = _manager_call(manager, 'get_client_config', req.protocol, req.client_id, pub_host, port, public_port=pub_port, **xray_fp_kwargs(server, req.protocol))
         ssh.disconnect()
         return {'config': config, **config_payloads(config, server, req.protocol)}
     except Exception as e:
@@ -9663,6 +12289,7 @@ def api_list_users(request: Request, search: str = '', page: int = 1, size: int 
             'email': u.get('email'),
             'description': u.get('description'),
             'connections_count': sum(1 for c in conns if c['user_id'] == u['id']),
+            'max_connections': u.get('max_connections', 0),
             'traffic_used': u.get('traffic_used', 0),
             'traffic_total': u.get('traffic_total', 0),
             'traffic_limit': u.get('traffic_limit', 0),
@@ -9712,6 +12339,7 @@ def api_add_user(request: Request, req: AddUserRequest):
             'email': req.email,
             'description': req.description,
             'traffic_limit': int(req.traffic_limit * 1024**3) if req.traffic_limit else 0,
+            'max_connections': req.max_connections,
             'traffic_reset_strategy': req.traffic_reset_strategy or 'never',
             'traffic_used': 0,
             'traffic_total': 0,
@@ -9806,6 +12434,8 @@ async def api_update_user(request: Request, user_id: str, req: UpdateUserRequest
                     return JSONResponse({'error': str(exc)}, status_code=400)
             if req.email is not None: user['email'] = req.email
             if req.description is not None: user['description'] = req.description
+            if req.max_connections is not None:
+                user['max_connections'] = req.max_connections
             if req.traffic_limit is not None:
                 new_limit = int(req.traffic_limit * 1024**3)
                 user['traffic_limit'] = new_limit
@@ -9971,7 +12601,7 @@ async def api_add_user_connection(request: Request, user_id: str, req: AddUserCo
             # Use existing client
             target_client_id = req.client_id
             # Retrieve config for existing client
-            config = await asyncio.to_thread(_manager_call, manager, 'get_client_config', req.protocol, req.client_id, pub_host, port, public_port=pub_port)
+            config = await asyncio.to_thread(_manager_call, manager, 'get_client_config', req.protocol, req.client_id, pub_host, port, public_port=pub_port, **xray_fp_kwargs(server, req.protocol))
             result = {'client_id': target_client_id, 'config': config}
         else:
             # Create new client
@@ -9984,6 +12614,12 @@ async def api_add_user_connection(request: Request, user_id: str, req: AddUserCo
                     secret=req.telemt_secret,
                     user_ad_tag=req.telemt_ad_tag,
                     max_tcp_conns=req.telemt_max_conns
+                )
+            elif protocol_base(req.protocol) == 'xray':
+                result = await asyncio.to_thread(
+                    manager.add_client, req.protocol, req.name, pub_host, port,
+                    public_port=pub_port,
+                    fingerprint=xray_stored_fingerprint(server, req.protocol)
                 )
             else:
                 result = await asyncio.to_thread(manager.add_client, req.protocol, req.name, pub_host, port, public_port=pub_port)
@@ -10361,7 +12997,7 @@ def api_share_config(token: str, connection_id: str, request: Request):
         ssh.connect()
         # Use appropriate manager for the protocol
         manager = get_protocol_manager(ssh, conn['protocol'])
-        config = _manager_call(manager, 'get_client_config', conn['protocol'], conn['client_id'], pub_host, port, public_port=pub_port)
+        config = _manager_call(manager, 'get_client_config', conn['protocol'], conn['client_id'], pub_host, port, public_port=pub_port, **xray_fp_kwargs(server, conn['protocol']))
         ssh.disconnect()
         return {'config': config, **config_payloads(config, server, conn['protocol'])}
     except Exception as e:
@@ -10393,7 +13029,7 @@ def api_my_connection_config(request: Request, connection_id: str):
         ssh.connect()
         # Use appropriate manager for the protocol (fixes Telemt/Xray not working for users)
         manager = get_protocol_manager(ssh, conn['protocol'])
-        config = _manager_call(manager, 'get_client_config', conn['protocol'], conn['client_id'], pub_host, port, public_port=pub_port)
+        config = _manager_call(manager, 'get_client_config', conn['protocol'], conn['client_id'], pub_host, port, public_port=pub_port, **xray_fp_kwargs(server, conn['protocol']))
         ssh.disconnect()
         return {'config': config, **config_payloads(config, server, conn['protocol'])}
     except Exception as e:
@@ -10558,6 +13194,7 @@ def settings_page(request: Request):
         current_version=CURRENT_VERSION,
         backup_csrf=backup_csrf,
         self_service_protocol_choices=self_service_protocol_choices(),
+        cheburcheck_targets=_cheburcheck_targets_context(data),
     )
 
 
@@ -10566,7 +13203,14 @@ def api_get_settings(request: Request):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     data = load_data()
-    return data.get('settings', {})
+    settings = dict(data.get('settings', {}))
+    # API-токен cheburcheck — только на запись: из общего ответа настроек он
+    # вырезается, иначе утекает в каждый GET /api/settings.
+    cb = settings.get('cheburcheck')
+    if isinstance(cb, dict) and 'api_token' in cb:
+        settings['cheburcheck'] = {k: v for k, v in cb.items()
+                                   if k != 'api_token'}
+    return settings
 
 
 @app.get('/api/settings/tunnels/status', tags=["Settings"])
@@ -10777,7 +13421,7 @@ def save_settings(request: Request, payload: SaveSettingsRequest):
     if tg_cfg.enabled and tg_cfg.token:
         if not tg_bot.is_running():
             logger.info("Starting Telegram bot (settings save)...")
-            tg_bot.launch_bot(tg_cfg.token, load_data, generate_vpn_link, save_data, self_service_svc=self_service_connections)
+            tg_bot.launch_bot(tg_cfg.token, load_data, generate_vpn_link, save_data, self_service_svc=self_service_connections, credential_resolver=lambda server: _credential_store().resolve(server))
     else:
         if tg_bot.is_running():
             logger.info("Stopping Telegram bot (settings save)...")
@@ -10961,7 +13605,7 @@ async def api_telegram_toggle(request: Request):
         save_data(data)
         return {'status': 'stopped', 'bot_running': False}
     else:
-        tg_bot.launch_bot(token, load_data, generate_vpn_link, save_data, self_service_svc=self_service_connections)
+        tg_bot.launch_bot(token, load_data, generate_vpn_link, save_data, self_service_svc=self_service_connections, credential_resolver=lambda server: _credential_store().resolve(server))
         tg_cfg['enabled'] = True
         data['settings']['telegram'] = tg_cfg
         save_data(data)
@@ -11124,10 +13768,14 @@ def _backup_admin(request):
 @app.get('/api/settings/backup/download', tags=["Settings"])
 def api_backup_download(request: Request):
     if not _backup_admin(request):
-        return JSONResponse({'error': 'Forbidden'}, status_code=403)
-    if not os.path.exists(DATA_FILE):
-        return JSONResponse({'error': 'Data file not found'}, status_code=404)
-    return FileResponse(DATA_FILE, media_type='application/json', filename='data.json')
+        return JSONResponse({'error': 'Forbidden'}, status_code=403,
+                            headers=PRIVATE_HEADERS)
+    # The legacy endpoint returned the raw state file (historically including
+    # reusable SSH credentials). Use the complete, access-controlled archive.
+    return JSONResponse({
+        'error': 'Legacy plaintext state export is disabled. Use the complete backup archive.',
+        'code': 'legacy_backup_disabled',
+    }, status_code=410, headers=PRIVATE_HEADERS)
 
 
 class PrivateBackupResponse(StreamingResponse):
@@ -11185,13 +13833,39 @@ async def api_backup_archive(request: Request):
                              'code': 'panel_backup_unavailable'}, status_code=503, headers=PRIVATE_HEADERS)
 
 
+def _prepare_restore_credentials(current, backup):
+    """Seal legacy backup credentials and keep envelopes stable when unchanged.
+
+    Online restore compares server records strictly. Reusing the existing
+    envelope for identical credentials prevents random nonces from looking like
+    a topology change; changed credentials still fail that guard as before.
+    """
+    store = _credential_store()
+    current_servers = current.get('servers', [])
+    for server in backup.get('servers', []):
+        match = next((s for s in current_servers
+                      if s.get('uid') and s.get('uid') == server.get('uid')), None)
+        if match and all(server.get(k) == match.get(k)
+                         for k in ('host', 'ssh_port', 'username')):
+            if store.resolve(server) == store.resolve(match) and match.get('ssh_credentials'):
+                server.pop('password', None)
+                server.pop('private_key', None)
+                server['ssh_credentials'] = dict(match['ssh_credentials'])
+                continue
+        store.seal_document({'servers': [server]})
+
+
 @app.post('/api/settings/backup/restore', tags=["Settings"])
 @serialize_peer_lifecycle
 async def api_backup_restore(request: Request, file: UploadFile = File(...),
                              operation_id: Optional[str] = Form(None)):
     backup_actor = _backup_admin(request)
     if not backup_actor:
-        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+        return JSONResponse({'error': 'Forbidden'}, status_code=403,
+                            headers=PRIVATE_HEADERS)
+    if request is not None and not _same_origin_request(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403,
+                            headers=PRIVATE_HEADERS)
     try:
         # Limit the in-memory JSON read; enforce request-body limits at the
         # reverse proxy too, since multipart parsing happens before this handler.
@@ -11225,6 +13899,10 @@ async def api_backup_restore(request: Request, file: UploadFile = File(...),
         async with DATA_LOCK:
             # Even identical-looking old backups can rewind traffic baselines.
             current = load_data()
+            if not _backup_admin(request):
+                return JSONResponse({'error': 'Forbidden'}, status_code=403,
+                                    headers=PRIVATE_HEADERS)
+            _prepare_restore_credentials(current, backup_data)
             # Bearer-admin restores have no session, so the resolved token
             # owner is the audit actor; session restores keep the same id.
             actor = str(backup_actor.get('id') if isinstance(backup_actor, dict)
@@ -11251,9 +13929,10 @@ async def api_backup_restore(request: Request, file: UploadFile = File(...),
         # Full disaster recovery is deliberately separate and offline; see
         # scripts/panel_recovery.py. Never use a force flag on this endpoint.
         return result if isinstance(operation_id, str) else {'status': 'success'}
-    except Exception as e:
+    except Exception:
         logger.exception("Error during restore")
-        return JSONResponse({'error': str(e)}, status_code=500)
+        return JSONResponse({'error': 'Restore failed'}, status_code=500,
+                            headers=PRIVATE_HEADERS)
 
 
 class OrphanRecoveryRequest(BaseModel):
@@ -11283,7 +13962,13 @@ def _probe_blocking_peer(server, conn):
     try:
         ssh.connect()
         manager = get_protocol_manager(ssh, conn['protocol'])
-        clients = _manager_call(manager, 'get_clients', conn['protocol'])
+        if protocol_base(conn['protocol']) == 'xray':
+            try:
+                clients = manager.get_clients(conn['protocol'], strict=True)
+            except RuntimeError as error:
+                raise RecoveryError('incomplete_peer_state') from error
+        else:
+            clients = _manager_call(manager, 'get_clients', conn['protocol'])
         if not isinstance(clients, list):
             raise RecoveryError('incomplete_peer_state')
         peers = [c for c in clients
@@ -11408,6 +14093,13 @@ async def api_orphan_recovery(request: Request, req: OrphanRecoveryRequest):
 
 
 def panel_bind_host(ssl_conf: dict) -> str:
+    # Docker/.env can override the saved choice without rewriting data.json.
+    # Unknown values fail closed to loopback; an unset variable preserves the
+    # administrator's explicit setting from the Settings page.
+    override = os.environ.get('PANEL_BIND_ALL_INTERFACES')
+    if override is not None:
+        enabled = override.strip().lower() in ('1', 'true', 'yes', 'on')
+        return '0.0.0.0' if enabled else '127.0.0.1'
     # Bind locally by default; public exposure requires explicit opt-in.
     return '0.0.0.0' if ssl_conf.get('bind_all_interfaces') is True else '127.0.0.1'
 

@@ -425,7 +425,19 @@ class OnboardingTests(unittest.TestCase):
                     result = self.client.post('/api/servers/0/edit?server_uid=a', json=self.endpoint)
                     self.assertEqual(result.status_code, 409)
                     manager.return_value.disconnect.assert_called_once()
-                self.assertEqual(self.read()['servers'], replacement)
+                actual = self.read()['servers']
+                if not replacement:
+                    self.assertEqual(actual, [])
+                else:
+                    from credential_store import CredentialStore, default_key_path
+                    store = CredentialStore(default_key_path(self.app.DATA_FILE))
+                    self.assertEqual(store.resolve(actual[0]), (
+                        replacement[0].get('password', ''), replacement[0].get('private_key', '')))
+                    actual_public = dict(actual[0])
+                    actual_public.pop('ssh_credentials', None)
+                    expected_public = {'self_service_enabled': False, **{k: v for k, v in replacement[0].items()
+                                       if k not in ('password', 'private_key')}}
+                    self.assertEqual(actual_public, expected_public)
 
     def test_expiry_is_checked_again_at_short_commit(self):
         endpoint = dict(self.endpoint, uid=None, enrollment_context='new-server')

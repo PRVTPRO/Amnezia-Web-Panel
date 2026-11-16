@@ -51,7 +51,7 @@
 
 <!-- ===== Create Connection Modal ===== -->
 <div class="modal-backdrop" id="createConnectionModal">
-    <div class="modal" style="max-width: 460px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title">{{ _('create_connection') }}</h2>
             <button class="modal-close" onclick="closeModal('createConnectionModal')">×</button>
@@ -93,7 +93,7 @@
 
 <!-- ===== Config Modal ===== -->
 <div class="modal-backdrop" id="configModal">
-    <div class="modal" style="max-width: 600px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title" id="configModalTitle">{{ _('config') }}</h2>
             <button class="modal-close" onclick="closeModal('configModal')">×</button>
@@ -253,7 +253,7 @@
                 controls.style.display = 'flex';
                 disabledMsg.classList.add('hidden');
                 document.getElementById('connectionsCounter').textContent =
-                    _('connections_counter').replace('{0}', data.remaining_connections).replace('{1}', data.max_connections_per_user);
+                    _('connections_counter').replace('{0}', data.connections_count).replace('{1}', data.max_connections_per_user);
             } else {
                 controls.classList.add('hidden');
                 controls.style.display = 'none';

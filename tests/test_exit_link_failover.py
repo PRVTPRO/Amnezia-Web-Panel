@@ -263,7 +263,7 @@ class FailoverHttpTests(unittest.TestCase):
         with open(panel.DATA_FILE, 'w', encoding='utf-8') as f:
             json.dump({
                 'servers': with_third_exit()['servers'],
-                'users': [],
+                'users': [{'id': 'admin-id', 'username': 'admin', 'password_hash': panel.hash_password('admin'), 'role': 'admin', 'enabled': True}],
                 'user_connections': [],
             }, f)
         self._monitor_flag = panel._conn_monitor_started

@@ -81,7 +81,9 @@ class WarpApiTests(unittest.TestCase):
                 existing = {}
         with open(panel.DATA_FILE, 'w', encoding='utf-8') as handle:
             json.dump({'servers': [server_record(protocols, warp=warp)],
-                       'users': existing.get('users', []),
+                       'users': existing.get('users') or [{'id': 'admin-id', 'username': 'admin',
+                              'password_hash': panel.hash_password('admin'),
+                              'role': 'admin', 'enabled': True}],
                        'user_connections': []}, handle)
 
     def post(self, path, body):

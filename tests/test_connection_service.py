@@ -137,6 +137,58 @@ class ConnectionServiceTest(unittest.IsolatedAsyncioTestCase):
             [{'id': 0, 'name': 'Server 1', 'protocols': [{'protocol': 'awg', 'name': 'AmneziaWG'}]}],
         )
 
+    async def test_user_limit_overrides_global_limit(self):
+        data = base_data()
+        data['users'][0]['max_connections'] = 2
+        data['settings']['self_service']['max_connections_per_user'] = 5
+        data['user_connections'] = [
+            {'id': 'existing-1', 'user_id': 'user-1', 'name': 'old-1'},
+            {'id': 'existing-2', 'user_id': 'user-1', 'name': 'old-2'},
+        ]
+        service, _, _ = self.make_service(data)
+        options = await service.get_self_service_options('user-1', 'web')
+        self.assertEqual(options['max_connections_per_user'], 2)
+        self.assertEqual(options['connections_count'], 2)
+        self.assertEqual(options['remaining_connections'], 0)
+        with self.assertRaises(SelfServiceError):
+            await service.create_user_connection('user-1', 0, 'awg', 'third', 'telegram')
+
+    async def test_zero_user_limit_falls_back_to_global_limit(self):
+        data = base_data()
+        data['users'][0]['max_connections'] = 0
+        data['settings']['self_service']['max_connections_per_user'] = 1
+        data['user_connections'].append({'id': 'existing', 'user_id': 'user-1', 'name': 'old'})
+        service, _, _ = self.make_service(data)
+        options = await service.get_self_service_options('user-1', 'telegram')
+        self.assertEqual(options['max_connections_per_user'], 1)
+        with self.assertRaises(SelfServiceError):
+            await service.create_user_connection('user-1', 0, 'awg', 'new', 'web')
+
+    async def test_user_limit_is_independent_for_each_user_and_telegram(self):
+        data = base_data()
+        data['users'][0]['max_connections'] = 1
+        data['users'].append({'id': 'user-2', 'username': 'bob', 'enabled': True, 'max_connections': 2})
+        data['settings']['self_service']['max_connections_per_user'] = 1
+        data['user_connections'].append({'id': 'existing', 'user_id': 'user-1', 'name': 'old'})
+        service, _, _ = self.make_service(data)
+        result = await service.create_user_connection('user-2', 0, 'awg', 'bob-home', 'telegram')
+        self.assertEqual(result['status'], 'success')
+
+    async def test_zero_global_connection_limit_disables_self_service_creation(self):
+        data = base_data()
+        data['settings']['self_service']['max_connections_per_user'] = 0
+        service, _, manager = self.make_service(data)
+
+        options = await service.get_self_service_options('user-1', 'web')
+        self.assertEqual(options['max_connections_per_user'], 0)
+        self.assertEqual(options['remaining_connections'], 0)
+
+        with self.assertRaises(SelfServiceError) as ctx:
+            await service.create_user_connection('user-1', 0, 'awg', 'blocked', 'web')
+
+        self.assertTrue(ctx.exception.forbidden)
+        self.assertEqual(manager.calls, [])
+
     async def test_create_rejects_when_user_reaches_max_connections(self):
         data = base_data()
         data['settings']['self_service']['max_connections_per_user'] = 1

@@ -26,6 +26,7 @@ import panel_backup as backup
 import peer_lifecycle_lock as lifecycle
 import peer_recovery as recovery
 from scripts.panel_recovery import complete_restore, FINISH_CONFIRM
+from credential_store import CredentialStore, default_key_path
 
 
 def fixture():
@@ -50,6 +51,9 @@ class StateFixture:
         self.data.parent.mkdir()
         self.original = fixture()
         self.data.write_text(json.dumps(self.original), encoding='utf-8')
+        migrated = copy.deepcopy(self.original)
+        CredentialStore(default_key_path(self.data)).seal_document(migrated)
+        recovery.atomic_json(self.data, migrated)
         self.trust = self.root / 'pins' / 'custom_known_hosts'
         self.trust.parent.mkdir()
         public = paramiko.RSAKey.generate(1024)
@@ -66,6 +70,7 @@ class StateFixture:
         self.record = self.recovery / ('b' * 32 + '.json')
         self.record.write_text('{"phase":"prepared","before_base64":"c3ludGhldGlj"}')
         self.record.chmod(0o600)
+        recovery.migrate_recovery_snapshots(self.data)
         self.journal_lock, self.trust_lock = threading.RLock(), threading.RLock()
 
     def job(self):
@@ -102,6 +107,7 @@ class ArchiveTests(StateFixture, unittest.TestCase):
         (self.recovery / '.recovery-scratch').write_text('incomplete')
         manifest, files, checksum = backup.read_archive(self.archive())
         self.assertEqual(set(files), {'state/data.json', 'state/data.json.peer-creates.json',
+                                      'state/data.json.credential.key',
                                       'state/data.json.lifecycle-uncertain.json',
                                       'state/data.json.recovery/' + self.record.name, 'trust/ssh_known_hosts'})
         self.assertEqual(files['state/data.json'], self.data.read_bytes())
@@ -113,6 +119,19 @@ class ArchiveTests(StateFixture, unittest.TestCase):
         for item in manifest['files']:
             self.assertEqual(hashlib.sha256(files[item['path']]).hexdigest(), item['sha256'])
             self.assertEqual(len(files[item['path']]), item['size'])
+
+    def test_archive_seals_legacy_credentials_and_carries_portability_key(self):
+        manifest, files, _ = backup.read_archive(self.archive())
+        raw = files['state/data.json']
+        self.assertNotIn(b'synthetic-sensitive-password', raw)
+        self.assertIn('state/data.json.credential.key', files)
+        server = json.loads(raw)['servers'][0]
+        self.assertNotIn('password', server)
+        store = CredentialStore(default_key_path(self.data))
+        self.assertEqual(store.resolve(server), ('synthetic-sensitive-password', ''))
+        record = json.loads(files['state/data.json.recovery/' + self.record.name])
+        self.assertNotIn('before_base64', record)
+        self.assertIn('before_sealed', record)
 
     def test_system_pins_included_and_missing_panel_pins_explicit(self):
         self.trust.replace(self.system)
@@ -303,18 +322,31 @@ class RestoreTests(StateFixture, unittest.TestCase):
         self.assertIn(recovery.DISASTER_HOLD, json.loads((target / 'state/data.json').read_bytes()))
 
     def test_complete_staging_preserves_accounting_and_all_evidence(self):
+        source_before = self.data.read_bytes()
         archive = self.archive(); target = self.root / 'restored'
         result = backup.stage_restore(archive, target, backup.STAGE_CONFIRM)
         data = json.loads((target / 'state/data.json').read_text())
         self.assertTrue(result['startup_held'])
         self.assertEqual(data[recovery.DISASTER_HOLD], result['restore_id'])
         for key in self.original:
+            if key == 'servers':
+                actual = data[key][0]
+                store = CredentialStore(default_key_path(target / 'state/data.json'))
+                self.assertEqual(store.resolve(actual), (
+                    self.original[key][0].get('password', ''),
+                    self.original[key][0].get('private_key', '')))
+                actual = dict(actual)
+                actual.pop('ssh_credentials', None)
+                expected = {k: v for k, v in self.original[key][0].items()
+                            if k not in ('password', 'private_key')}
+                self.assertEqual(actual, expected)
+                continue
             self.assertEqual(data[key], self.original[key])
         self.assertEqual((target / 'state/data.json.peer-creates.json').read_bytes(), self.journal.read_bytes())
         self.assertEqual((target / 'state/data.json.lifecycle-uncertain.json').read_bytes(), self.fence.read_bytes())
         self.assertEqual((target / 'state/data.json.recovery' / self.record.name).read_bytes(), self.record.read_bytes())
         self.assertEqual((target / 'trust/ssh_known_hosts').read_bytes(), self.trust.read_bytes())
-        self.assertEqual(self.data.read_text(), json.dumps(self.original))
+        self.assertEqual(self.data.read_bytes(), source_before)
         self.assertFalse((target / 'state/data.json.runtime.lock').exists())
         with self.assertRaises(recovery.RecoveryError):
             complete_restore(target / 'state/data.json', result['restore_id'], 'e' * 32,
@@ -329,6 +361,18 @@ class RestoreTests(StateFixture, unittest.TestCase):
         self.assertFalse(done['counters_verified_final'])
         self.assertNotIn(recovery.DISASTER_HOLD, json.loads(path.read_bytes()))
         for key in self.original:
+            if key == 'servers':
+                restored = json.loads(path.read_bytes())[key][0]
+                store = CredentialStore(default_key_path(path))
+                self.assertEqual(store.resolve(restored), (
+                    self.original[key][0].get('password', ''),
+                    self.original[key][0].get('private_key', '')))
+                restored = dict(restored)
+                restored.pop('ssh_credentials', None)
+                expected = {k: v for k, v in self.original[key][0].items()
+                            if k not in ('password', 'private_key')}
+                self.assertEqual(restored, expected)
+                continue
             self.assertEqual(json.loads(path.read_bytes())[key], self.original[key])
 
     def test_existing_destination_and_retry_never_overwrite_newer_state(self):
@@ -495,8 +539,9 @@ class HTTPTests(StateFixture, unittest.TestCase):
     def test_legacy_json_download_and_ordinary_restore_protection_remain(self):
         self.identity('admin')
         result = self.client.get('/api/settings/backup/download')
-        self.assertEqual(result.status_code, 200)
-        self.assertEqual(result.content, self.data.read_bytes())
+        self.assertEqual(result.status_code, 410)
+        self.assertEqual(result.json()['code'], 'legacy_backup_disabled')
+        self.assertNotIn('synthetic-sensitive-password', result.text)
         # Exercise topology protection independently of a pre-existing unknown
         # SSH result (which correctly fences every ordinary restore with 503).
         self.fence.unlink()

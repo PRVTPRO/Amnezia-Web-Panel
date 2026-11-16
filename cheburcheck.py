@@ -1,0 +1,592 @@
+"""Cheburcheck integration: checking whether a server's public IP is blocked
+in Russia (RKN lists + TSPU/SNI/DNS probes via https://cheburcheck.ru).
+
+Public API:
+  - set_api_token(token)           -> задать API-токен (только в памяти процесса)
+  - get_api_token()                -> текущий токен (для тестов; наружу не отдавать)
+  - fetch_check(target)            -> static check (lists, geo, complaints) or None
+  - fetch_probe(id, timeout, ...)  -> aggregated probe dict or None (retries on 429)
+  - fetch_credits(token=None)      -> остаток кредитов API (проверка токена) -> int
+  - CheburcheckApiError            -> ошибка API с готовым текстом для интерфейса
+  - classify(static_blocked, verdicts, responses, is_static_cdn=False) -> status
+  - select_verdict(regions, is_static_cdn) -> verdict by majority vote (like the site)
+  - blocking_regions(regions, is_static_cdn) -> regions carrying a blocking verdict
+  - build_summary(host, static, probe, error=None) -> stored record for one server
+"""
+import asyncio
+import json
+import time
+import urllib.parse
+from datetime import datetime, timezone
+
+import httpx
+
+BASE_URL = "https://cheburcheck.ru"
+CHECK_URL = BASE_URL + "/api/v1/check"
+PROBE_URL = BASE_URL + "/api/v1/probe/"
+STATUS_URL = BASE_URL + "/api/v1/status"
+CREDITS_URL = BASE_URL + "/api/v1/credits"
+TOKEN_DOC_URL = BASE_URL + "/kb/api#authorization"
+USER_AGENT = "Amnezia-Web-Panel/cheburcheck"
+
+# Сообщение для случая, когда токен вообще не задан в настройках панели.
+NO_TOKEN_MESSAGE = ("API-токен cheburcheck не задан. Сканеры требуют токен: "
+                    + TOKEN_DOC_URL)
+
+# API-токен живёт только в памяти процесса и в data.json (settings.cheburcheck).
+# В лог, в JSON-ответы и в интерфейс он не попадает: наружу отдаём лишь признак
+# «задан» и последние 4 символа.
+_api_token = None
+
+
+def set_api_token(token):
+    """Запомнить API-токен (пустое значение сбрасывает его)."""
+    global _api_token
+    token = str(token).strip() if token else ''
+    _api_token = token or None
+
+
+def get_api_token():
+    """Текущий токен. Нужен тестам; в ответах панели его быть не должно."""
+    return _api_token
+
+
+def _auth_headers(extra=None):
+    """Заголовки запроса: User-Agent, дополнительные и Bearer, если токен есть."""
+    headers = {"User-Agent": USER_AGENT}
+    if extra:
+        headers.update(extra)
+    if _api_token:
+        headers["Authorization"] = "Bearer " + _api_token
+    return headers
+
+
+class CheburcheckApiError(Exception):
+    """Ошибка API cheburcheck с полями из ответа и готовой фразой для UI.
+
+    ``code``/``info``/``documentation_url`` приходят из JSON сервиса,
+    ``user_message`` — человекочитаемый русский текст без технического мусора.
+    Токен сюда не попадает никогда.
+    """
+
+    def __init__(self, code=None, info=None, documentation_url=None,
+                 user_message=None):
+        self.code = code
+        self.info = info
+        self.documentation_url = documentation_url
+        self.user_message = (user_message or info
+                             or "Ошибка API cheburcheck")
+        super().__init__(self.user_message)
+
+
+def _error_from_payload(payload, status_code=None):
+    """Собрать CheburcheckApiError из JSON-тела ошибки сервиса.
+
+    Коды различаются по смыслу, а не только по названию: 400 — цель не
+    поддерживается сканерами (подсети, ASN), 403 без упоминания токена —
+    служебный/локальный адрес (bogon), 401/403 с текстом про токен — токен.
+    Иначе панель писала бы «API-токен не принят» на отказ трассировать
+    локальный адрес.
+    """
+    data = payload if isinstance(payload, dict) else {}
+    code = data.get("code", status_code) or status_code
+    info = data.get("info") or data.get("error") or data.get("message")
+    doc = data.get("documentation_url") or TOKEN_DOC_URL
+    low = str(info or "").lower()
+    mentions_token = any(word in low for word in
+                         ("токен", "token", "bearer", "authorization", "авторизац"))
+    if code == 400:
+        message = ("Сканеры cheburcheck не проверяют такую цель ({}): поддерживаются "
+                   "домены и отдельные IP-адреса, без подсетей, ASN и локальных "
+                   "адресов.".format(info or "неверные параметры"))
+    elif code == 403 and not mentions_token:
+        message = ("Сканеры cheburcheck отказали в проверке адреса (403: {}). "
+                   "Служебные и локальные адреса (bogon) не трассируются."
+                   .format(info or "Forbidden"))
+    elif code in (401, 403):
+        message = "API-токен cheburcheck не принят ({}): {}".format(
+            code, info or "нет доступа")
+        if "http" not in message:
+            # Текст сервиса иногда уже содержит ссылку на документацию.
+            message += ". Документация: " + doc
+    else:
+        message = "Ошибка API cheburcheck ({}): {}".format(
+            code or "?", info or "нет описания")
+    return CheburcheckApiError(code=code, info=info,
+                               documentation_url=doc, user_message=message)
+
+
+async def _read_error_payload(resp):
+    """Прочитать JSON-тело ошибки до открытия SSE-потока (может быть пустым)."""
+    try:
+        raw = await resp.aread()
+    except Exception:
+        return None
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw.decode("utf-8", "replace")
+                          if isinstance(raw, (bytes, bytearray)) else raw)
+    except (ValueError, AttributeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+# Service limits (defaults from docker-compose of cheburcheck):
+#   /check            — 30 req/min per IP, burst 1;
+#   /probe            — 5 req/min per key with 0 credits (burst 1),
+#                       60 req/min per key with credits (burst 10);
+#   каждый запрос /probe списывает 1 кредит ключа, даже если ответ из кеша.
+# Держим 12.5 с между пробами: это ~4.8/мин и укладывается в бесплатный лимит,
+# поэтому панель не зависит от баланса кредитов.
+CHECK_SPACING = 2.2
+PROBE_SPACING = 12.5
+
+BLOCKING_VERDICTS = {"tspu_block", "sni_block", "dns_spoofing", "cdn_block"}
+# Only the TSPU verdict means "banned": SNI/DNS/CDN hits stay visible as
+# restrictions but do not flip the status. Note that a raw cdn_block is only
+# meaningful for targets found in CDN subnets (see normalize_verdicts).
+BAN_VERDICTS = {"tspu_block"}
+RESTRICTION_VERDICTS = {"sni_block", "dns_spoofing", "cdn_block"}
+
+# Global spacing across all callers (single panel IP).
+_check_lock = asyncio.Lock()
+_probe_lock = asyncio.Lock()
+_last_check = 0.0
+_last_probe = 0.0
+
+
+async def _respect_spacing(lock, spacing):
+    """Serialise and space out requests: the service allows one burst per IP."""
+    global _last_check, _last_probe
+    async with lock:
+        last = _last_check if lock is _check_lock else _last_probe
+        wait = spacing - (time.monotonic() - last)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        if lock is _check_lock:
+            _last_check = time.monotonic()
+        else:
+            _last_probe = time.monotonic()
+
+
+async def _request_with_backoff(client, url, *, timeout=40, max_retries=4):
+    """GET with retries on 429/5xx/network errors."""
+    delay = 2.0
+    last_exc = None
+    for _ in range(max_retries):
+        try:
+            r = await client.get(url, timeout=timeout)
+            if r.status_code == 429 or r.status_code >= 500:
+                last_exc = httpx.HTTPStatusError(
+                    f"HTTP {r.status_code}", request=r.request, response=r
+                )
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 60)
+                continue
+            r.raise_for_status()
+            return r
+        except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as e:
+            last_exc = e
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 60)
+            continue
+        except httpx.HTTPStatusError as e:
+            # 4xx other than 429: do not retry
+            raise
+    if last_exc:
+        raise last_exc
+    return None
+
+
+async def fetch_status():
+    async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT}) as client:
+        await _respect_spacing(_check_lock, CHECK_SPACING)
+        r = await _request_with_backoff(client, STATUS_URL)
+        return r.json() if r is not None else None
+
+
+async def fetch_check(target):
+    """Static check against RKN/CDN lists + geo. Returns parsed dict or None."""
+    url = CHECK_URL + "?target=" + _quote(target)
+    async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT}) as client:
+        await _respect_spacing(_check_lock, CHECK_SPACING)
+        r = await _request_with_backoff(client, url)
+        if r is None:
+            return None
+        return r.json()
+
+
+def _payload_of(response):
+    """JSON-тело httpx-ответа как dict (или None, если это не JSON-объект)."""
+    try:
+        data = response.json()
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+async def fetch_credits(token=None, timeout=20):
+    """GET /api/v1/credits — проверка API-токена и остаток кредитов.
+
+    Возвращает целое число кредитов. Без токена бросает ``CheburcheckApiError``
+    без сетевого запроса; отказ 401/403 поднимает ошибку с ``info`` и ссылкой
+    на документацию из ответа сервиса. Токен в тексте ошибок не появляется.
+    """
+    tok = str(token).strip() if token else _api_token
+    if not tok:
+        raise CheburcheckApiError(user_message=NO_TOKEN_MESSAGE,
+                                  documentation_url=TOKEN_DOC_URL)
+    headers = {"User-Agent": USER_AGENT, "Authorization": "Bearer " + tok}
+    async with httpx.AsyncClient(headers=headers) as client:
+        await _respect_spacing(_check_lock, CHECK_SPACING)
+        try:
+            resp = await _request_with_backoff(client, CREDITS_URL,
+                                               timeout=timeout, max_retries=2)
+        except httpx.HTTPStatusError as exc:
+            raise _error_from_payload(_payload_of(exc.response),
+                                      getattr(exc.response, "status_code", None))
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            raise CheburcheckApiError(user_message=(
+                "Не удалось проверить API-токен: сервис cheburcheck не ответил "
+                "({})".format(exc)))
+    payload = _payload_of(resp) if resp is not None else None
+    if not isinstance(payload, dict):
+        raise CheburcheckApiError(user_message=(
+            "Неожиданный ответ cheburcheck /api/v1/credits"))
+    if "credits" not in payload:
+        raise _error_from_payload(payload, getattr(resp, "status_code", None))
+    try:
+        return int(payload.get("credits"))
+    except (TypeError, ValueError):
+        raise CheburcheckApiError(user_message=(
+            "cheburcheck вернул кредиты в неизвестном формате"))
+
+
+async def fetch_probe(check_id, timeout=90, max_retries=3):
+    """Open the SSE probe stream, collect results, return aggregated dict.
+
+    Retries the whole stream on 429/5xx and network errors: the upstream limit
+    is 5 probe requests per minute, and a single 429 must not silently turn a
+    healthy server into "unknown".
+
+    Сканеры cheburcheck требуют API-токен. Без токена запрос не отправляется
+    вовсе (лимит 5 проб/мин не тратится), а сразу поднимается
+    ``CheburcheckApiError`` с текстом для интерфейса. Ответ 401/403 тоже
+    превращается в ошибку и не ретраится.
+    """
+    if not _api_token:
+        raise CheburcheckApiError(user_message=NO_TOKEN_MESSAGE,
+                                  documentation_url=TOKEN_DOC_URL)
+    delay = 4.0
+    for attempt in range(max_retries):
+        result, retryable = await _read_probe_stream(check_id, timeout)
+        if result is not None:
+            return result
+        if not retryable:
+            return None
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, 60)
+    return None
+
+
+async def _read_probe_stream(check_id, timeout):
+    """One pass over the SSE stream. Returns (result, retryable)."""
+    url = PROBE_URL + str(check_id)
+    await _respect_spacing(_probe_lock, PROBE_SPACING)
+    started = None
+    results = []
+    done = None
+    http_error = None
+    try:
+        async with httpx.AsyncClient(headers=_auth_headers(
+                {"Accept": "text/event-stream"})) as client:
+            async with client.stream("GET", url, timeout=timeout) as resp:
+                if resp.status_code >= 400:
+                    # Тело ошибки читаем всегда: 401/403 приходят JSON-объектом
+                    # с объяснением (нужен API-токен). Их не ретраим — без
+                    # токена повтор даст тот же отказ и сожжёт лимит.
+                    payload = await _read_error_payload(resp)
+                    if resp.status_code in (401, 403):
+                        raise _error_from_payload(payload, resp.status_code)
+                    if resp.status_code == 429 or resp.status_code >= 500:
+                        return None, True
+                    if payload:
+                        raise _error_from_payload(payload, resp.status_code)
+                    return None, False
+                event = None
+                async for line in resp.aiter_lines():
+                    line = line.rstrip("\r")
+                    if line == "":
+                        event = None
+                        continue
+                    if line.startswith("event:"):
+                        event = line[6:].strip()
+                        continue
+                    if line.startswith("data:"):
+                        payload = line[5:].strip()
+                        if not payload:
+                            continue
+                        try:
+                            data = json.loads(payload)
+                        except json.JSONDecodeError:
+                            continue
+                        if event == "started":
+                            started = data
+                        elif event == "result":
+                            results.append(data)
+                        elif event == "done":
+                            done = data
+    except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as e:
+        # A partial pass still carries data; only retry when we got nothing.
+        if results:
+            pass
+        else:
+            return None, True
+    if not results and started is None and done is None:
+        return None, True
+    verdicts = []
+    for r in results:
+        verdicts.extend(r.get("verdicts") or [])
+    regions = []
+    for r in results:
+        regions.append({
+            "region": r.get("region"),
+            "provider": r.get("provider"),
+            "asn": r.get("asn"),
+            "verdicts": list(r.get("verdicts") or []),
+            "dpi_hop": r.get("dpi_hop"),
+            "target_hop": r.get("target_hop"),
+            "cached": bool(r.get("cached")),
+            # Needed to mirror the site's verdict display: a raw cdn_block only
+            # counts when the static check found the target in CDN subnets, and
+            # a plain ok turns into cdn_block for CDN targets whose control
+            # hosts were not unblocked.
+            "cdn_unblocked": bool(r.get("cdn_unblocked")),
+            "host_results": (None if r.get("host_results") is None
+                             else len(r.get("host_results") or [])),
+        })
+    return {
+        "online_probes": (started or {}).get("online_probes"),
+        "response_count": (done or {}).get("response_count", len(results)),
+        "started_id": (started or {}).get("id"),
+        "regions": regions,
+        "verdicts": verdicts,
+        "verdict_counts": _count(verdicts),
+    }, False
+
+
+def _count(items):
+    out = {}
+    for x in items:
+        out[x] = out.get(x, 0) + 1
+    return out
+
+
+def _quote(s):
+    return urllib.parse.quote(str(s), safe="")
+
+
+def classify(static_blocked, probe_verdicts, probe_responses):
+    """Return 'banned' / 'clean' / 'unknown'.
+
+    Only the TSPU verdict is a ban. ``static_blocked`` (the address is inside a
+    blocked CDN subnet or the RKN registry) is reported in the record but does
+    not flip the status; the argument is kept for backward compatibility.
+    """
+    if any(v in BAN_VERDICTS for v in (probe_verdicts or [])):
+        return "banned"
+    if not probe_responses:
+        return "unknown"
+    if all(v == "uncertain" for v in (probe_verdicts or [])):
+        return "unknown"
+    return "clean"
+
+
+# Priority used by the site to pick one verdict per probe and then by majority
+# vote (frontend selectProbeVerdict).
+VERDICT_PRIORITY = ("tspu_block", "sni_block", "dns_spoofing", "whitelist",
+                    "cdn_block", "ok", "uncertain")
+
+
+def static_is_cdn(static):
+    """True when the static check found the target in CDN provider subnets."""
+    return bool((static or {}).get("cdn_providers"))
+
+
+def normalize_verdicts(verdicts, is_static_cdn, cdn_unblocked=False,
+                       host_results=None):
+    """Mirror the site's displayProbeVerdicts() mapping.
+
+    * raw cdn_block -> cdn_block for CDN targets, otherwise -> ok;
+    * ok -> cdn_block for CDN targets whose control hosts were not unblocked
+      (``cdn_unblocked`` false) and that reported host results;
+    * when any blocking verdict is present, plain ok entries are dropped.
+    """
+    out = []
+    for verdict in verdicts or []:
+        if verdict == "cdn_block":
+            out.append("cdn_block" if is_static_cdn else "ok")
+        elif (is_static_cdn and not cdn_unblocked
+              and (host_results is None or host_results != 0)
+              and verdict == "ok"):
+            out.append("cdn_block")
+        else:
+            out.append(verdict)
+    if any(v in BLOCKING_VERDICTS for v in out):
+        out = [v for v in out if v != "ok"]
+    return out
+
+
+def region_verdict(region, is_static_cdn):
+    """Highest-priority verdict of one probe, after the display mapping."""
+    verdicts = normalize_verdicts(
+        region.get("verdicts"), is_static_cdn,
+        cdn_unblocked=region.get("cdn_unblocked"),
+        host_results=region.get("host_results"))
+    return next((v for v in VERDICT_PRIORITY if v in verdicts), None)
+
+
+def select_verdict(regions, is_static_cdn):
+    """Majority vote across probes; ties go to the higher-priority verdict."""
+    votes = {}
+    for region in regions or []:
+        verdict = region_verdict(region, is_static_cdn)
+        if verdict:
+            votes[verdict] = votes.get(verdict, 0) + 1
+    winner = None
+    best = 0
+    for verdict in VERDICT_PRIORITY:
+        count = votes.get(verdict, 0)
+        if count > best:
+            winner, best = verdict, count
+    return None if winner == "uncertain" else winner
+
+
+def ban_regions(regions, is_static_cdn=False):
+    """Regions whose verdict is a TSPU block (the only ban verdict)."""
+    return [r for r in (regions or [])
+            if region_verdict(r, is_static_cdn) in BAN_VERDICTS]
+
+
+def restricted_regions(regions, is_static_cdn=False):
+    """Regions carrying SNI/DNS/CDN restrictions (not bans)."""
+    return [r for r in (regions or [])
+            if region_verdict(r, is_static_cdn) in RESTRICTION_VERDICTS]
+
+
+# Kept for callers/tests written before the ban/restriction split.
+def blocking_regions(regions, is_static_cdn=False):
+    return ban_regions(regions, is_static_cdn)
+
+
+def in_quiet_hours(cfg, now=None):
+    """True when the current hour falls inside the quiet window.
+
+    ``cfg`` is the cheburcheck settings block:
+        quiet_enabled: bool
+        quiet_start:   hour the window opens (0-23)
+        quiet_end:     hour the window closes (0-23)
+
+    The window wraps midnight: 22 -> 6 means 22:00-05:59. ``quiet_end`` is the
+    first hour that is NOT quiet, so 0 -> 0 disables the window entirely (an
+    empty range would otherwise mean "always quiet").
+    """
+    quiet_enabled = bool((cfg or {}).get("quiet_enabled"))
+    if not quiet_enabled:
+        return False
+    try:
+        start = int(cfg.get("quiet_start"))
+        end = int(cfg.get("quiet_end"))
+    except (TypeError, ValueError):
+        return False
+    if not (0 <= start <= 23 and 0 <= end <= 23):
+        return False
+    if start == end:
+        return False           # empty window: nothing is quiet
+    hour = (now or datetime.now()).hour
+    if start < end:
+        return start <= hour < end
+    return hour >= start or hour < end
+
+
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def build_summary(host, static, probe, error=None):
+    """Build the stored record for one server.
+
+    Never raises on missing input: a failed check must still produce a record,
+    otherwise the previous result stays in the cache and a stale "clean" reads
+    as a current one. `error` carries the reason when `status` is 'unknown'.
+    """
+    static = static or {}
+    probe = probe or {}
+    pv = probe.get("verdicts") or []
+    pr = probe.get("response_count") or 0
+    regions = probe.get("regions") or []
+    is_static_cdn = static_is_cdn(static)
+    banned = ban_regions(regions, is_static_cdn)
+    restricted = restricted_regions(regions, is_static_cdn)
+    restricted_count = len(restricted)
+    if not restricted_count:
+        # The site maps a raw cdn_block to "ok" for non-CDN targets; keep the
+        # scanner's own SNI/DNS/CDN hits visible as remarks anyway.
+        raw_counts = probe.get("verdict_counts") or {}
+        restricted_count = sum(int(count) for verdict, count
+                               in raw_counts.items()
+                               if verdict in RESTRICTION_VERDICTS)
+    # Count only regions that actually returned verdicts: ``response_count``
+    # comes from the "done" event and may exceed what the stream delivered.
+    answered = len([r for r in regions if r.get("verdicts")])
+    winner = select_verdict(regions, is_static_cdn)
+    # A ban is a TSPU verdict only: SNI/DNS/CDN verdicts and a static CDN/RKN
+    # hit are reported as facts, they do not flip the status.
+    if banned:
+        status = "banned"
+    elif answered and not banned:
+        status = "clean"
+    else:
+        status = "unknown"
+    if status == "unknown" and not error:
+        error = "probe returned no verdicts" if pr == 0 else "probe undecided"
+    # Verdict counts as displayed by the site (after the CDN mapping and the
+    # per-probe priority), plus the raw counts for diagnostics.
+    display_counts = {}
+    for region in regions:
+        verdict = region_verdict(region, is_static_cdn)
+        if verdict:
+            display_counts[verdict] = display_counts.get(verdict, 0) + 1
+    static_hit = bool(static.get("blocked") or static.get("cdn_providers"))
+    record = {
+        "target": host,
+        "status": status,                      # banned / clean / unknown
+        "checked_at": now_iso(),
+        "static": {
+            "blocked": bool(static.get("blocked")),
+            "blocked_subnets": static.get("blocked_subnets") or [],
+            "cdn_providers": list((static.get("cdn_providers") or {}).keys()),
+            "geo": static.get("geo") or {},
+            "whitelist": static.get("whitelist"),
+            "complaints_14d": sum((d.get("count") or 0) for d in (static.get("complaints") or [])),
+            "reverse_lookup": static.get("reverse_lookup") or [],
+        },
+        "probe": {
+            "online_probes": probe.get("online_probes"),
+            "response_count": pr,
+            "verdict": winner,
+            "verdict_counts": display_counts,
+            "raw_verdict_counts": probe.get("verdict_counts") or {},
+            "static_cdn": is_static_cdn,
+            "ban_regions": len(banned),
+            "restricted_regions": restricted_count,
+            "static_hit": static_hit,
+            "blocking_regions": len(banned),        # compat: ban-based
+            "clear_regions": max(0, answered - len(banned)),
+        },
+        "partial": bool(answered and 0 < len(banned) < answered),
+    }
+    if error:
+        record["error"] = str(error)
+    return record

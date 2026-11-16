@@ -116,8 +116,8 @@ def _token(payload):
 def inventory_binding(server):
     # Bind draft edits to saved connection settings without exposing credentials
     # or a password-verifiable unkeyed hash in the browser's signed token.
-    values = {k: server.get(k) for k in
-              ('uid', 'host', 'ssh_port', 'username', 'password', 'private_key')}
+    values = {k: server.get(k) for k in ('uid', 'host', 'ssh_port', 'username')}
+    values['credential_revision'] = (server.get('ssh_credentials') or {}).get('revision')
     return hmac.new(_SECRET, json.dumps(values, sort_keys=True).encode(), hashlib.sha256).hexdigest()
 
 

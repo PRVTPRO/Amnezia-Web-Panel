@@ -103,7 +103,7 @@ class IntegrationTests(unittest.TestCase):
     def test_rendered_pages_javascript_all_locales(self):
         with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
             data_path = Path(tmp) / 'data.json'
-            data_path.write_text(json.dumps({'servers': [{'name': 'Isolated', 'host': '192.0.2.1', 'protocols': {}, 'server_info': {}}], 'users': [], 'user_connections': [], 'settings': {'session_secret': 'test-only'}}), encoding='utf-8')
+            data_path.write_text(json.dumps({'servers': [{'name': 'Isolated', 'host': '192.0.2.1', 'protocols': {}, 'server_info': {}}], 'users': [{'id': 'admin-id', 'username': 'admin', 'password_hash': panel.hash_password('admin'), 'role': 'admin', 'enabled': True}], 'user_connections': [], 'settings': {'session_secret': 'test-only'}}), encoding='utf-8')
             stack.enter_context(patch.object(panel, 'DATA_FILE', str(data_path)))
             stack.enter_context(patch.object(panel, '_start_conn_monitor'))
             stack.enter_context(patch.object(panel, 'periodic_background_tasks'))

@@ -14,6 +14,33 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class PanelBindHostTests(unittest.TestCase):
+    def test_environment_can_enable_all_interfaces_without_rewriting_saved_state(self):
+        saved = {'bind_all_interfaces': False}
+        with mock.patch.dict(panel.os.environ, {'PANEL_BIND_ALL_INTERFACES': '1'}):
+            self.assertEqual(panel.panel_bind_host(saved), '0.0.0.0')
+        self.assertFalse(saved['bind_all_interfaces'])
+
+    def test_environment_can_force_loopback_when_saved_setting_is_enabled(self):
+        saved = {'bind_all_interfaces': True}
+        for value in ('0', 'false', 'off', 'no'):
+            with self.subTest(value=value), mock.patch.dict(panel.os.environ,
+                                                            {'PANEL_BIND_ALL_INTERFACES': value}):
+                self.assertEqual(panel.panel_bind_host(saved), '127.0.0.1')
+
+    def test_unset_environment_keeps_saved_setting(self):
+        with mock.patch.dict(panel.os.environ, {}, clear=True):
+            self.assertEqual(panel.panel_bind_host({'bind_all_interfaces': True}), '0.0.0.0')
+            self.assertEqual(panel.panel_bind_host({'bind_all_interfaces': False}), '127.0.0.1')
+
+    def test_bundled_compose_files_enable_external_access_with_env_override(self):
+        import yaml
+        for name in ('docker-compose.yml', 'docker-compose.warp.yml'):
+            with self.subTest(compose=name):
+                document = yaml.safe_load((ROOT / name).read_text(encoding='utf-8'))
+                environment = document['services']['amnezia_panel']['environment']
+                self.assertEqual(environment['PANEL_BIND_ALL_INTERFACES'],
+                                 '${PANEL_BIND_ALL_INTERFACES:-1}')
+
     def test_ssl_model_defaults_to_loopback_only(self):
         settings = panel.SSLSettings()
         self.assertFalse(settings.bind_all_interfaces)

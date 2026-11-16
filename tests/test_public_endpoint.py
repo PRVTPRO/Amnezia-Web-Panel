@@ -82,7 +82,7 @@ class ClientConfigTests(unittest.TestCase):
 
     def wireguard(self):
         mgr = WireGuardManager(ssh_manager=mock.Mock())
-        mgr._get_clients_table = lambda: [{'clientId': 'peer', 'userData': {
+        mgr._get_clients_table = lambda **kwargs: [{'clientId': 'peer', 'userData': {
             'clientPrivateKey': 'priv', 'clientIp': '10.8.0.6', 'psk': 'psk'}}]
         mgr._get_server_public_key = lambda: 'serverpub'
         mgr._get_server_psk = lambda: 'serverpsk'
@@ -92,7 +92,7 @@ class ClientConfigTests(unittest.TestCase):
 
     def awg(self):
         mgr = AWGManager(mock.Mock())
-        mgr._get_clients_table = lambda proto: [{'clientId': 'peer', 'userData': {
+        mgr._get_clients_table = lambda proto, **kwargs: [{'clientId': 'peer', 'userData': {
             'clientPrivateKey': 'priv', 'clientIp': '10.8.1.6', 'psk': 'psk'}}]
         mgr._get_client_ipv6 = lambda proto, ip: ''
         mgr._get_server_public_key = lambda proto: 'serverpub'
@@ -104,7 +104,7 @@ class ClientConfigTests(unittest.TestCase):
 
     def xray(self):
         mgr = XrayManager(mock.Mock())
-        mgr._get_clients_table = lambda: [{'clientId': 'uuid-1',
+        mgr._get_clients_table = lambda **kwargs: [{'clientId': 'uuid-1',
                                           'userData': {'clientName': 'laptop'}}]
         mgr._get_meta_json = lambda: {'port': 443, 'public_key': 'pbk', 'short_id': 'sid',
                                       'site_name': 'yahoo.com'}
@@ -211,7 +211,7 @@ class PublicEndpointApiTests(unittest.TestCase):
             json.dump({'servers': [server_with({
                 'awg2': {'installed': True, 'port': '55424', 'base_protocol': 'awg2'},
                 'telemt': {'installed': True, 'port': '8443', 'base_protocol': 'telemt'},
-            })], 'users': [], 'user_connections': []}, f)
+            })], 'users': [{'id': 'admin-id', 'username': 'admin', 'password_hash': panel.hash_password('admin'), 'role': 'admin', 'enabled': True}], 'user_connections': []}, f)
         self._monitor_flag = panel._conn_monitor_started
         panel._conn_monitor_started = True
 
@@ -634,6 +634,8 @@ class RestoreForwardTests(unittest.TestCase):
                 }),
                 dict(server_with({}), uid='other-server'),  # nothing to forward
             ], 'users': [], 'user_connections': []}, f)
+                server_with({}),  # nothing to forward
+            ], 'users': [{'id': 'admin-id', 'username': 'admin', 'password_hash': panel.hash_password('admin'), 'role': 'admin', 'enabled': True}], 'user_connections': []}, f)
         self._monitor_flag = panel._conn_monitor_started
         panel._conn_monitor_started = True
         self._delay = panel.RESTORE_FORWARD_DELAY
