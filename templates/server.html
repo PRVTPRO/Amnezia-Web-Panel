@@ -1248,7 +1248,12 @@
         openModal('awgPluginModal');
         renderAwgPluginModal();
         if (!awgPluginStatus) loadAwgPluginStatus().then(renderAwgPluginModal);
-        else if (xrayProtocols.length && !xrayCoreStatus) loadXrayCoreStatus().then(renderAwgPluginModal);
+        if (xrayProtocols.length) {
+            // The user is looking at the update dialog: re-probe the core
+            // for real. A cached badge may lag a core that was updated
+            // outside the panel (or anywhere the 12h cache cannot see).
+            loadXrayCoreStatus(true).then(renderAwgPluginModal);
+        }
     }
 
     function closeAwgPluginModal() {
@@ -1489,7 +1494,16 @@
                 }
                 const button = document.getElementById('awgPluginUpdate-' + component);
                 if (button) button.remove();
-                if (xrayCoreStatus && xrayCoreStatus[proto]) xrayCoreStatus[proto].update_available = false;
+                if (xrayCoreStatus && xrayCoreStatus[proto]) {
+                    // Sync the localStorage copy too: it outlives the page
+                    // (12h TTL) and a stale entry would resurrect the
+                    // "update available" badge on every reload even though
+                    // the core is already at the target version.
+                    xrayCoreStatus[proto].version = (data.result && data.result.version)
+                        || xrayCoreStatus[proto].version;
+                    xrayCoreStatus[proto].update_available = false;
+                    writeXrayCoreCache(xrayCoreStatus);
+                }
                 applyPluginButtonState();
                 setTimeout(() => checkServer(), 800);
             }
