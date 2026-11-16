@@ -6,10 +6,18 @@ import base64
 import shlex
 from datetime import datetime
 import urllib.parse
+from managers import docker_image_cleanup
 
 logger = logging.getLogger(__name__)
 
 XRAY_CORE_VERSION = "v26.10.31"
+
+# uTLS client hello fingerprints a VLESS link may request. The Reality server
+# does not pin this value, so it is a per-link property, not a container
+# setting; chrome stays the historical default.
+XRAY_FINGERPRINTS = ('chrome', 'firefox', 'safari', 'ios', 'android', 'edge',
+                     '360', 'qq', 'random', 'randomized')
+XRAY_DEFAULT_FINGERPRINT = 'chrome'
 
 class XrayManager:
     """Manages Xray (VLESS-Reality) protocol installation and client management."""
@@ -165,6 +173,15 @@ class XrayManager:
             'port': meta.get('port')
         }
 
+    def get_port_usage(self):
+        """Running state and client count for the server header IP chips.
+
+        A light probe: no stats query and no meta/key reads.
+        """
+        running = self.check_container_running()
+        return {'running': running,
+                'clients': len(self._get_clients_table()) if running else 0}
+
     def _dockerfile_content(self):
         config_dir = self._config_dir()
         return f"""FROM alpine:3.15
@@ -230,10 +247,15 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         self.ssh.run_sudo_command(f"mkdir -p {dockerfile_folder}")
         self.ssh.upload_file_sudo(dockerfile_content, f"{dockerfile_folder}/Dockerfile")
         
+        old_image_id = docker_image_cleanup.image_id(self.ssh, self.image_name)
         _, err, code = self.ssh.run_sudo_command(
             f"docker build --no-cache -t {self.image_name} {dockerfile_folder}", timeout=300
         )
         if code != 0: raise RuntimeError(f"Failed to build container: {err}")
+        # The tag now points at the new build; the previous image of this very
+        # instance would otherwise stay behind as <none>:<none>.
+        docker_image_cleanup.drop_replaced_image(
+            self.ssh, self.image_name, old_image_id)
 
         results.append("Generating keys and config...")
         # We generate a base config using a temp container or directly if host has openssl
@@ -347,14 +369,34 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
             (f"docker stop {self.container_name}", 'no such container'),
             (f"docker rm -fv {self.container_name}", 'no such container'),
         )
-        if self.instance <= 1:
-            commands += ((f"docker rmi {self.image_name}", 'no such image'),)
         for command, absent_marker in commands:
             out, err, code = self.ssh.run_sudo_command(command)
             detail = (err or out or '').strip()
             if code != 0 and absent_marker not in detail.lower():
                 raise RuntimeError(f"Xray uninstall failed: {detail or f'exit code {code}'}")
+        # Images are named per instance (amnezia-xray, amnezia-xray-2, ...), so
+        # the image belongs to this instance and must go with it. Re-tagged or
+        # shared images are still safe: never remove one another container uses.
+        if not self._image_in_use():
+            out, err, code = self.ssh.run_sudo_command(f"docker rmi {self.image_name}")
+            detail = (err or out or '').strip().lower()
+            if (code != 0 and 'no such image' not in detail
+                    and 'image is being used' not in detail):
+                raise RuntimeError(
+                    f"Xray uninstall failed: {detail or f'exit code {code}'}")
+        # The build context carries a single generated Dockerfile; the next
+        # install recreates it from scratch (--no-cache --pull). Drop it so an
+        # uninstalled instance leaves no /opt/amnezia/<container> directory.
+        self.ssh.run_sudo_command(f"rm -rf /opt/amnezia/{self.container_name}")
         return True
+
+    def _image_in_use(self):
+        """True when some container on the host still runs/uses our image."""
+        out, _, code = self.ssh.run_sudo_command(
+            "docker ps -a --format '{{.Image}}'")
+        if code != 0:
+            return False
+        return self.image_name in (out or '').split()
 
     # ===================== CLIENT MANAGEMENT =====================
 
@@ -708,21 +750,45 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
 
         stats = self._query_xray_stats()
 
+        # The stats API only reports cumulative per-client counters, so "last
+        # activity" is derived here: counters that grew since the previous
+        # poll mean the client exchanged traffic in between. The counters are
+        # persisted alongside the stamped lastSeen; when they shrink (a
+        # container restart resets them), they are re-baselined instead so
+        # growth from zero registers as fresh activity later on.
+        stats_dirty = False
         for c in clients_table:
             uid = c.get('clientId', '')
-            if uid in stats:
-                user_data = c.setdefault('userData', {})
-                rx = stats[uid]['rx']
-                tx = stats[uid]['tx']
-                if rx > 0 or tx > 0:
+            if uid not in stats:
+                continue
+            user_data = c.setdefault('userData', {})
+            rx = stats[uid]['rx']
+            tx = stats[uid]['tx']
+            prev_total = ((user_data.get('dataReceivedBytes') or 0)
+                          + (user_data.get('dataSentBytes') or 0))
+            if rx + tx > prev_total:
+                user_data['lastSeen'] = datetime.now().isoformat()
+                stats_dirty = True
+            if rx > 0 or tx > 0:
+                if (user_data.get('dataReceivedBytes') != rx
+                        or user_data.get('dataSentBytes') != tx):
                     user_data['dataReceived'] = self._format_bytes(rx)
                     user_data['dataSent'] = self._format_bytes(tx)
                     user_data['dataReceivedBytes'] = rx
                     user_data['dataSentBytes'] = tx
+                    stats_dirty = True
+            elif rx + tx < prev_total:
+                user_data['dataReceivedBytes'] = rx
+                user_data['dataSentBytes'] = tx
+                stats_dirty = True
+
+        if stats_dirty:
+            self._save_clients_table(clients_table)
 
         return clients_table
 
-    def get_client_config(self, protocol, client_id, server_host, port, public_port=None):
+    def get_client_config(self, protocol, client_id, server_host, port, public_port=None,
+                          fingerprint=None):
         clients = self._get_clients_table()
         client = next((c for c in clients if c['clientId'] == client_id), None)
         if not client: return None
@@ -740,22 +806,27 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
 
         # Format URL
         # vless://{id}@{host}:{port}?type=tcp&security=reality&pbk={public_key}&sni={sni}&fp=chrome&sid={short_id}&spx=%2F&flow=xtls-rprx-vision#{name}
-        
+
         name = client.get('userData', {}).get('clientName', 'vpn')
         encoded_name = urllib.parse.quote(name)
-        
+
+        # The instance-level fingerprint chosen in the panel beats the default;
+        # an unknown value (hand-edited data.json) falls back instead of
+        # reaching the link.
+        fp = fingerprint if fingerprint in XRAY_FINGERPRINTS else XRAY_DEFAULT_FINGERPRINT
+
         url = (
             # meta.json is synced from the live server.json, so it beats the
             # port the panel remembers; an explicit public port beats both.
             f"vless://{client_id}@{server_host}:{public_port or meta.get('port', port)}"
             f"?type=tcp&security=reality&pbk={meta['public_key']}"
-            f"&sni={sni}&fp=chrome&sid={meta['short_id']}"
+            f"&sni={sni}&fp={fp}&sid={meta['short_id']}"
             f"&spx=%2F&flow=xtls-rprx-vision#{encoded_name}"
         )
         return url
 
     def add_client(self, protocol, client_name, server_host, port, public_port=None,
-                   warp_ctx=None):
+                   warp_ctx=None, fingerprint=None):
         client_id = str(uuid.uuid4())
         
         config = self._get_server_json()
@@ -797,7 +868,8 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
 
         return {
             'client_id': client_id,
-            'config': self.get_client_config(protocol, client_id, server_host, port, public_port)
+            'config': self.get_client_config(protocol, client_id, server_host, port, public_port,
+                                             fingerprint=fingerprint)
         }
 
     def toggle_client(self, protocol, client_id, enable):
