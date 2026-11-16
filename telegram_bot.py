@@ -671,6 +671,7 @@ TG_TRANSLATIONS = {
     },
     "zh": {
         "hi": "你好",
+        "account_disabled": "账户已被禁用",
         "account_not_linked": "你的 Telegram 账号尚未关联任何面板用户。",
         "contact_admin_to_link": "请联系管理员，将你的 Telegram ID 添加到个人资料中。",
         "your_telegram_id": "你的 Telegram ID",
