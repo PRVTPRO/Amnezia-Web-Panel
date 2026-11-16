@@ -5586,6 +5586,7 @@
                         : '';
                     const selfstealBtn = protoBase(proto) === 'xray'
                         ? `<button class="btn btn-secondary btn-sm" onclick="openSelfstealModal('${proto}')" title="${_('xray_selfsteal_title')}">🎭 ${_('xray_selfsteal')}</button>`
+                        : '';
                     const copyBtn = COPYABLE_PROTOCOLS.includes(protoBase(proto))
                         ? `<button class="btn btn-secondary btn-sm" onclick="openCopyInstance('${proto}')" title="${_('copy_instance_title')}">${_('copy_instance_btn')}</button>`
                         : '';
@@ -5599,6 +5600,7 @@
                         <button class="btn btn-danger btn-sm" onclick="toggleContainer('${proto}', true)" title="${_('stop_container_confirm').replace('{}', '')}">${_('stop_btn')}</button>
                     `;
                 }
+            }
             }
         } else if (info.container_exists) {
             installedProtocols[proto] = true;

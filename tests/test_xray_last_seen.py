@@ -7,6 +7,7 @@ after a counter reset (container restart).
 """
 
 import json
+import re
 import unittest
 
 from managers.xray_manager import XrayManager
@@ -77,6 +78,10 @@ class FakeSSH:
         self.last_upload = None
         self.stats = {}
 
+    def upload_file(self, content, remote_path):
+        self.last_upload = (content, remote_path)
+        return True
+
     def upload_file_sudo(self, content, remote_path):
         self.files[remote_path] = content
         self.last_upload = (content, remote_path)
@@ -96,12 +101,22 @@ class FakeSSH:
             if self.last_upload:
                 self.files[dest] = self.last_upload[0]
             return ('', '', 0)
+        if 'mv -f --' in cmd and 'clientsTable' in cmd:
+            for source, target in re.findall(r'cp -p -- (\S+) (\S+)', command):
+                if source in self.files:
+                    self.files[target] = self.files[source]
+            for source, target in re.findall(r'mv -f -- (\S+) (\S+)', command):
+                if source in self.files:
+                    self.files[target.rstrip("'")] = self.files.pop(source)
+            return ('', '', 0)
         if ' cat ' in cmd:
             path = cmd.rsplit(' cat ', 1)[-1].split(' 2>', 1)[0].strip()
             return (self.files.get(path, ''), '', 0)
         return ('', '', 0)
 
     def run_command(self, command, **kwargs):
+        if command.startswith('mktemp -d /tmp/amnezia-clients.'):
+            return ('/tmp/amnezia-clients.fixture\n', '', 0)
         return ('', '', 0)
 
 

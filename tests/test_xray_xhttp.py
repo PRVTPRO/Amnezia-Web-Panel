@@ -187,7 +187,7 @@ class XhttpClientFlowTests(unittest.TestCase):
                 manager._upgrade_config_for_stats = lambda *args, **kwargs: None
                 manager._xray_api_add_user = lambda *args: True
                 manager._write_server_json = lambda *args, **kwargs: None
-                manager._get_clients_table = lambda: []
+                manager._get_clients_table = lambda *args, **kwargs: []
                 manager._save_clients_table = lambda table: None
                 manager.get_client_config = lambda *args, **kwargs: 'vless://example'
 
