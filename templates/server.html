@@ -148,6 +148,42 @@
         font-size: 0.78rem;
     }
     .ssh-trust-btn { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; }
+    /* --- I1 masking block (install + settings) --- */
+    .i1-panel {
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-md);
+        padding: var(--space-md);
+        background: var(--bg-secondary);
+    }
+    .i1-panel .i1-panel-head {
+        display: flex; align-items: baseline; gap: var(--space-sm);
+        flex-wrap: wrap; margin-bottom: var(--space-xs);
+    }
+    .i1-panel .i1-panel-head h4 { font-size: 0.98rem; font-weight: 650; }
+    .i1-memo {
+        display: flex; gap: 10px; align-items: flex-start;
+        padding: 10px 12px; border-radius: var(--radius-sm);
+        font-size: var(--text-sm); line-height: 1.5;
+        background: var(--info-bg); border: 1px solid var(--info-border);
+        margin-bottom: var(--space-md);
+    }
+    .i1-memo.is-warn { background: var(--warning-bg); border-color: var(--warning-border); }
+    .i1-memo.is-ok { background: var(--success-bg); border-color: var(--success-border); }
+    .i1-code {
+        font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.76rem;
+        line-height: 1.5; word-break: break-all;
+        padding: 10px 12px; border-radius: var(--radius-sm);
+        background: rgba(0, 0, 0, 0.28); border: 1px solid var(--border-color);
+    }
+    [data-theme="light"] .i1-code { background: rgba(0, 0, 0, 0.04); }
+    .i1-breakdown { list-style: none; font-size: var(--text-sm); margin-top: var(--space-sm); }
+    .i1-breakdown li { display: flex; gap: 10px; padding: 4px 0; border-bottom: 1px dashed var(--border-color); }
+    .i1-breakdown li:last-child { border-bottom: none; }
+    .i1-breakdown .k { flex: none; width: 118px; color: var(--text-muted); font-size: 0.76rem; }
+    .i1-breakdown .v { flex: 1; word-break: break-word; }
+    .i1-manual { border: 1px dashed var(--border-color); border-radius: var(--radius-md); padding: 10px 12px; }
+    .i1-manual > summary { cursor: pointer; font-size: var(--text-sm); color: var(--text-secondary); }
+    .i1-manual[open] > summary { margin-bottom: var(--space-sm); color: var(--text-primary); }
     .ssh-trust-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); flex: 0 0 auto; }
     .ssh-trust-btn.is-urgent { border-color: var(--warning); background: var(--warning-bg); color: var(--warning); }
     .ssh-trust-dot.is-urgent { background: var(--warning); animation: sshTrustPulse 1.4s infinite; }
@@ -300,6 +336,28 @@
     @keyframes serverStatsPulse { 0%, 100% { opacity: 1; } 50% { opacity: .38; } }
     @media (prefers-reduced-motion: reduce) {
         .server-stats-skel { animation: none; }
+    }
+    /* Загрузка шапки: страница рисуется сразу, пробы догоняют её фоном.
+       Пульсируют только точки уже существующих кнопок, скелетоны — блоки. */
+    .srv-header .srv-status-btn[data-state="loading"] .ssh-trust-dot,
+    .srv-header .srv-status-btn[data-state="loading"] .awg-plugin-dot,
+    .srv-header .srv-status-btn[data-state="loading"] .cheburcheck-dot {
+        background: var(--text-muted);
+        animation: serverStatsPulse 1.2s ease-in-out infinite;
+    }
+    .srv-header .badge.is-skeleton,
+    .srv-header .ip-chip.is-skeleton {
+        color: transparent;
+        background: var(--bg-secondary);
+        border-color: var(--border-color);
+        animation: serverStatsPulse 1.2s ease-in-out infinite;
+    }
+    @media (prefers-reduced-motion: reduce) {
+        .srv-header .srv-status-btn[data-state="loading"] .ssh-trust-dot,
+        .srv-header .srv-status-btn[data-state="loading"] .awg-plugin-dot,
+        .srv-header .srv-status-btn[data-state="loading"] .cheburcheck-dot,
+        .srv-header .badge.is-skeleton,
+        .srv-header .ip-chip.is-skeleton { animation: none; }
     }
     @media (max-width: 520px) {
         .server-stats-popover {
@@ -555,6 +613,59 @@
     @media (max-width: 420px) {
         .srv-header .srv-status-btn { white-space: normal; line-height: 1.2; text-align: start; }
     }
+
+    .connection-sort { position: relative; }
+    .connection-sort > summary { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; list-style: none; }
+    .connection-sort > summary::-webkit-details-marker { display: none; }
+    .connection-sort[open] > summary { border-color: var(--border-focus); }
+    .connection-sort-menu {
+        position: absolute;
+        top: calc(100% + 7px);
+        inset-inline-end: 0;
+        z-index: 1100;
+        width: 230px;
+        max-width: calc(100vw - 24px);
+        padding: 12px;
+        display: grid;
+        gap: 7px;
+        background: var(--bg-card);
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-lg);
+        box-shadow: var(--shadow-lg);
+    }
+    .connection-sort-menu label { margin-top: 3px; color: var(--text-muted); font-size: .75rem; font-weight: 600; }
+    .connection-sort-menu .form-select { width: 100%; min-width: 0; }
+
+    @media (max-width: 640px) {
+        /* Keep the sort popup inside the viewport on narrow screens. */
+        .connection-sort-menu {
+            inset-inline-start: 0;
+            inset-inline-end: auto;
+        }
+    }
+
+    /* Keep the protocol picker visually aligned with the adjacent header buttons. */
+    .connection-protocol-select {
+        width: auto;
+        min-width: 0;
+        height: 36px;
+        padding: 6px 32px 6px 12px;
+        background-color: var(--bg-card);
+        background-position: right 11px center;
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-sm);
+        font-size: 0.8rem;
+        line-height: 1.2;
+    }
+    .connection-protocol-select:hover {
+        border-color: var(--border-hover);
+        background-color: var(--bg-card-hover);
+    }
+    .connection-protocol-select:focus {
+        border-color: var(--border-focus);
+        box-shadow: 0 0 0 3px var(--accent-glow);
+    }
+
 </style>
 {% endblock %}
 
@@ -588,7 +699,7 @@
 {% endif %}
 
 <div class="modal-backdrop" id="sshTrustModal">
-    <div class="modal" style="max-width: 560px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title">{{ _('ssh_trust_title') }}</h2>
             <button class="modal-close" type="button" onclick="closeModal('sshTrustModal')">×</button>
@@ -611,6 +722,7 @@
         const text = document.getElementById('sshTrustBtnText');
         const dot = document.getElementById('sshTrustDot');
         if (!btn || !text || !dot) return;
+        btn.removeAttribute('aria-busy');
         btn.classList.remove('is-urgent', 'is-danger', 'is-ok');
         dot.classList.remove('is-urgent', 'is-danger', 'is-ok');
         if (state === 'changed') {
@@ -674,9 +786,270 @@
     document.addEventListener('DOMContentLoaded', loadSSHTrustStatus);
 </script>
 
+<!-- ===== Copy one AWG instance to another server ===== -->
+<div class="modal-backdrop" id="copyInstanceModal">
+    <div class="modal" style="max-width: 620px;">
+        <div class="modal-header">
+            <h2 class="modal-title">{{ _('copy_instance_title') }}</h2>
+            <button class="modal-close" type="button" onclick="closeCopyInstance()">×</button>
+        </div>
+        <div id="copyInstanceForm">
+            <p class="text-muted" style="margin-top: 0;">{{ _('copy_instance_desc') }}</p>
+            <div class="form-group">
+                <label class="form-label">{{ _('copy_instance_source') }}</label>
+                <div class="form-hint" id="copyInstanceSource"></div>
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="copyInstanceTarget">{{ _('copy_instance_target') }}</label>
+                <select class="form-select" id="copyInstanceTarget" onchange="loadCopyPreview()"></select>
+            </div>
+            <div class="form-hint" id="copyInstancePreview">{{ _('copy_instance_checking') }}</div>
+            <div class="form-hint" style="margin-top: var(--space-sm);">{{ _('copy_instance_key_warning') }}</div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" type="button" onclick="closeCopyInstance()">{{ _('copy_instance_close') }}</button>
+                <button class="btn btn-primary" type="button" id="copyInstanceStart" onclick="startCopyInstance()" disabled>{{ _('copy_instance_start') }}</button>
+            </div>
+        </div>
+        <div id="copyInstanceProgress" class="hidden">
+            <div class="awg-progress">
+                <div class="awg-progress-head">
+                    <span id="copyInstanceStage">{{ _('copy_instance_running') }}</span>
+                    <span class="awg-progress-percent" id="copyInstancePercent">0%</span>
+                </div>
+                <div class="awg-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+                     aria-valuenow="0" id="copyInstanceTrack">
+                    <div class="awg-progress-fill" id="copyInstanceFill"></div>
+                </div>
+            </div>
+            <div class="awg-plugin-stage" id="copyInstanceStep"></div>
+            <details class="awg-plugin-details" id="copyInstanceLogBox">
+                <summary>{{ _('copy_instance_log') }}</summary>
+                <div class="awg-plugin-log" id="copyInstanceLog" aria-live="polite"></div>
+            </details>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" type="button" id="copyInstanceCancel"
+                        onclick="cancelCopyInstance()">{{ _('copy_instance_cancel') }}</button>
+                <button class="btn btn-primary hidden" type="button" id="copyInstanceDone"
+                        onclick="closeCopyInstance()">{{ _('copy_instance_close') }}</button>
+            </div>
+        </div>
+    </div>
+</div>
+<script>
+    const COPY_TARGETS = {{ copy_targets | tojson }};
+    const COPY_LABELS = {{ {
+        'checking': _('copy_instance_checking'),
+        'preview': _('copy_instance_preview'),
+        'port': _('port'),
+        'peers': _('connections'),
+        'port_busy': _('copy_instance_port_busy'),
+        'image': _('copy_instance_image'),
+        'disk_low': _('copy_instance_disk_low'),
+        'no_targets': _('copy_instance_target_missing'),
+        'running': _('copy_instance_running'),
+        'step': _('copy_instance_step'),
+        'success': _('copy_instance_success'),
+        'failed': _('copy_instance_failed'),
+        'cancelled': _('copy_instance_cancelled'),
+        'connections': _('copy_instance_connections'),
+        'error': _('error')
+    } | tojson }};
+    let copySource = null;
+    let copyPlan = null;
+    let copyOp = null;
+    let copyFinished = null;
+
+    function copyFmt(text, vars) {
+        return String(text || '').replace(/\{(\w+)\}/g, function (match, key) {
+            return vars[key] !== undefined ? vars[key] : match;
+        });
+    }
+
+    function openCopyInstance(proto) {
+        if (copyOp && copyOp.timer) clearTimeout(copyOp.timer);
+        copyOp = null;
+        copySource = proto;
+        copyPlan = null;
+        copyFinished = null;
+        const source = document.getElementById('copyInstanceSource');
+        if (source) source.textContent = getProtoTitle(proto);
+        const select = document.getElementById('copyInstanceTarget');
+        const start = document.getElementById('copyInstanceStart');
+        const preview = document.getElementById('copyInstancePreview');
+        document.getElementById('copyInstanceForm').classList.remove('hidden');
+        document.getElementById('copyInstanceProgress').classList.add('hidden');
+        document.getElementById('copyInstanceLog').textContent = '';
+        if (select) {
+            select.innerHTML = (COPY_TARGETS || []).map(function (target) {
+                return '<option value="' + target.id + '">' + escapeHtml(target.name) +
+                    ' — ' + escapeHtml(target.host) + '</option>';
+            }).join('');
+        }
+        if (start) start.disabled = true;
+        if (preview) preview.textContent = COPY_TARGETS.length ? COPY_LABELS.checking : COPY_LABELS.no_targets;
+        openModal('copyInstanceModal');
+        if (COPY_TARGETS.length) loadCopyPreview();
+    }
+
+    async function loadCopyPreview() {
+        const select = document.getElementById('copyInstanceTarget');
+        const preview = document.getElementById('copyInstancePreview');
+        const start = document.getElementById('copyInstanceStart');
+        if (!select || !select.value || !copySource) return;
+        copyPlan = null;
+        if (start) start.disabled = true;
+        if (preview) preview.textContent = COPY_LABELS.checking;
+        try {
+            const plan = await apiCall(`/api/servers/${SERVER_ID}/copy/preflight`, 'POST', {
+                protocol: copySource,
+                target_server_id: Number(select.value),
+            });
+            copyPlan = plan;
+            const parts = [
+                COPY_LABELS.preview + ': ' + plan.target_key + ' · ' + plan.target_container,
+                COPY_LABELS.port + ': ' + plan.port,
+                COPY_LABELS.peers + ': ' + plan.peers,
+            ];
+            const warnings = plan.warnings || [];
+            if (warnings.indexOf('port_in_use') !== -1) {
+                parts.push(copyFmt(COPY_LABELS.port_busy, {port: plan.source_port, new: plan.port}));
+            }
+            if (warnings.indexOf('image_transfer') !== -1) parts.push(COPY_LABELS.image);
+            if (warnings.indexOf('disk_low') !== -1) {
+                parts.push(copyFmt(COPY_LABELS.disk_low, {
+                    free: plan.disk_free_mb,
+                    need: Math.ceil((plan.image_bytes || 0) / 1048576),
+                }));
+            }
+            if (preview) preview.textContent = parts.join(' · ');
+            if (start) start.disabled = false;
+        } catch (error) {
+            if (preview) preview.textContent = COPY_LABELS.error + ': ' + error.message;
+        }
+    }
+
+    async function startCopyInstance() {
+        const select = document.getElementById('copyInstanceTarget');
+        const start = document.getElementById('copyInstanceStart');
+        if (!copySource || !select || !select.value) return;
+        if (start) start.disabled = true;
+        try {
+            const res = await apiCall(`/api/servers/${SERVER_ID}/copy`, 'POST', {
+                protocol: copySource,
+                target_server_id: Number(select.value),
+            });
+            copyOp = {opId: res.operation_id, offset: 0, timer: null};
+            document.getElementById('copyInstanceForm').classList.add('hidden');
+            document.getElementById('copyInstanceProgress').classList.remove('hidden');
+            document.getElementById('copyInstanceDone').classList.add('hidden');
+            const cancel = document.getElementById('copyInstanceCancel');
+            if (cancel) {
+                cancel.disabled = false;
+                cancel.textContent = {{ _('copy_instance_cancel') | tojson }};
+            }
+            pollCopyInstance();
+        } catch (error) {
+            showToast(COPY_LABELS.error + ': ' + error.message, 'error');
+            if (start) start.disabled = false;
+        }
+    }
+
+    async function pollCopyInstance() {
+        const op = copyOp;
+        if (!op) return;
+        try {
+            const data = await apiCall(`/api/servers/${SERVER_ID}/copy/` +
+                encodeURIComponent(op.opId) + '?offset=' + op.offset);
+            op.offset = data.next_offset;
+            const percent = Math.max(0, Math.min(100, data.percent || 0));
+            const fill = document.getElementById('copyInstanceFill');
+            const label = document.getElementById('copyInstancePercent');
+            const track = document.getElementById('copyInstanceTrack');
+            const stepEl = document.getElementById('copyInstanceStep');
+            if (fill) fill.style.width = percent + '%';
+            if (label) label.textContent = percent + '%';
+            if (track) track.setAttribute('aria-valuenow', String(percent));
+            const log = document.getElementById('copyInstanceLog');
+            (data.lines || []).forEach(function (line) {
+                if (log) log.textContent += '[' + line.ts + '] ' + line.text + '\n';
+            });
+            if (log) log.scrollTop = log.scrollHeight;
+            if (data.state === 'running') {
+                if (stepEl) stepEl.textContent = copyFmt(COPY_LABELS.step,
+                    {step: data.step || 0, total: data.total || 8});
+                op.timer = setTimeout(pollCopyInstance, 1000);
+                return;
+            }
+            const cancel = document.getElementById('copyInstanceCancel');
+            if (cancel) cancel.remove();
+            document.getElementById('copyInstanceDone').classList.remove('hidden');
+            if (data.state === 'success') {
+                copyFinished = 'success';
+                if (stepEl) {
+                    stepEl.textContent = copyFmt(COPY_LABELS.success, {name: data.target_key || ''});
+                    stepEl.className = 'awg-plugin-stage awg-plugin-updated';
+                }
+                if (data.result && data.result.connections !== undefined && stepEl) {
+                    stepEl.textContent += ' · ' +
+                        copyFmt(COPY_LABELS.connections, {n: data.result.connections});
+                }
+            } else if (data.state === 'cancelled') {
+                copyFinished = 'cancelled';
+                if (stepEl) stepEl.textContent = COPY_LABELS.cancelled;
+            } else {
+                copyFinished = 'failed';
+                const box = document.getElementById('copyInstanceLogBox');
+                if (box) box.open = true;
+                if (stepEl) {
+                    stepEl.textContent = COPY_LABELS.failed + ': ' +
+                        ((data.error && data.error.message) || '');
+                    stepEl.style.color = 'var(--danger)';
+                }
+            }
+        } catch (error) {
+            // A dropped poll must not spin forever: after ten misses show the
+            // reason and stop, the operation keeps running on the server.
+            op.failures = (op.failures || 0) + 1;
+            if (op.failures > 10) {
+                const stepEl = document.getElementById('copyInstanceStep');
+                if (stepEl) {
+                    stepEl.textContent = COPY_LABELS.error + ': ' + error.message;
+                    stepEl.style.color = 'var(--danger)';
+                }
+                const cancel = document.getElementById('copyInstanceCancel');
+                if (cancel) cancel.remove();
+                document.getElementById('copyInstanceDone').classList.remove('hidden');
+                return;
+            }
+            op.timer = setTimeout(pollCopyInstance, 2000);
+        }
+    }
+
+    async function cancelCopyInstance() {
+        const op = copyOp;
+        if (!op) return;
+        const button = document.getElementById('copyInstanceCancel');
+        if (button) button.disabled = true;
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/copy/` +
+                encodeURIComponent(op.opId) + '/cancel', 'POST');
+        } catch (error) {
+            if (button) button.disabled = false;
+        }
+    }
+
+    function closeCopyInstance() {
+        if (copyOp && copyOp.timer) clearTimeout(copyOp.timer);
+        copyOp = null;
+        closeModal('copyInstanceModal');
+        const reload = copyFinished === 'success';
+        copyFinished = null;
+        if (reload) location.reload();
+    }
+</script>
 <!-- ===== AmneziaWG plugin updates ===== -->
 <div class="modal-backdrop" id="awgPluginModal">
-    <div class="modal" style="max-width: 640px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title">{{ _('awg_plugin_title') }}</h2>
             <button class="modal-close" type="button" onclick="closeAwgPluginModal()">×</button>
@@ -693,6 +1066,18 @@
 <script>
     let awgPluginStatus = null;
     const awgPluginOps = {};
+
+    const xrayStageLabels = {{ {
+        'start': _('xray_update_stage_start'),
+        'host': _('xray_update_stage_host'),
+        'version': _('xray_update_stage_version'),
+        'arch': _('xray_update_stage_arch'),
+        'build': _('xray_update_stage_build'),
+        'verify': _('xray_update_stage_verify'),
+        'swap': _('xray_update_stage_swap'),
+        'check': _('xray_update_stage_check'),
+        'done': _('xray_update_stage_done')
+    } | tojson }};
 
     function awgPluginLabel(key) {
         return {{ {
@@ -721,7 +1106,8 @@
             'cancelling': _('awg_plugin_cancelling'),
             'cancelled': _('awg_plugin_cancelled'),
             'step': _('awg_plugin_step'),
-            'unknown': _('awg_plugin_unknown_version')
+            'unknown': _('awg_plugin_unknown_version'),
+            'xray_desc': _('xray_update_hint')
         } | tojson }};
     }
 
@@ -729,6 +1115,7 @@
         const btn = document.getElementById('awgPluginBtn');
         const text = document.getElementById('awgPluginBtnText');
         if (!btn || !text) return;
+        btn.removeAttribute('aria-busy');
         btn.classList.remove('is-update');
         btn.dataset.state = state;
         const labels = awgPluginLabel();
@@ -767,11 +1154,75 @@
         }
     }
 
+    function applyPluginButtonState() {
+        const components = Object.values((awgPluginStatus && awgPluginStatus.components) || {});
+        const xrayUpdate = Object.values(xrayCoreStatus || {})
+            .some(item => item && item.update_available);
+        setAwgPluginButton(
+            components.some(item => item.update_available) || xrayUpdate ? 'update' : 'ok');
+    }
+
     function applyAwgPluginStatus(data) {
         awgPluginStatus = data;
-        const components = Object.values((data && data.components) || {});
-        setAwgPluginButton(components.some(item => item.update_available) ? 'update' : 'ok');
+        if (xrayProtocols.length) loadXrayCoreStatus().then(applyPluginButtonState);
+        applyPluginButtonState();
         return awgPluginStatus;
+    }
+
+    // Xray connections on this server, for the components dialog below.
+    const xrayProtocols = [
+        {%- for proto, info in (server.get('protocols') or {}).items()
+            if proto.split('__')[0] == 'xray' and info.get('installed') %}{{ proto | tojson }},
+        {%- endfor %}
+    ];
+    let xrayCoreStatus = null;
+    const XRAY_CORE_CACHE_KEY = 'xrayCoreStatus:v1:' + {{ (server.uid or server.host) | tojson }};
+
+    function readXrayCoreCache() {
+        try {
+            const raw = window.localStorage.getItem(XRAY_CORE_CACHE_KEY);
+            if (!raw) return null;
+            const entry = JSON.parse(raw);
+            if (!entry || !entry.ts || typeof entry.data === 'undefined') return null;
+            return entry;
+        } catch (error) {
+            return null;
+        }
+    }
+
+    function writeXrayCoreCache(data) {
+        try {
+            window.localStorage.setItem(XRAY_CORE_CACHE_KEY, JSON.stringify({ts: Date.now(), data: data}));
+        } catch (error) {
+            // Private mode or quota: the cache is an optimisation only.
+        }
+    }
+
+    async function loadXrayCoreStatus(force) {
+        if (!xrayProtocols.length) return applyXrayCoreStatus({});
+        const cached = readXrayCoreCache();
+        if (!force && cached && Date.now() - cached.ts < AWG_PLUGIN_CACHE_TTL) {
+            return applyXrayCoreStatus(cached.data);
+        }
+        try {
+            const pairs = await Promise.all(xrayProtocols.map(proto =>
+                apiCall('/api/servers/{{ server_id }}/xray/core?protocol=' + encodeURIComponent(proto))
+                    .then(data => [proto, data])
+                    .catch(() => [proto, null])));
+            const data = {};
+            pairs.forEach(([proto, info]) => { if (info) data[proto] = info; });
+            writeXrayCoreCache(data);
+            return applyXrayCoreStatus(data);
+        } catch (error) {
+            if (cached && cached.data) return applyXrayCoreStatus(cached.data);
+            return applyXrayCoreStatus({});
+        }
+    }
+
+    function applyXrayCoreStatus(data) {
+        xrayCoreStatus = data || {};
+        applyPluginButtonState();
+        return xrayCoreStatus;
     }
 
     async function loadAwgPluginStatus(force) {
@@ -797,6 +1248,7 @@
         openModal('awgPluginModal');
         renderAwgPluginModal();
         if (!awgPluginStatus) loadAwgPluginStatus().then(renderAwgPluginModal);
+        else if (xrayProtocols.length && !xrayCoreStatus) loadXrayCoreStatus().then(renderAwgPluginModal);
     }
 
     function closeAwgPluginModal() {
@@ -821,7 +1273,6 @@
         const labels = awgPluginLabel();
         if (!awgPluginStatus) {
             host.appendChild(awgPluginElement('p', 'text-muted', labels.error));
-            return;
         }
         const descriptions = {kernel_module: labels.kernel_desc, userspace: labels.userspace_desc};
         const titles = {kernel_module: labels.kernel, userspace: labels.userspace};
@@ -883,6 +1334,168 @@
             const running = awgPluginOps[component];
             if (running && running.opId) renderAwgPluginProgress(component);
         });
+        renderXrayComponents(host);
+    }
+
+    function renderXrayComponents(host) {
+        if (!xrayProtocols.length) return;
+        const labels = awgPluginLabel();
+        xrayProtocols.forEach(proto => {
+            const info = (xrayCoreStatus || {})[proto];
+            const instance = proto.split('__')[1];
+            const component = 'xray-' + proto;
+            const available = !!(info && info.update_available);
+            const block = awgPluginElement('div', 'awg-plugin-component');
+            const head = awgPluginElement('div', 'awg-plugin-component-head');
+            head.appendChild(awgPluginElement('strong', '',
+                instance ? 'Xray-core #' + instance : 'Xray-core'));
+            const badge = awgPluginElement('span',
+                'badge ' + (available ? 'badge-success' : 'badge-info'));
+            badge.id = 'awgPluginBadge-' + component;
+            badge.appendChild(awgPluginElement('span', 'badge-dot'));
+            badge.appendChild(document.createTextNode(
+                ' ' + (available ? labels.available : labels.no_update)));
+            head.appendChild(badge);
+            block.appendChild(head);
+            block.appendChild(awgPluginElement('div', 'text-muted', labels.xray_desc));
+            const versions = awgPluginElement('div', 'awg-plugin-version');
+            versions.id = 'awgPluginVersions-' + component;
+            versions.appendChild(document.createTextNode(
+                labels.installed + ': ' + ((info && info.version) || labels.unknown)));
+            if (available && info.latest) {
+                versions.appendChild(document.createTextNode('  →  ' + labels.available + ': '));
+                versions.appendChild(awgPluginElement('span', 'awg-plugin-updated', info.latest));
+            }
+            block.appendChild(versions);
+            const actions = awgPluginElement('div', 'flex gap-sm');
+            actions.style.marginTop = 'var(--space-sm)';
+            if (available) {
+                const run = awgPluginElement('button', 'btn btn-primary btn-sm', labels.update_btn);
+                run.type = 'button';
+                run.id = 'awgPluginUpdate-' + component;
+                run.onclick = () => startXrayCoreUpdate(proto, run);
+                actions.appendChild(run);
+            }
+            if (actions.childNodes.length) block.appendChild(actions);
+            const progress = awgPluginElement('div', 'awg-plugin-progress hidden');
+            progress.id = 'awgPluginProgress-' + component;
+            block.appendChild(progress);
+            host.appendChild(block);
+            const running = awgPluginOps[component];
+            if (running && running.opId) renderXrayProgress(proto);
+        });
+    }
+
+    async function startXrayCoreUpdate(proto, button) {
+        const labels = awgPluginLabel();
+        if (!window.confirm(labels.confirm)) return;
+        button.disabled = true;
+        const component = 'xray-' + proto;
+        try {
+            const data = await apiCall('/api/servers/{{ server_id }}/xray/update', 'POST', {
+                protocol: proto
+            });
+            awgPluginOps[component] = {opId: data.operation_id, offset: 0, timer: null};
+            renderXrayProgress(proto);
+            pollXrayUpdate(proto);
+        } catch (error) {
+            button.disabled = false;
+            const block = button.closest('.awg-plugin-component');
+            if (block) {
+                const box = awgPluginElement('div', 'awg-plugin-log', error.message);
+                box.style.marginTop = 'var(--space-sm)';
+                block.appendChild(box);
+            }
+        }
+    }
+
+    function renderXrayProgress(proto) {
+        const component = 'xray-' + proto;
+        const host = document.getElementById('awgPluginProgress-' + component);
+        if (!host) return;
+        host.classList.remove('hidden');
+        host.textContent = '';
+        const labels = awgPluginLabel();
+        const progress = awgPluginElement('div', 'awg-progress');
+        const head = awgPluginElement('div', 'awg-progress-head');
+        head.appendChild(awgPluginElement('span', '', labels.step));
+        const percent = awgPluginElement('span', 'awg-progress-percent', '0%');
+        percent.id = 'awgProgressPercent-' + component;
+        head.appendChild(percent);
+        progress.appendChild(head);
+        const track = awgPluginElement('div', 'awg-progress-track');
+        track.setAttribute('role', 'progressbar');
+        track.setAttribute('aria-valuemin', '0');
+        track.setAttribute('aria-valuemax', '100');
+        track.setAttribute('aria-valuenow', '0');
+        track.id = 'awgProgressTrack-' + component;
+        const fill = awgPluginElement('div', 'awg-progress-fill');
+        fill.id = 'awgProgressFill-' + component;
+        track.appendChild(fill);
+        progress.appendChild(track);
+        host.appendChild(progress);
+        host.appendChild(awgPluginElement('div', 'awg-plugin-stage', labels.running));
+        const logBox = awgPluginElement('details', 'awg-plugin-details');
+        logBox.id = 'awgPluginLogBox-' + component;
+        logBox.appendChild(awgPluginElement('summary', '', labels.log));
+        const log = awgPluginElement('div', 'awg-plugin-log');
+        log.id = 'awgPluginLog-' + component;
+        log.setAttribute('aria-live', 'polite');
+        logBox.appendChild(log);
+        host.appendChild(logBox);
+        setAwgProgress(component, 0, 9, 0, true);
+    }
+
+    async function pollXrayUpdate(proto) {
+        const component = 'xray-' + proto;
+        const op = awgPluginOps[component];
+        if (!op) return;
+        const log = document.getElementById('awgPluginLog-' + component);
+        try {
+            const data = await apiCall('/api/servers/{{ server_id }}/install/progress?operation_id=' +
+                encodeURIComponent(op.opId) + '&offset=' + op.offset);
+            op.offset = data.next_offset;
+            setAwgProgress(component, data.step, data.total, data.percent, data.state === 'running');
+            (data.lines || []).forEach(line => {
+                if (log) log.textContent += '[' + line.ts + '] ' + line.stage + ': ' + line.text + '\n';
+                if (log) log.scrollTop = log.scrollHeight;
+            });
+            if (data.state === 'running') {
+                const stageLine = document.querySelector('#awgPluginProgress-' + component + ' .awg-plugin-stage');
+                if (stageLine && data.stage && xrayStageLabels[data.stage]) {
+                    stageLine.textContent = xrayStageLabels[data.stage];
+                }
+                op.timer = setTimeout(() => pollXrayUpdate(proto), 1000);
+                return;
+            }
+            const labels = awgPluginLabel();
+            const stage = document.querySelector('#awgPluginProgress-' + component + ' .awg-plugin-stage');
+            if (stage) {
+                if (data.state === 'success') {
+                    stage.textContent = labels.success + ' — Xray-core ' + (data.result && data.result.version || '');
+                    stage.className = 'awg-plugin-stage awg-plugin-updated';
+                } else {
+                    stage.textContent = labels.failed + ': ' + (data.error && data.error.message || '');
+                    stage.style.color = 'var(--danger)';
+                }
+            }
+            if (data.state === 'success') {
+                const versions = document.getElementById('awgPluginVersions-' + component);
+                if (versions) versions.textContent = labels.installed + ': Xray-core ' + (data.result && data.result.version || '');
+                const badge = document.getElementById('awgPluginBadge-' + component);
+                if (badge) {
+                    badge.className = 'badge badge-info';
+                    badge.textContent = labels.no_update;
+                }
+                const button = document.getElementById('awgPluginUpdate-' + component);
+                if (button) button.remove();
+                if (xrayCoreStatus && xrayCoreStatus[proto]) xrayCoreStatus[proto].update_available = false;
+                applyPluginButtonState();
+                setTimeout(() => checkServer(), 800);
+            }
+        } catch (error) {
+            op.timer = setTimeout(() => pollXrayUpdate(proto), 2000);
+        }
     }
 
     async function loadAwgPluginChangelog(component, version, box) {
@@ -1285,8 +1898,13 @@
                 if (flow === 'smartroute') smartRouteBusy = false;
                 else if (flow === 'rknblock') rknBlockBusy = false;
                 else if (flow === 'warp') warpBusy = false;
+                // WARP failures carry a stable code: show the translated text
+                // instead of the raw srv_warp_* code in the log and the toast.
+                const opErrorText = flow === 'warp' && data.error?.code
+                    ? warpErrorMessage({payload: data.error})
+                    : (data.error?.message || _('install_error'));
                 if (stageEl) {
-                    stageEl.textContent = _('error') + ': ' + (data.error?.message || _('install_error'));
+                    stageEl.textContent = _('error') + ': ' + opErrorText;
                     stageEl.style.color = 'var(--danger)';
                 }
                 if (fillEl) {
@@ -1295,10 +1913,10 @@
                 }
                 const errDiv = document.createElement('div');
                 errDiv.className = 'log-line error';
-                errDiv.textContent = `✕ ${_('error')}: ${data.error?.message || _('install_error')}`;
+                errDiv.textContent = `✕ ${_('error')}: ${opErrorText}`;
                 logEl.appendChild(errDiv);
                 logEl.scrollTop = logEl.scrollHeight;
-                showToast(_('install_error') + ': ' + (data.error?.message || _('install_error')), 'error');
+                showToast(_('install_error') + ': ' + opErrorText, 'error');
                 if (flow === 'warp') {
                     await loadWarpStatus(true);
                     applyInstalledAppsVisibility();
@@ -1361,20 +1979,20 @@
                 </div>
                 {% if current_user and current_user.role == 'admin' %}
                 <button class="btn btn-sm ssh-trust-btn srv-status-btn" type="button" id="sshTrustBtn"
-                        onclick="openSSHTrustModal()">
+                        onclick="openSSHTrustModal()" data-state="loading">
                     <span class="ssh-trust-dot" id="sshTrustDot"></span>
                     {{ ui_icon('key', 14) }}
                     <span id="sshTrustBtnText">{{ _('ssh_trust_button') }}</span>
                 </button>
                 <button class="btn btn-sm awg-plugin-btn srv-status-btn" type="button" id="awgPluginBtn"
-                        onclick="openAwgPluginModal()" data-state="unknown">
+                        onclick="openAwgPluginModal()" data-state="loading">
                     <span class="awg-plugin-dot" id="awgPluginDot"></span>
                     {{ ui_icon('plug', 14) }}
                     <span id="awgPluginBtnText">{{ _('awg_plugin_button') }}</span>
                 </button>
                 {% if cheburcheck_enabled %}
                 <button class="btn btn-sm srv-status-btn" type="button" id="cheburcheckBtn"
-                        onclick="openCheburcheckModal()" data-state="unknown">
+                        onclick="openCheburcheckModal()" data-state="loading">
                     <span class="cheburcheck-dot" id="cheburcheckDot"></span>
                     {{ ui_icon('shield', 14) }}
                     <span id="cheburcheckBtnText">{{ _('cheburcheck_button') }}</span>
@@ -1392,13 +2010,13 @@
         </button>
     </div>
 
-    <div id="serverStatus" class="srv-header__status hidden">
+    <div id="serverStatus" class="srv-header__status">
         <div class="srv-header__badges" id="statusBadges"></div>
         <div class="srv-header__actions">
-            <button class="btn btn-primary btn-sm srv-action" onclick="openMarketplaceModal()" id="marketplaceBtn">
+            <button class="btn btn-primary btn-sm srv-action" onclick="openMarketplaceModal()" id="marketplaceBtn" disabled>
                 {{ ui_icon('store', 15) }} <span>{{ _('marketplace') }}</span>
             </button>
-            <button class="btn btn-secondary btn-sm srv-action" onclick="openServerManagement()" id="managementBtn">
+            <button class="btn btn-secondary btn-sm srv-action" onclick="openServerManagement()" id="managementBtn" disabled>
                 {{ ui_icon('sliders', 15) }} <span>{{ _('management') }}</span>
             </button>
             <button class="btn btn-secondary btn-sm srv-action" onclick="openHostTuning()" id="hostTuningBtn">
@@ -1846,7 +2464,7 @@
 
     <!-- ===== Cloudflare WARP terms modal (srv-warp, not panel-warp) ===== -->
     <div class="modal-backdrop" id="warpTosModal">
-        <div class="modal" style="max-width:560px;">
+        <div class="modal">
             <div class="modal-header">
                 <h2 class="modal-title">{{ _('srv_warp_tos_title') }}</h2>
                 <button class="modal-close" onclick="resolveWarpTos(false)">×</button>
@@ -1863,7 +2481,7 @@
 
     <!-- ===== RKN Block scans modal ===== -->
     <div class="modal-backdrop" id="rknScansModal">
-        <div class="modal" style="max-width:720px;">
+        <div class="modal">
             <div class="modal-header">
                 <h2 class="modal-title">{{ _('rkn_scans_title') }}</h2>
                 <button class="modal-close" onclick="closeModal('rknScansModal')">×</button>
@@ -1879,7 +2497,7 @@
 
     <!-- ===== RKN Block options modal (per-direction flags) ===== -->
     <div class="modal-backdrop" id="rknOptionsModal">
-        <div class="modal" style="max-width:520px;">
+        <div class="modal">
             <div class="modal-header">
                 <h2 class="modal-title">{{ _('rknblock_options_title') }}</h2>
                 <button class="modal-close" onclick="closeModal('rknOptionsModal')">×</button>
@@ -1935,6 +2553,30 @@
         </div>
     </div>
 
+    <!-- HAProxy Card -->
+    <div class="card card-hover protocol-card protocol-haproxy" id="proto-haproxy">
+        <div class="protocol-card-head">
+            <div class="protocol-icon">⚖️</div>
+            <div class="protocol-name">HAProxy</div>
+        </div>
+        <div class="flex gap-sm protocol-ctrl" id="haproxy-ctrl" style="display:none!important;"></div>
+        <div class="protocol-desc">
+            {{ _('haproxy_desc') }}
+        </div>
+        <div class="protocol-status" id="haproxy-status">
+            <span class="badge badge-warn"><span class="badge-dot"></span> {{ _('not_checked') }}</span>
+        </div>
+        <div id="haproxy-info" class="hidden">
+            <div class="protocol-info" id="haproxy-info-grid"></div>
+        </div>
+        <div class="flex gap-sm" id="haproxy-actions">
+            <button class="btn btn-primary btn-sm" onclick="openInstallModal('haproxy')" id="haproxy-install-btn"
+                style="flex:1">
+                {{ _('install') }}
+            </button>
+        </div>
+    </div>
+
     <!-- ===== Reverse Proxy teaser (locked, full grid width) ===== -->
     <div class="promo-block promo-revproxy" aria-disabled="true" role="article">
         <div class="promo-grid-bg" aria-hidden="true"></div>
@@ -1984,8 +2626,30 @@
             {{ _('connections') }}
         </h2>
         <div class="page-header__actions">
-            <select class="form-select" id="connProtoSelect" onchange="loadConnections()"
-                style="width:auto;">
+            <details class="connection-sort">
+                <summary class="btn btn-secondary btn-sm">⇅ {{ _('sort') }}</summary>
+                <div class="connection-sort-menu">
+                    <label for="connSortField">{{ _('sort_by') }}</label>
+                    <select class="form-select" id="connSortField" onchange="applyConnectionSort(); closeConnectionSortPopup()">
+                        <option value="name">{{ _('sort_name') }}</option>
+                        <option value="created">{{ _('sort_created') }}</option>
+                        <option value="handshake">{{ _('sort_handshake') }}</option>
+                        <option value="rx">{{ _('sort_rx') }}</option>
+                        <option value="tx">{{ _('sort_tx') }}</option>
+                        <option value="maxspeed">{{ _('sort_max_speed') }}</option>
+                        <option value="total">{{ _('sort_total_traffic') }}</option>
+                        <option value="ip">{{ _('sort_ip') }}</option>
+                        <option value="quota">{{ _('sort_quota') }}</option>
+                        <option value="expiry">{{ _('sort_expiry') }}</option>
+                    </select>
+                    <label for="connSortDirection">{{ _('sort_direction') }}</label>
+                    <select class="form-select" id="connSortDirection" onchange="applyConnectionSort(); closeConnectionSortPopup()">
+                        <option value="asc">{{ _('sort_ascending') }}</option>
+                        <option value="desc">{{ _('sort_descending') }}</option>
+                    </select>
+                </div>
+            </details>
+            <select class="form-select connection-protocol-select" id="connProtoSelect" onchange="loadConnections()">
                 <option value="awg">AmneziaWG</option>
                 <option value="awg2">AmneziaWG 2.0</option>
                 <option value="awg3">AmneziaWG 3.1</option>
@@ -1994,6 +2658,15 @@
                 <option value="telemt">Telemt</option>
                 <option value="wireguard">WireGuard</option>
             </select>
+            <select class="form-select" id="torrentGuardSelect" onchange="saveTorrentGuard(this)"
+                style="width:auto; display:none;" title="{{ _('torrent_guard_title') }}"
+                aria-label="{{ _('torrent_guard_title') }}">
+                <option value="on">{{ _('torrent_guard_on') }}</option>
+                <option value="count">{{ _('torrent_guard_count') }}</option>
+                <option value="off">{{ _('torrent_guard_off') }}</option>
+            </select>
+            <span id="torrentGuardHealth" class="text-muted"
+                style="font-size:0.72rem; color:#f87171; display:none;"></span>
             <button class="btn btn-primary btn-sm" onclick="openAddConnectionModal()">
                 <span>＋</span> {{ _('add') }}
             </button>
@@ -2017,7 +2690,7 @@
 <!-- ===== Marketplace Modal ===== -->
 <!-- wg-easy Import Modal -->
 <div class="modal-backdrop" id="wgeasyImportModal">
-    <div class="modal" style="max-width: 640px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title">📥 {{ _('wgeasy_import_title') }}</h2>
             <button class="modal-close" onclick="closeModal('wgeasyImportModal')">×</button>
@@ -2064,7 +2737,7 @@
 
 <!-- Public Endpoint Modal -->
 <div class="modal-backdrop" id="publicEndpointModal">
-    <div class="modal" style="max-width: 460px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title">🌐 {{ _('public_endpoint_title') }}</h2>
             <button class="modal-close" onclick="closeModal('publicEndpointModal')">&times;</button>
@@ -2094,7 +2767,7 @@
 
 <!-- Rename Instance Modal -->
 <div class="modal-backdrop" id="renameProtoModal">
-    <div class="modal" style="max-width: 420px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title">✏️ {{ _('rename_instance') }}</h2>
             <button class="modal-close" onclick="closeModal('renameProtoModal')">×</button>
@@ -2113,8 +2786,27 @@
     </div>
 </div>
 
+<!-- ===== Xray Self-steal Modal ===== -->
+<div class="modal-backdrop" id="xraySelfstealModal">
+    <div class="modal" style="max-width: 520px;">
+        <div class="modal-header">
+            <div>
+                <h2 class="modal-title">🎭 {{ _('xray_selfsteal') }}</h2>
+                <div class="text-muted text-sm">{{ _('xray_selfsteal_hint') }}</div>
+            </div>
+            <button class="modal-close" onclick="closeModal('xraySelfstealModal')">×</button>
+        </div>
+        <div class="modal-body" id="selfstealBody">
+            <div class="text-muted text-sm">…</div>
+        </div>
+        <div class="modal-footer" id="selfstealFooter">
+            <button class="btn btn-secondary" onclick="closeModal('xraySelfstealModal')">{{ _('cancel') }}</button>
+        </div>
+    </div>
+</div>
+
 <div class="modal-backdrop" id="marketplaceModal">
-    <div class="modal" style="max-width: 980px;">
+    <div class="modal">
         <div class="modal-header">
             <div>
                 <h2 class="modal-title">🛒 {{ _('marketplace') }}</h2>
@@ -2168,19 +2860,70 @@
                 </div>
                 <div class="ip-note" data-kind="info" id="installIpv6Note" style="display:none;"></div>
                 <div id="installAwgJunk">
-                    <div class="form-group">
-                        <label class="form-label" style="display:flex; justify-content:space-between; align-items:center;">
-                            {{ _('awg_special_junk') }}
-                            <button type="button" class="btn btn-secondary btn-sm"
-                                onclick="resetSpecialJunkFields('installAwg')">{{ _('awg_special_junk_reset') }}</button>
-                        </label>
-                        <div class="form-hint" style="margin-bottom:var(--space-xs);">{{ _('awg_special_junk_hint') }}</div>
-                        <input class="form-input" type="text" id="installAwgI1" spellcheck="false" placeholder="I1">
-                        <input class="form-input mt-xs" type="text" id="installAwgI2" spellcheck="false" placeholder="I2">
-                        <input class="form-input mt-xs" type="text" id="installAwgI3" spellcheck="false" placeholder="I3">
-                        <input class="form-input mt-xs" type="text" id="installAwgI4" spellcheck="false" placeholder="I4">
-                        <input class="form-input mt-xs" type="text" id="installAwgI5" spellcheck="false" placeholder="I5">
-                        <div class="form-hint">{{ _('awg_special_junk_syntax') }}</div>
+                    <div class="i1-panel">
+                        <div class="i1-panel-head">
+                            <h4>{{ _('awg_i1_title') }}</h4>
+                            <span class="badge badge-success">{{ _('awg_i1_auto_badge') }}</span>
+                        </div>
+                        <div class="form-hint" style="margin-bottom:var(--space-sm);">{{ _('awg_i1_intro') }}</div>
+                        <div class="i1-memo is-ok" id="installAwgI1Memo">{{ _('awg_i1_install_memo') }}</div>
+
+                        <div class="form-group">
+                            <label class="form-label">{{ _('awg_i1_profile') }}</label>
+                            <select class="form-select" id="installAwgI1Profile"
+                                    onchange="onAwgI1ProfileChange('install')">
+                                <option value="any">{{ _('awg_i1_profile_any') }}</option>
+                                <option value="apple">{{ _('awg_i1_profile_apple') }}</option>
+                                <option value="windows">{{ _('awg_i1_profile_windows') }}</option>
+                                <option value="android">{{ _('awg_i1_profile_android') }}</option>
+                                <option value="linux">{{ _('awg_i1_profile_linux') }}</option>
+                            </select>
+                            <div class="form-hint">{{ _('awg_i1_profile_hint') }}</div>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">{{ _('awg_i1_domain') }}</label>
+                            <select class="form-select" id="installAwgI1Domain"
+                                    onchange="onAwgI1DomainChange('install')"></select>
+                            <div class="form-hint">{{ _('awg_i1_domain_hint') }}</div>
+                        </div>
+
+                        <div id="installAwgI1CustomRow" style="display:none;">
+                            <div class="form-group">
+                                <label class="form-label">{{ _('awg_i1_custom_domain') }}</label>
+                                <input class="form-input" type="text" id="installAwgI1Custom"
+                                       spellcheck="false" placeholder="example.com"
+                                       oninput="previewAwgI1('install')">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">{{ _('awg_i1_pool') }}</label>
+                                <select class="form-select" id="installAwgI1Pool"
+                                        onchange="previewAwgI1('install')"></select>
+                                <div class="form-hint">{{ _('awg_i1_pool_hint') }}</div>
+                            </div>
+                        </div>
+
+                        <div class="form-group">
+                            <label class="form-label" style="display:flex; justify-content:space-between; align-items:center;">
+                                {{ _('awg_i1_packet') }}
+                                <span class="badge badge-secondary" id="installAwgI1Bytes">—</span>
+                            </label>
+                            <div class="i1-code" id="installAwgI1Preview">—</div>
+                            <div class="form-hint" style="display:flex; justify-content:space-between; gap:8px; align-items:center; flex-wrap:wrap;">
+                                <span id="installAwgI1Status">{{ _('awg_i1_install_status') }}</span>
+                                <button type="button" class="btn btn-secondary btn-sm"
+                                        onclick="previewAwgI1('install')">{{ _('awg_i1_regenerate') }}</button>
+                            </div>
+                        </div>
+
+                        <details class="i1-manual">
+                            <summary>{{ _('awg_i1_manual') }}</summary>
+                            <div class="form-hint" style="margin:var(--space-sm) 0;">{{ _('awg_i1_manual_hint') }}</div>
+                            <input class="form-input" type="text" id="installAwgI1" spellcheck="false" placeholder="I1">
+                            <input class="form-input mt-xs" type="text" id="installAwgI2" spellcheck="false" placeholder="I2">
+                            <input class="form-input mt-xs" type="text" id="installAwgI3" spellcheck="false" placeholder="I3">
+                            <input class="form-input mt-xs" type="text" id="installAwgI4" spellcheck="false" placeholder="I4">
+                            <input class="form-input mt-xs" type="text" id="installAwgI5" spellcheck="false" placeholder="I5">
+                        </details>
                     </div>
                 </div>
             </div>
@@ -2220,6 +2963,12 @@
                         <input type="checkbox" id="installExitObfuscation"> {{ _('exit_obfuscation') }}
                     </label>
                     <div class="form-hint">{{ _('exit_obfuscation_hint') }}</div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" style="display:flex; align-items:center; gap:var(--space-sm);">
+                        <input type="checkbox" id="installExitAwg3"> {{ _('exit_awg3') }}
+                    </label>
+                    <div class="form-hint">{{ _('exit_awg3_hint') }}</div>
                 </div>
             </div>
             <div id="socks5Options"
@@ -2298,6 +3047,23 @@
                 <div class="form-hint">{{ _('nginx_install_hint') }}</div>
             </div>
 
+            <div id="xrayOptions"
+                style="display:none; padding: var(--space-md); background: rgba(0,0,0,0.03); border-radius: var(--radius-md); margin-bottom: var(--space-md);">
+                <div class="form-group">
+                    <label class="form-label">{{ _('xray_transport') }}</label>
+                    <select class="form-input" id="installXrayTransport">
+                        <option value="xhttp">{{ _('xray_transport_xhttp') }}</option>
+                        <option value="tcp">{{ _('xray_transport_tcp') }}</option>
+                    </select>
+                    <div class="form-hint">{{ _('xray_transport_hint') }}</div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">{{ _('xray_domain') }}</label>
+                    <input class="form-input" type="text" id="installXrayDomain" placeholder="yahoo.com" spellcheck="false">
+                    <div class="form-hint">{{ _('xray_domain_hint') }}</div>
+                </div>
+            </div>
+
             <div class="modal-footer">
                 <button class="btn btn-secondary" onclick="closeModal('installModal')">{{ _('cancel') }}</button>
                 <button class="btn btn-primary" onclick="installProtocol()" id="installBtn">
@@ -2332,7 +3098,7 @@
 
 <!-- ===== AmneziaWG Settings Modal ===== -->
 <div class="modal-backdrop" id="ipSettingsModal">
-    <div class="modal" style="max-width:720px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title">{{ _('server_ipv6_modal_title') }}</h2>
             <button class="modal-close" onclick="closeIpSettings()">×</button>
@@ -2396,7 +3162,7 @@
 </div>
 
 <div class="modal-backdrop" id="awgSettingsModal">
-    <div class="modal" style="max-width:640px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title" id="awgSettingsTitle">{{ _('awg_settings_title') }}</h2>
             <button class="modal-close" onclick="closeModal('awgSettingsModal')">×</button>
@@ -2443,19 +3209,71 @@
                 {{ _('server_ipv6_apply') }}
             </button>
         </div>
-        <div class="form-group" id="awgSetJunkGroup">
-            <label class="form-label" style="display:flex; justify-content:space-between; align-items:center;">
-                {{ _('awg_special_junk') }}
+        <div class="i1-panel" id="awgSetJunkGroup">
+            <div class="i1-panel-head">
+                <h4>{{ _('awg_i1_title') }}</h4>
+                <span class="badge badge-secondary" id="awgSetI1Badge">{{ _('awg_i1_badge_unknown') }}</span>
+            </div>
+            <div class="form-hint" style="margin-bottom:var(--space-sm);">{{ _('awg_i1_intro') }}</div>
+            <div class="i1-memo" id="awgSetI1Memo" style="display:none;"></div>
+
+            <div class="form-group">
+                <label class="form-label">{{ _('awg_i1_profile') }}</label>
+                <select class="form-select" id="awgSetI1Profile" onchange="onAwgI1ProfileChange('awgSet')">
+                    <option value="any">{{ _('awg_i1_profile_any') }}</option>
+                    <option value="apple">{{ _('awg_i1_profile_apple') }}</option>
+                    <option value="windows">{{ _('awg_i1_profile_windows') }}</option>
+                    <option value="android">{{ _('awg_i1_profile_android') }}</option>
+                    <option value="linux">{{ _('awg_i1_profile_linux') }}</option>
+                </select>
+                <div class="form-hint">{{ _('awg_i1_profile_hint') }}</div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">{{ _('awg_i1_domain') }}</label>
+                <select class="form-select" id="awgSetI1Domain" onchange="onAwgI1DomainChange('awgSet')"></select>
+                <div class="form-hint">{{ _('awg_i1_domain_hint') }}</div>
+            </div>
+
+            <div id="awgSetI1CustomRow" style="display:none;">
+                <div class="form-group">
+                    <label class="form-label">{{ _('awg_i1_custom_domain') }}</label>
+                    <input class="form-input" type="text" id="awgSetI1Custom" spellcheck="false"
+                           placeholder="example.com">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">{{ _('awg_i1_pool') }}</label>
+                    <select class="form-select" id="awgSetI1Pool"></select>
+                    <div class="form-hint">{{ _('awg_i1_pool_hint') }}</div>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label" style="display:flex; justify-content:space-between; align-items:center;">
+                    I1
+                    <span class="badge badge-secondary" id="awgSetI1Bytes">—</span>
+                </label>
+                <textarea class="form-textarea" id="awgSetI1" spellcheck="false" rows="3"
+                          style="min-height:84px;" oninput="onAwgSetI1Input()"></textarea>
+                <div class="form-hint" id="awgSetI1Status">{{ _('awg_i1_settings_status') }}</div>
+            </div>
+
+            <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:var(--space-md);">
+                <button type="button" class="btn btn-primary btn-sm"
+                        onclick="generateAwgSetI1()">{{ _('awg_i1_generate') }}</button>
                 <button type="button" class="btn btn-secondary btn-sm"
-                    onclick="resetSpecialJunkFields('awgSet')">{{ _('awg_special_junk_reset') }}</button>
-            </label>
-            <div class="form-hint" style="margin-bottom:var(--space-xs);">{{ _('awg_special_junk_hint') }}</div>
-            <input class="form-input" type="text" id="awgSetI1" spellcheck="false" placeholder="I1">
-            <input class="form-input mt-xs" type="text" id="awgSetI2" spellcheck="false" placeholder="I2">
-            <input class="form-input mt-xs" type="text" id="awgSetI3" spellcheck="false" placeholder="I3">
-            <input class="form-input mt-xs" type="text" id="awgSetI4" spellcheck="false" placeholder="I4">
-            <input class="form-input mt-xs" type="text" id="awgSetI5" spellcheck="false" placeholder="I5">
-            <div class="form-hint">{{ _('awg_special_junk_syntax') }}</div>
+                        onclick="clearAwgSetI1()">{{ _('awg_i1_clear') }}</button>
+            </div>
+
+            <div id="awgSetI1Breakdown"></div>
+
+            <details class="i1-manual" style="margin-top:var(--space-md);">
+                <summary>I2–I5</summary>
+                <div class="form-hint" style="margin:var(--space-sm) 0;">{{ _('awg_i1_extra_hint') }}</div>
+                <input class="form-input" type="text" id="awgSetI2" spellcheck="false" placeholder="I2">
+                <input class="form-input mt-xs" type="text" id="awgSetI3" spellcheck="false" placeholder="I3">
+                <input class="form-input mt-xs" type="text" id="awgSetI4" spellcheck="false" placeholder="I4">
+                <input class="form-input mt-xs" type="text" id="awgSetI5" spellcheck="false" placeholder="I5">
+            </details>
         </div>
         <div class="modal-footer">
             <button class="btn btn-secondary" onclick="closeModal('awgSettingsModal')">{{ _('cancel') }}</button>
@@ -2469,7 +3287,7 @@
 
 <!-- ===== Exit Node: peers ===== -->
 <div class="modal-backdrop" id="exitPeersModal">
-    <div class="modal" style="max-width:760px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title">{{ _('exit_peers_title') }}</h2>
             <button class="modal-close" onclick="closeModal('exitPeersModal')">×</button>
@@ -2485,7 +3303,7 @@
 
 <!-- ===== Exit Node: link an AWG instance ===== -->
 <div class="modal-backdrop" id="exitLinkModal">
-    <div class="modal" style="max-width:640px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title" id="exitLinkTitle">{{ _('exit_link_title') }}</h2>
             <button class="modal-close" onclick="closeModal('exitLinkModal')">×</button>
@@ -2572,7 +3390,7 @@
 
 <!-- ===== Smart Route Modal ===== -->
 <div class="modal-backdrop" id="smartRouteAckModal">
-    <div class="modal" style="max-width:640px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title">{{ _('smartroute_ack_title') }}</h2>
             <button class="modal-close" onclick="closeSmartRouteAck()">×</button>
@@ -2609,7 +3427,7 @@
 
 
 <div class="modal-backdrop" id="smartRouteModal">
-    <div class="modal" style="max-width:560px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title">{{ _('smartroute_title') }}</h2>
             <button class="modal-close" onclick="closeModal('smartRouteModal')">×</button>
@@ -2685,9 +3503,42 @@
     </div>
 </div>
 
+<!-- ===== Xray Fingerprint Modal ===== -->
+<div class="modal-backdrop" id="xrayFingerprintModal">
+    <div class="modal">
+        <div class="modal-header">
+            <h2 class="modal-title">{{ _('xray_fingerprint_title') }}</h2>
+            <button class="modal-close" onclick="closeModal('xrayFingerprintModal')">×</button>
+        </div>
+        <div class="form-group">
+            <label class="form-label">{{ _('xray_fingerprint_label') }}</label>
+            <select class="form-select" id="xrayFingerprintSelect">
+                <option value="chrome">chrome</option>
+                <option value="firefox">firefox</option>
+                <option value="safari">safari</option>
+                <option value="ios">ios</option>
+                <option value="android">android</option>
+                <option value="edge">edge</option>
+                <option value="360">360</option>
+                <option value="qq">qq</option>
+                <option value="random">random</option>
+                <option value="randomized">randomized</option>
+            </select>
+            <div class="form-hint">{{ _('xray_fingerprint_hint') }}</div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="closeModal('xrayFingerprintModal')">{{ _('cancel') }}</button>
+            <button class="btn btn-primary" onclick="saveXrayFingerprint()" id="xrayFpSaveBtn">
+                <span id="xrayFpSaveBtnText">{{ _('save') }}</span>
+                <div class="spinner hidden" id="xrayFpSaveSpinner"></div>
+            </button>
+        </div>
+    </div>
+</div>
+
 <!-- ===== NGINX Site Modal ===== -->
 <div class="modal-backdrop" id="siteConfigModal">
-    <div class="modal" style="max-width:680px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title" id="siteConfigModalTitle">{{ _('site_editor') }}</h2>
             <button class="modal-close" onclick="closeModal('siteConfigModal')">×</button>
@@ -2719,7 +3570,7 @@
 
 <!-- ===== Protocol Backup Modal ===== -->
 <div class="modal-backdrop" id="backupModal">
-    <div class="modal" style="max-width:720px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title" id="backupModalTitle">{{ _('backups') }}</h2>
             <button class="modal-close" onclick="closeModal('backupModal')">×</button>
@@ -2814,7 +3665,7 @@
 
 <!-- ===== Connection Config Modal (with Tabs) ===== -->
 <div class="modal-backdrop" id="configModal">
-    <div class="modal" style="max-width: 600px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title" id="configModalTitle">{{ _('config') }}</h2>
             <button class="modal-close" onclick="closeModal('configModal')">×</button>
@@ -2877,7 +3728,7 @@
 </div>
 <!-- ===== Server Config Modal ===== -->
 <div class="modal-backdrop" id="serverConfigModal">
-    <div class="modal" style="max-width:680px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title" id="serverConfigModalTitle">{{ _('server_config') }}</h2>
             <button class="modal-close" onclick="closeModal('serverConfigModal')">×</button>
@@ -2909,7 +3760,7 @@
 </div>
 <!-- ===== Host Tuning Modal ===== -->
 <div class="modal-backdrop" id="hostTuningModal">
-    <div class="modal" style="max-width:520px;">
+    <div class="modal">
         <div class="modal-header">
             <h2 class="modal-title">📊 {{ _('host_tuning') }}</h2>
             <button class="modal-close" onclick="closeModal('hostTuningModal')">×</button>
@@ -2949,6 +3800,10 @@
         {{ proto|tojson }}: { host: {{ (info.get('public_host') or '')|tojson }}, port: {{ (info.get('public_port') or '')|tojson }} },
         {%- endfor %}
     };
+    // Protocol records known at render time. The marketplace uses this to tell
+    // a host with no AmneziaWG instance (nothing to install WARP into) from one
+    // where the app simply is not active yet.
+    const SERVER_PROTOCOL_KEYS = {{ (server.get('protocols') or {}).keys()|list|tojson }};
     const MARKETPLACE_APPS = [
         { proto: 'awg3', category: 'protocols', icon: '🛡', title: 'AmneziaWG 3.1', descKey: 'awg3_desc', badge: 'NEW' },
         { proto: 'awg2', category: 'protocols', icon: '✨', title: 'AmneziaWG 2.0', descKey: 'awg_desc' },
@@ -2965,6 +3820,7 @@
         { proto: 'warp', category: 'services', icon: '☁️', title: 'Cloudflare WARP', descKey: 'srv_warp_card_desc' },
         { proto: 'rknblock', category: 'services', icon: '🌈', title: 'RKN Block (C24Be)', descKey: 'rknblock_desc' },
         { proto: 'nginx', category: 'web_servers', icon: '🌐', title: 'NGINX', descKey: 'nginx_desc' },
+        { proto: 'haproxy', category: 'web_servers', icon: '⚖️', title: 'HAProxy', descKey: 'haproxy_desc' },
     ];
     const MARKETPLACE_CATEGORIES = [
         { id: 'protocols', icon: '🔐', titleKey: 'protocols' },
@@ -2984,6 +3840,9 @@
     let currentAwgProto = 'awg2';
     // Smart Route app state (GET /api/servers/{id}/smartroute/status); null = not loaded.
     let smartRouteStatus = null;
+    // Last /check protocols payload: lets the exit-node marks be repainted after
+    // a Smart Route action without running a second (SSH-heavy) check.
+    let lastProtocolsInfo = {};
     let smartRouteBusy = false;
     // RKN Block app state (GET /api/servers/{id}/rkn_scans); null = not loaded.
     let rknBlockStatus = {{ server.get('rknblock') | tojson }};
@@ -2997,12 +3856,23 @@
     const WARP_STATUS_TTL = 5000;
 
     const AWG_PROTOCOLS = ['awg', 'awg2', 'awg3', 'awg_legacy'];
+    // Instance copy is AmneziaWG 2.0/3.x only: the legacy client has no
+    // compatible container layout on newer targets.
+    const COPYABLE_PROTOCOLS = ['awg', 'awg2', 'awg3'];
     // Protocols that hand out a client config or link, and therefore have an
     // address a client dials.
     const ENDPOINT_PROTOCOLS = [...AWG_PROTOCOLS, 'wireguard', 'xray', 'telemt'];
     const SPECIAL_JUNK_KEYS = ['i1', 'i2', 'i3', 'i4', 'i5'];
-    // Same value the desktop client ships as its default I1.
-    const AWG_DEFAULT_I1 = '<r 2><b 0x858000010001000000000669636c6f756403636f6d0000010001c00c000100010000105a00044d583737>';
+    const AWG_I1_CUSTOM = '__custom__';
+    // Masking domains and device presets come from the backend (one source of
+    // truth: managers/awg_junk.py). Nothing is hardcoded here, so the panel
+    // never needs to know the public Amnezia default either.
+    let awgI1Catalog = null;
+    let awgI1Timer = null;
+    // Junk values as they were when the settings modal opened. Only fields
+    // the admin actually changed are sent, so an old value the current
+    // validator rejects cannot block an MTU/DNS save.
+    let awgSetJunkOriginal = {};
 
     // The install form and the settings modal name their inputs differently
     // (installAwgI1 vs awgSetI1), so callers pass the whole id prefix.
@@ -3011,10 +3881,253 @@
     }
 
     function resetSpecialJunkFields(prefix) {
-        SPECIAL_JUNK_KEYS.forEach((key, idx) => {
+        SPECIAL_JUNK_KEYS.forEach(key => {
             const el = specialJunkField(prefix, key);
-            if (el) el.value = idx === 0 ? AWG_DEFAULT_I1 : '';
+            if (el) el.value = '';
         });
+    }
+
+    function awgI1El(prefix, suffix) {
+        return document.getElementById(prefix === 'install'
+            ? 'installAwg' + suffix : 'awgSet' + suffix);
+    }
+
+    async function ensureAwgI1Catalog() {
+        if (awgI1Catalog) return awgI1Catalog;
+        awgI1Catalog = await apiCall('/api/awg/i1/catalog', 'GET');
+        return awgI1Catalog;
+    }
+
+    function awgI1DomainsFor(profile) {
+        const cat = awgI1Catalog || {domains: [], device_profiles: []};
+        const prof = (cat.device_profiles || []).find(item => item.key === profile);
+        const allowed = prof ? prof.domains : null;
+        return (cat.domains || []).filter(item => !allowed || allowed.includes(item.domain));
+    }
+
+    function awgI1Option(value, label) {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = label;
+        return option;
+    }
+
+    function fillAwgI1Pool(prefix) {
+        const select = awgI1El(prefix, 'I1Pool');
+        if (!select) return;
+        select.innerHTML = '';
+        (awgI1Catalog.domains || []).forEach(item => {
+            select.appendChild(awgI1Option(item.domain,
+                item.domain + ' — ' + item.owner + ', ' + item.cidr));
+        });
+    }
+
+    function renderAwgI1Domains(prefix) {
+        const profile = awgI1El(prefix, 'I1Profile').value;
+        const select = awgI1El(prefix, 'I1Domain');
+        const previous = select.value;
+        select.innerHTML = '';
+        awgI1DomainsFor(profile).forEach(item => {
+            select.appendChild(awgI1Option(item.domain,
+                item.domain + ' — ' + item.owner + ', ' + item.cidr));
+        });
+        select.appendChild(awgI1Option(AWG_I1_CUSTOM, _('awg_i1_domain_custom')));
+        if (previous && Array.from(select.options).some(option => option.value === previous)) {
+            select.value = previous;
+        }
+    }
+
+    function isAwgI1Custom(prefix) {
+        return awgI1El(prefix, 'I1Domain').value === AWG_I1_CUSTOM;
+    }
+
+    function onAwgI1ProfileChange(prefix) {
+        renderAwgI1Domains(prefix);
+        onAwgI1DomainChange(prefix);
+    }
+
+    function onAwgI1DomainChange(prefix) {
+        awgI1El(prefix, 'I1CustomRow').style.display = isAwgI1Custom(prefix) ? '' : 'none';
+        // In the settings modal the packet belongs to a live instance: a new
+        // domain only prepares the picker, the admin presses "Generate".
+        if (prefix === 'install') previewAwgI1(prefix);
+    }
+
+    async function initAwgI1(prefix) {
+        try {
+            await ensureAwgI1Catalog();
+        } catch (err) {
+            setAwgI1Status(prefix, err.message, true);
+            return;
+        }
+        fillAwgI1Pool(prefix);
+        renderAwgI1Domains(prefix);
+        onAwgI1DomainChange(prefix);
+    }
+
+    function setAwgI1Status(prefix, text, isError) {
+        const el = awgI1El(prefix, 'I1Status');
+        if (!el) return;
+        el.textContent = text;
+        el.style.color = isError ? 'var(--danger)' : 'var(--text-muted)';
+    }
+
+    function previewAwgI1(prefix, immediate) {
+        clearTimeout(awgI1Timer);
+        const run = async () => {
+            const custom = isAwgI1Custom(prefix);
+            const body = {
+                domain: custom ? awgI1El(prefix, 'I1Custom').value.trim()
+                               : awgI1El(prefix, 'I1Domain').value,
+                pool: custom ? (awgI1El(prefix, 'I1Pool').value || null) : null,
+            };
+            if (!body.domain) {
+                setAwgI1Status(prefix, _('awg_i1_need_domain'), true);
+                return;
+            }
+            try {
+                const res = await apiCall('/api/awg/i1/preview', 'POST', body);
+                applyAwgI1Preview(prefix, res);
+            } catch (err) {
+                setAwgI1Status(prefix, err.message, true);
+            }
+        };
+        if (immediate) run();
+        else awgI1Timer = setTimeout(run, 250);
+    }
+
+    function renderAwgI1Breakdown(target, parsed) {
+        if (!target) return;
+        if (!parsed) {
+            target.innerHTML = '';
+            return;
+        }
+        const rows = [
+            [_('awg_i1_row_id'), _('awg_i1_row_id_value')],
+            [_('awg_i1_row_flags'), '0x' + (parsed.flags || 0).toString(16).toUpperCase()],
+            [_('awg_i1_row_question'), parsed.domain + ' · A · IN'],
+            [_('awg_i1_row_answer'), 'TTL ' + parsed.ttl + ' · ' + parsed.ip +
+                (parsed.owner ? ' (' + parsed.owner + ')' : '')],
+            [_('awg_i1_row_size'), parsed.size + ' ' + _('awg_i1_bytes_unit')],
+        ];
+        target.innerHTML = '<ul class="i1-breakdown">' + rows.map(row =>
+            '<li><span class="k">' + row[0] + '</span><span class="v">' +
+            row[1] + '</span></li>').join('') + '</ul>';
+    }
+
+    function applyAwgI1Preview(prefix, res) {
+        const parsed = res.parsed || {};
+        setAwgI1Status(prefix, _('awg_i1_valid'), false);
+        const bytes = awgI1El(prefix, 'I1Bytes');
+        if (bytes) bytes.textContent = (parsed.size || 0) + ' ' + _('awg_i1_bytes_unit');
+        if (prefix === 'install') {
+            document.getElementById('installAwgI1Preview').textContent = res.i1;
+            document.getElementById('installAwgI1Memo').textContent = _('awg_i1_memo_generated')
+                .replace('{domain}', parsed.domain || '')
+                .replace('{size}', String(parsed.size || 0));
+        } else {
+            document.getElementById('awgSetI1').value = res.i1;
+            renderAwgI1Breakdown(document.getElementById('awgSetI1Breakdown'), parsed);
+            renderAwgSetI1Badge(parsed, false);
+        }
+    }
+
+    function renderAwgSetI1Badge(parsed, isDefault) {
+        const badge = document.getElementById('awgSetI1Badge');
+        const memo = document.getElementById('awgSetI1Memo');
+        if (!badge) return;
+        if (isDefault) {
+            badge.textContent = _('awg_i1_badge_default');
+            badge.className = 'badge badge-warn';
+            memo.className = 'i1-memo is-warn';
+            memo.textContent = _('awg_i1_memo_default');
+            memo.style.display = 'flex';
+        } else if (parsed) {
+            badge.textContent = _('awg_i1_badge_custom');
+            badge.className = 'badge badge-success';
+            memo.className = 'i1-memo is-ok';
+            memo.textContent = _('awg_i1_memo_generated')
+                .replace('{domain}', parsed.domain || '')
+                .replace('{size}', String(parsed.size || 0));
+            memo.style.display = 'flex';
+        } else {
+            badge.textContent = _('awg_i1_badge_unknown');
+            badge.className = 'badge badge-secondary';
+            memo.style.display = 'none';
+        }
+    }
+
+    function awgI1SizeOf(value) {
+        let size = 0;
+        const re = /<\s*([a-z]+)(?:\s+([^>]*?))?\s*>/g;
+        let match;
+        while ((match = re.exec(value || '')) !== null) {
+            const tag = match[1];
+            const arg = (match[2] || '').trim();
+            if (tag === 'b') {
+                const digits = arg.slice(0, 2).toLowerCase() === '0x' ? arg.slice(2) : '';
+                size += Math.floor(digits.length / 2);
+            } else if (tag === 't') {
+                size += 4;
+            } else {
+                const count = parseInt(arg, 10);
+                if (count > 0) size += count;
+            }
+        }
+        return size;
+    }
+
+    // Mirrors the server: printable ASCII only, canonical <tag> <arg> form,
+    // and only tags both implementations parse. Returns '' when the value
+    // is acceptable, otherwise the message to show.
+    function awgI1Problem(value) {
+        if (!value) return '';
+        for (const ch of value) {
+            const code = ch.codePointAt(0);
+            if (code < 0x20 || code > 0x7e) return _('awg_i1_ascii_only');
+        }
+        const strict = /<(b|t|r|rc|rd)(?: ([^>]*))?>/g;
+        let consumed = 0;
+        let match;
+        while ((match = strict.exec(value)) !== null) {
+            if (match.index !== consumed) return _('awg_i1_canonical_tag');
+            const tag = match[1];
+            const arg = match[2] || '';
+            const canonical = arg ? '<' + tag + ' ' + arg + '>' : '<' + tag + '>';
+            if (arg !== arg.trim() || match[0] !== canonical) {
+                return _('awg_i1_canonical_tag');
+            }
+            consumed = match.index + match[0].length;
+        }
+        if (consumed !== value.length) {
+            const bad = value.match(/<\s*(c|d|ds|dz)\b/);
+            if (bad) return _('awg_i1_bad_tag').replace('{tag}', bad[1]);
+            return _('awg_i1_canonical_tag');
+        }
+        return '';
+    }
+
+    function onAwgSetI1Input() {
+        const value = document.getElementById('awgSetI1').value.trim();
+        const bytes = document.getElementById('awgSetI1Bytes');
+        if (bytes) bytes.textContent = awgI1SizeOf(value) + ' ' + _('awg_i1_bytes_unit');
+        renderAwgI1Breakdown(document.getElementById('awgSetI1Breakdown'), null);
+        if (!value) {
+            setAwgI1Status('awgSet', _('awg_i1_empty'), false);
+            renderAwgSetI1Badge(null, false);
+            return;
+        }
+        const problem = awgI1Problem(value);
+        setAwgI1Status('awgSet', problem || _('awg_i1_valid'), !!problem);
+    }
+
+    function generateAwgSetI1() {
+        previewAwgI1('awgSet', true);
+    }
+
+    function clearAwgSetI1() {
+        document.getElementById('awgSetI1').value = '';
+        onAwgSetI1Input();
     }
 
     function protoBase(proto) {
@@ -3187,15 +4300,21 @@
                                     : (isWarp ? warpIsInstalled()
                                         : baseInstalled(app.proto)));
                             const canInstallAnother = installed && isMultiInstanceBase(app.proto);
+                            // WARP is not a host-level binary: wgcf and
+                            // warp0.conf live inside an AmneziaWG container, so
+                            // an exit-only host has nothing to install into.
+                            const warpNoTarget = isWarp && !installed && !warpHasTargetInstance();
                             const action = isSmart
                                 ? `onclick="openSmartRouteModal()"`
                                 : (isWarp
-                                    ? (installed ? 'disabled' : `onclick="closeModal('marketplaceModal'); installWarp()"`)
+                                    ? (installed || warpNoTarget ? 'disabled' : `onclick="closeModal('marketplaceModal'); installWarp()"`)
                                     : (isRkn
                                         ? (installed || rknUnknown ? 'disabled' : `onclick="closeModal('marketplaceModal'); installRknBlock()"`)
                                         : (installed && !canInstallAnother ? 'disabled' : `onclick="installFromMarketplace('${app.proto}', ${canInstallAnother ? 'true' : 'false'})"`)));
                             const statusBadge = isWarp
-                                ? warpAggregateBadge()
+                                ? (warpNoTarget
+                                    ? `<span class="badge badge-warn"><span class="badge-dot"></span> ${escapeHtml(_('srv_warp_no_awg'))}</span>`
+                                    : warpAggregateBadge())
                                 : (isHostApp
                                     ? (installed
                                         ? `<span class="badge badge-success"><span class="badge-dot"></span> ${_('installed')}</span>`
@@ -3214,7 +4333,7 @@
                                     </div>
                                     <div class="marketplace-app-desc">${_(app.descKey)}</div>
                                     <button class="btn ${installed && !canInstallAnother ? 'btn-secondary' : 'btn-primary'} btn-sm" ${action}>
-                                        ${isSmart ? _('smartroute_open') : (canInstallAnother ? _('install_another') : (installed ? _('installed') : _('install')))}
+                                        ${isSmart ? _('smartroute_open') : (warpNoTarget ? _('srv_warp_no_awg') : (canInstallAnother ? _('install_another') : (installed ? _('installed') : _('install'))))}
                                     </button>
                                 </div>
                             `;
@@ -3651,7 +4770,10 @@
         // Older payloads omit ipv4_state: keep the previous green default then.
         const v4 = host.ipv4_state || 'in_use';
         const v4Style = ipHostChipStyle(v4);
-        const v4Counts = {
+        // IPv4 counts come from the server: AWG subnets plus host-port
+        // protocols (Xray) that have no AWG instance row. Older payloads
+        // without the field fall back to the AWG-only numbers.
+        const v4Counts = host.ipv4_counts || {
             instances: instances.filter(item => item.subnet_v4).length,
             peers: instances.reduce((sum, item) => sum + (item.peers || 0), 0),
         };
@@ -3789,20 +4911,31 @@
             : `<tr><td colspan="5">${_('server_ipv6_state_unknown')}</td></tr>`;
     }
 
-    async function loadIpStatus() {
-        try {
-            const data = await apiCall(`/api/servers/${SERVER_ID}/ip-status`, 'GET');
-            ipStatusCache = data;
-            renderIpChips(data);
-            if (document.getElementById('ipSettingsModal').classList.contains('active')) {
-                renderIpSettings(data);
+    let ipStatusInFlight = null;
+
+    // Одна проба на страницу: очередь, поллер и visibilitychange не должны
+    // ставить в SSH-соединение сервера второй такой же запрос.
+    function loadIpStatus() {
+        if (ipStatusInFlight) return ipStatusInFlight;
+        ipStatusInFlight = (async () => {
+            try {
+                const data = await apiCall(`/api/servers/${SERVER_ID}/ip-status`, 'GET');
+                ipStatusCache = data;
+                renderIpChips(data);
+                if (document.getElementById('ipSettingsModal').classList.contains('active')) {
+                    renderIpSettings(data);
+                }
+                if (document.getElementById('installModal').classList.contains('active')) {
+                    renderInstallIpv6Note();
+                }
+            } catch (err) {
+                console.warn('IP status failed:', err);
+                markIpChipsError();
+            } finally {
+                ipStatusInFlight = null;
             }
-            if (document.getElementById('installModal').classList.contains('active')) {
-                renderInstallIpv6Note();
-            }
-        } catch (err) {
-            console.warn('IP status failed:', err);
-        }
+        })();
+        return ipStatusInFlight;
     }
 
     async function openIpSettings() {
@@ -4090,6 +5223,7 @@
             }
             badges.innerHTML = html;
             if (data.protocols) {
+                lastProtocolsInfo = data.protocols;
                 const protoSelect = document.getElementById('connProtoSelect');
                 const currentVal = protoSelect.value;
                 protoSelect.innerHTML = '';
@@ -4126,6 +5260,9 @@
             // Smart Route card is painted with its final badge together with
             // the protocol cards instead of appearing later.
             smartRouteStatus = await smartRouteProbe;
+            // Cards were painted before the probe resolved: repaint the
+            // exit-node marks now that "installed/enabled" is known.
+            refreshExitMarks();
             updateStatusCounts(data.protocols || {});
             showToast(_('server_check_complete'), 'success');
         } catch (err) {
@@ -4232,7 +5369,7 @@
 
     // Services that don't have per-user "connections" — they expose a single
     // shared endpoint (DNS/proxy/admin UI) rather than per-client configs.
-    const SERVICE_PROTOS = ['dns', 'socks5', 'adguard', 'nginx', 'exit'];
+    const SERVICE_PROTOS = ['dns', 'socks5', 'adguard', 'nginx', 'haproxy', 'exit'];
 
     function buildServiceInfoGrid(proto, info) {
         // Custom info-grid markup for non-VPN services. Returns HTML for the grid body.
@@ -4266,9 +5403,12 @@
                 <div class="protocol-info-item"><span class="protocol-info-label">${_('port')}</span><span class="protocol-info-value">${info.port || '—'}/UDP</span></div>
                 <div class="protocol-info-item"><span class="protocol-info-label">${_('exit_subnet')}</span><span class="protocol-info-value">${escapeHtml(info.subnet || '—')}</span></div>
                 <div class="protocol-info-item"><span class="protocol-info-label">${_('exit_peers')}</span><span class="protocol-info-value">${info.peers_count ?? 0}</span></div>
-                <div class="protocol-info-item"><span class="protocol-info-label">${_('exit_obfuscation_short')}</span><span class="protocol-info-value">${info.obfuscation ? _('on') : _('off')}</span></div>
+                <div class="protocol-info-item"><span class="protocol-info-label">${_('exit_obfuscation_short')}</span><span class="protocol-info-value">${info.obfuscation ? (info.protocol_version || _('on')) : _('off')}</span></div>
                 <div class="protocol-info-item"><span class="protocol-info-label">${_('exit_public_key')}</span><span class="protocol-info-value">${key}</span></div>
             `;
+        }
+        if (base === 'haproxy') {
+            return `<div class="protocol-info-item"><span class="protocol-info-label">${_('port')}</span><span class="protocol-info-value">${info.port || 8080}/TCP</span></div>`;
         }
         if (base === 'nginx') {
             const domain = info.domain || '—';
@@ -4351,6 +5491,9 @@
                 } else if (info.port) {
                     grid += `<div class="protocol-info-item"><span class="protocol-info-label">${_('port')}</span><span class="protocol-info-value">${info.port}/${(['xray', 'telemt'].includes(protoBase(proto))) ? 'TCP' : 'UDP'}</span></div>`;
                 }
+                if (protoBase(proto) === 'xray' && info.fingerprint) {
+                    grid += `<div class="protocol-info-item"><span class="protocol-info-label">${_('xray_fingerprint_label')}</span><span class="protocol-info-value">${escapeHtml(info.fingerprint)}</span></div>`;
+                }
                 if (!isService && info.clients_count !== undefined) {
                     grid += `<div class="protocol-info-item"><span class="protocol-info-label">${_('connections')}</span><span class="protocol-info-value">${info.clients_count}</span></div>`;
                 }
@@ -4391,6 +5534,11 @@
                     <button class="btn btn-secondary btn-sm" onclick="showProtocolBackups('${proto}')">${_('backup')}</button>
                     <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')">${_('uninstall')}</button>
                 `;
+            } else if (protoBase(proto) === 'haproxy') {
+                actionsEl.innerHTML = `
+                    <button class="btn btn-secondary btn-sm" onclick="showProtocolBackups('${proto}')" style="flex:1">${_('backup')}</button>
+                    <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')">${_('uninstall')}</button>
+                `;
             } else if (protoBase(proto) === 'dns') {
                 actionsEl.innerHTML = `
                     <button class="btn btn-secondary btn-sm" onclick="showProtocolBackups('${proto}')" style="flex:1">${_('backup')}</button>
@@ -4402,20 +5550,21 @@
                     <button class="btn btn-secondary btn-sm" onclick="showProtocolBackups('${proto}')">${_('backup')}</button>
                     <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')">${_('uninstall')}</button>
                 `;
-            } else {
+            } else if (protoBase(proto) === 'xray') {
                 actionsEl.innerHTML = `
                     <button class="btn btn-secondary btn-sm" onclick="selectProtocolForConns('${proto}')" style="flex:1">${_('connections')}</button>
+                    <button class="btn btn-secondary btn-sm" onclick="openXrayFingerprint('${proto}')" title="${_('xray_fingerprint_hint')}">${_('xray_fingerprint_btn')}</button>
                     <button class="btn btn-secondary btn-sm" onclick="showProtocolBackups('${proto}')">${_('backup')}</button>
                     <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')">${_('uninstall')}</button>
                 `;
                 showConnectionsSection();
-            }
+            } else {
             // Show control buttons (stop + optional config). Services use the
             // container's own config UI (AdGuard web wizard / our SOCKS5 modal /
             // unbound's static config), so we don't expose a raw editor for them.
             if (ctrlEl) {
                 ctrlEl.style.cssText = '';
-                if (protoBase(proto) === 'nginx') {
+                if (['nginx', 'haproxy'].includes(protoBase(proto))) {
                     ctrlEl.innerHTML = `
                         <button class="btn btn-secondary btn-sm" onclick="showServerConfig('${proto}')" title="${_('server_config')}">${_('config_btn')}</button>
                         <button class="btn btn-danger btn-sm" onclick="toggleContainer('${proto}', true)" title="${_('stop_container_confirm').replace('{}', '')}">${_('stop_btn')}</button>
@@ -4429,16 +5578,23 @@
                         ? `<button class="btn btn-secondary btn-sm" onclick="openAwgSettings('${proto}')" title="${_('awg_settings_title')}">${_('awg_settings_btn')}</button>`
                         : '';
                     const exitBtn = AWG_PROTOCOLS.includes(protoBase(proto))
-                        ? `<button class="btn btn-secondary btn-sm" onclick="openExitLinkModal('${proto}')" title="${_('exit_link_title')}">🚪${info.exit_link ? ' ' + escapeHtml(info.exit_link.exit_name || '') : ''}</button>`
+                        ? `<button class="btn btn-secondary btn-sm exit-link-btn" onclick="openExitLinkModal('${proto}')" title="${_('exit_link_title')}">🚪${info.exit_link ? ' ' + escapeHtml(info.exit_link.exit_name || '') + smartRouteMark(info.exit_link) : ''}</button>`
                         : '';
                     const ep = PUBLIC_ENDPOINTS[proto];
                     const endpointBtn = ENDPOINT_PROTOCOLS.includes(protoBase(proto))
                         ? `<button class="btn btn-secondary btn-sm" onclick="openPublicEndpointModal('${proto}')" title="${_('public_endpoint_title')}">🌐${ep ? ' ' + escapeHtml(publicEndpointLabel(ep)) : ''}</button>`
                         : '';
+                    const selfstealBtn = protoBase(proto) === 'xray'
+                        ? `<button class="btn btn-secondary btn-sm" onclick="openSelfstealModal('${proto}')" title="${_('xray_selfsteal_title')}">🎭 ${_('xray_selfsteal')}</button>`
+                    const copyBtn = COPYABLE_PROTOCOLS.includes(protoBase(proto))
+                        ? `<button class="btn btn-secondary btn-sm" onclick="openCopyInstance('${proto}')" title="${_('copy_instance_title')}">${_('copy_instance_btn')}</button>`
+                        : '';
                     ctrlEl.innerHTML = `
                         ${awgBtn}
                         ${exitBtn}
                         ${endpointBtn}
+                        ${selfstealBtn}
+                        ${copyBtn}
                         <button class="btn btn-secondary btn-sm" onclick="showServerConfig('${proto}')" title="${_('server_config')}">${_('config_btn')}</button>
                         <button class="btn btn-danger btn-sm" onclick="toggleContainer('${proto}', true)" title="${_('stop_container_confirm').replace('{}', '')}">${_('stop_btn')}</button>
                     `;
@@ -4462,7 +5618,7 @@
             }
             if (ctrlEl) {
                 ctrlEl.style.cssText = '';
-                if (protoBase(proto) === 'nginx') {
+                if (['nginx', 'haproxy'].includes(protoBase(proto))) {
                     ctrlEl.innerHTML = `
                         <button class="btn btn-secondary btn-sm" onclick="showServerConfig('${proto}')" title="${_('server_config')}">${_('config_btn')}</button>
                         <button class="btn btn-primary btn-sm" onclick="toggleContainer('${proto}', false)" title="${_('start_container_confirm').replace('{}', '')}">${_('start_btn')}</button>
@@ -4579,6 +5735,9 @@
         html += row('amneziawg module', h.awg_module ? `kernel v${h.awg_module}` : 'userspace (amneziawg-go)');
         for (const c of (t.containers || [])) {
             html += `<div style="font-weight:600;margin:12px 0 2px;">🐳 ${esc(c.name)} ${c.running ? '<span style="color:var(--success,#3fb950)">● online</span>' : '<span style="color:var(--danger,#f85149)">● stopped</span>'}</div>`;
+            if (c.version) {
+                html += row('xray core', c.version);
+            }
             if (c.running && c.ct) {
                 html += row('rmem_max / wmem_max', `${c.ct['net.core.rmem_max'] || '—'} / ${c.ct['net.core.wmem_max'] || '—'}`);
                 html += row('tcp_fastopen', c.ct['net.ipv4.tcp_fastopen']);
@@ -4956,6 +6115,77 @@
         }
     }
 
+    // ===== Xray self-steal: mask under the local NGINX site =====
+    function selfstealErrorText(err) {
+        return (err && err.payload && err.payload.error) || (err && err.message) || '';
+    }
+
+    function openSelfstealModal(proto) {
+        openModal('xraySelfstealModal');
+        document.getElementById('selfstealBody').innerHTML = '<div class="text-muted text-sm">…</div>';
+        document.getElementById('selfstealFooter').innerHTML =
+            `<button class="btn btn-secondary" onclick="closeModal('xraySelfstealModal')">${_('cancel')}</button>`;
+        apiCall(`/api/servers/${SERVER_ID}/xray/selfsteal/plan?protocol=${encodeURIComponent(proto)}`)
+            .then(plan => renderSelfstealPlan(proto, plan))
+            .catch(err => {
+                document.getElementById('selfstealBody').innerHTML =
+                    `<div class="text-muted text-sm">❌ ${escapeHtml(selfstealErrorText(err))}</div>`;
+            });
+    }
+
+    function renderSelfstealPlan(proto, plan) {
+        const body = document.getElementById('selfstealBody');
+        const footer = document.getElementById('selfstealFooter');
+        if (!plan.xray_running) {
+            body.innerHTML = `<div class="text-muted text-sm">${_('xray_selfsteal_not_running')}</div>`;
+            return;
+        }
+        if (!plan.options.length) {
+            body.innerHTML = `<div class="text-muted text-sm">${_('xray_selfsteal_empty')}</div>`;
+            return;
+        }
+        let html = '';
+        if (plan.current_sni || plan.current_dest) {
+            html += `<div class="text-muted text-sm" style="margin-bottom: var(--space-md);">
+                ${_('xray_selfsteal_current')}: <strong>${escapeHtml(plan.current_sni || '—')}</strong>
+                <span class="text-muted">(${escapeHtml(plan.current_dest || '—')})</span></div>`;
+        }
+        plan.options.forEach((opt, i) => {
+            const checked = i === 0 ? ' checked' : '';
+            const siteBadge = opt.site_ok ? '✓' : '✗';
+            html += `
+            <label class="form-group" style="display:flex; align-items:flex-start; gap:var(--space-sm); cursor:pointer;">
+                <input type="radio" name="selfstealNginx" value="${escapeHtml(opt.protocol)}"${checked} style="margin-top:3px;">
+                <span><strong>${escapeHtml(opt.domain)}</strong> ${siteBadge}
+                <div class="text-muted text-sm">${_('xray_selfsteal_target')}: ${escapeHtml(opt.dest || '—')}</div></span>
+            </label>`;
+        });
+        html += `<div class="form-hint" style="margin-top: var(--space-md);">${_('xray_selfsteal_note')}</div>`;
+        body.innerHTML = html;
+        footer.innerHTML = `
+            <button class="btn btn-secondary" onclick="closeModal('xraySelfstealModal')">${_('cancel')}</button>
+            <button class="btn btn-primary" onclick="applySelfsteal('${proto}')">${_('xray_selfsteal_apply')}</button>`;
+    }
+
+    function applySelfsteal(proto) {
+        const chosen = document.querySelector('input[name="selfstealNginx"]:checked');
+        if (!chosen) return;
+        document.getElementById('selfstealFooter').innerHTML =
+            `<button class="btn btn-secondary" onclick="closeModal('xraySelfstealModal')">${_('cancel')}</button>`;
+        apiCall(`/api/servers/${SERVER_ID}/xray/selfsteal`, 'POST', {
+            protocol: proto, nginx_protocol: chosen.value,
+        }).then(result => {
+            document.getElementById('selfstealBody').innerHTML =
+                `<div class="text-muted text-sm">✓ ${_('xray_selfsteal_success')}</div>
+                 <div class="text-muted text-sm" style="margin-top: var(--space-sm);">
+                 ${_('xray_selfsteal_target')}: <strong>${escapeHtml(result.sni || '')}</strong>
+                 <span class="text-muted">(${escapeHtml(result.dest || '')})</span></div>`;
+        }).catch(err => {
+            document.getElementById('selfstealBody').innerHTML =
+                `<div class="text-muted text-sm">❌ ${escapeHtml(selfstealErrorText(err))}</div>`;
+        });
+    }
+
     // ========== Protocol Installation ==========
     function updateNginxDnsHint() {
         const input = document.getElementById('installNginxDomain');
@@ -4981,6 +6211,7 @@
         const nginxOpts = document.getElementById('nginxOptions');
         const awgOpts = document.getElementById('awgOptions');
         const exitOpts = document.getElementById('exitOptions');
+        const xrayOpts = document.getElementById('xrayOptions');
 
         telemtOpts.style.display = 'none';
         socks5Opts.style.display = 'none';
@@ -4988,6 +6219,7 @@
         nginxOpts.style.display = 'none';
         awgOpts.style.display = 'none';
         exitOpts.style.display = 'none';
+        xrayOpts.style.display = 'none';
 
         if (base === 'dns') {
             portLabel.textContent = _('port') + ' (Internal)';
@@ -4999,6 +6231,9 @@
             portInput.disabled = false;
             portInput.value = currentInstallAnother ? nextSuggestedPort(currentInstallProto, 443) : '443';
             portHint.textContent = currentInstallAnother ? _('port_next_instance_hint') : _('port_xray_hint');
+            xrayOpts.style.display = 'block';
+            document.getElementById('installXrayTransport').value = 'xhttp';
+            document.getElementById('installXrayDomain').value = '';
         } else if (base === 'telemt') {
             portLabel.textContent = _('port') + ' (TCP)';
             portInput.value = currentInstallAnother ? nextSuggestedPort(currentInstallProto, 443) : '443';
@@ -5017,6 +6252,11 @@
             portInput.disabled = false;
             portHint.textContent = _('adguard_dns_port_hint');
             adguardOpts.style.display = 'block';
+        } else if (base === 'haproxy') {
+            portLabel.textContent = _('port') + ' (TCP)';
+            portInput.value = currentInstallAnother ? nextSuggestedPort(currentInstallProto, 8080) : '8080';
+            portInput.disabled = false;
+            portHint.textContent = currentInstallAnother ? _('port_next_instance_hint') : _('haproxy_port_hint');
         } else if (base === 'nginx') {
             portLabel.textContent = _('port') + ' (HTTPS/TCP)';
             portInput.value = '443';
@@ -5047,6 +6287,9 @@
             document.getElementById('installAwgDns6').value = '2606:4700:4700::1111';
             renderInstallIpv6Note();
             resetSpecialJunkFields('installAwg');
+            const manualJunk = document.querySelector('#installAwgJunk details.i1-manual');
+            if (manualJunk) manualJunk.open = false;
+            initAwgI1('install');
         }
 
         document.getElementById('installForm').classList.remove('hidden');
@@ -5185,18 +6428,39 @@
             } else if (protoBase(currentInstallProto) === 'nginx') {
                 params.nginx_domain = document.getElementById('installNginxDomain').value.trim();
                 params.nginx_email = document.getElementById('installNginxEmail').value.trim();
+            } else if (protoBase(currentInstallProto) === 'xray') {
+                params.xray_transport = document.getElementById('installXrayTransport').value;
+                params.xray_domain = document.getElementById('installXrayDomain').value.trim();
             } else if (protoBase(currentInstallProto) === 'exit') {
                 params.exit_subnet = document.getElementById('installExitSubnet').value.trim();
                 params.exit_obfuscation = document.getElementById('installExitObfuscation').checked;
+                params.exit_awg3 = params.exit_obfuscation && document.getElementById('installExitAwg3').checked;
             } else if (AWG_PROTOCOLS.includes(protoBase(currentInstallProto))) {
                 params.awg_mtu = document.getElementById('installAwgMtu').value.trim();
                 params.awg_dns1 = document.getElementById('installAwgDns1').value.trim();
                 params.awg_dns2 = document.getElementById('installAwgDns2').value.trim();
                 params.awg_dns6 = document.getElementById('installAwgDns6').value.trim();
                 if (protoBase(currentInstallProto) !== 'awg_legacy') {
-                    ['i1', 'i2', 'i3', 'i4', 'i5'].forEach(key => {
-                        params['awg_' + key] = specialJunkField('installAwg', key).value.trim();
-                    });
+                    const manual = document.querySelector('#installAwgJunk details.i1-manual');
+                    const typed = ['i1', 'i2', 'i3', 'i4', 'i5']
+                        .map(key => specialJunkField('installAwg', key).value.trim());
+                    if (manual && manual.open && typed.some(Boolean)) {
+                        // Explicit packets win; the backend sends exactly these.
+                        typed.forEach((value, idx) => {
+                            params['awg_' + SPECIAL_JUNK_KEYS[idx]] = value;
+                        });
+                    } else {
+                        // Otherwise the backend generates a per-instance packet
+                        // for this domain (or picks one when it is empty).
+                        const custom = isAwgI1Custom('install');
+                        const domain = custom
+                            ? document.getElementById('installAwgI1Custom').value.trim()
+                            : document.getElementById('installAwgI1Domain').value;
+                        if (domain) params.awg_i1_domain = domain;
+                        if (custom) {
+                            params.awg_i1_pool = document.getElementById('installAwgI1Pool').value || null;
+                        }
+                    }
                 }
             }
             // The POST may outlive its 120s response deadline while the worker
@@ -5499,11 +6763,26 @@
                 ipStatusCache ? ipStatusCache.can_write !== false : true,
                 ipInst ? (ipInst.blocked_reason || '') : '');
             const junkGroup = document.getElementById('awgSetJunkGroup');
-            junkGroup.style.display = data.supports_special_junk ? '' : 'none';
+            junkGroup.style.display = data.supports_special_junk ? 'block' : 'none';
+            awgSetJunkOriginal = {};
             SPECIAL_JUNK_KEYS.forEach(key => {
                 const el = specialJunkField('awgSet', key);
-                if (el) el.value = data[key] || '';
+                const value = data[key] || '';
+                if (el) el.value = value;
+                awgSetJunkOriginal[key] = value;
             });
+            if (data.supports_special_junk) {
+                await initAwgI1('awgSet');
+                const parsed = data.i1_parsed || null;
+                renderAwgI1Breakdown(document.getElementById('awgSetI1Breakdown'), parsed);
+                renderAwgSetI1Badge(parsed, !!data.i1_is_default);
+                const bytes = document.getElementById('awgSetI1Bytes');
+                if (bytes) {
+                    const size = (parsed && parsed.size) || awgI1SizeOf(data.i1 || '');
+                    bytes.textContent = size + ' ' + _('awg_i1_bytes_unit');
+                }
+                setAwgI1Status('awgSet', data.i1 ? _('awg_i1_valid') : _('awg_i1_empty'), false);
+            }
             openModal('awgSettingsModal');
         } catch (err) {
             showToast(_('error') + ': ' + err.message, 'error');
@@ -5523,7 +6802,10 @@
         };
         if (document.getElementById('awgSetJunkGroup').style.display !== 'none') {
             SPECIAL_JUNK_KEYS.forEach(key => {
-                payload[key] = specialJunkField('awgSet', key).value.trim();
+                const value = specialJunkField('awgSet', key).value.trim();
+                if (value !== (awgSetJunkOriginal[key] || '').trim()) {
+                    payload[key] = value;
+                }
             });
         }
         btn.disabled = true;
@@ -5567,6 +6849,48 @@
         return EXIT_LINK_ERROR_KEYS.includes(err.message) ? _(err.message) : err.message;
     }
 
+    // Smart Route state of a linked instance. The split flags live in
+    // exit_link (merged into /check from the saved record), the app-wide
+    // switch lives in smartRouteStatus (probed in parallel by checkServer).
+    // 'lost' wins over 'paused': a removed app must not look like a pause.
+    function smartRouteMarkState(link) {
+        if (!link) return null;
+        // A removed app leaves smart_route=false + smart_route_lost=true: the
+        // warning must win, otherwise the instance looks simply unlinked.
+        if (link.smart_route_lost) return 'lost';
+        if (!link.smart_route) return null;
+        if (!smartRouteStatus || !smartRouteStatus.installed) return 'lost';
+        if (smartRouteStatus.enabled === false) return 'paused';
+        return 'on';
+    }
+
+    // The mark is appended inside the exit-node button, so the mode is visible
+    // without opening the modal; no mark at all means the split is off.
+    function smartRouteMark(link) {
+        const state = smartRouteMarkState(link);
+        if (!state) return '';
+        const labels = { on: '⇄ RU', paused: '⇄ RU', lost: '⚠ RU' };
+        const hint = _(`smartroute_mark_${state}_hint`).replace('{name}', (link && link.exit_name) || '');
+        return `<span class="sr-mark sr-mark--${state}" role="img" aria-label="${escapeHtml(_('smartroute_title'))}" title="${escapeHtml(hint)}">${labels[state]}</span>`;
+    }
+
+    // Repaint the mark on one card, keeping the node name in place.
+    function refreshExitMark(proto, info) {
+        const btn = document.querySelector(`#proto-${protoDomKey(proto)} .exit-link-btn`);
+        if (!btn) return;
+        const old = btn.querySelector('.sr-mark');
+        if (old) old.remove();
+        const mark = info && info.exit_link ? smartRouteMark(info.exit_link) : '';
+        if (mark) btn.insertAdjacentHTML('beforeend', mark);
+    }
+
+    // updateProtocolCard paints before the Smart Route probe settles, and app
+    // actions change the flags without a fresh /check: repaint from the cache.
+    function refreshExitMarks(protocols) {
+        Object.entries(protocols || lastProtocolsInfo || {}).forEach(
+            ([proto, info]) => refreshExitMark(proto, info));
+    }
+
     async function showExitPeers(proto = 'exit') {
         currentExitPeersProto = proto || 'exit';
         const list = document.getElementById('exitPeersList');
@@ -5576,7 +6900,7 @@
         try {
             const data = await apiCall(`/api/servers/${SERVER_ID}/exit/peers`, 'POST', { protocol: currentExitPeersProto });
             const info = data.info || {};
-            infoEl.textContent = `${_('port')}: ${info.port || '—'}/UDP · ${_('exit_subnet')}: ${info.subnet || '—'} · ${_('exit_obfuscation_short')}: ${info.obfuscation ? _('on') : _('off')}`;
+            infoEl.textContent = `${_('port')}: ${info.port || '—'}/UDP · ${_('exit_subnet')}: ${info.subnet || '—'} · ${_('exit_obfuscation_short')}: ${info.obfuscation ? (info.protocol_version || _('on')) : _('off')}`;
             const e = escapeHtml;
             if (!data.peers || !data.peers.length) {
                 list.innerHTML = `<div class="empty-state">${_('exit_no_peers')}</div>`;
@@ -5992,6 +7316,8 @@
             smartRouteStatus = await loadSmartRouteStatus();
             renderSmartRouteCard();
             renderMarketplace();
+            // Pause/resume is server-wide: every split instance changes mark.
+            refreshExitMarks();
         } catch (err) {
             showToast(_('error') + ': ' + smartrouteErrorText(err), 'error');
         } finally {
@@ -6089,6 +7415,11 @@
                                         { protocol: currentExitLinkProto });
             currentExitLinkState = state;
             renderExitLinkState(state);
+            // Keep the exit-node mark on the card in sync with the toggle.
+            if (lastProtocolsInfo[currentExitLinkProto]) {
+                lastProtocolsInfo[currentExitLinkProto].exit_link = state.exit_link;
+            }
+            refreshExitMark(currentExitLinkProto, state);
         } catch (err) {
             box.checked = !enabled;
             showToast(_('error') + ': ' + smartrouteErrorText(err), 'error');
@@ -6132,7 +7463,7 @@
         ];
         if (host.source_v4) rows.push(`${_('smartroute_source')}: ${escapeHtml(host.source_v4)}`);
         if (host.updated_at) rows.push(`${_('smartroute_updated')}: ${escapeHtml(formatSmartRouteTime(host.updated_at))}`);
-        if (host.next_update) rows.push(`${_('smartroute_next_update')}: ${escapeHtml(host.next_update)}`);
+        if (host.next_update) rows.push(`${_('smartroute_next_update')}: ${escapeHtml(formatSmartRouteTime(host.next_update))}`);
         document.getElementById('smartRouteListsInfo').innerHTML = rows.map(r => `<div>${r}</div>`).join('');
         document.getElementById('smartRouteListsError').textContent = host.error || '';
         document.getElementById('smartRouteOwnSubnets').value = (status.own_subnets || []).join('\n');
@@ -6177,6 +7508,7 @@
     async function uninstallSmartRoute() {
         if (!confirm(_('smartroute_uninstall_confirm'))) return;
         const btn = document.getElementById('smartRouteUninstallBtn');
+        const splitProtos = (smartRouteStatus && smartRouteStatus.split_instances) || [];
         btn.disabled = true;
         try {
             await apiCall(`/api/servers/${SERVER_ID}/smartroute/uninstall`, 'POST');
@@ -6185,6 +7517,16 @@
             renderSmartRouteModal(smartRouteStatus);
             renderSmartRouteCard();
             applyInstalledAppsVisibility();
+            // The backend keeps the links but flags the split as lost; mirror
+            // that locally so the node marks turn warning without a /check.
+            splitProtos.forEach(proto => {
+                const info = lastProtocolsInfo[proto];
+                if (info && info.exit_link) {
+                    info.exit_link.smart_route = false;
+                    info.exit_link.smart_route_lost = true;
+                }
+            });
+            refreshExitMarks();
         } catch (err) {
             showToast(_('error') + ': ' + smartrouteErrorText(err), 'error');
         } finally {
@@ -6280,6 +7622,48 @@
         }
     }
 
+    // ========== Xray Fingerprint ==========
+    let currentXrayProto = 'xray';
+
+    async function openXrayFingerprint(proto = 'xray') {
+        currentXrayProto = proto || 'xray';
+        try {
+            const data = await apiCall(`/api/servers/${SERVER_ID}/xray/fingerprint?protocol=${encodeURIComponent(currentXrayProto)}`);
+            document.getElementById('xrayFingerprintSelect').value = data.fingerprint || 'chrome';
+            openModal('xrayFingerprintModal');
+        } catch (err) {
+            showToast(_('error') + ': ' + err.message, 'error');
+        }
+    }
+
+    async function saveXrayFingerprint() {
+        const btn = document.getElementById('xrayFpSaveBtn');
+        const text = document.getElementById('xrayFpSaveBtnText');
+        const spinner = document.getElementById('xrayFpSaveSpinner');
+        btn.disabled = true;
+        text.textContent = _('saving') || 'Saving...';
+        spinner.classList.remove('hidden');
+        try {
+            const res = await apiCall(`/api/servers/${SERVER_ID}/xray/fingerprint`, 'POST', {
+                protocol: currentXrayProto,
+                fingerprint: document.getElementById('xrayFingerprintSelect').value
+            });
+            if (res.status === 'success') {
+                showToast(_('xray_fingerprint_saved'), 'success');
+                closeModal('xrayFingerprintModal');
+                setTimeout(() => checkServer(), 500);
+            } else {
+                throw new Error(res.message || res.error || 'Unknown error');
+            }
+        } catch (err) {
+            showToast(_('error') + ': ' + err.message, 'error');
+        } finally {
+            btn.disabled = false;
+            text.textContent = _('save');
+            spinner.classList.add('hidden');
+        }
+    }
+
     // ========== Connection Management ==========
     function selectProtocolForConns(proto) {
         document.getElementById('connectionsSection').style.display = '';
@@ -6302,6 +7686,7 @@
 
     async function loadConnections(isPoll, force) {
         const proto = document.getElementById('connProtoSelect').value;
+        updateConnectionSortOptions(proto);
         markActiveProtocolCard();
         const loading = document.getElementById('connectionsLoading');
         const emptyEl = document.getElementById('connectionsEmpty');
@@ -6340,6 +7725,27 @@
             // Stale response: the user switched protocol while we awaited —
             // drop it, the pending re-run below will fetch the right one.
             if (proto !== document.getElementById('connProtoSelect').value) return;
+            // Режим торрент-фильтра инстанса: только там, где трафик на
+            // интерфейсе расшифрован (AWG-семейство и WireGuard).
+            const guardSelect = document.getElementById('torrentGuardSelect');
+            if (guardSelect) {
+                const guardSupported = ['awg', 'awg2', 'awg3', 'awg_legacy', 'wireguard'].includes(protoBase(proto));
+                guardSelect.style.display = guardSupported ? '' : 'none';
+                if (guardSupported && data.torrent_guard) guardSelect.value = data.torrent_guard;
+                const healthEl = document.getElementById('torrentGuardHealth');
+                if (healthEl) {
+                    const health = data.torrent_guard_health || {};
+                    if (guardSupported && health.ok === false) {
+                        healthEl.textContent = _('torrent_guard_card_degraded');
+                        healthEl.title = health.error || '';
+                        healthEl.style.display = '';
+                    } else {
+                        healthEl.textContent = '';
+                        healthEl.title = '';
+                        healthEl.style.display = 'none';
+                    }
+                }
+            }
             // The rename editor may have opened while this poll was in flight —
             // re-rendering now would destroy it mid-typing.
             if (isPoll && !force && listEl.querySelector('.rename-editor')) return;
@@ -6394,8 +7800,37 @@
                     `<button class="btn btn-secondary btn-sm btn-icon conn-warning-clear" onclick="clearConnWarnings('${escapeJs(client.clientId)}')" title="${_('clear_warnings')}" style="margin-top:4px;">${ICON_TRASH}</button></div>`;
                 }
 
+                // Торрент-активность ключа: сигнатуры протокола на интерфейсе
+                // туннеля. Метка админская, клиент её не видит.
+                let torrentHtml = '';
+                const torrentEvents = Array.isArray(client.torrentEvents) ? client.torrentEvents : [];
+                if (torrentEvents.length) {
+                    const last = torrentEvents[torrentEvents.length - 1] || {};
+                    const t = new Date((last.ts || 0) * 1000);
+                    const when = String(t.getDate()).padStart(2, '0') + '.' +
+                        String(t.getMonth() + 1).padStart(2, '0') + ' ' +
+                        String(t.getHours()).padStart(2, '0') + ':' +
+                        String(t.getMinutes()).padStart(2, '0');
+                    const sigLabel = _('torrent_sig_' + (last.sig || 'handshake'));
+                    const text = _('torrent_activity_text')
+                        .replace('{when}', when)
+                        .replace('{sig}', sigLabel)
+                        .replace('{count}', last.count);
+                    torrentHtml = `<div class="conn-warning torrent-warning">${escapeHtml(text)}` +
+                        `<button class="btn btn-secondary btn-sm btn-icon conn-warning-clear" onclick="clearTorrentEvents(this, '${escapeJs(client.clientId)}', '${escapeJs(client.torrentIp || '')}')" title="${_('clear_warnings')}" style="margin-top:4px;">${ICON_TRASH}</button></div>`;
+                }
                 // Per-peer bandwidth limit badge (AWG): ⚡∞ by default, 🐢 X Mbps when a limit is set
                 const maxSpeed = parseFloat(userData.maxSpeed || 0) || 0;
+                const createdTimestamp = Date.parse(created) || 0;
+                const handshakeAge = parseHandshakeAgo(handshake);
+                const handshakeTimestamp = handshakeAge === null ? 0 : handshakeAge;
+                const rxBytes = Number(userData.dataReceivedBytes) || 0;
+                const txBytes = Number(userData.dataSentBytes) || 0;
+                const totalBytes = proto === 'telemt'
+                    ? (Number(userData.total_octets) || 0)
+                    : rxBytes + txBytes;
+                const quotaBytes = Number(userData.quota) || 0;
+                const expiryTimestamp = Date.parse(userData.expiry || '') || 0;
                 if (proto.startsWith('awg') || protoBase(proto) === 'wireguard') metaHtml += `<span class="traffic-badge traffic-limit" title="${_('max_speed')}">${maxSpeed > 0 ? '🐢 ' + maxSpeed + ' Mbps' : '⚡<span style="font-size:1.25em; line-height:0;">∞</span>'}</span>`;
 
                 if (proto === 'telemt') {
@@ -6408,13 +7843,18 @@
                     const hsSec = parseHandshakeAgo(handshake);
                     const isOnline = hsSec !== null && hsSec < 180;
                     if (handshake) metaHtml += `<span class="meta-handshake${isOnline ? ' meta-online' : ''}">🤝 ${formatHandshakeCompact(handshake)}</span>`;
+                    // Xray has no handshake concept: lastSeen is stamped by the
+                    // panel whenever the client's traffic counters grow between polls.
+                    const seenSec = isoAgeSeconds(userData.lastSeen);
+                    const seenOnline = seenSec !== null && seenSec < 180;
+                    if (userData.lastSeen) metaHtml += `<span class="meta-handshake${seenOnline ? ' meta-online' : ''}" title="${_('last_seen')}">🕐 ${formatAgoCompact(seenSec)}</span>`;
                     // awg show reports transfer from the SERVER perspective:
                     // "received" = client upload, "sent" = client download.
                     if (sent) metaHtml += `<span class="traffic-badge traffic-down">↓ ${sent}</span>`;
                     if (received) metaHtml += `<span class="traffic-badge traffic-up">↑ ${received}</span>`;
                     const rates = computeRates(client.clientId, userData);
                     if (rates) metaHtml += `<span class="traffic-badge speed-badge${rates.active ? ' speed-active' : ''}">↓${formatBytes(Math.round(rates.rx))}/s ↑${formatBytes(Math.round(rates.tx))}/s</span>`;
-                    if (isOnline) client._online = true;
+                    if (isOnline || seenOnline) client._online = true;
                 }
 
                 if (!enabled) metaHtml += `<span class="badge badge-danger" style="font-size:0.65rem">${_('stop')}</span>`;
@@ -6428,14 +7868,13 @@
                 const canShowConfig = proto === 'xray' || true; // always show 📄 button
 
                 listEl.innerHTML += `
-                    <div class="client-item" style="${disabledStyle}" data-maxspeed="${maxSpeed}" data-assigned-user="${client.assigned_user_id || ''}" data-server-id="${SERVER_ID}" data-protocol="${escapeHtml(proto)}" data-client-id="${escapeHtml(client.clientId).replace(/"/g, '&quot;')}" data-peer-name="${escapeHtml(name).replace(/"/g, '&quot;')}">
+                    <div class="client-item" style="${disabledStyle}" data-maxspeed="${maxSpeed}" data-sort-name="${escapeHtml(name)}" data-sort-created="${createdTimestamp}" data-sort-handshake="${handshakeTimestamp}" data-sort-rx="${rxBytes}" data-sort-tx="${txBytes}" data-sort-maxspeed="${maxSpeed}" data-sort-total="${totalBytes}" data-sort-ip="${escapeHtml(peerIp)}" data-sort-quota="${quotaBytes}" data-sort-expiry="${expiryTimestamp}" data-assigned-user="${client.assigned_user_id || ''}" data-server-id="${SERVER_ID}" data-protocol="${escapeHtml(proto)}" data-client-id="${escapeHtml(client.clientId).replace(/"/g, '&quot;')}" data-peer-name="${escapeHtml(name).replace(/"/g, '&quot;')}">
                         <div class="client-info">
                             <div class="client-avatar${client._online ? ' avatar-online' : ''}">${initial}</div>
                             <div>
                                 <div class="client-name">${escapeHtml(name)}${ipHtml}${endpointHtml}</div>
                                 <div class="client-meta">${metaHtml || `<span class="text-muted">${_('no_data')}</span>`}</div>
-                                ${warningsHtml}
-                            </div>
+                                ${torrentHtml}                            </div>
                         </div>
                         <div class="client-actions">
                             <button class="btn btn-secondary btn-sm btn-icon" onclick="startRenameConnection('${escapeJs(client.clientId)}', this)" title="${_('rename')}">${ICON_PENCIL}</button>
@@ -6453,6 +7892,7 @@
         } finally {
             window.connLoading = false;
             PeerQueue.reapplyRowStates();
+            applyConnectionSort();
             highlightPeerFromQuery();
             // A switch was requested mid-flight: load the currently selected
             // protocol now (the stale response above was dropped).
@@ -6636,6 +8076,48 @@
         }
     }
 
+    // Метка торрент-активности снимается отдельно от flood-предупреждений:
+    // вторая живёт в контейнере, эта — в журнале панели (30 дней).
+    async function clearTorrentEvents(btn, clientId, ip) {
+        const proto = document.getElementById('connProtoSelect').value;
+        if (!confirm(_('torrent_clear_confirm'))) return;
+        if (btn) btn.disabled = true;
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/connections/torrent_clear`, 'POST', {
+                protocol: proto, client_id: clientId, ip: ip || '',
+            });
+            showToast(_('warnings_cleared'), 'success');
+            loadConnections();
+        } catch (err) {
+            if (btn) btn.disabled = false;
+            showToast(_('error') + ': ' + err.message, 'error');
+        }
+    }
+
+    // Режим фильтра: on (считать + DROP), count (только счётчик), off.
+    async function saveTorrentGuard(select) {
+        const proto = document.getElementById('connProtoSelect').value;
+        select.disabled = true;
+        try {
+            const res = await apiCall(`/api/servers/${SERVER_ID}/connections/torrent_guard`, 'POST', {
+                protocol: proto, mode: select.value,
+            });
+            if (res && res.apply && res.apply.error) {
+                // Сервер откатил режим: селект не должен показывать то,
+                // чего нет в правилах.
+                if (res.mode) select.value = res.mode;
+                showToast(_('error') + ': ' + res.apply.error, 'error');
+            } else {
+                showToast(_('torrent_guard_saved'), 'success');
+            }
+        } catch (err) {
+            // 400/404/500 (протокол, сервер, сеть) — селект вернём к факту.
+            showToast(_('error') + ': ' + err.message, 'error');
+            loadConnections();
+        } finally {
+            select.disabled = false;
+        }
+    }
     function startRenameConnection(clientId, btn) {
         const item = btn.closest('.client-item');
         const nameEl = item.querySelector('.client-name');
@@ -6993,6 +8475,91 @@
         return matched ? total : null;
     }
 
+    const CONNECTION_SORT_ATTRIBUTES = {
+        name: 'sortName',
+        created: 'sortCreated',
+        handshake: 'sortHandshake',
+        rx: 'sortRx',
+        tx: 'sortTx',
+        maxspeed: 'sortMaxspeed',
+        total: 'sortTotal',
+        ip: 'sortIp',
+        quota: 'sortQuota',
+        expiry: 'sortExpiry'
+    };
+
+    function connectionSortAvailable(field, proto) {
+        const isAwg = proto.startsWith('awg');
+        const isWireGuard = protoBase(proto) === 'wireguard';
+        switch (field) {
+            case 'name': return true;
+            case 'created': return proto !== 'telemt';
+            case 'handshake': return proto !== 'telemt' && proto !== 'xray';
+            case 'rx':
+            case 'tx': return proto !== 'telemt';
+            case 'maxspeed':
+            case 'ip': return isAwg || isWireGuard;
+            case 'total': return true;
+            case 'quota':
+            case 'expiry': return proto === 'telemt';
+            default: return false;
+        }
+    }
+
+    function updateConnectionSortOptions(proto) {
+        const select = document.getElementById('connSortField');
+        if (!select) return;
+        Array.from(select.options).forEach(option => {
+            option.disabled = !connectionSortAvailable(option.value, proto);
+        });
+        if (select.selectedOptions.length && select.selectedOptions[0].disabled) {
+            select.value = 'name';
+        }
+    }
+
+    function closeConnectionSortPopup() {
+        const popup = document.querySelector('.connection-sort');
+        if (popup) popup.open = false;
+    }
+
+    // Close the sort menu when the user clicks anywhere outside it.
+    document.addEventListener('click', event => {
+        const popup = document.querySelector('.connection-sort');
+        if (popup && popup.open && !popup.contains(event.target)) {
+            popup.open = false;
+        }
+    });
+
+    function applyConnectionSort() {
+        const list = document.getElementById('connectionsListInner');
+        const fieldSelect = document.getElementById('connSortField');
+        const directionSelect = document.getElementById('connSortDirection');
+        if (!list || !fieldSelect || !directionSelect) return;
+
+        const field = fieldSelect.value;
+        const attr = CONNECTION_SORT_ATTRIBUTES[field];
+        if (!attr) return;
+        const direction = directionSelect.value === 'desc' ? -1 : 1;
+        const rows = Array.from(list.querySelectorAll(':scope > .client-item'));
+        rows.sort((a, b) => {
+            const av = a.dataset[attr] || '';
+            const bv = b.dataset[attr] || '';
+            let result;
+            if (field === 'name' || field === 'ip') {
+                result = av.localeCompare(bv, undefined, { numeric: true, sensitivity: 'base' });
+            } else {
+                // Missing, empty and invalid numeric values are all zero.
+                result = (Number(av) || 0) - (Number(bv) || 0);
+            }
+            if (result) return result * direction;
+            // Stable and predictable secondary order, regardless of direction.
+            return (a.dataset.sortName || '').localeCompare(
+                b.dataset.sortName || '', undefined, { numeric: true, sensitivity: 'base' }
+            );
+        });
+        rows.forEach(row => list.appendChild(row));
+    }
+
     // Compact fixed-ish length: "45s ago" / "3m 51s ago" / "2h 29m ago" / "2d 3h ago"
     function formatHandshakeCompact(str) {
         const sec = parseHandshakeAgo(str);
@@ -7001,6 +8568,23 @@
         if (sec < 3600) return Math.floor(sec / 60) + 'm ' + (sec % 60) + 's ago';
         if (sec < 86400) return Math.floor(sec / 3600) + 'h ' + Math.floor((sec % 3600) / 60) + 'm ago';
         return Math.floor(sec / 86400) + 'd ' + Math.floor((sec % 86400) / 3600) + 'h ago';
+    }
+
+    // Age in seconds of an ISO timestamp stored by the panel (xray lastSeen)
+    function isoAgeSeconds(iso) {
+        if (!iso) return null;
+        const t = Date.parse(iso);
+        if (isNaN(t)) return null;
+        return Math.max(0, (Date.now() - t) / 1000);
+    }
+
+    // Compact coarse-grained variant: "45s ago" / "12m ago" / "5h 20m ago" / "3d ago"
+    function formatAgoCompact(sec) {
+        if (sec === null) return '';
+        if (sec < 60) return Math.floor(sec) + 's ago';
+        if (sec < 3600) return Math.floor(sec / 60) + 'm ago';
+        if (sec < 86400) return Math.floor(sec / 3600) + 'h ' + Math.floor((sec % 3600) / 60) + 'm ago';
+        return Math.floor(sec / 86400) + 'd ago';
     }
 
     // Speed = delta of cumulative bytes between two polls (same approach as wg-easy)
@@ -7360,6 +8944,7 @@
         srv_warp_xor_conflict: 'srv_warp_err_xor',
         srv_warp_tos_required: 'srv_warp_err_tos',
         srv_warp_job_busy: 'srv_warp_err_job_busy',
+        srv_warp_no_targets: 'srv_warp_err_no_awg',
     };
 
     function warpAggregate() {
@@ -7374,6 +8959,18 @@
         if (Array.isArray(d.instances) && d.instances.some(item => item && item.installed)) return true;
         const agg = warpAggregate();
         return agg === 'installed' || agg === 'degraded';
+    }
+
+    // WARP has no host-level binary: wgcf and warp0.conf live inside an
+    // AmneziaWG container. A host without such an instance (an exit-only node)
+    // cannot take WARP at all, so the marketplace says so instead of offering
+    // an install the backend would refuse.
+    function warpHasTargetInstance() {
+        const isTarget = proto => ['awg', 'awg2', 'awg3'].includes(protoBase(proto));
+        const known = Array.isArray(SERVER_PROTOCOL_KEYS) ? SERVER_PROTOCOL_KEYS : [];
+        if (known.some(isTarget)) return true;
+        // The status poll may report an instance the page snapshot predates.
+        return Object.keys(currentProtocolStatus || {}).some(isTarget);
     }
 
     function warpBadgeClass(agg) {
@@ -7696,33 +9293,132 @@ function cheburAge(checkedAt) {
     return Math.floor(h / 24) + ' ' + _('cheburcheck_days_ago');
 }
 
+// Ошибка cheburcheck для интерфейса. Технические строки API («probe returned
+// no verdicts») пользователю ничего не объясняют, а признак токена — объясняет:
+// показываем блок со ссылкой на настройки и документацию.
+function cheburcheckErrorHtml(message) {
+    const text = String(message == null ? '' : message);
+    if (!text) return '';
+    if (/api-токен|api token|unauthorized|http 403|\b403\b/i.test(text)) {
+        return ' &middot; <span class="badge badge-warn">&#128274; '
+            + escapeHtml(_('cheburcheck_token_required')) + '</span>'
+            + ' <a href="/settings#settings-cheburcheck">'
+            + escapeHtml(_('cheburcheck_token_open_settings')) + '</a>'
+            + ' &middot; <a href="https://cheburcheck.ru/kb/api#authorization"'
+            + ' target="_blank" rel="noopener">'
+            + escapeHtml(_('cheburcheck_token_docs')) + '</a>';
+    }
+    if (/probe returned no verdicts|probe undecided/i.test(text)) {
+        return ' &middot; ' + _('cheburcheck_error') + ': '
+            + escapeHtml(_('cheburcheck_probe_no_data'));
+    }
+    return ' &middot; ' + _('cheburcheck_error') + ': ' + escapeHtml(text);
+}
+
 async function loadCheburcheck() {
     try {
         const r = await apiCall(`/api/servers/${SERVER_ID}/cheburcheck`, 'GET');
-        const d = r && r.data;
         const el = document.getElementById('cheburcheck-summary');
+        const details = document.getElementById('cheburcheck-details');
         if (!el) return;
-        if (!d) { el.textContent = _('cheburcheck_no_data'); return; }
-        const status = d.status || 'unknown';
-        const icon = status === 'banned' ? '&#128683;' : (status === 'clean' ? '&#9989;' : '&#128993;');
-        const label = status === 'banned' ? _('cheburcheck_banned')
-            : (status === 'clean' ? _('cheburcheck_clean') : _('cheburcheck_unknown'));
-        const br = (d.probe || {}).blocking_regions || 0;
-        const rc = (d.probe || {}).response_count || 0;
-        const age = cheburAge(d.checked_at);
-        // A stale verdict is not a current one: mark it instead of letting an
-        // old "clean" read as today's answer.
-        const stale = age && age.indexOf(_('cheburcheck_days_ago')) === 0;
+        const status = (r && r.status) || 'unknown';
+        const br = ((r && r.probe) || {}).blocking_regions || 0;
+        const rc = br + (((r && r.probe) || {}).clear_regions || 0);
+        const rr = ((r && r.probe) || {}).restricted_regions || 0;
+        const remarks = (r && r.remarks) || 0;
+        // "No restrictions detected" must not appear next to "restrictions: 24":
+        // a clean probe with SNI/DNS/CDN hits or list hits is a separate state.
+        const hasRemarks = rr > 0 || remarks > 0 || !!(r && r.static_hit);
+        // scan_mode = static_only: пробы не запускались (нет API-токена или
+        // сервис их не дал). Это не «сломалось» и не «чисто» — только списки.
+        const scanMode = (r && r.scan_mode) || 'full';
+        const staticOnly = scanMode === 'static_only';
+        const icon = staticOnly ? '&#8505;&#65039;'
+            : (status === 'banned' ? '&#128683;'
+            : (status === 'clean' ? (hasRemarks ? '&#9888;&#65039;' : '&#9989;') : '&#128993;'));
+        const label = staticOnly ? _('cheburcheck_static_only')
+            : (status === 'banned' ? _('cheburcheck_banned')
+            : (status === 'clean'
+                ? (hasRemarks ? _('cheburcheck_remarks_only') : _('cheburcheck_clean'))
+                : _('cheburcheck_unknown')));
+        const age = cheburAge(r && r.checked_at);
+        // Staleness is a timestamp comparison: locale text never matches.
+        const stale = cheburcheckStale(r && r.checked_at);
         const staleTag = stale ? ' &#9888;&#65039; ' + _('cheburcheck_stale') : '';
-        const errTag = d.error ? ' &middot; ' + _('cheburcheck_error') + ': ' + escapeHtml(String(d.error)) : '';
-        el.innerHTML = `${icon} <b>${label}</b> &middot; ${_('cheburcheck_regions_blocked')}: ${br}/${rc}`
+        const errTag = cheburcheckErrorHtml(r && r.error);
+        const restrictTag = rr > 0 ? ` &middot; ${_('cheburcheck_restrictions')}: ${rr}` : '';
+        const listTag = (r && r.static_hit) ? ` &middot; ${_('cheburcheck_static_hit')}` : '';
+        const remarksTag = remarks > 0 && rr === 0 ? ` &middot; ${_('cheburcheck_remarks_badge')}: ${remarks}` : '';
+        // В режиме «только списки» счётчик регионов бессмысленен: проб не было.
+        const regionsTag = staticOnly ? ''
+            : ` &middot; ${_('cheburcheck_regions_blocked')}: ${br}/${rc}`;
+        const basicTag = staticOnly
+            ? ` &middot; <span class="text-muted">${escapeHtml(_('cheburcheck_static_only_note'))}</span>`
+            : '';
+        el.innerHTML = `${icon} <b>${label}</b>${regionsTag}`
+            + restrictTag + listTag + remarksTag + basicTag
             + (age ? ` &middot; ${_('cheburcheck_checked_at')}: ${age}${staleTag}` : '')
             + errTag;
-        cheburcheckButtonState(status);
+        const targets = (r && r.targets) || {};
+        if (details) {
+            const keys = Object.keys(targets).sort();
+            if (keys.length) {
+                const head = `<tr><th style="text-align:left;padding:4px 8px;">${_('cheburcheck_target')}</th>`
+                    + `<th style="text-align:left;padding:4px 8px;">${_('cheburcheck_status')}</th>`
+                    + `<th style="text-align:left;padding:4px 8px;">${_('cheburcheck_regions_short')}</th>`
+                    + `<th style="text-align:left;padding:4px 8px;">${_('cheburcheck_checked_at')}</th>`
+                    + `<th style="text-align:left;padding:4px 8px;">${_('cheburcheck_error')}</th></tr>`;
+                const rows = keys.map(target => cheburcheckTargetRow(target, targets[target] || {})).join('');
+                details.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:0.9em;">`
+                    + `<thead>${head}</thead><tbody>${rows}</tbody></table>`;
+                details.classList.remove('hidden');
+            } else {
+                details.innerHTML = '';
+                details.classList.add('hidden');
+            }
+        }
+        cheburcheckButtonState(staticOnly ? 'static_only' : status);
     } catch (e) {
         const el = document.getElementById('cheburcheck-summary');
         if (el) el.textContent = _('cheburcheck_error') + ': ' + (e.message || e);
     }
+}
+
+function cheburcheckStale(checkedAt) {
+    if (!checkedAt) return false;                 // new Date(null) is 0, not NaN
+    const ts = new Date(checkedAt).getTime();
+    if (isNaN(ts)) return false;
+    return Date.now() - ts >= 24 * 3600 * 1000;
+}
+
+function cheburcheckTargetRow(target, rec) {
+    const status = rec.status || 'unknown';
+    const br = (rec.probe || {}).blocking_regions || 0;
+    const rc = br + ((rec.probe || {}).clear_regions || 0);
+    const rr = (rec.probe || {}).restricted_regions || 0;
+    const staticBits = [];
+    if ((rec.static || {}).blocked) staticBits.push(_('cheburcheck_static_rkn'));
+    if (((rec.static || {}).cdn_providers || []).length) staticBits.push('CDN');
+    const hasRemarks = rr > 0 || staticBits.length > 0;
+    const icon = status === 'banned' ? '&#128683;'
+        : (status === 'clean' ? (hasRemarks ? '&#9888;&#65039;' : '&#9989;') : '&#128993;');
+    const label = status === 'banned' ? _('cheburcheck_banned')
+        : (status === 'clean'
+            ? (hasRemarks ? _('cheburcheck_remarks_found') : _('cheburcheck_clean'))
+            : _('cheburcheck_unknown'));
+    const age = cheburAge(rec.checked_at);
+    const staleTag = cheburcheckStale(rec.checked_at) ? ' &#9888;&#65039;' : '';
+    const partialTag = rec.partial ? ' &middot; ' + _('cheburcheck_partial') : '';
+    const restrictTag = rr > 0 ? ` &middot; ${_('cheburcheck_restrictions')}: ${rr}` : '';
+    const staticTag = staticBits.length
+        ? ` &middot; ${_('cheburcheck_static_hit')}: ${staticBits.join(', ')}` : '';
+    const err = cheburcheckErrorHtml(rec.error);
+    const border = 'padding:4px 8px;border-top:1px solid var(--border,#333);';
+    return `<tr><td style="${border}">${escapeHtml(String(target))}</td>`
+        + `<td style="${border}">${icon} <b>${label}</b>${partialTag}${restrictTag}${staticTag}</td>`
+        + `<td style="${border}">${br}/${rc}</td>`
+        + `<td style="${border}">${age ? escapeHtml(age) + staleTag : '&mdash;'}</td>`
+        + `<td style="${border}">${err}</td></tr>`;
 }
 
 // The check takes 15-60s, so it runs in the background and this polls instead
@@ -7734,7 +9430,10 @@ async function runCheburcheckNow() {
     if (sp) sp.style.display = '';
     try {
         const r = await apiCall(`/api/servers/${SERVER_ID}/cheburcheck/run`, 'POST', {});
-        if (r && r.started === 0) { showToast(_('cheburcheck_master_off'), 'error'); return; }
+        if (r && r.reason === 'disabled') { showToast(_('cheburcheck_master_off'), 'error'); return; }
+        if (r && r.reason === 'no_targets') { showToast(_('cheburcheck_no_targets'), 'error'); return; }
+        if (r && r.already_running) { showToast(_('cheburcheck_still_running'), 'info'); return; }
+        if (!r || r.started === 0) return;
         const startedAt = Date.now();
         for (let i = 0; i < 40; i++) {
             await new Promise(res => setTimeout(res, 2000));
@@ -7757,7 +9456,9 @@ function cheburcheckButtonState(status) {
     btn.classList.remove('is-danger', 'is-warn', 'is-ok');
     btn.removeAttribute('data-state');
     if (status === 'banned') { btn.classList.add('is-danger'); btn.dataset.state = 'banned'; }
-    else if (status === 'unknown') { btn.classList.add('is-warn'); btn.dataset.state = 'unknown'; }
+    else if (status === 'unknown' || status === 'static_only') {
+        btn.classList.add('is-warn'); btn.dataset.state = status === 'static_only' ? 'static_only' : 'unknown';
+    }
     else { btn.classList.add('is-ok'); btn.dataset.state = 'clean'; }
 }
 

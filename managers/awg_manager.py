@@ -22,6 +22,18 @@ import uuid
 import functools
 import threading
 from contextlib import nullcontext
+from managers.torrent_guard import TorrentGuard
+
+from managers.awg_junk import (
+    DEFAULT_I1 as _DEFAULT_I1,
+    DEVICE_PROFILES,
+    catalog as junk_catalog,
+    generate_i1,
+    is_legacy_default,
+    is_valid_domain,
+    parse_i1,
+    pool_for,
+)
 
 def _awg_batch_lock_of(obj):
     """Return a usable context manager for the AWG batch lock,
@@ -41,6 +53,7 @@ from cryptography.hazmat.primitives import serialization
 from managers.clients_table import save_clients_table
 import warp_service as warp_logic
 from managers import split_tunnel
+from managers import docker_image_cleanup
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +63,40 @@ logger = logging.getLogger(__name__)
 AWG_IPV6_ENV = 'AWG_IPV6'
 IPV6_FORCE_OFF = ('off', 'false', '0', 'no', 'disable', 'disabled')
 IPV6_FORCE_ON = ('on', 'true', '1', 'yes', 'force', 'forced')
+
+# The panel used to add `-p icmp --icmp-type echo-request -j DROP` to INPUT in
+# setup_firewall(). That made the host itself unpingable, so ICMP that arrived
+# through a tunnel was dropped after decryption and diagnostics lied. New
+# installs remove the rule instead; app.py reuses the same script to clean up
+# hosts provisioned by an older panel.
+ICMP_ECHO_ALLOW_SCRIPT = """
+ICMP_ECHO_DROP_LEFT=0
+for bin in iptables iptables-legacy; do
+    command -v "$bin" >/dev/null 2>&1 || continue
+    for spec in "-p icmp --icmp-type echo-request" "-p icmp -m icmp --icmp-type echo-request" "-p icmp --icmp-type 8" "-p icmp -m icmp --icmp-type 8"; do
+        while "$bin" -C INPUT $spec -j DROP 2>/dev/null; do
+            "$bin" -D INPUT $spec -j DROP 2>/dev/null || break
+        done
+    done
+done
+if [ -f /etc/iptables/rules.v4 ]; then
+    if grep -E -q '^-A INPUT .*-p icmp .*(--icmp-type (8|echo-request)).*-j DROP' /etc/iptables/rules.v4; then
+        cp -p /etc/iptables/rules.v4 "/etc/iptables/rules.v4.bak.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+        if grep -E -v '^-A INPUT .*-p icmp .*(--icmp-type (8|echo-request)).*-j DROP' /etc/iptables/rules.v4 > /etc/iptables/rules.v4.awp.tmp 2>/dev/null; then
+            mv /etc/iptables/rules.v4.awp.tmp /etc/iptables/rules.v4 || rm -f /etc/iptables/rules.v4.awp.tmp
+        else
+            rm -f /etc/iptables/rules.v4.awp.tmp
+        fi
+    fi
+fi
+for bin in iptables iptables-legacy; do
+    command -v "$bin" >/dev/null 2>&1 || continue
+    n=$("$bin" -S INPUT 2>/dev/null | grep -E -c -- '-p icmp .*--icmp-type (8|echo-request) .*-j DROP' || true)
+    ICMP_ECHO_DROP_LEFT=$((ICMP_ECHO_DROP_LEFT + ${n:-0}))
+done
+echo "ICMP_ECHO_DROP_LEFT=$ICMP_ECHO_DROP_LEFT"
+exit 0
+"""
 
 # Default AWG parameters (from protocols_defs.h)
 AWG_DEFAULTS = {
@@ -223,6 +270,35 @@ TRANSIT_PARAM_KEYS = (
     ('transport_packet_magic_header', 'H4'),
 )
 
+# AWG 3.1 keys of a transit link. HeaderProtectionKey makes the kernel demand
+# S1-S4 >= AWG3_MIN_JUNK_SIZE, so S3/S4 come back at the floor (12) - the
+# MTU budget pays for S4, and the entry side must write the same set.
+# H1-H4 stay at the 1..4 compatibility values: with header protection on the
+# custom-header mechanism is off, and ranged headers plus RandomTrailers
+# misclassify transport packets as handshakes (amneziawg-go#186).
+TRANSIT_AWG3_PARAM_KEYS = (
+    ('cookie_reply_packet_junk_size', 'S3'),
+    ('transport_packet_junk_size', 'S4'),
+    ('header_protection_key', 'HeaderProtectionKey'),
+    ('content_padding_addition', 'ContentPaddingAddition'),
+    ('rekey_after_time', 'RekeyAfterTime'),
+    ('rekey_timeout', 'RekeyTimeout'),
+    ('reject_after_time', 'RejectAfterTime'),
+    ('keepalive_timeout', 'KeepaliveTimeout'),
+    ('max_handshake_attempts', 'MaxHandshakeAttempts'),
+    ('random_trailers', 'RandomTrailers'),
+    ('disable_cookies', 'DisableCookies'),
+    ('i1', 'I1'),
+    ('i2', 'I2'),
+    ('i3', 'I3'),
+    ('i4', 'I4'),
+    ('i5', 'I5'),
+)
+
+# Transit 3.1 padding is deliberately narrower than on a client instance: the
+# link is a tunnel inside a tunnel, and every padded byte is lost client MTU.
+TRANSIT_AWG3_PADDING = '8-24'
+
 # Runs inside the awg3 container before awg-quick. Creating a throwaway
 # interface both loads the module (a module present on disk but not yet loaded
 # would otherwise read as absent) and proves the container can reach it.
@@ -252,12 +328,13 @@ SPECIAL_JUNK_KEYS = ('i1', 'i2', 'i3', 'i4', 'i5')
 
 # Byte-identical to protocols::awg::defaultSpecialJunk1 in the desktop client:
 # a DNS response for icloud.com preceded by a random 2-byte transaction id.
-AWG_DEFAULT_I1 = (
-    '<r 2><b 0x858000010001000000000669636c6f756403636f6d'
-    '0000010001c00c000100010000105a00044d583737>'
-)
+# Kept for reference and for instances created before per-instance
+# generation: new installs get their own value from managers.awg_junk, so
+# the 42 constant bytes of this packet are no longer shared by every
+# deployment.
+AWG_DEFAULT_I1 = _DEFAULT_I1
 
-_SPECIAL_JUNK_TAG_RE = re.compile(r'<\s*(b|c|t|r|rc|rd)(?:\s+([^>]*?))?\s*>')
+_SPECIAL_JUNK_TAG_RE = re.compile(r'<(b|t|r|rc|rd)(?: ([^>]*))?>')
 
 # A junk packet still has to fit into one datagram.
 SPECIAL_JUNK_MAX_SIZE = 1280
@@ -265,9 +342,36 @@ SPECIAL_JUNK_MAX_SIZE = 1280
 
 def validate_special_junk(value):
     """Validate an I1-I5 value and return the packet size it produces."""
-    text = (value or '').strip()
+    raw = value or ''
+    if '\n' in raw or '\r' in raw:
+        # The value lands in the server config as `I1 = <value>`; a line break
+        # would split it into extra lines and corrupt [Interface].
+        raise ValueError("line breaks are not allowed in the I1-I5 value")
+    # Both parsers are stricter than Python whitespace: the kernel splits a
+    # tag into key/value on a single space (jp_parse_tags), so tabs, NBSP and
+    # Unicode separators make it reject the config while Go accepts it.
+    if any(ord(ch) < 0x20 or ord(ch) > 0x7e for ch in raw):
+        raise ValueError("only printable ASCII is allowed in the I1-I5 value")
+    text = raw.strip()
     if not text:
         return 0
+
+    # Only the intersection of both parsers is allowed. A tag understood by
+    # one side only makes the peer drop the whole config: amneziawg-go
+    # (device/obf.go) has b,t,r,rc,rd,d,ds,dz while the kernel module
+    # (src/junk.c) has b,t,r,rc,rd,c.
+    for match in re.finditer(r'<\s*([a-z]+)', text):
+        tag = match.group(1)
+        if tag == 'c':
+            raise ValueError(
+                "<c> is parsed by the kernel module only; a client running "
+                "amneziawg-go rejects the whole config")
+        if tag in ('d', 'ds', 'dz'):
+            raise ValueError(
+                f"<{tag}> is parsed by amneziawg-go only; the kernel module "
+                f"rejects the whole config")
+        if tag not in ('b', 't', 'r', 'rc', 'rd'):
+            raise ValueError(f"unknown tag <{tag}>")
 
     size = 0
     pos = 0
@@ -279,6 +383,12 @@ def validate_special_junk(value):
 
         tag = match.group(1)
         arg = (match.group(2) or '').strip()
+        canonical = f"<{tag} {arg}>" if arg else f"<{tag}>"
+        if match.group(0) != canonical:
+            # `<r  2>`, `< r 2>` or `<r 2 >` are rejected by the kernel
+            # parser even though they look harmless.
+            raise ValueError(
+                f"tag must be written exactly as {canonical}, got {match.group(0)!r}")
         if tag in ('c', 't'):
             if arg:
                 raise ValueError(f"<{tag}> takes no argument")
@@ -425,7 +535,8 @@ def safe_client_mtu(awg_params, link_mtu=DEFAULT_LINK_MTU):
     return max(MIN_CLIENT_MTU, link - transport_overhead(awg_params))
 
 
-def generate_awg_params(use_ranges=False, awg3=False):
+def generate_awg_params(use_ranges=False, awg3=False, i1_domain=None,
+                        i1_pool=None):
     """Generate random AWG obfuscation parameters.
     
     For AWG 2.0 (use_ranges=True): generates H1-H4 as non-overlapping
@@ -498,10 +609,13 @@ def generate_awg_params(use_ranges=False, awg3=False):
         'transport_packet_magic_header': h4,
     }
 
-    if use_ranges:
-        # The desktop client ships a special junk packet out of the box; not
-        # setting one leaves the first packet of every session recognisable.
-        params['i1'] = AWG_DEFAULT_I1
+    if use_ranges or awg3:
+        # Each instance gets its own packet. The desktop client's default
+        # (a DNS answer for icloud.com with an address from Yandex) is shared
+        # by every deployment, so keeping it makes the first packet of a
+        # session a global signature. i1_domain narrows the choice; without
+        # one a known domain is picked at random.
+        params['i1'] = generate_i1(i1_domain, i1_pool)
 
     if awg3:
         # Ranges are "min-max" (u16_range_from_string in amneziawg-tools).
@@ -527,6 +641,125 @@ def generate_awg_params(use_ranges=False, awg3=False):
         })
 
     return params
+
+
+def is_awg31_params(params):
+    """Whether a transit param dict carries the AWG 3.1 header-protection set."""
+    return bool((params or {}).get('header_protection_key'))
+
+
+def transit_param_lines(params):
+    """Obfuscation lines of a transit config.
+
+    Both ends render from the very same dict: the entry copies it from the exit
+    node record, so header protection keys, padding and timings always match.
+    2.0 links carry TRANSIT_PARAM_KEYS only - S3/S4 pad every transport packet
+    and are left out of that hop; a 3.1 link needs them to satisfy the
+    header-protection floor, so they come back with the rest of that set.
+    """
+    params = params or {}
+    keys = TRANSIT_PARAM_KEYS
+    if is_awg31_params(params):
+        keys = keys + TRANSIT_AWG3_PARAM_KEYS
+    return ''.join(
+        f"{config_key} = {params[param_key]}\n"
+        for param_key, config_key in keys
+        if params.get(param_key)
+    )
+
+
+def transit_param_names():
+    """Config keys that belong to the obfuscation block (plus MTU)."""
+    names = {config_key.lower() for _, config_key in
+             TRANSIT_PARAM_KEYS + TRANSIT_AWG3_PARAM_KEYS}
+    names.add('mtu')
+    return names
+
+
+def rewrite_transit_conf(text, awg_params):
+    """Replace the obfuscation block and MTU of a transit config in place.
+
+    Everything else - the private key, Address, ListenPort, Table, the
+    ``# ProtocolVersion`` marker and every ``[Peer]`` section with its
+    PresharedKey - is copied through untouched. Used to switch an already
+    configured link between the 3.1 and 2.0 parameter sets: regenerating the
+    file from scratch would rotate the key pair and drop the peers.
+    """
+    names = transit_param_names()
+    version = '3.1' if is_awg31_params(awg_params) else (
+        '2.0' if awg_params else 'wireguard')
+    block = transit_param_lines(awg_params)
+    mtu = transit_mtu(awg_params)
+    out, in_interface, inserted = [], False, False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith('['):
+            in_interface = stripped == '[Interface]'
+            out.append(line)
+            continue
+        if not in_interface:
+            out.append(line)
+            continue
+        if not stripped:
+            out.append(line)
+            continue
+        if stripped.startswith('#'):
+            if stripped.lower().startswith('# protocolversion'):
+                out.append(f'# ProtocolVersion = {version}')
+            else:
+                out.append(line)
+            continue
+        name = stripped.split('=', 1)[0].strip().lower()
+        if name in names:
+            continue
+        out.append(line)
+        if name == 'address' and not inserted:
+            out.append(f'MTU = {mtu}')
+            if block:
+                out.extend(block.rstrip('\n').splitlines())
+            inserted = True
+    if not inserted:
+        raise RuntimeError('exit link config has no Address line')
+    return '\n'.join(out) + '\n'
+
+
+def transit_mtu(params, link_mtu=DEFAULT_LINK_MTU):
+    """exit0 MTU that still fits the transit obfuscation overhead.
+
+    The contract is the same as safe_client_mtu: size against the *maximum*
+    ContentPaddingAddition/S4, otherwise only the unlucky packets are dropped.
+    Without 3.1 keys the answer is the historic 1420.
+    """
+    try:
+        link = int(link_mtu)
+    except (TypeError, ValueError):
+        link = DEFAULT_LINK_MTU
+    room = (link - transport_overhead(params)) // 8 * 8
+    return max(MIN_CLIENT_MTU, min(EXIT_MTU, room))
+
+
+def generate_transit_params(awg3=False):
+    """Obfuscation parameters of an exit-node transit link.
+
+    `awg3` produces the full 3.1 set: header protection, narrow content
+    padding, the fixed H1-H4 compatibility values, S3/S4 at the module floor
+    and the desktop client's special junk packet (I1).
+    """
+    if not awg3:
+        wanted = {param_key for param_key, _ in TRANSIT_PARAM_KEYS}
+        return {k: v for k, v in generate_awg_params(use_ranges=False).items()
+                if k in wanted}
+
+    wanted = {param_key for param_key, _ in
+              TRANSIT_PARAM_KEYS + TRANSIT_AWG3_PARAM_KEYS}
+    params = generate_awg_params(awg3=True)
+    params.setdefault('i1', AWG_DEFAULT_I1)
+    # HeaderProtectionKey needs S1-S4 >= 12; S3/S4 are the ones a 2.0 link
+    # leaves out, so pin them to the floor instead of the random 12-50.
+    params['cookie_reply_packet_junk_size'] = str(AWG3_MIN_JUNK_SIZE)
+    params['transport_packet_junk_size'] = str(AWG3_MIN_JUNK_SIZE)
+    params['content_padding_addition'] = TRANSIT_AWG3_PADDING
+    return {k: v for k, v in params.items() if k in wanted}
 
 
 class AWGManager:
@@ -1071,8 +1304,14 @@ class AWGManager:
             'exit_linked': exit_linked,
         }
 
-    def get_ip_status(self, protocols):
-        """Full IPv4/IPv6 status of a server and its AWG instances."""
+    def get_ip_status(self, protocols, port_usage=None):
+        """Full IPv4/IPv6 status of a server and its AWG instances.
+
+        ``port_usage`` carries the host-port protocols the panel does not
+        manage IPv6 for (Xray today): ``[{'running': bool, 'clients': int}]``.
+        A running port instance uses the host IPv4 just like an AWG subnet
+        does, and its clients join the IPv4 chip counts.
+        """
         host = self._host_ipv6_info()
         docker = self._docker_ipv6_info()
         instances = []
@@ -1085,6 +1324,7 @@ class AWGManager:
                 instances.append({'proto': proto, 'blocked_reason': 'state_unreadable',
                                   'peers': None, 'ipv6_enabled': False,
                                   'can_enable': False, 'can_disable': False})
+        port_usage = [u for u in (port_usage or []) if u.get('running')]
         used = any(i.get('ipv6_enabled') for i in instances)
         peers_v6 = sum(i.get('peers_v6') or 0 for i in instances)
         if host.get('disabled_by_sysctl'):
@@ -1099,7 +1339,7 @@ class AWGManager:
             v6_state = 'enabled_no_peers'
         else:
             v6_state = 'host_only'
-        v4_used = any(i.get('subnet_v4') for i in instances)
+        v4_used = any(i.get('subnet_v4') for i in instances) or bool(port_usage)
         unreadable = any(i.get('peers') is None for i in instances)
         host_readable = host.get('readable') is not False
         if not host_readable:
@@ -1117,6 +1357,12 @@ class AWGManager:
             'host': {'ipv4': host.get('ipv4', ''), 'ipv6': host['address'],
                      'ipv4_state': ('unknown' if not host_readable
                                     else ('in_use' if v4_used else 'host_only')),
+                     'ipv4_counts': {
+                         'instances': (sum(1 for i in instances if i.get('subnet_v4'))
+                                       + len(port_usage)),
+                         'peers': (sum(i.get('peers') or 0 for i in instances)
+                                   + sum(u.get('clients') or 0 for u in port_usage)),
+                     },
                      'ipv6_state': ('unknown' if not host_readable else v6_state),
                      'ipv6_default_route': host['default_route'],
                      'ipv6_disabled_by_sysctl': bool(host.get('disabled_by_sysctl'))},
@@ -1339,11 +1585,14 @@ class AWGManager:
         return parsed[0] if isinstance(parsed, list) and parsed else None
 
     @staticmethod
-    def _run_cmd_from_inspect(info, name, image):
+    def _run_cmd_from_inspect(info, name, image, port_override=None):
         """Rebuild the run command from the container's own inspect data.
 
         Keeps binds, caps, ulimits, ports, restart policy and sysctls, then
         forces the two IPv6 sysctls the old container was missing.
+
+        ``port_override`` republishes every UDP mapping on another port; the
+        instance copy uses it to move a container to a free port on the target.
         """
         if not isinstance(info, dict):
             return None
@@ -1410,10 +1659,17 @@ class AWGManager:
         for port, bindings in (host.get('PortBindings') or {}).items():
             if skip_ports:
                 break
+            protocol = port.partition('/')[2]
+            try:
+                override = int(port_override) if port_override else None
+            except (TypeError, ValueError):
+                override = None
+            container_port = (f'{override}/{protocol}' if protocol else str(override)) if override else port
             for binding in bindings or []:
                 host_ip = binding.get('HostIp') or ''
-                host_port = binding.get('HostPort') or ''
-                mapping = f'{host_ip}:{host_port}:{port}' if host_ip else f'{host_port}:{port}'
+                host_port = str(override) if override else (binding.get('HostPort') or '')
+                mapping = (f'{host_ip}:{host_port}:{container_port}' if host_ip
+                           else f'{host_port}:{container_port}')
                 parts.append(f'-p {shlex.quote(mapping)}')
         parts.append(f'--name {shlex.quote(name)}')
         parts.append(shlex.quote(image))
@@ -2086,10 +2342,9 @@ echo "KERNEL_MODULE: ok: installed {v}"
         users see as random connection freezes. 262144 is a safe value
         for a VPN gateway; persisted via /etc/sysctl.d.
         """
-        script = """
+        script = ICMP_ECHO_ALLOW_SCRIPT + """
 sysctl -w net.ipv4.ip_forward=1
 sysctl -w net.ipv6.conf.all.forwarding=1 2>/dev/null || true
-iptables -C INPUT -p icmp --icmp-type echo-request -j DROP 2>/dev/null || iptables -A INPUT -p icmp --icmp-type echo-request -j DROP
 iptables -C FORWARD -j DOCKER-USER 2>/dev/null || iptables -A FORWARD -j DOCKER-USER 2>/dev/null
 if [ -f /proc/sys/net/netfilter/nf_conntrack_max ]; then
     cur=$(cat /proc/sys/net/netfilter/nf_conntrack_max)
@@ -2134,7 +2389,8 @@ fi
 
     def get_host_tuning(self):
         """Read live network-tuning state for the whole server (host + all
-        AWG containers). Used by the server-level "Host tuning" modal.
+        AWG containers + xray containers with their core version). Used by
+        the server-level "Host tuning" modal.
         """
         script = """
 echo "HOST_CC=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"
@@ -2144,11 +2400,18 @@ echo "HOST_CONNTRACK_COUNT=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/d
 echo "HOST_BACKLOG=$(sysctl -n net.core.netdev_max_backlog 2>/dev/null)"
 echo "HOST_SOMAXCONN=$(sysctl -n net.core.somaxconn 2>/dev/null)"
 echo "HOST_AWG_MODULE=$(modinfo amneziawg 2>/dev/null | awk '/^version:/{print $2; exit}')"
-for c in $(docker ps -a --format '{{.Names}}' | grep -E '^amnezia-(awg|exit)' | sort); do
+for c in $(docker ps -a --format '{{.Names}}' | grep -E '^amnezia-(awg|exit|xray)' | sort); do
   echo "CT_NAME=$c"
   if docker ps --format '{{.Names}}' | grep -qx "$c"; then
     echo "CT_RUNNING=1"
-    docker exec "$c" sh -c 'for p in net.core.rmem_max net.core.wmem_max net.ipv4.tcp_fastopen net.ipv4.tcp_mtu_probing; do echo "CTK_$p=$(sysctl -n $p 2>/dev/null)"; done; echo "CTK_nofile=$(ulimit -n)"' 2>/dev/null
+    case "$c" in
+      amnezia-xray*)
+        echo "CT_VERSION=$(docker exec "$c" /usr/bin/xray version 2>/dev/null | awk '/^Xray /{print $2; exit}')"
+        ;;
+      *)
+        docker exec "$c" sh -c 'for p in net.core.rmem_max net.core.wmem_max net.ipv4.tcp_fastopen net.ipv4.tcp_mtu_probing; do echo "CTK_$p=$(sysctl -n $p 2>/dev/null)"; done; echo "CTK_nofile=$(ulimit -n)"' 2>/dev/null
+        ;;
+    esac
   else
     echo "CT_RUNNING=0"
   fi
@@ -2174,13 +2437,16 @@ done
                 info['containers'].append(current)
             elif key == 'CT_RUNNING' and current is not None:
                 current['running'] = val == '1'
+            elif key == 'CT_VERSION' and current is not None:
+                current['version'] = val
             elif key.startswith('CTK_') and current is not None:
                 current['ct'][key[4:]] = val
         return info
 
     def install_protocol(self, protocol_type, port=None, awg_params=None,
                          mtu=None, dns=None, special_junk=None, dns6=None,
-                         progress=None, ipv6_preference=None, warp_ctx=None):
+                         progress=None, ipv6_preference=None, warp_ctx=None,
+                         i1_domain=None, i1_pool=None):
         """
         Full installation of AWG or AWG-Legacy protocol.
         Steps: install docker -> prepare host -> build container ->
@@ -2188,6 +2454,8 @@ done
 
         mtu/dns end up in the generated client configs; special_junk is an
         {'i1': ..., 'i5': ...} mapping overriding the generated I1-I5.
+        i1_domain picks the domain of the generated packet; an explicit
+        special_junk wins over it.
         """
         if port is None:
             port = AWG_DEFAULTS['port']
@@ -2201,6 +2469,10 @@ done
                 # AmneziaVPN client generates.
                 use_ranges=(base_proto in (self.AWG, self.AWG2)),
                 awg3=(base_proto == self.AWG3),
+                # None = pick a domain at random: an install that never
+                # touched the I1 UI still must not inherit the public default.
+                i1_domain=i1_domain,
+                i1_pool=i1_pool,
             )
 
         if special_junk is not None:
@@ -2330,6 +2602,7 @@ done
         results.append("Pulling Docker image...")
         flush('build', 40)
         dockerfile_folder = f"/opt/amnezia/{container_name}"
+        old_image_id = docker_image_cleanup.image_id(self.ssh, container_name)
 
         dockerfile_content = self._dockerfile_content(
             docker_image,
@@ -2384,6 +2657,9 @@ done
                 f"no output; full log on the server: {build_log}")
             raise RuntimeError(f"Failed to build container: {detail}")
         results.append("Docker image built successfully")
+        # Building under the same tag leaves the previous image behind as
+        # <none>:<none>; drop exactly the one this build replaced.
+        docker_image_cleanup.drop_replaced_image(self.ssh, container_name, old_image_id)
         flush('build', 75)
 
         # Step 5: Run container
@@ -3086,16 +3362,16 @@ x_warp_up() {
             f"# ExitUid = {link.get('exit_uid', '')}",
             f"# ExitName = {link.get('exit_name', '')}",
             f"# Obfuscation = {'on' if link.get('obfuscation') else 'off'}",
+            f"# ProtocolVersion = {'3.1' if is_awg31_params(link.get('awg_params')) else ('2.0' if link.get('obfuscation') else 'wireguard')}",
             f"# DnsViaExit = {'on' if link.get('dns_via_exit') else 'off'}",
             f"PrivateKey = {ENTRY_PRIVATE_KEY_PLACEHOLDER}",
             f"Address = {link['transit_ip']}/{link.get('subnet_cidr', 24)}",
-            f"MTU = {EXIT_MTU}",
+            f"MTU = {link.get('mtu') or transit_mtu(link.get('awg_params'))}",
             'Table = off',
         ]
         if link.get('obfuscation'):
             params = link.get('awg_params') or {}
-            lines += [f"{config_key} = {params[param_key]}"
-                      for param_key, config_key in TRANSIT_PARAM_KEYS if params.get(param_key)]
+            lines += transit_param_lines(params).splitlines()
         lines += [
             '',
             '[Peer]',
@@ -3191,6 +3467,46 @@ x_warp_up() {
             raise RuntimeError(f"Failed to update the DNS route of the link: {err or out}")
         return self._exit_apply(protocol_type)
 
+    def exit_update_params(self, protocol_type, awg_params):
+        """Switch an existing exit0.conf between the WG / 2.0 / 3.1 param sets.
+
+        Only the obfuscation lines and MTU are rewritten: the private key, the
+        address, Table and the [Peer] with its PresharedKey stay as they are,
+        so the exit never sees a new peer and the link keeps its keys. Applied
+        live with `awg syncconf` (interface and flows keep running); a kernel
+        that refuses the change (removing 3.1 keys is not allowed) falls back
+        to the recreate path every other link apply already uses.
+        """
+        container_name = self._container_name(protocol_type)
+        out, err, code = self.ssh.run_sudo_command(
+            f"docker exec -i {container_name} sh -c 'test -f {EXIT_CONF} && cat {EXIT_CONF}'")
+        if code != 0 or not (out or '').strip():
+            raise RuntimeError('This instance has no exit link file')
+        self.ssh.upload_file(rewrite_transit_conf(out, awg_params), '/tmp/_amnz_exit0.conf')
+        # The file carries the entry's private key: keep it 0600 and delete it
+        # as soon as docker cp has copied it into the container.
+        self.ssh.run_command('chmod 600 /tmp/_amnz_exit0.conf')
+        try:
+            for step in (
+                f"docker cp /tmp/_amnz_exit0.conf {container_name}:{EXIT_CONF}",
+                f"docker exec -i {container_name} chmod 600 {EXIT_CONF}",
+            ):
+                _out, _err, rc = self.ssh.run_sudo_command(step)
+                if rc != 0:
+                    raise RuntimeError(f"Failed to write exit0.conf: {_err or _out}")
+        finally:
+            self.ssh.run_command('rm -f /tmp/_amnz_exit0.conf')
+        applied = 'syncconf'
+        sync = self.ssh.run_sudo_command(
+            f"docker exec -i {container_name} bash -c '"
+            f"{self._quick_binary(protocol_type)} strip {EXIT_CONF} > /tmp/_amnz_exit0.sync && "
+            f"{self._wg_binary(protocol_type)} syncconf {EXIT_IFACE} /tmp/_amnz_exit0.sync'")
+        if sync[2] != 0:
+            applied = 'recreate'
+            self._exit_apply(protocol_type)
+        return {'applied': applied,
+                'backend': self.exit_link_backend(protocol_type)}
+
     def exit_unlink(self, protocol_type):
         """Tear the link down live and delete exit0.conf; the key pair stays
         so a re-link reuses the public key already known to the exit."""
@@ -3224,6 +3540,24 @@ x_warp_up() {
         if code != 0:
             raise RuntimeError(f"Failed to restore exit0.conf: {err or out or f'SSH exit code {code}'}")
         return self._exit_apply(protocol_type)
+
+    def _tunnel_backend(self, protocol_type, iface):
+        """Which implementation carries an interface: 'kernel', 'userspace', 'down'.
+
+        amneziawg-go creates a plain TUN device, while the kernel module
+        creates a link of type `amneziawg` - that is the only reliable
+        difference in `ip -d link` output.
+        """
+        out, _, _ = self.ssh.run_sudo_command(
+            f"docker exec {self._container_name(protocol_type)} "
+            f"sh -c 'ip -d link show {iface} 2>/dev/null'")
+        if not (out or '').strip():
+            return 'down'
+        return 'kernel' if 'amneziawg' in out else 'userspace'
+
+    def exit_link_backend(self, protocol_type):
+        """Backend carrying exit0 (see _tunnel_backend)."""
+        return self._tunnel_backend(protocol_type, EXIT_IFACE)
 
     def exit_link_info(self, protocol_type):
         """What the container believes it is linked to, or None. Reads only
@@ -3353,8 +3687,22 @@ x_warp_up() {
         """Remove AWG container (mirrors remove_container.sh)."""
         container_name = self._container_name(protocol_type)
         self.ssh.run_sudo_command(f"docker stop {container_name}")
-        self.ssh.run_sudo_command(f"docker rm -fv {container_name}")
+        out, err, code = self.ssh.run_sudo_command(f"docker rm -fv {container_name}")
+        detail = ((err or out) or '').strip()
+        container_gone = code == 0 or 'no such container' in detail.lower()
         self.ssh.run_sudo_command(f"docker rmi {container_name}")
+        # The build context holds a single generated Dockerfile and is recreated
+        # by the next install (build uses --no-cache --pull), so a removed
+        # instance must not leave /opt/amnezia/<container> behind. Peer state
+        # lives elsewhere (/opt/amnezia/awg inside the container, rollbacks in
+        # /opt/amnezia/backups) and is untouched. Only drop the directory once
+        # the container is really gone, so a failed removal stays retryable.
+        if container_gone:
+            self.ssh.run_sudo_command(f"rm -rf /opt/amnezia/{container_name}")
+        else:
+            logger.warning(
+                "remove_container: %s still present (%s); keeping /opt/amnezia/%s",
+                container_name, detail or f'exit code {code}', container_name)
         if hasattr(self.ssh, 'docker_ps_invalidate'):
             self.ssh.docker_ps_invalidate()
         return True
@@ -4277,6 +4625,22 @@ done < "$BW"
             self._save_conn_warnings(protocol_type, warnings)
         return {'status': 'success', 'cleared_ip': ip}
 
+    # ---- Torrent guard: DPI-сигнатуры торрентов на интерфейсе туннеля ----
+
+    def torrent_guard(self, protocol_type=None):
+        """Правила торрент-фильтра этого инстанса (awg0/wg0 внутри контейнера).
+
+        Протокол по умолчанию — самый первый AWG: вызывающий обычно передаёт
+        конкретный ключ протокола, но обёртка не должна падать без него.
+        """
+        proto = protocol_type or self.AWG
+        return TorrentGuard(
+            self.ssh,
+            container=self._container_name(proto),
+            iface=self._interface_name(proto),
+            show_cmd='awg show 2>/dev/null || wg show 2>/dev/null',
+            host_key=getattr(self.ssh, 'host', '') or '',
+        )
     def _wg_show(self, protocol_type):
         """Run 'wg show all' and parse output."""
         container_name = self._container_name(protocol_type)
@@ -5030,6 +5394,13 @@ PersistentKeepalive = 25
             'dns6': self._get_dns6(protocol_type),
             'ipv6_enabled': bool(self._get_subnet_ipv6_ip(protocol_type)),
             'default_i1': AWG_DEFAULT_I1,
+            # What the stored packet actually is: domain/address/ttl, whether
+            # it still equals the shared client default, and the picker data.
+            'i1_parsed': parse_i1(params.get('i1', '')),
+            'i1_is_default': is_legacy_default(params.get('i1', '')),
+            'device_profiles': [{'key': key, 'domains': list(domains)}
+                                for key, domains in DEVICE_PROFILES],
+            'domain_catalog': junk_catalog(),
             'supports_special_junk': self._base_protocol(protocol_type) != self.AWG_LEGACY,
             # an instance behind an exit link cannot carry more than the link
             'exit_linked': bool(link_info),
@@ -5065,7 +5436,8 @@ PersistentKeepalive = 25
                 raise RuntimeError('bad_request')
         return text
 
-    def update_awg_settings(self, protocol_type, mtu=None, dns=None, special_junk=None, dns6=None):
+    def update_awg_settings(self, protocol_type, mtu=None, dns=None,
+                            special_junk=None, dns6=None, i1_value=None):
         """Rewrite MTU/DNS/I1-I5 in the server config and apply them live.
 
         I1-I5 go to the kernel through `awg syncconf`, so peers stay up; MTU
@@ -5076,7 +5448,34 @@ PersistentKeepalive = 25
         """
         if self._base_protocol(protocol_type) == self.AWG_LEGACY:
             special_junk = None
-        junk = normalize_special_junk(special_junk) if special_junk is not None else None
+            i1_value = None
+        current = self._get_awg_params_from_config(protocol_type)
+        junk = None
+        if special_junk is not None:
+            # None = field not sent, leave it alone; '' = clear it. A value
+            # equal to the stored one is carried over verbatim: an instance
+            # saved before <c> was rejected must still allow an MTU change.
+            junk = {}
+            for key in SPECIAL_JUNK_KEYS:
+                provided = special_junk.get(key)
+                if provided is None:
+                    continue
+                raw = str(provided).strip()
+                if not raw:
+                    junk[key] = None
+                    continue
+                if raw != (current.get(key) or ''):
+                    try:
+                        validate_special_junk(raw)
+                    except ValueError as exc:
+                        raise ValueError(f"{key.upper()}: {exc}") from exc
+                junk[key] = raw
+        elif i1_value is not None:
+            # Replace only I1 and keep I2-I5 as they are.
+            validate_special_junk(i1_value.strip())
+            junk = {key: current[key] for key in SPECIAL_JUNK_KEYS
+                    if current.get(key)}
+            junk['i1'] = i1_value.strip()
 
         # Validate DNS and DNS6 before writing
         if dns is not None:
@@ -5084,7 +5483,7 @@ PersistentKeepalive = 25
         if dns6 is not None:
             self._validate_dns_value(dns6)
 
-        current_junk = self._get_awg_params_from_config(protocol_type)
+        current_junk = current
         config = self._get_server_config(protocol_type)
         lines = config.split('\n')
 
@@ -5109,8 +5508,9 @@ PersistentKeepalive = 25
             value = str(dns6).strip()
             replaced['DNS6'] = f"# DNS6 = {value}" if value else None
         if junk is not None:
-            for key in SPECIAL_JUNK_KEYS:
-                value = junk.get(key)
+            # Only the keys the caller touched: a key missing from `junk`
+            # means "leave as is", not "clear".
+            for key, value in junk.items():
                 replaced[key.upper()] = f"{key.upper()} = {value}" if value else None
 
         # Everything lives in [Interface]; drop the old occurrences first so a
@@ -5137,7 +5537,7 @@ PersistentKeepalive = 25
             # packet cannot be pushed through syncconf -- the kernel would
             # keep sending the old one. Recreating the interface is the only
             # way to make a removal take effect.
-            dropped = any(current_junk.get(key) and not junk.get(key)
+            dropped = any(current_junk.get(key) and key in junk and not junk.get(key)
                           for key in SPECIAL_JUNK_KEYS)
             if dropped:
                 self._restart_container(protocol_type)

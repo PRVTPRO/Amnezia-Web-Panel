@@ -103,13 +103,29 @@ class TagTests(unittest.TestCase):
         self.assertIsNone(parse_tag('v3.1.2026'))
         self.assertIsNone(parse_tag('v3.1.20260906-rc1'))
 
+    def test_parse_tag_keeps_rebuild_suffix(self):
+        self.assertEqual(parse_tag('v3.1.20261113-02'), '3.1.20261113-02')
+        self.assertEqual(parse_tag('3.1.20261113-2'), '3.1.20261113-2')
+        # Only ``-<digits>`` may follow the date; anything else stays rejected.
+        self.assertIsNone(parse_tag('v3.1.20261113-'))
+        self.assertIsNone(parse_tag('v3.1.20261113-02; rm -rf /'))
+
     def test_version_tuple(self):
-        self.assertEqual(version_tuple(NEW), (3, 1, 20260906))
+        self.assertEqual(version_tuple(NEW), (3, 1, 20260906, 0))
+        self.assertEqual(version_tuple('3.1.20261113-02'), (3, 1, 20261113, 2))
         self.assertIsNone(version_tuple('nope'))
 
     def test_pick_latest_orders_by_date(self):
         tags = ['v3.1.20260812', 'v3.1.20260906', 'v3.1.20260828', 'release-notes']
         self.assertEqual(pick_latest(tags), '3.1.20260906')
+
+    def test_pick_latest_prefers_rebuild_of_same_date(self):
+        tags = ['v3.1.20261113', 'v3.1.20261113-02', 'v3.1.20260906']
+        self.assertEqual(pick_latest(tags), '3.1.20261113-02')
+
+    def test_pick_latest_orders_rebuilds_numerically(self):
+        tags = ['v3.1.20261113-02', 'v3.1.20261113-10', 'v3.1.20261113']
+        self.assertEqual(pick_latest(tags), '3.1.20261113-10')
 
     def test_pick_latest_ignores_invalid(self):
         self.assertIsNone(pick_latest(['latest', 'v2.0', '']))
@@ -213,6 +229,23 @@ class StatusTests(unittest.TestCase):
         )
         self.assertTrue(status['components'][KERNEL_MODULE]['update_available'])
         self.assertFalse(status['components'][USERSPACE]['update_available'])
+
+    def test_rebuild_is_offered_over_base_tag(self):
+        """A fixed rebuild of the installed date must still be offered."""
+        status = AwgPluginUpdater(self._ssh_with_userspace()).status(
+            latest={KERNEL_MODULE: '3.1.20261113-02', USERSPACE: None},
+            installed={KERNEL_MODULE: '3.1.20261113', USERSPACE: '0.0.20250522'},
+        )
+        kernel = status['components'][KERNEL_MODULE]
+        self.assertTrue(kernel['update_available'])
+        self.assertEqual(kernel['available'], '3.1.20261113-02')
+
+    def test_installed_rebuild_is_up_to_date(self):
+        status = AwgPluginUpdater(self._ssh_with_userspace()).status(
+            latest={KERNEL_MODULE: '3.1.20261113-02', USERSPACE: None},
+            installed={KERNEL_MODULE: '3.1.20261113-02', USERSPACE: '0.0.20250522'},
+        )
+        self.assertFalse(status['components'][KERNEL_MODULE]['update_available'])
 
 
 class PreflightTests(unittest.TestCase):

@@ -157,7 +157,7 @@
                     {{ protocol_short_name(proto_key, proto_val.get('header_protection'), proto_val.get('protocol_version')) }}
                     {% else %}
                     {{ 'AWG' if proto_key == 'awg' else ('AWG-Legacy' if proto_key == 'awg_legacy' else ('Xray' if
-                    proto_key == 'xray' else ('Exit' if proto_key == 'exit' else proto_key | upper))) }}
+                    proto_key == 'xray' else ('HAProxy' if proto_key == 'haproxy' else ('Exit' if proto_key == 'exit' else proto_key | upper)))) }}
                     {% endif %}
                 </span>
                 {% endif %}
@@ -175,6 +175,8 @@
                 <div id="chebur-alert-{{ loop.index0 }}" style="display:none;"></div>
             </div>
             {% endif %}
+            <div class="server-alerts" id="torrent-alert-{{ loop.index0 }}"
+                style="margin-top: var(--space-sm); display:none;"></div>
 
             <div class="server-actions">
                 <span class="reorder-btns">
@@ -938,6 +940,10 @@
         setupDragAndDrop();
         loadRknScanFlags();
         loadCheburcheckFlags();
+        loadTorrentFlags();
+        // Метка торрент-активности обновляется сама: снятая метка или истёкший
+        // TTL не должны висеть на плитке до F5.
+        setInterval(loadTorrentFlags, 60000);
     });
 
     // Red "scans detected" button per server card, fed from the cached flags endpoint.
@@ -967,21 +973,62 @@
                 const el = document.getElementById('chebur-alert-' + id);
                 if (!el) continue;
                 if (f.status === 'banned') {
-                    const n = f.blocking_regions || 0;
+                    const n = (f.probe && f.probe.blocking_regions) || 0;
+                    const remarks = f.remarks || 0;
+                    const extra = remarks > 0 ? ` · ${_('cheburcheck_remarks_badge')} (${remarks})` : '';
                     const label = n > 0
-                        ? `🚫 ${_('cheburcheck_ban_badge')} (${n})`
-                        : `🚫 ${_('cheburcheck_ban_badge')}`;
+                        ? `🚫 ${_('cheburcheck_ban_badge')} (${n})${extra}`
+                        : `🚫 ${_('cheburcheck_ban_badge')}${extra}`;
                     el.innerHTML = `<button class="btn btn-danger btn-sm" style="width:100%; font-weight:700"
-                        onclick="location.href='/server/${id}#cheburcheck-card'">${label}</button>`;
+                        onclick="location.href='/server/${id}'">${label}</button>`;
                     el.style.display = '';
-                } else if (f.status === 'unknown') {
+                } else if ((f.remarks || 0) > 0) {
+                    const remarks = f.remarks;
                     el.innerHTML = `<button class="btn btn-secondary btn-sm" style="width:100%;"
-                        onclick="location.href='/server/${id}#cheburcheck-card'">🟡 ${_('cheburcheck_unknown_badge')}</button>`;
+                        onclick="location.href='/server/${id}'">⚠️ ${_('cheburcheck_remarks_badge')} (${remarks})</button>`;
+                    el.style.display = '';
+                } else if (f.scan_mode === 'static_only') {
+                    // Без API-токена пробы не идут: честно называем режим,
+                    // вместо жёлтого «Неизвестно» (это не поломка).
+                    el.innerHTML = `<button class="btn btn-secondary btn-sm" style="width:100%;"
+                        onclick="location.href='/server/${id}'">ℹ️ ${_('cheburcheck_static_only')}</button>`;
                     el.style.display = '';
                 }
             }
         } catch (e) {
             console.warn('cheburcheck flags failed:', e);
+        }
+    }
+    // TORRENT-активность на плитке. Клик ведёт на страницу сервера штатным
+    // deep link: ?protocol= переключает инстанс, &highlight= подсвечивает ключ.
+    async function loadTorrentFlags() {
+        try {
+            const res = await apiCall('/api/servers/torrent_flags', 'GET');
+            const flags = (res && res.flags) ? res.flags : {};
+            // Гасим всё, чего нет в ответе: иначе снятая метка или истёкший
+            // TTL оставляли кнопку на плитке до перезагрузки страницы.
+            document.querySelectorAll('[id^="torrent-alert-"]').forEach(el => {
+                el.style.display = 'none';
+                el.innerHTML = '';
+            });
+            for (const [id, protos] of Object.entries(flags)) {
+                const el = document.getElementById('torrent-alert-' + id);
+                if (!el) continue;
+                const entries = Object.entries(protos || {});
+                if (!entries.length) { el.style.display = 'none'; continue; }
+                let total = 0;
+                for (const [, f] of entries) total += (f && f.events) || 0;
+                const proto = entries[0][0];
+                const f = entries[0][1] || {};
+                let url = `/server/${id}?protocol=${encodeURIComponent(proto)}`;
+                if (f.client_id) url += `&highlight=${encodeURIComponent(f.client_id)}`;
+                el.innerHTML = `<button class="btn btn-danger btn-sm" style="width:100%; font-weight:700">🔴 {{ _('torrent_badge') }} (${total})</button>`;
+                const btn = el.querySelector('button');
+                if (btn) btn.addEventListener('click', function () { window.location.href = url; });
+                el.style.display = '';
+            }
+        } catch (e) {
+            console.warn('torrent flags failed:', e);
         }
     }
 </script>
