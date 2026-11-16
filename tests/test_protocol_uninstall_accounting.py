@@ -112,6 +112,48 @@ class ProtocolUninstallAccountingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.commits, [])
         self.assertEqual(self.saved, [])
 
+    async def test_probe_table_only_peer_is_quiescent(self):
+        # A clientsTable row whose peer is gone from server.json (a
+        # hand-edited config) cannot carry traffic and must not block
+        # archiving; the table's final counters are still reported.
+        ssh = Mock()
+        manager = XrayManager(ssh)
+        manager._get_server_json = lambda: {'inbounds': [{
+            'protocol': 'vless',
+            'settings': {'clients': [{'id': 'some-other-peer'}]},
+        }]}
+        manager.get_clients = lambda protocol, strict=True: [{
+            'clientId': 'xray-peer-0',
+            'userData': {'enabled': True,
+                         'dataReceivedBytes': 100, 'dataSentBytes': 20},
+        }]
+        conn = self.data['user_connections'][0]
+        with patch.object(panel, 'get_ssh', return_value=ssh),              patch.object(panel, 'get_protocol_manager', return_value=manager):
+            observed, quiescent = await asyncio.to_thread(
+                panel._probe_blocking_peer, self.data['servers'][0], conn)
+        self.assertEqual((observed, quiescent), (120, True))
+        ssh.disconnect.assert_called_once_with()
+
+    async def test_probe_runtime_peer_stays_blocking(self):
+        # Present in the live config: traffic can flow through it, the
+        # table's enabled flag does not gate the core.
+        ssh = Mock()
+        manager = XrayManager(ssh)
+        manager._get_server_json = lambda: {'inbounds': [{
+            'protocol': 'vless',
+            'settings': {'clients': [{'id': 'xray-peer-0'}]},
+        }]}
+        manager.get_clients = lambda protocol, strict=True: [{
+            'clientId': 'xray-peer-0',
+            'userData': {'enabled': True,
+                         'dataReceivedBytes': 100, 'dataSentBytes': 20},
+        }]
+        conn = self.data['user_connections'][0]
+        with patch.object(panel, 'get_ssh', return_value=ssh),              patch.object(panel, 'get_protocol_manager', return_value=manager):
+            observed, quiescent = await asyncio.to_thread(
+                panel._probe_blocking_peer, self.data['servers'][0], conn)
+        self.assertEqual((observed, quiescent), (120, False))
+
     async def test_xray_probe_rejects_unreadable_live_config(self):
         ssh = Mock()
         ssh.run_sudo_command.return_value = ('', 'connection lost', -1)
