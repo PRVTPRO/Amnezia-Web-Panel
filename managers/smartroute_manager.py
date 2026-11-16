@@ -600,11 +600,18 @@ class SmartRouteManager:
                 status = json.loads(out)
             except ValueError:
                 status = {'error': 'status file is not valid JSON'}
+            if not isinstance(status, dict):
+                status = {'error': 'status file is not a JSON object'}
         out, _, code = self.ssh.run_command(
-            'systemctl list-timers smartroute.timer --no-legend 2>/dev/null | awk \'{print $1, $2}\'')
+            'systemctl list-timers smartroute.timer --no-legend 2>/dev/null | awk \'{print $2, $3}\'')
         next_run = ''
         if code == 0 and out.strip():
-            next_run = out.strip().split()[0]
+            # `list-timers` prints WEEKDAY DATE TIME; awk keeps DATE TIME, and
+            # the regex rejects anything that is not that exact shape (e.g. an
+            # "n/a" placeholder) so the UI never shows a bare weekday.
+            candidate = out.strip().splitlines()[0].strip()
+            if re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}', candidate):
+                next_run = candidate
         out, _, code = self.ssh.run_command(f'ls {SMARTR_INSTANCES} 2>/dev/null')
         instances = sorted(out.split()) if code == 0 and out.strip() else []
         return {

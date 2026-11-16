@@ -803,7 +803,6 @@ a:hover {
     font-weight: 500;
     color: var(--text-secondary);
     margin-bottom: var(--space-xs);
-    text-transform: uppercase;
     letter-spacing: 0.05em;
 }
 
@@ -985,7 +984,7 @@ a:hover {
     border: 1px solid var(--border-color);
     border-radius: var(--radius-xl);
     width: 90%;
-    max-width: 520px;
+    max-width: 720px;
     max-height: 90vh;
     overflow-y: auto;
     padding: var(--space-xl);
@@ -1424,6 +1423,7 @@ a:hover {
    frozen. */
 @media (prefers-reduced-motion: reduce) {
     .spinner,
+    .spinner-inline,
     .loading-spinner {
         animation: spin 0.6s linear infinite !important;
     }
@@ -1977,6 +1977,18 @@ a:hover {
     width: 36px;
     height: 36px;
     border: 3px solid var(--border-color);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+/* Compact spinner for a row-level status ("проверено 2 из 5"): sits inline
+   with text instead of taking a whole loading block. */
+.spinner-inline {
+    width: 14px;
+    height: 14px;
+    flex: 0 0 auto;
+    border: 2px solid var(--border-color);
     border-top-color: var(--accent);
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
