@@ -87,7 +87,7 @@ def probe(host, port, jump_manager=None):
         if not jump_transport or not jump_transport.is_active():
             raise ConnectionError('SSH jump host transport is unavailable')
         sock_context = closing(jump_transport.open_channel(
-            'direct-tcpip', (host, port), ('127.0.0.1', 0)))
+            'direct-tcpip', (host, port), ('127.0.0.1', 0), timeout=30))
     else:
         sock_context = socket.create_connection((host, port), timeout=10)
     with sock_context as sock:

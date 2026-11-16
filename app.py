@@ -8801,11 +8801,8 @@ def api_protocol_backup_download(request: Request, server_id: int, req: BackupDo
             return JSONResponse({'error': err or 'Backup not found'}, status_code=404)
         fd, tmp_path = tempfile.mkstemp(prefix='amnezia-backup-', suffix='.tar.gz')
         os.close(fd)
-        sftp = ssh.client.open_sftp()
-        try:
+        with ssh.sftp_transfer() as sftp:
             sftp.get(tmp_remote, tmp_path)
-        finally:
-            sftp.close()
         return FileResponse(
             tmp_path,
             media_type='application/gzip',
