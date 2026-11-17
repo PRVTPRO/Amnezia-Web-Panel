@@ -1,6 +1,7 @@
 """Subscription files: path/token handling and the push into the NGINX
 mask html root."""
 import base64
+import urllib.parse
 import json
 import unittest
 from types import SimpleNamespace
@@ -95,9 +96,32 @@ class SubscriptionPushTests(unittest.TestCase):
         self.assertEqual(errors, [])
         content, path = self.uploads[0]
         self.assertEqual(path, f"{NginxManager.HTML_DIR}/sub/{token}")
-        self.assertEqual(base64.b64decode(content).decode(),
-                         'vless://peer-1@entry:443?type=tcp')
+        decoded = base64.b64decode(content).decode()
+        # The fragment carries "server · instance", not the admin's private
+        # connection note.
+        base, _, fragment = decoded.rpartition('#')
+        self.assertEqual(base, 'vless://peer-1@entry:443?type=tcp')
+        self.assertEqual(urllib.parse.unquote(fragment), '198.51.100.1 · Xray')
         self.assertIn('mkdir -p', self.sudo[0])
+
+    def test_push_uses_named_server_and_instance(self):
+        user = self.data['users'][0]
+        self.data['servers'][1]['name'] = 'Frankfurt'
+        self.data['servers'][1]['protocols']['xray']['display_name'] = 'Xray #2'
+        ssh = self._ssh()
+        manager = Mock()
+        manager.get_client_config = Mock(
+            return_value='vless://peer-1@entry:443?type=tcp#old-private-note')
+        with patch.object(panel, 'get_ssh', return_value=ssh),              patch.object(panel, 'get_protocol_manager', return_value=manager),              patch.object(panel, 'protocol_public_endpoint',
+                          return_value=('entry.example', None)),              patch.object(panel, 'xray_fp_kwargs', return_value={}):
+            panel.push_user_subscription(
+                self.data, user,
+                {'enabled': True, 'server_id': 0, 'path': 'sub'},
+                self.data['servers'][0])
+        content, _ = self.uploads[0]
+        base, _, fragment = base64.b64decode(content).decode().rpartition('#')
+        self.assertEqual(base, 'vless://peer-1@entry:443?type=tcp')
+        self.assertEqual(urllib.parse.unquote(fragment), 'Frankfurt · Xray #2')
 
     def test_push_reports_entry_failure_when_no_links_were_collected(self):
         user = self.data['users'][0]

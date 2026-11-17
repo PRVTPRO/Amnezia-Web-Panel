@@ -13379,7 +13379,17 @@ def push_user_subscription(data, user, sub_settings, nginx_server):
                         public_port=pub_port,
                         **xray_fp_kwargs(server, protocol))
                     if link:
-                        links.append(link)
+                        # The link fragment is what the user sees in their
+                        # client: "server · xray instance". The panel-side
+                        # connection name is the admin's private note and
+                        # must not leak into the subscription.
+                        entry_name = (f"{server.get('name') or server.get('host')}"
+                                      f" · {proto_info.get('display_name')
+                                      or protocol_display_name(protocol)}")
+                        fragment = urllib.parse.quote(entry_name)
+                        links.append(link.rpartition('#')[0] + '#' + fragment
+                                     if '#' in link
+                                     else link + '#' + fragment)
             finally:
                 ssh.disconnect()
         except Exception as e:
