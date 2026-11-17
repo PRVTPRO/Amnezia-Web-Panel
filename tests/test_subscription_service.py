@@ -19,7 +19,7 @@ def state():
                  protocols={'nginx': {}}),
             dict(uid='node', host='198.51.100.1', protocols={'xray': {'port': 443}}),
         ],
-        'users': [dict(id='u1', username='alice')],
+        'users': [dict(id='u1', username='alice', role='admin')],
         'user_connections': [
             dict(id='c1', user_id='u1', server_id=1,
                  protocol='xray', client_id='peer-1'),
@@ -89,13 +89,14 @@ class SubscriptionPushTests(unittest.TestCase):
              patch.object(panel, 'protocol_public_endpoint',
                           return_value=('entry.example', None)), \
              patch.object(panel, 'xray_fp_kwargs', return_value={}):
-            token, links, errors = panel.push_user_subscription(
+            token, links, errors, unchanged = panel.push_user_subscription(
                 self.data, user,
                 {'enabled': True, 'server_id': 0, 'path': 'sub'},
                 self.data['servers'][0])
 
         self.assertEqual(links, 1)
         self.assertEqual(errors, [])
+        self.assertFalse(unchanged)
         content, path = self.uploads[0]
         self.assertEqual(path, f"{NginxManager.HTML_DIR}/sub/{token}")
         decoded = base64.b64decode(content).decode()
@@ -104,7 +105,7 @@ class SubscriptionPushTests(unittest.TestCase):
         base, _, fragment = decoded.rpartition('#')
         self.assertEqual(base, 'vless://peer-1@entry:443?type=tcp')
         self.assertEqual(urllib.parse.unquote(fragment), '198.51.100.1 · Xray')
-        self.assertIn('mkdir -p', self.sudo[0])
+        self.assertTrue(any('mkdir -p' in cmd for cmd in self.sudo))
 
     def test_push_uses_named_server_and_instance(self):
         user = self.data['users'][0]
@@ -180,6 +181,66 @@ class SubscriptionConfigTests(unittest.TestCase):
         self.assertTrue(injected.rstrip().endswith('}'))
 
 
+class AutoPushTests(unittest.TestCase):
+    def setUp(self):
+        self.data = state()
+        self.uploads = []
+        self.saved = []
+        self.sudo = []
+        self.ssh = Mock()
+        self.ssh.upload_file_sudo = lambda content, path: self.uploads.append((content, path))
+        self.ssh.run_sudo_command = lambda *a, **k: (
+            self.sudo.append(a[0] if a else '') or ('', '', 0))
+        self.ssh.run_command = lambda *a, **k: ('', '', 0)
+
+    def test_auto_push_writes_file_and_caches_the_url(self):
+        self.data['settings'] = {'subscription': {
+            'enabled': True, 'server_id': 0, 'path': 'sub'}}
+        manager = Mock()
+        manager.get_client_config = Mock(
+            return_value='vless://peer-1@entry:443?type=tcp')
+        with patch.object(panel, 'get_ssh', return_value=self.ssh),              patch.object(panel, 'get_protocol_manager', return_value=manager),              patch.object(panel, 'protocol_public_endpoint',
+                          return_value=('entry.example', None)),              patch.object(panel, 'xray_fp_kwargs', return_value={}),              patch.object(panel, '_subscription_mask_domain',
+                          return_value='mask.example'),              patch.object(panel, 'save_data',
+                          Mock(side_effect=lambda d: self.saved.append(d))):
+            panel.auto_push_subscriptions(self.data, ['u1'])
+
+        self.assertIn('https://mask.example/sub/', self.data['users'][0]['sub_url'])
+        self.assertTrue(self.saved)
+        content, _ = self.uploads[0]
+        self.assertIn('peer-1', base64.b64decode(content).decode())
+
+    def test_auto_push_skips_identical_files_and_clears_dead_urls(self):
+        self.data['settings'] = {'subscription': {
+            'enabled': True, 'server_id': 0, 'path': 'sub'}}
+        manager = Mock()
+        manager.get_client_config = Mock(
+            return_value='vless://peer-1@entry:443?type=tcp')
+        self.data['users'][0]['sub_url'] = 'https://mask.example/sub/old'
+
+        def cat(command, **kwargs):
+            # First read: nothing there yet; later reads: the pushed content.
+            if 'cat' in command and self.uploads:
+                return (self.uploads[-1][0], '', 0)
+            return ('', '', 0)
+        self.ssh.run_sudo_command = lambda *a, **k: (
+            self.sudo.append(a[0] if a else '') or cat(*a, **k))
+
+        with patch.object(panel, 'get_ssh', return_value=self.ssh),              patch.object(panel, 'get_protocol_manager', return_value=manager),              patch.object(panel, 'protocol_public_endpoint',
+                          return_value=('entry.example', None)),              patch.object(panel, 'xray_fp_kwargs', return_value={}),              patch.object(panel, '_subscription_mask_domain',
+                          return_value='mask.example'),              patch.object(panel, 'save_data', Mock()):
+            panel.auto_push_subscriptions(self.data, ['u1'])
+            first_write = len(self.uploads)
+            self.assertTrue(self.data['users'][0]['sub_url'].startswith('https://'))
+            panel.auto_push_subscriptions(self.data, ['u1'])
+            self.assertEqual(len(self.uploads), first_write)  # unchanged: no rewrite
+
+            # All xray connections are gone: the cached URL must clear.
+            self.data['user_connections'] = []
+            panel.auto_push_subscriptions(self.data, ['u1'])
+        self.assertIsNone(self.data['users'][0].get('sub_url'))
+
+
 class SubscriptionEndpointsTests(unittest.TestCase):
     def request(self):
         return SimpleNamespace(cookies={}, headers={})
@@ -201,6 +262,16 @@ class SubscriptionEndpointsTests(unittest.TestCase):
                 self.request(),
                 panel.SubscriptionSettingsRequest(enabled=False, path='a b'))
         self.assertEqual(result.status_code, 400)
+
+    def test_users_list_carries_the_cached_sub_url(self):
+        data = state()
+        data['settings'] = {'subscription': {
+            'enabled': True, 'server_id': 0, 'path': 'sub'}}
+        data['users'][0]['sub_url'] = 'https://mask.example/sub/tok'
+        with patch.object(panel, 'load_data', return_value=data),              patch.object(panel, '_check_admin', lambda request: True):
+            result = panel.api_list_users(self.request(), search='', page=1, size=10)
+        self.assertEqual(result['users'][0]['sub_url'],
+                         'https://mask.example/sub/tok')
 
     def test_endpoints_require_admin(self):
         data = state()

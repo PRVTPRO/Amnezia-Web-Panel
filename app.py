@@ -3351,6 +3351,8 @@ class TunnelStartRequest(BaseModel):
 # conntrack summary), so detection works 24/7 without anyone watching the UI
 # and the 6s UI refresh only reads the small snapshot files.
 CONN_MONITOR_INTERVAL = 600
+SUBSCRIPTION_MONITOR_INTERVAL = 600
+_subscription_monitor_started = False
 
 
 
@@ -3552,6 +3554,27 @@ def _conn_monitor_once(data):
             list(pool.map(work, tasks))
 
 
+def _subscriptions_monitor_loop():
+    while True:
+        time.sleep(SUBSCRIPTION_MONITOR_INTERVAL)
+        try:
+            data = load_data()
+            if subscription_settings(data)['enabled']:
+                auto_push_subscriptions(data)
+        except Exception as e:
+            logger.warning(f"subscription monitor loop: {e}")
+
+
+def _start_subscriptions_monitor():
+    global _subscription_monitor_started
+    if _subscription_monitor_started:
+        return
+    _subscription_monitor_started = True
+    threading.Thread(target=_subscriptions_monitor_loop, daemon=True,
+                     name='subscriptions-monitor').start()
+    logger.info(f"Subscription monitor started (every {SUBSCRIPTION_MONITOR_INTERVAL}s)")
+
+
 def _conn_monitor_loop():
     while True:
         try:
@@ -3589,6 +3612,7 @@ async def startup():
         raise RuntimeError('Disaster recovery requires independent node reconciliation before startup')
     _start_conn_monitor()
     _start_duckdns_monitor()
+    _start_subscriptions_monitor()
     changed = False
     # No fixed credentials are created. A fresh installation stays at the
     # first-run setup form until an administrator is explicitly registered.
@@ -12369,6 +12393,7 @@ def api_list_users(request: Request, search: str = '', page: int = 1, size: int 
             'share_enabled': u.get('share_enabled', False),
             'share_token': u.get('share_token'),
             'has_share_password': bool(u.get('share_password_hash')),
+            'sub_url': u.get('sub_url'),
             'source': 'Remnawave' if u.get('remnawave_uuid') else 'Local'
         })
     return {
@@ -12712,6 +12737,14 @@ async def api_add_user_connection(request: Request, user_id: str, req: AddUserCo
             data = load_data()
             data['user_connections'].append(conn)
             save_data(data)
+            if protocol_base(req.protocol) == 'xray':
+                # Refresh the user's subscription file right away; the
+                # periodic monitor covers every other change source.
+                try:
+                    await asyncio.to_thread(auto_push_subscriptions, data,
+                                            [user_id])
+                except Exception:
+                    logger.warning("subscription auto-push failed", exc_info=True)
 
         resp = {'status': 'success'}
         if result.get('config'):
@@ -13463,14 +13496,53 @@ def push_user_subscription(data, user, sub_settings, nginx_server):
                            + ('; '.join(errors) or 'no xray connections'))
     payload = base64.b64encode('\n'.join(links).encode()).decode()
     sub_dir = f"{NginxManager.HTML_DIR}/{sub_settings['path']}"
+    remote_path = f"{sub_dir}/{token}"
     ssh = get_ssh(nginx_server)
     ssh.connect()
     try:
+        # Skip the write when the served file is already current: the
+        # periodic auto-push runs this for every user around the clock.
+        out, _, _ = ssh.run_sudo_command(f"cat {shlex.quote(remote_path)} 2>/dev/null")
+        if (out or '').strip() == payload:
+            return token, len(links), errors, True
         ssh.run_sudo_command(f"mkdir -p {shlex.quote(sub_dir)}")
-        ssh.upload_file_sudo(payload, f"{sub_dir}/{token}")
+        ssh.upload_file_sudo(payload, remote_path)
     finally:
         ssh.disconnect()
-    return token, len(links), errors
+    return token, len(links), errors, False
+
+
+def auto_push_subscriptions(data, user_ids=None):
+    """Best-effort regeneration of the affected users' subscription files.
+    Never raises; no-ops when subscriptions are disabled. Persists minted
+    tokens and cached sub URLs via save_data."""
+    sub_settings = subscription_settings(data)
+    if not sub_settings['enabled']:
+        return
+    nginx_server = subscription_nginx_server(data, sub_settings)
+    if nginx_server is None:
+        return
+    domain = _subscription_mask_domain(nginx_server)
+    users_by_id = {u.get('id'): u for u in data.get('users', [])}
+    if user_ids is None:
+        targets = [u for u in data.get('users', [])
+                   if _subscription_user_targets(data, u)]
+    else:
+        targets = [users_by_id[uid] for uid in user_ids if uid in users_by_id]
+    for user in targets:
+        if not _subscription_user_targets(data, user):
+            user.pop('sub_url', None)  # all xray connections are gone
+            continue
+        try:
+            token, count, errors, unchanged = push_user_subscription(
+                data, user, sub_settings, nginx_server)
+            if domain:
+                user['sub_url'] = (f"https://{domain}/{sub_settings['path']}/"
+                                   f"{token}")
+        except Exception as e:
+            logger.warning("subscription auto-push failed for %s: %s",
+                           user.get('username'), e)
+    save_data(data)
 
 
 def push_all_subscriptions(data):
@@ -13480,22 +13552,52 @@ def push_all_subscriptions(data):
         raise ValueError('No NGINX server selected for subscriptions')
     domain = _subscription_mask_domain(nginx_server)
     pushed, errors = [], []
+    valid_tokens = set()
     for user in data.get('users', []):
         if not _subscription_user_targets(data, user):
             continue
         try:
-            token, count, user_errors = push_user_subscription(
+            token, count, user_errors, unchanged = push_user_subscription(
                 data, user, sub_settings, nginx_server)
             errors.extend(f"{user.get('username')}: {text}" for text in user_errors)
+            valid_tokens.add(token)
+            url = (f"https://{domain}/{sub_settings['path']}/{token}"
+                   if domain else None)
+            if url:
+                user['sub_url'] = url  # cached for the /users page
             pushed.append({
                 'username': user.get('username'), 'token': token, 'links': count,
-                'url': (f"https://{domain}/{sub_settings['path']}/{token}"
-                        if domain else None),
+                'unchanged': unchanged, 'url': url,
             })
         except Exception as e:
             errors.append(f"{user.get('username')}: {e}")
+    _subscription_prune_stale_files(data, nginx_server, sub_settings, valid_tokens)
     return {'pushed': pushed, 'errors': errors,
             'path': sub_settings['path'], 'domain': domain}
+
+
+def _subscription_prune_stale_files(data, nginx_server, sub_settings,
+                                    valid_tokens):
+    """Remove subscription files of users that no longer exist (deleting a
+    user does not walk the mask's html root)."""
+    from managers.nginx_manager import NginxManager
+    sub_dir = f"{NginxManager.HTML_DIR}/{sub_settings['path']}"
+    ssh = get_ssh(nginx_server)
+    ssh.connect()
+    try:
+        out, _, code = ssh.run_sudo_command(
+            f"ls -1 {shlex.quote(sub_dir)} 2>/dev/null")
+        if code != 0 or not (out or '').strip():
+            return
+        stale = [name.strip() for name in out.strip().split('\n')
+                 if name.strip() and name.strip() not in valid_tokens
+                 and re.fullmatch(r'[0-9a-f]{32}', name.strip())]
+        for name in stale:
+            ssh.run_sudo_command(f"rm -f {shlex.quote(f'{sub_dir}/{name}')}")
+        if stale:
+            logger.info("removed %d stale subscription files", len(stale))
+    finally:
+        ssh.disconnect()
 
 
 class SubscriptionSettingsRequest(BaseModel):
@@ -13564,10 +13666,24 @@ def api_subscription_settings_save(request: Request, req: SubscriptionSettingsRe
                               if protocol_base(key) == 'nginx'), None) \
                 if old_server is not None else None
             if nginx_key:
-                # Strip the managed location the previous configuration added.
+                # Strip the managed location the previous configuration added
+                # and stop serving the files entirely.
                 _apply_subscription_config(old_server, nginx_key,
                                            subscription_settings(data),
                                            remove=True)
+                try:
+                    from managers.nginx_manager import NginxManager
+                    ssh = get_ssh(old_server)
+                    ssh.connect()
+                    try:
+                        ssh.run_sudo_command(
+                            f"rm -rf {shlex.quote(NginxManager.HTML_DIR + '/' + old['path'])}")
+                    finally:
+                        ssh.disconnect()
+                except Exception:
+                    logger.warning("subscription file cleanup failed", exc_info=True)
+            for user in data.get('users', []):
+                user.pop('sub_url', None)
         return result
     except ValueError as e:
         return JSONResponse({'error': str(e)}, status_code=400)
@@ -13610,12 +13726,15 @@ def api_subscription_reset(request: Request, user_id: str):
         if not user:
             return JSONResponse({'error': 'User not found'}, status_code=404)
         user['sub_token'] = secrets.token_hex(16)  # force a fresh token
-        token, count, errors = push_user_subscription(data, user, sub_settings,
-                                                      nginx_server)
+        token, count, errors, _ = push_user_subscription(data, user, sub_settings,
+                                                         nginx_server)
         save_data(data)
         domain = _subscription_mask_domain(nginx_server)
         url = (f"https://{domain}/{sub_settings['path']}/{token}"
                if domain else None)
+        if url:
+            user['sub_url'] = url
+        save_data(data)
         return {'status': 'success', 'token': token, 'links': count,
                 'url': url, 'errors': errors}
     except Exception as e:

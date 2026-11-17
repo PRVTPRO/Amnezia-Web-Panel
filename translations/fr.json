@@ -110,6 +110,7 @@
   "subscription_path_label": "Chemin d'abonnement",
   "subscription_path_hint": "URL : https://<domaine NGINX>/<chemin>/<jeton>. Lettres minuscules, chiffres, barres obliques et tirets.",
   "subscription_push": "Régénérer les fichiers d'abonnement",
+  "subscription_copy": "Copier le lien d'abonnement",
   "subscription_name_label": "Nom de l'abonnement",
   "subscription_name_hint": "Affiché comme nom de profil dans les clients. Toutes les langues et emojis acceptés.",
   "xray_selfsteal": "Self-steal",

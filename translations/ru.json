@@ -111,6 +111,7 @@
   "subscription_path_label": "Путь подписки",
   "subscription_path_hint": "URL: https://<домен NGINX>/<путь>/<токен>. Латиница, цифры, слэши и дефисы.",
   "subscription_push": "Пересобрать файлы подписок",
+  "subscription_copy": "Скопировать ссылку подписки",
   "subscription_name_label": "Название подписки",
   "subscription_name_hint": "Отображается в клиенте как название профиля. Можно эмодзи и любой язык.",
   "xray_selfsteal": "Self-steal",

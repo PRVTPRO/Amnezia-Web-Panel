@@ -110,6 +110,7 @@
   "subscription_path_label": "订阅路径",
   "subscription_path_hint": "URL：https://<NGINX 域名>/<路径>/<令牌>。小写字母、数字、斜杠和连字符。",
   "subscription_push": "重新生成订阅文件",
+  "subscription_copy": "复制订阅链接",
   "subscription_name_label": "订阅名称",
   "subscription_name_hint": "在客户端中显示为配置名称。可使用任意语言和表情符号。",
   "xray_selfsteal": "Self-steal",
