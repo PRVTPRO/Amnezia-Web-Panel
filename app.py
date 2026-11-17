@@ -499,6 +499,7 @@ from peer_finalization import (
     connection_scope,
     find_connection,
     read_peer_state,
+    apply_final_sample,
     finalize_connection_record,
     commit_finalize,
     make_intent,
@@ -11460,8 +11461,27 @@ def api_server_config_save(request: Request, server_id: int, req: ServerConfigSa
                 unchanged = False
             if unchanged:
                 return {'status': 'success', 'unchanged': True}
-            return JSONResponse({'error': 'Applying this configuration may restart the protocol and reset peer counters. A counter-preserving apply procedure is required.',
-                                 'code': 'traffic_finalization_required'}, status_code=409)
+            if base != 'xray':
+                # Other protocols have no counter-preserving apply; keep
+                # their accounted configs read-only.
+                return JSONResponse({'error': 'Applying this configuration may restart the protocol and reset peer counters. A counter-preserving apply procedure is required.',
+                                     'code': 'traffic_finalization_required'}, status_code=409)
+            # Counter-preserving apply for xray: commit the owned peers'
+            # current counters against their baselines, apply the config,
+            # then move the baselines to the restarted core's zero counters.
+            owned_rows = ownership_rows(current, server_id=server_id,
+                                        protocol=req.protocol)
+            now = time.time()
+            for conn in owned_rows:
+                observed, _quiescent = read_peer_state(
+                    mgr, conn['protocol'], conn.get('client_id'))
+                if observed is not None:
+                    apply_final_sample(current, conn, server, observed, now)
+                else:
+                    # Peer gone or counters unreadable: the restart resets
+                    # the core counters to zero anyway — rebase up front.
+                    conn['last_bytes'] = 0
+            save_data(current)
         if protocol_base(req.protocol) == 'xray':
             from managers.xray_manager import XrayManager
             mgr = XrayManager(ssh, req.protocol)
@@ -11471,6 +11491,19 @@ def api_server_config_save(request: Request, server_id: int, req: ServerConfigSa
             except Exception as e:
                 return JSONResponse({'error': f'Invalid JSON format: {str(e)}'}, status_code=400)
             mgr._save_server_json(data_json)
+            if protected and owned_rows:
+                # The recreation restarted the core with zeroed counters:
+                # move the owned peers' baselines with them, otherwise the
+                # first poll would read observed < baseline.
+                owned_ids = {(c.get('user_id'), c.get('client_id'))
+                             for c in owned_rows}
+                data = load_data()
+                for conn in data.get('user_connections', []):
+                    if (conn.get('server_id') == server_id
+                            and protocol_base(conn.get('protocol')) == base
+                            and (conn.get('user_id'), conn.get('client_id')) in owned_ids):
+                        conn['last_bytes'] = 0
+                save_data(data)
         elif protocol_base(req.protocol) == 'telemt':
             from managers.telemt_manager import TelemtManager
             mgr = TelemtManager(ssh, req.protocol)
