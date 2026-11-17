@@ -179,7 +179,10 @@ class ClearTests(unittest.IsolatedAsyncioTestCase):
 class ClearBrowserTests(unittest.TestCase):
     def test_shared_clear_handler_sends_the_selected_uid(self):
         source = (Path(__file__).resolve().parents[1] / 'static/js/server-management.js').read_text(encoding='utf-8')
-        self.assertIn('/clear?server_uid=${selectedUid()}', source)
+        # Идентичность сервера добавляется helper'ом и только когда uid известен:
+        # пустой ?server_uid= бэкенд считает подменой сервера (409).
+        self.assertIn('withServerUid(`/api/servers/${context.serverId}/clear`)', source)
+        self.assertIn('`${url}?server_uid=${uid}`', source)
         self.assertIn('serverUid: document.body.dataset.serverUid',
                       (Path(__file__).resolve().parents[1] / 'templates/server.html').read_text(encoding='utf-8'))
 
