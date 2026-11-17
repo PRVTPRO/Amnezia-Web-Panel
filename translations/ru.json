@@ -111,6 +111,8 @@
   "subscription_path_label": "Путь подписки",
   "subscription_path_hint": "URL: https://<домен NGINX>/<путь>/<токен>. Латиница, цифры, слэши и дефисы.",
   "subscription_push": "Пересобрать файлы подписок",
+  "subscription_name_label": "Название подписки",
+  "subscription_name_hint": "Отображается в клиенте как название профиля. Можно эмодзи и любой язык.",
   "xray_selfsteal": "Self-steal",
   "xray_selfsteal_title": "Маскировка под локальный сайт NGINX",
   "xray_selfsteal_hint": "Направляет Reality на сайт NGINX на этом же сервере: ваш домен с настоящим сертификатом становится маской, а зонды попадают на настоящий сайт.",

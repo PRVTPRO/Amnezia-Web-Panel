@@ -156,6 +156,7 @@ SUBSCRIPTION_KEYS = {
     'subscription_title', 'subscription_desc', 'subscription_enable',
     'subscription_server_label', 'subscription_server_hint',
     'subscription_path_label', 'subscription_path_hint', 'subscription_push',
+    'subscription_name_label', 'subscription_name_hint',
 }
 
 # I1 masking block (per-instance special-junk packet): install and settings.

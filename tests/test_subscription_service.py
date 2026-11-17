@@ -3,6 +3,7 @@ mask html root."""
 import base64
 import urllib.parse
 import json
+import re
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -38,7 +39,8 @@ class SubscriptionPathTests(unittest.TestCase):
 
     def test_settings_defaults(self):
         self.assertEqual(panel.subscription_settings({'settings': {}}),
-                         {'enabled': False, 'server_id': None, 'path': 'sub'})
+                         {'enabled': False, 'server_id': None, 'path': 'sub',
+                          'name': ''})
 
     def test_nginx_server_requires_an_nginx_protocol(self):
         data = state()
@@ -140,6 +142,42 @@ class SubscriptionPushTests(unittest.TestCase):
                     self.data['servers'][0])
         self.assertIn('198.51.100.1', str(ctx.exception))
         self.assertEqual(self.uploads, [])
+
+
+class SubscriptionConfigTests(unittest.TestCase):
+    def _base_config(self):
+        return NginxManager(Mock())._build_ssl_config('d.example', 443)
+
+    def test_inject_replace_and_remove_are_idempotent(self):
+        base = self._base_config()
+        injected = panel._apply_subscription_config_text(base, 'sub', 'My VPN')
+        self.assertIn('location /sub/', injected)
+        self.assertIn('add_header profile-title "My VPN" always;', injected)
+        self.assertIn('profile-update-interval "24"', injected)
+
+        replaced = panel._apply_subscription_config_text(
+            injected, 'sub2', panel._subscription_profile_title('Другое имя'))
+        self.assertNotIn('location /sub/', replaced)
+        self.assertIn('location /sub2/', replaced)
+        title = 'profile-title "base64:'
+        self.assertIn(title, replaced)
+        import base64 as b64
+        encoded = replaced.split(title, 1)[1].split('"', 1)[0]
+        self.assertEqual(b64.b64decode(encoded).decode(), 'Другое имя')
+
+        removed = panel._apply_subscription_config_text(replaced, remove=True)
+        self.assertNotIn('panel subscription (managed)', removed)
+        normalize = lambda text: re.sub(r'\n{2,}', '\n', text).strip()
+        self.assertEqual(normalize(removed), normalize(base))
+
+    def test_injection_targets_the_last_server_block(self):
+        injected = panel._apply_subscription_config_text(
+            self._base_config(), 'sub', 'My VPN')
+        # The managed location must live inside the 443 server block
+        # (after its location /), not after the final brace.
+        self.assertLess(injected.index('location /sub/'),
+                        injected.rindex('try_files $uri $uri/ /index.html;') + 200)
+        self.assertTrue(injected.rstrip().endswith('}'))
 
 
 class SubscriptionEndpointsTests(unittest.TestCase):

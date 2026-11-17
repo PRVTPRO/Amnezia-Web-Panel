@@ -110,6 +110,8 @@
   "subscription_path_label": "مسیر اشتراک",
   "subscription_path_hint": "URL: https://<دامنه NGINX>/<مسیر>/<توکن>. حروف کوچک، اعداد، اسلش و خط تیره.",
   "subscription_push": "بازسازی فایل‌های اشتراک",
+  "subscription_name_label": "نام اشتراک",
+  "subscription_name_hint": "در کلاینت به‌عنوان نام پروفایل نمایش داده می‌شود. هر زبانی و ایموجی مجاز است.",
   "xray_selfsteal": "Self-steal",
   "xray_selfsteal_title": "پوشش زیر سایت NGINX محلی",
   "xray_selfsteal_hint": "Reality را به سایت NGINX روی همین سرور اشاره می‌دهد: دامنه خودتان با گواهی واقعی پوشش می‌شود و اسکنرهای کاوشگر به سایت واقعی می‌رسند.",

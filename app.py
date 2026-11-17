@@ -13291,7 +13291,8 @@ def subscription_settings(data):
         path = 'sub'
     return {'enabled': bool(settings.get('enabled')),
             'server_id': settings.get('server_id'),
-            'path': path}
+            'path': path,
+            'name': normalize_subscription_name(settings.get('name'))}
 
 
 def normalize_subscription_path(path):
@@ -13299,6 +13300,66 @@ def normalize_subscription_path(path):
     if not re.fullmatch(r'[a-z0-9][a-z0-9/_-]{0,63}', path):
         raise ValueError('Invalid subscription path')
     return path
+
+
+def normalize_subscription_name(name):
+    return ' '.join((name or '').split())[:96]
+
+
+def _subscription_profile_title(name):
+    """profile-title header value: raw when ASCII-safe, base64-prefixed
+    otherwise (the widely supported way to carry non-ASCII names)."""
+    name = name or ''
+    if all(32 <= ord(c) < 127 for c in name):
+        return name
+    return 'base64:' + base64.b64encode(name.encode()).decode()
+
+
+def _subscription_config_block(sub_path, profile_title):
+    return (
+        "\n    # === panel subscription (managed) ===\n"
+        f"    location /{sub_path}/ {{\n"
+        f"        add_header profile-title \"{profile_title}\" always;\n"
+        f"        add_header profile-update-interval \"24\" always;\n"
+        f"        try_files $uri =404;\n"
+        f"    }}\n"
+        "    # === end panel subscription block ===\n"
+    )
+
+
+def _apply_subscription_config_text(config, sub_path='sub', profile_title='',
+                                    remove=False):
+    """Inject/replace/remove the managed subscription location inside the
+    last server block of the mask site config (pure text, testable)."""
+    cleaned = re.sub(r"\n?[ \t]*# === panel subscription \(managed\) ===.*?"
+                     r"# === end panel subscription block ===\n?",
+                     "\n", config, flags=re.S)
+    if remove:
+        return cleaned
+    index = cleaned.rstrip().rfind('}')
+    if index == -1:
+        raise RuntimeError('unexpected NGINX config shape')
+    return cleaned[:index] + _subscription_config_block(sub_path, profile_title) \
+        + cleaned[index:]
+
+
+def _apply_subscription_config(nginx_server, nginx_protocol, sub_settings,
+                               remove=False):
+    """Apply the managed subscription location on the live mask (nginx -t
+    validated by save_server_config, which reverts on failure)."""
+    from managers.nginx_manager import NginxManager
+    ssh = get_ssh(nginx_server)
+    ssh.connect()
+    try:
+        nginx = NginxManager(ssh)
+        config = nginx._get_server_config(nginx_protocol)
+        new_config = _apply_subscription_config_text(
+            config, sub_settings['path'],
+            _subscription_profile_title(sub_settings.get('name')),
+            remove=remove)
+        return nginx.save_server_config(nginx_protocol, new_config)
+    finally:
+        ssh.disconnect()
 
 
 def subscription_nginx_server(data, sub_settings):
@@ -13438,6 +13499,7 @@ class SubscriptionSettingsRequest(BaseModel):
     enabled: bool = False
     server_id: Optional[int] = None
     path: Optional[str] = None
+    name: Optional[str] = None
 
 
 @app.get('/api/subscription/status', tags=["Settings"])
@@ -13467,6 +13529,8 @@ def api_subscription_settings_save(request: Request, req: SubscriptionSettingsRe
     try:
         data = load_data()
         sub_path = normalize_subscription_path(req.path)
+        sub_name = normalize_subscription_name(req.name)
+        old = subscription_settings(data)
         if req.enabled:
             probe = subscription_nginx_server(
                 data, {'enabled': True, 'server_id': req.server_id})
@@ -13477,15 +13541,30 @@ def api_subscription_settings_save(request: Request, req: SubscriptionSettingsRe
         settings['enabled'] = req.enabled
         settings['server_id'] = req.server_id
         settings['path'] = sub_path
+        settings['name'] = sub_name
         save_data(data)
         result = {'status': 'success', 'enabled': req.enabled, 'path': sub_path,
                   'pushed': [], 'errors': []}
         if req.enabled:
+            nginx_key = next(key for key in (probe.get('protocols') or {})
+                             if protocol_base(key) == 'nginx')
+            _apply_subscription_config(probe, nginx_key,
+                                       subscription_settings(data))
             outcome = push_all_subscriptions(data)
             save_data(data)  # freshly minted sub tokens
             result['pushed'] = outcome['pushed']
             result['errors'] = outcome['errors']
             result['domain'] = outcome.get('domain')
+        elif old['enabled']:
+            old_server = subscription_nginx_server(data, {'server_id': old['server_id']})
+            nginx_key = next((key for key in (old_server.get('protocols') or {})
+                              if protocol_base(key) == 'nginx'), None) \
+                if old_server is not None else None
+            if nginx_key:
+                # Strip the managed location the previous configuration added.
+                _apply_subscription_config(old_server, nginx_key,
+                                           subscription_settings(data),
+                                           remove=True)
         return result
     except ValueError as e:
         return JSONResponse({'error': str(e)}, status_code=400)

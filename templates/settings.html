@@ -79,6 +79,11 @@
             </div>
             <div id="subFields" style="display: {% if subscription_settings.enabled %}block{% else %}none{% endif %};">
                 <div class="form-group">
+                    <label class="form-label">{{ _('subscription_name_label') }}</label>
+                    <input class="form-input" id="subName" value="{{ subscription_settings.name }}" placeholder="My VPN">
+                    <div class="form-hint">{{ _('subscription_name_hint') }}</div>
+                </div>
+                <div class="form-group">
                     <label class="form-label">{{ _('subscription_server_label') }}</label>
                     <select class="form-input" id="subServer">
                         <option value="">—</option>
@@ -2202,12 +2207,13 @@ async function saveSubscription() {
     const btn = document.getElementById('subSaveBtn');
     btn.disabled = true;
     try {
-        const res = await apiCall('/api/settings/subscription', 'POST', {
-            enabled: document.getElementById('sub_enabled').checked,
-            server_id: document.getElementById('subServer').value === ''
-                ? null : parseInt(document.getElementById('subServer').value),
-            path: document.getElementById('subPath').value.trim() || 'sub',
-        });
+            const res = await apiCall('/api/settings/subscription', 'POST', {
+                enabled: document.getElementById('sub_enabled').checked,
+                server_id: document.getElementById('subServer').value === ''
+                    ? null : parseInt(document.getElementById('subServer').value),
+                path: document.getElementById('subPath').value.trim() || 'sub',
+                name: document.getElementById('subName').value.trim(),
+            });
         renderSubscriptionStatus(res);
         showToast(_('saved') || 'Saved', 'success');
     } catch (err) {

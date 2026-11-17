@@ -111,6 +111,8 @@
   "subscription_path_label": "Subscription path",
   "subscription_path_hint": "URL: https://<NGINX domain>/<path>/<token>. Lowercase letters, digits, slashes and dashes.",
   "subscription_push": "Regenerate subscription files",
+  "subscription_name_label": "Subscription name",
+  "subscription_name_hint": "Shown as the profile name in clients. Any language and emoji are fine.",
   "xray_selfsteal": "Self-steal",
   "xray_selfsteal_title": "Mask under the local NGINX site",
   "xray_selfsteal_hint": "Points Reality at the NGINX site running on this server: your own domain with a real certificate becomes the mask, and probing scanners land on the real site.",
