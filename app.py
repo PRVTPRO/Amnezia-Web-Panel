@@ -13425,6 +13425,7 @@ def push_user_subscription(data, user, sub_settings, nginx_server):
     links = []
     errors = []
     for server, conns in _subscription_user_targets(data, user):
+        instance_names = server_protocol_names(server)
         try:
             ssh = get_ssh(server)
             ssh.connect()
@@ -13444,9 +13445,11 @@ def push_user_subscription(data, user, sub_settings, nginx_server):
                         # client: "server · xray instance". The panel-side
                         # connection name is the admin's private note and
                         # must not leak into the subscription.
+                        instance_name = (proto_info.get('custom_name')
+                                         or instance_names.get(protocol)
+                                         or protocol_display_name(protocol))
                         entry_name = (f"{server.get('name') or server.get('host')}"
-                                      f" · {proto_info.get('display_name')
-                                      or protocol_display_name(protocol)}")
+                                      f" · {instance_name}")
                         fragment = urllib.parse.quote(entry_name)
                         links.append(link.rpartition('#')[0] + '#' + fragment
                                      if '#' in link

@@ -109,7 +109,7 @@ class SubscriptionPushTests(unittest.TestCase):
     def test_push_uses_named_server_and_instance(self):
         user = self.data['users'][0]
         self.data['servers'][1]['name'] = 'Frankfurt'
-        self.data['servers'][1]['protocols']['xray']['display_name'] = 'Xray #2'
+        self.data['servers'][1]['protocols']['xray']['custom_name'] = 'VLESS+XHTTP+REALITY'
         ssh = self._ssh()
         manager = Mock()
         manager.get_client_config = Mock(
@@ -123,7 +123,7 @@ class SubscriptionPushTests(unittest.TestCase):
         content, _ = self.uploads[0]
         base, _, fragment = base64.b64decode(content).decode().rpartition('#')
         self.assertEqual(base, 'vless://peer-1@entry:443?type=tcp')
-        self.assertEqual(urllib.parse.unquote(fragment), 'Frankfurt · Xray #2')
+        self.assertEqual(urllib.parse.unquote(fragment), 'Frankfurt · VLESS+XHTTP+REALITY')
 
     def test_push_reports_entry_failure_when_no_links_were_collected(self):
         user = self.data['users'][0]
