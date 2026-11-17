@@ -241,6 +241,22 @@ class AutoPushTests(unittest.TestCase):
         self.assertIsNone(self.data['users'][0].get('sub_url'))
 
 
+    def test_auto_push_is_silent_when_disabled(self):
+        self.data['settings'] = {'subscription': {
+            'enabled': False, 'server_id': 0, 'path': 'sub'}}
+        self.data['users'][0]['sub_url'] = 'https://mask.example/sub/keep'
+        # Any SSH or data write attempt while disabled is a test failure.
+        self.ssh.upload_file_sudo = Mock(side_effect=AssertionError('ssh write'))
+        self.ssh.run_sudo_command = Mock(side_effect=AssertionError('ssh cmd'))
+        self.ssh.connect = Mock(side_effect=AssertionError('ssh connect'))
+        save = Mock(side_effect=AssertionError('save_data'))
+        with patch.object(panel, 'get_ssh', return_value=self.ssh),              patch.object(panel, 'save_data', save):
+            panel.auto_push_subscriptions(self.data, ['u1'])
+        self.assertEqual(self.uploads, [])
+        self.assertEqual(self.data['users'][0]['sub_url'],
+                         'https://mask.example/sub/keep')
+
+
 class SubscriptionEndpointsTests(unittest.TestCase):
     def request(self):
         return SimpleNamespace(cookies={}, headers={})
