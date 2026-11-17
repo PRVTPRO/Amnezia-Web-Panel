@@ -27,6 +27,7 @@
     <a href="#settings-tokens">{{ _('api_tokens_title') }}</a>
     <a href="#settings-exit-nodes">{{ _('exit_defaults_title') }}</a>
     <a href="#settings-self-service">{{ _('self_service_title') }}</a>
+    <a href="#settings-subscription">{{ _('subscription_title') }}</a>
     <a href="#settings-about">{{ _('about_title') }}</a>
 </nav>
 
@@ -64,50 +65,6 @@
                     </label>
                 </div>
             </form>
-        </div>
-
-        <!-- BLOCK Subscription (Xray) -->
-        <div class="card" id="settings-subscription">
-            <h3 class="card-title" style="margin-bottom: var(--space-lg);">{{ _('subscription_title') }}</h3>
-            <p class="form-hint" style="margin-bottom: var(--space-md);">{{ _('subscription_desc') }}</p>
-            <div class="form-group">
-                <label style="display: flex; align-items: center; gap: var(--space-sm); cursor: pointer;">
-                    <input type="checkbox" id="sub_enabled" {% if subscription_settings.enabled %}checked{% endif %}
-                        onchange="toggleSubscriptionFields()">
-                    {{ _('subscription_enable') }}
-                </label>
-            </div>
-            <div id="subFields" style="display: {% if subscription_settings.enabled %}block{% else %}none{% endif %};">
-                <div class="form-group">
-                    <label class="form-label">{{ _('subscription_name_label') }}</label>
-                    <input class="form-input" id="subName" value="{{ subscription_settings.name }}" placeholder="My VPN">
-                    <div class="form-hint">{{ _('subscription_name_hint') }}</div>
-                </div>
-                <div class="form-group">
-                    <label class="form-label">{{ _('subscription_server_label') }}</label>
-                    <select class="form-input" id="subServer">
-                        <option value="">—</option>
-                        {% for server in subscription_servers %}
-                        <option value="{{ server.id }}" {% if subscription_settings.server_id == server.id %}selected{% endif %}>{{ server.label }}</option>
-                        {% endfor %}
-                    </select>
-                    <div class="form-hint">{{ _('subscription_server_hint') }}</div>
-                </div>
-                <div class="form-group">
-                    <label class="form-label">{{ _('subscription_path_label') }}</label>
-                    <input class="form-input" id="subPath" value="{{ subscription_settings.path }}" placeholder="sub">
-                    <div class="form-hint">{{ _('subscription_path_hint') }}</div>
-                </div>
-                <div class="row-between" style="margin-top: var(--space-md);">
-                    <button type="button" class="btn btn-secondary btn-sm" onclick="pushSubscriptions()" id="subPushBtn">
-                        {{ _('subscription_push') }}
-                    </button>
-                    <button type="button" class="btn btn-primary btn-sm" onclick="saveSubscription()" id="subSaveBtn">
-                        {{ _('save') }}
-                    </button>
-                </div>
-                <div id="subStatus" style="margin-top: var(--space-md);"></div>
-            </div>
         </div>
 
         <!-- BLOCK Telegram Bot -->
@@ -908,6 +865,50 @@
                 </div>
             </div>
             </div>{# /cb_body #}
+        </div>
+
+        <!-- BLOCK Subscription (Xray) -->
+        <div class="card" id="settings-subscription" style="margin-top: var(--space-lg);">
+            <h3 class="card-title" style="margin-bottom: var(--space-lg);">🔗 {{ _('subscription_title') }}</h3>
+            <p class="form-hint" style="margin-bottom: var(--space-md);">{{ _('subscription_desc') }}</p>
+            <div class="form-group">
+                <label style="display: flex; align-items: center; gap: var(--space-sm); cursor: pointer;">
+                    <input type="checkbox" id="sub_enabled" {% if subscription_settings.enabled %}checked{% endif %}
+                        onchange="toggleSubscriptionFields()">
+                    {{ _('subscription_enable') }}
+                </label>
+            </div>
+            <div id="subFields" style="display: {% if subscription_settings.enabled %}block{% else %}none{% endif %};">
+                <div class="form-group">
+                    <label class="form-label">{{ _('subscription_name_label') }}</label>
+                    <input class="form-input" id="subName" value="{{ subscription_settings.name }}" placeholder="My VPN">
+                    <div class="form-hint">{{ _('subscription_name_hint') }}</div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">{{ _('subscription_server_label') }}</label>
+                    <select class="form-input" id="subServer">
+                        <option value="">—</option>
+                        {% for server in subscription_servers %}
+                        <option value="{{ server.id }}" {% if subscription_settings.server_id == server.id %}selected{% endif %}>{{ server.label }}</option>
+                        {% endfor %}
+                    </select>
+                    <div class="form-hint">{{ _('subscription_server_hint') }}</div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">{{ _('subscription_path_label') }}</label>
+                    <input class="form-input" id="subPath" value="{{ subscription_settings.path }}" placeholder="sub">
+                    <div class="form-hint">{{ _('subscription_path_hint') }}</div>
+                </div>
+                <div class="row-between" style="margin-top: var(--space-md);">
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="pushSubscriptions()" id="subPushBtn">
+                        {{ _('subscription_push') }}
+                    </button>
+                    <button type="button" class="btn btn-primary btn-sm" onclick="saveSubscription()" id="subSaveBtn">
+                        {{ _('save') }}
+                    </button>
+                </div>
+                <div id="subStatus" style="margin-top: var(--space-md);"></div>
+            </div>
         </div>
 
         <!-- BLOCK: About & Updates -->
