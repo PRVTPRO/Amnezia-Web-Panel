@@ -13268,7 +13268,252 @@ def settings_page(request: Request):
         backup_csrf=backup_csrf,
         self_service_protocol_choices=self_service_protocol_choices(),
         cheburcheck_targets=_cheburcheck_targets_context(data),
+        subscription_settings=subscription_settings(data),
+        subscription_servers=[
+            {'id': index, 'label': server.get('name') or server.get('host')}
+            for index, server in enumerate(data.get('servers', []))
+            if any(protocol_base(key) == 'nginx'
+                   for key in (server.get('protocols') or {}))
+        ],
     )
+
+
+# ===== Subscriptions (Xray): the panel builds each user's link list and
+# pushes ready base64 files into the html root of an NGINX mask server,
+# where clients fetch them over the entry domain. The panel itself stays
+# unreachable from the internet — it only initiates outbound SSH. =====
+
+def subscription_settings(data):
+    settings = (data.get('settings') or {}).get('subscription') or {}
+    try:
+        path = normalize_subscription_path(settings.get('path'))
+    except ValueError:
+        path = 'sub'
+    return {'enabled': bool(settings.get('enabled')),
+            'server_id': settings.get('server_id'),
+            'path': path}
+
+
+def normalize_subscription_path(path):
+    path = (path or '').strip().strip('/').lower() or 'sub'
+    if not re.fullmatch(r'[a-z0-9][a-z0-9/_-]{0,63}', path):
+        raise ValueError('Invalid subscription path')
+    return path
+
+
+def subscription_nginx_server(data, sub_settings):
+    """The NGINX server chosen as the subscription file host, or None."""
+    server_id = sub_settings.get('server_id')
+    if not isinstance(server_id, int) or not 0 <= server_id < len(data.get('servers', [])):
+        return None
+    server = data['servers'][server_id]
+    if not any(protocol_base(key) == 'nginx'
+               for key in (server.get('protocols') or {})):
+        return None
+    return server
+
+
+def ensure_subscription_token(user):
+    token = user.get('sub_token')
+    if not token or not re.fullmatch(r'[0-9a-f]{32}', str(token)):
+        token = secrets.token_hex(16)
+        user['sub_token'] = token
+    return token
+
+
+def _subscription_user_targets(data, user):
+    """[(server, [connection, ...])] for the user's xray connections."""
+    groups = {}
+    for conn in data.get('user_connections', []):
+        if conn.get('user_id') != user.get('id'):
+            continue
+        protocol = conn.get('protocol') or ''
+        if not protocol.startswith('xray'):
+            continue
+        server_id = conn.get('server_id')
+        if isinstance(server_id, int) and 0 <= server_id < len(data.get('servers', [])):
+            groups.setdefault(server_id, []).append(conn)
+    return [(data['servers'][server_id], conns)
+            for server_id, conns in groups.items()]
+
+
+def push_user_subscription(data, user, sub_settings, nginx_server):
+    """Build the user's link list and write the base64 file into the mask
+    html root. One SSH hop per entry server (the live config is the link
+    source) plus one write into the mask server.
+    Returns (token, link_count, per-entry-server errors)."""
+    from managers.nginx_manager import NginxManager
+    token = ensure_subscription_token(user)
+    links = []
+    errors = []
+    for server, conns in _subscription_user_targets(data, user):
+        try:
+            ssh = get_ssh(server)
+            ssh.connect()
+            try:
+                for conn in conns:
+                    protocol = conn['protocol']
+                    proto_info = server.get('protocols', {}).get(protocol, {})
+                    port = proto_info.get('port', 443)
+                    pub_host, pub_port = protocol_public_endpoint(server, protocol)
+                    link = _manager_call(
+                        get_protocol_manager(ssh, protocol), 'get_client_config',
+                        protocol, conn.get('client_id'), pub_host, port,
+                        public_port=pub_port,
+                        **xray_fp_kwargs(server, protocol))
+                    if link:
+                        links.append(link)
+            finally:
+                ssh.disconnect()
+        except Exception as e:
+            errors.append(f"{server.get('host')}: {e}")
+    if not links:
+        raise RuntimeError('no links collected: '
+                           + ('; '.join(errors) or 'no xray connections'))
+    payload = base64.b64encode('\n'.join(links).encode()).decode()
+    sub_dir = f"{NginxManager.HTML_DIR}/{sub_settings['path']}"
+    ssh = get_ssh(nginx_server)
+    ssh.connect()
+    try:
+        ssh.run_sudo_command(f"mkdir -p {shlex.quote(sub_dir)}")
+        ssh.upload_file_sudo(payload, f"{sub_dir}/{token}")
+    finally:
+        ssh.disconnect()
+    return token, len(links), errors
+
+
+def push_all_subscriptions(data):
+    sub_settings = subscription_settings(data)
+    nginx_server = subscription_nginx_server(data, sub_settings)
+    if nginx_server is None:
+        raise ValueError('No NGINX server selected for subscriptions')
+    pushed, errors = [], []
+    for user in data.get('users', []):
+        if not _subscription_user_targets(data, user):
+            continue
+        try:
+            token, count, user_errors = push_user_subscription(
+                data, user, sub_settings, nginx_server)
+            errors.extend(f"{user.get('username')}: {text}" for text in user_errors)
+            pushed.append({'username': user.get('username'), 'token': token,
+                           'links': count})
+        except Exception as e:
+            errors.append(f"{user.get('username')}: {e}")
+    return {'pushed': pushed, 'errors': errors}
+
+
+class SubscriptionSettingsRequest(BaseModel):
+    enabled: bool = False
+    server_id: Optional[int] = None
+    path: Optional[str] = None
+
+
+@app.get('/api/subscription/status', tags=["Settings"])
+def api_subscription_status(request: Request):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    data = load_data()
+    sub_settings = subscription_settings(data)
+    nginx_server = (subscription_nginx_server(data, sub_settings)
+                    if sub_settings['enabled'] else None)
+    domain = None
+    urls = []
+    if nginx_server is not None:
+        try:
+            from managers.nginx_manager import NginxManager
+            ssh = get_ssh(nginx_server)
+            ssh.connect()
+            try:
+                domain = NginxManager(ssh).get_server_status(
+                    next(key for key in (nginx_server.get('protocols') or {})
+                         if protocol_base(key) == 'nginx')).get('domain')
+            finally:
+                ssh.disconnect()
+        except Exception:
+            logger.warning("subscription mask domain lookup failed", exc_info=True)
+        prefix = f"https://{domain or '<mask-domain>'}/{sub_settings['path']}/"
+        for user in data.get('users', []):
+            token = user.get('sub_token')
+            if token and _subscription_user_targets(data, user):
+                urls.append({'username': user.get('username'),
+                             'url': prefix + token})
+    return {**sub_settings, 'domain': domain, 'urls': urls}
+
+
+@app.post('/api/settings/subscription', tags=["Settings"])
+def api_subscription_settings_save(request: Request, req: SubscriptionSettingsRequest):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        sub_path = normalize_subscription_path(req.path)
+        if req.enabled:
+            probe = subscription_nginx_server(
+                data, {'enabled': True, 'server_id': req.server_id})
+            if probe is None:
+                return JSONResponse(
+                    {'error': 'Select a server with NGINX installed'}, status_code=400)
+        settings = data.setdefault('settings', {}).setdefault('subscription', {})
+        settings['enabled'] = req.enabled
+        settings['server_id'] = req.server_id
+        settings['path'] = sub_path
+        save_data(data)
+        result = {'status': 'success', 'enabled': req.enabled, 'path': sub_path,
+                  'pushed': [], 'errors': []}
+        if req.enabled:
+            outcome = push_all_subscriptions(data)
+            save_data(data)  # freshly minted sub tokens
+            result['pushed'] = outcome['pushed']
+            result['errors'] = outcome['errors']
+        return result
+    except ValueError as e:
+        return JSONResponse({'error': str(e)}, status_code=400)
+    except Exception as e:
+        logger.exception("subscription settings save failed")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/subscription/push', tags=["Settings"])
+def api_subscription_push(request: Request):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if not subscription_settings(data)['enabled']:
+            return JSONResponse({'error': 'Subscriptions are disabled'},
+                                status_code=409)
+        outcome = push_all_subscriptions(data)
+        save_data(data)
+        return {'status': 'success', **outcome}
+    except ValueError as e:
+        return JSONResponse({'error': str(e)}, status_code=400)
+    except Exception as e:
+        logger.exception("subscription push failed")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/users/{user_id}/subscription/reset', tags=["Settings"])
+def api_subscription_reset(request: Request, user_id: str):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        sub_settings = subscription_settings(data)
+        nginx_server = subscription_nginx_server(data, sub_settings)
+        if nginx_server is None:
+            return JSONResponse({'error': 'Subscriptions are disabled'},
+                                status_code=409)
+        user = next((u for u in data.get('users', []) if u.get('id') == user_id), None)
+        if not user:
+            return JSONResponse({'error': 'User not found'}, status_code=404)
+        user['sub_token'] = secrets.token_hex(16)  # force a fresh token
+        token, count, errors = push_user_subscription(data, user, sub_settings,
+                                                      nginx_server)
+        save_data(data)
+        return {'status': 'success', 'token': token, 'links': count, 'errors': errors}
+    except Exception as e:
+        logger.exception("subscription token reset failed")
+        return JSONResponse({'error': str(e)}, status_code=500)
 
 
 @app.get('/api/settings', tags=["Settings"])

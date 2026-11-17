@@ -66,6 +66,45 @@
             </form>
         </div>
 
+        <!-- BLOCK Subscription (Xray) -->
+        <div class="card" id="settings-subscription">
+            <h3 class="card-title" style="margin-bottom: var(--space-lg);">{{ _('subscription_title') }}</h3>
+            <p class="form-hint" style="margin-bottom: var(--space-md);">{{ _('subscription_desc') }}</p>
+            <div class="form-group">
+                <label style="display: flex; align-items: center; gap: var(--space-sm); cursor: pointer;">
+                    <input type="checkbox" id="sub_enabled" {% if subscription_settings.enabled %}checked{% endif %}
+                        onchange="toggleSubscriptionFields()">
+                    {{ _('subscription_enable') }}
+                </label>
+            </div>
+            <div id="subFields" style="display: {% if subscription_settings.enabled %}block{% else %}none{% endif %};">
+                <div class="form-group">
+                    <label class="form-label">{{ _('subscription_server_label') }}</label>
+                    <select class="form-input" id="subServer">
+                        <option value="">—</option>
+                        {% for server in subscription_servers %}
+                        <option value="{{ server.id }}" {% if subscription_settings.server_id == server.id %}selected{% endif %}>{{ server.label }}</option>
+                        {% endfor %}
+                    </select>
+                    <div class="form-hint">{{ _('subscription_server_hint') }}</div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">{{ _('subscription_path_label') }}</label>
+                    <input class="form-input" id="subPath" value="{{ subscription_settings.path }}" placeholder="sub">
+                    <div class="form-hint">{{ _('subscription_path_hint') }}</div>
+                </div>
+                <div class="row-between" style="margin-top: var(--space-md);">
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="pushSubscriptions()" id="subPushBtn">
+                        {{ _('subscription_push') }}
+                    </button>
+                    <button type="button" class="btn btn-primary btn-sm" onclick="saveSubscription()" id="subSaveBtn">
+                        {{ _('save') }}
+                    </button>
+                </div>
+                <div id="subStatus" style="margin-top: var(--space-md);"></div>
+            </div>
+        </div>
+
         <!-- BLOCK Telegram Bot -->
         <div class="card" id="settings-telegram">
             <h3 class="card-title" style="margin-bottom: var(--space-lg);">{{ _('telegram_bot_title') }}</h3>
@@ -2133,5 +2172,73 @@ async function runAllCheburcheck() {
     }
 })();
 renderCheburcheckTargets();
+
+// ===== Subscriptions (Xray) =====
+function toggleSubscriptionFields() {
+    const on = document.getElementById('sub_enabled').checked;
+    document.getElementById('subFields').style.display = on ? 'block' : 'none';
+}
+
+function renderSubscriptionStatus(res) {
+    const box = document.getElementById('subStatus');
+    if (!box) return;
+    box.textContent = '';
+    (res.pushed || []).forEach(row => {
+        const p = document.createElement('div');
+        p.className = 'text-muted text-sm';
+        p.textContent = row.url ? `${row.username}: ${row.url}`
+            : `${row.username}: /${res.path}/${row.token} — ${row.links || 0}`;
+        box.appendChild(p);
+    });
+    (res.errors || []).forEach(text => {
+        const p = document.createElement('div');
+        p.className = 'text-muted text-sm';
+        p.textContent = '✗ ' + text;
+        box.appendChild(p);
+    });
+}
+
+async function saveSubscription() {
+    const btn = document.getElementById('subSaveBtn');
+    btn.disabled = true;
+    try {
+        const res = await apiCall('/api/settings/subscription', 'POST', {
+            enabled: document.getElementById('sub_enabled').checked,
+            server_id: document.getElementById('subServer').value === ''
+                ? null : parseInt(document.getElementById('subServer').value),
+            path: document.getElementById('subPath').value.trim() || 'sub',
+        });
+        renderSubscriptionStatus(res);
+        showToast(_('saved') || 'Saved', 'success');
+    } catch (err) {
+        showToast((_('error') || 'Error') + ': ' + err.message, 'error');
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+async function pushSubscriptions() {
+    const btn = document.getElementById('subPushBtn');
+    btn.disabled = true;
+    try {
+        const res = await apiCall('/api/subscription/push', 'POST', {});
+        renderSubscriptionStatus(res);
+        showToast(_('saved') || 'OK', 'success');
+    } catch (err) {
+        showToast((_('error') || 'Error') + ': ' + err.message, 'error');
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+(async function loadSubscriptionStatus() {
+    if (!document.getElementById('sub_enabled') || !document.getElementById('sub_enabled').checked) return;
+    try {
+        const res = await apiCall('/api/subscription/status', 'GET');
+        renderSubscriptionStatus({path: res.path,
+            pushed: (res.urls || []).map(u => ({username: u.username, url: u.url})),
+            errors: []});
+    } catch (e) { /* the block is optional; stay quiet */ }
+})();
 </script>
 {% endblock %}

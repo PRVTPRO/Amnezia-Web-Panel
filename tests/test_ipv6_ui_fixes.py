@@ -152,6 +152,12 @@ PROTOCOL_UNINSTALL_KEYS = {
     'uninstall_archive_confirm', 'uninstall_archived',
 }
 
+SUBSCRIPTION_KEYS = {
+    'subscription_title', 'subscription_desc', 'subscription_enable',
+    'subscription_server_label', 'subscription_server_hint',
+    'subscription_path_label', 'subscription_path_hint', 'subscription_push',
+}
+
 # I1 masking block (per-instance special-junk packet): install and settings.
 AWG_I1_KEYS = {
     'awg_i1_ascii_only', 'awg_i1_auto_badge', 'awg_i1_bad_tag',
@@ -425,7 +431,8 @@ class TestC6Translations(unittest.TestCase):
                                     - TORRENT_GUARD_KEYS
                                     - AWG_I1_KEYS - SRV_WARP_NO_AWG_KEYS
                                     - COPY_INSTANCE_KEYS - LATER_FEATURE_KEYS
-                                    - RELEASE_1811_KEYS - USER_LIMIT_KEYS - TELEGRAM_ACCOUNT_KEYS))
+                                    - RELEASE_1811_KEYS - USER_LIMIT_KEYS
+                                    - TELEGRAM_ACCOUNT_KEYS - SUBSCRIPTION_KEYS))
         self.assertEqual(hashlib.sha256(previous.encode('utf-8')).hexdigest(),
                          PRE_PANEL_ACCESS_KEYS_SHA256,
                          'Existing catalogue changed outside the declared additions')
@@ -434,7 +441,8 @@ class TestC6Translations(unittest.TestCase):
         for locale in LOCALES:
             data = translation(locale)
             for key in (NEW_KEYS | PANEL_ACCESS_KEYS | PROTOCOL_UNINSTALL_KEYS
-                        | TORRENT_GUARD_KEYS | AWG_I1_KEYS | USER_LIMIT_KEYS | TELEGRAM_ACCOUNT_KEYS):
+                        | TORRENT_GUARD_KEYS | AWG_I1_KEYS | USER_LIMIT_KEYS
+                        | TELEGRAM_ACCOUNT_KEYS | SUBSCRIPTION_KEYS):
                 self.assertIn(key, data)
                 self.assertTrue(str(data[key]).strip(), "%s empty in %s" % (key, locale))
 
