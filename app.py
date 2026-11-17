@@ -13321,6 +13321,23 @@ def ensure_subscription_token(user):
     return token
 
 
+def _subscription_mask_domain(nginx_server):
+    """The LE domain the NGINX mask serves (best-effort live lookup)."""
+    try:
+        from managers.nginx_manager import NginxManager
+        ssh = get_ssh(nginx_server)
+        ssh.connect()
+        try:
+            return NginxManager(ssh).get_server_status(
+                next(key for key in (nginx_server.get('protocols') or {})
+                     if protocol_base(key) == 'nginx')).get('domain')
+        finally:
+            ssh.disconnect()
+    except Exception:
+        logger.warning("subscription mask domain lookup failed", exc_info=True)
+        return None
+
+
 def _subscription_user_targets(data, user):
     """[(server, [connection, ...])] for the user's xray connections."""
     groups = {}
@@ -13387,6 +13404,7 @@ def push_all_subscriptions(data):
     nginx_server = subscription_nginx_server(data, sub_settings)
     if nginx_server is None:
         raise ValueError('No NGINX server selected for subscriptions')
+    domain = _subscription_mask_domain(nginx_server)
     pushed, errors = [], []
     for user in data.get('users', []):
         if not _subscription_user_targets(data, user):
@@ -13395,11 +13413,15 @@ def push_all_subscriptions(data):
             token, count, user_errors = push_user_subscription(
                 data, user, sub_settings, nginx_server)
             errors.extend(f"{user.get('username')}: {text}" for text in user_errors)
-            pushed.append({'username': user.get('username'), 'token': token,
-                           'links': count})
+            pushed.append({
+                'username': user.get('username'), 'token': token, 'links': count,
+                'url': (f"https://{domain}/{sub_settings['path']}/{token}"
+                        if domain else None),
+            })
         except Exception as e:
             errors.append(f"{user.get('username')}: {e}")
-    return {'pushed': pushed, 'errors': errors}
+    return {'pushed': pushed, 'errors': errors,
+            'path': sub_settings['path'], 'domain': domain}
 
 
 class SubscriptionSettingsRequest(BaseModel):
@@ -13416,21 +13438,9 @@ def api_subscription_status(request: Request):
     sub_settings = subscription_settings(data)
     nginx_server = (subscription_nginx_server(data, sub_settings)
                     if sub_settings['enabled'] else None)
-    domain = None
+    domain = _subscription_mask_domain(nginx_server) if nginx_server is not None else None
     urls = []
     if nginx_server is not None:
-        try:
-            from managers.nginx_manager import NginxManager
-            ssh = get_ssh(nginx_server)
-            ssh.connect()
-            try:
-                domain = NginxManager(ssh).get_server_status(
-                    next(key for key in (nginx_server.get('protocols') or {})
-                         if protocol_base(key) == 'nginx')).get('domain')
-            finally:
-                ssh.disconnect()
-        except Exception:
-            logger.warning("subscription mask domain lookup failed", exc_info=True)
         prefix = f"https://{domain or '<mask-domain>'}/{sub_settings['path']}/"
         for user in data.get('users', []):
             token = user.get('sub_token')
@@ -13465,6 +13475,7 @@ def api_subscription_settings_save(request: Request, req: SubscriptionSettingsRe
             save_data(data)  # freshly minted sub tokens
             result['pushed'] = outcome['pushed']
             result['errors'] = outcome['errors']
+            result['domain'] = outcome.get('domain')
         return result
     except ValueError as e:
         return JSONResponse({'error': str(e)}, status_code=400)
@@ -13510,7 +13521,11 @@ def api_subscription_reset(request: Request, user_id: str):
         token, count, errors = push_user_subscription(data, user, sub_settings,
                                                       nginx_server)
         save_data(data)
-        return {'status': 'success', 'token': token, 'links': count, 'errors': errors}
+        domain = _subscription_mask_domain(nginx_server)
+        url = (f"https://{domain}/{sub_settings['path']}/{token}"
+               if domain else None)
+        return {'status': 'success', 'token': token, 'links': count,
+                'url': url, 'errors': errors}
     except Exception as e:
         logger.exception("subscription token reset failed")
         return JSONResponse({'error': str(e)}, status_code=500)
