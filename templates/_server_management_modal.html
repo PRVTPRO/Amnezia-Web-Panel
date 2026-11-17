@@ -1,14 +1,24 @@
-<!-- Shared server-management modal used by the dashboard and server detail page. -->
+{#- Общая модалка управления сервером: используется дашбордом и страницей сервера.
+
+    Вёрстка без inline-стилей (правило проекта, HANDOFF 2026-11-18): раскладка
+    живёт в классах .sm-* в static/css/style.css, иконки — в реестре
+    templates/_ui_icons.html (монохромные, currentColor, без эмодзи). -#}
+{% from "_ui_icons.html" import ui_icon, ui_icon_json %}
 <div class="modal-backdrop" id="serverManagementModal">
     <div class="modal">
         <div class="modal-header">
             <div>
-                <h2 class="modal-title">⚙️ {{ _('server_management') }}</h2>
+                <h2 class="modal-title">
+                    <span class="btn-text-with-icon">{{ ui_icon('settings', 18) }} {{ _('server_management') }}</span>
+                </h2>
                 <div class="text-muted text-sm">{{ _('server_management_desc') }}</div>
             </div>
-            <button class="modal-close" onclick="closeModal('serverManagementModal')">×</button>
+            <button class="modal-close" onclick="closeModal('serverManagementModal')" title="{{ _('close') }}">×</button>
         </div>
         <div id="serverManagementContent"></div>
     </div>
 </div>
+{#- Набор иконок для shared-скрипта: собственный namespace, чтобы не
+    конфликтовать с const UI_ICONS на странице сервера. -#}
+<script>window.SM_ICONS = {{ ui_icon_json() | safe }};</script>
 <script src="/static/js/server-management.js?v={{ static_v }}"></script>

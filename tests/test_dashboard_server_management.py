@@ -41,7 +41,7 @@ class DashboardServerManagementTests(unittest.TestCase):
         self.assertNotIn('async function removeServer', DETAIL)
 
     def test_remove_action_supports_accounting_archive_retry(self):
-        self.assertIn('panel_only=true', SHARED)
+        self.assertIn("extraParam(url, 'panel_only', 'true')", SHARED)
         self.assertNotIn('archive_blocking=true', SHARED)
         self.assertNotIn('traffic_finalization_required', SHARED)
 
@@ -56,8 +56,12 @@ class DashboardServerManagementTests(unittest.TestCase):
         self.assertNotIn('id="checkBtn"', DETAIL)
         self.assertIn('serverId: SERVER_ID', DETAIL)
         self.assertIn('/reboot', SHARED)
-        self.assertIn('/clear?server_uid=', SHARED)
-        self.assertIn('/delete?server_uid=', SHARED)
+        self.assertIn('/clear', SHARED)
+        self.assertIn('/delete', SHARED)
+        # Идентичность сервера передаётся только когда uid известен: пустой
+        # ?server_uid= бэкенд считает подменой сервера (409).
+        self.assertIn('withServerUid(', SHARED)
+        self.assertIn('server_uid=', SHARED)
 
     def test_rendered_dashboard_script_has_valid_javascript(self):
         import json
@@ -92,6 +96,74 @@ class DashboardServerManagementTests(unittest.TestCase):
         import subprocess
         result = subprocess.run(['node', '--check', str(ROOT / 'static' / 'js' / 'server-management.js')], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    # --- Правило проекта: вёрстка без inline-стилей, иконки вместо эмодзи ---
+
+    def test_modal_markup_has_no_inline_styles(self):
+        self.assertNotIn('style="', MODAL)
+        self.assertNotIn('style="', SHARED)
+        # Записи вида state.style.color = ... тоже считаются inline-стилями.
+        self.assertNotIn('.style.', SHARED)
+
+    def test_modal_uses_icon_registry_instead_of_emoji(self):
+        self.assertIn("ui_icon('settings'", MODAL)
+        self.assertIn('window.SM_ICONS', MODAL)
+        for emoji in ('🔄', '🔁', '🧹', '🛡', '💾', '⚙'):
+            self.assertNotIn(emoji, MODAL, emoji)
+            self.assertNotIn(emoji, SHARED, emoji)
+        for name in ('refresh', 'power', 'eraser', 'trash', 'save', 'shield'):
+            self.assertIn("icon('%s'" % name, SHARED)
+
+    def test_torrent_guard_toggle_is_wired_on_open(self):
+        # Регресс сборки на SERVERA: без этого вызова чекбокс остаётся disabled
+        # навсегда и не нажимается ни при каком состоянии сервера.
+        self.assertIn('refreshTorrentGuard();', SHARED)
+        self.assertIn("data-server-management-action=\"check\"", SHARED)
+
+    def test_layout_classes_exist_in_stylesheet(self):
+        css = (ROOT / 'static' / 'css' / 'style.css').read_text(encoding='utf-8')
+        for name in ('.sm-stack', '.sm-action', '.sm-section', '.sm-row',
+                     '.sm-toggle', '.sm-state.is-error', '.sm-hint'):
+            self.assertIn(name, css, name)
+
+    def test_shared_script_behaviour_harness(self):
+        import subprocess
+        harness = ROOT / 'tests' / 'js' / 'server_management_modal.js'
+        self.assertTrue(harness.exists())
+        result = subprocess.run(['node', str(harness)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_modal_endpoints_are_registered(self):
+        # Каждое действие модалки обязано иметь живой маршрут: обработчики в
+        # static/js/server-management.js дергают именно эти пути.
+        import app as panel
+        paths = {getattr(route, 'path', '') for route in panel.app.routes}
+        for path in ('/api/servers/{server_id}/check',
+                     '/api/servers/{server_id}/reboot',
+                     '/api/servers/{server_id}/clear',
+                     '/api/servers/{server_id}/delete',
+                     '/api/servers/{server_id}/ssh_cooldown',
+                     '/api/servers/{server_id}/peer_poll_interval',
+                     '/api/servers/{server_id}/torrent_guard'):
+            self.assertIn(path, paths, path)
+
+    def test_modal_template_renders_without_inline_styles(self):
+        import json
+        from jinja2 import Environment, FileSystemLoader
+
+        strings = json.loads((ROOT / 'translations' / 'ru.json').read_text(encoding='utf-8'))
+        env = Environment(loader=FileSystemLoader(str(ROOT / 'templates')), autoescape=True)
+        html = env.get_template('_server_management_modal.html').render(
+            static_v='synthetic', _=lambda key: strings.get(key, key),
+        )
+        self.assertIn('id="serverManagementModal"', html)
+        self.assertIn('id="serverManagementContent"', html)
+        self.assertIn('window.SM_ICONS', html)
+        self.assertIn('<svg class="ui-icon"', html)
+        self.assertIn('/static/js/server-management.js?v=synthetic', html)
+        self.assertNotIn('style="', html)
+        for emoji in ('🔄', '🔁', '🧹', '🛡', '💾', '⚙'):
+            self.assertNotIn(emoji, html, emoji)
 
 
 if __name__ == '__main__':
