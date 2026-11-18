@@ -9630,6 +9630,35 @@ def api_awg_settings_save(request: Request, server_id: int, req: AwgSettingsRequ
             proto_record['mtu'] = settings.get('mtu')
             proto_record['dns'] = settings.get('dns')
             proto_record['dns6'] = settings.get('dns6')
+            # I1-I5 live in the server config, but the panel keeps its own copy
+            # for the instance card and for copying the instance to another
+            # host. Without this the stored packet keeps the value from install
+            # time and silently disagrees with the server after I1 is edited or
+            # regenerated (PR #346). An empty value means "the packet is gone",
+            # so the key is dropped instead of stored as ''.
+            if settings.get('supports_special_junk'):
+                params = proto_record.get('awg_params')
+                if params is None or params == '':
+                    # Instances installed before PR #346 carry no mapping.
+                    params = {}
+                elif not isinstance(params, dict):
+                    # A hand-edited or damaged record: do not overwrite what
+                    # the admin may still want to recover by hand.
+                    logger.warning(
+                        "awg_params for %s is %s, not a mapping; "
+                        "skipping the I1-I5 write-back", req.protocol,
+                        type(params).__name__)
+                    params = None
+                if params is not None:
+                    for key in ('i1', 'i2', 'i3', 'i4', 'i5'):
+                        raw = settings.get(key)
+                        value = raw.strip() if isinstance(raw, str) else ''
+                        if value:
+                            params[key] = value
+                        else:
+                            params.pop(key, None)
+                    if params or 'awg_params' in proto_record:
+                        proto_record['awg_params'] = params
             save_data(data)
         settings['dns1'], settings['dns2'] = split_dns(settings.get('dns'))
         settings['status'] = 'success'
