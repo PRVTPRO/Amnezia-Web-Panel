@@ -14,6 +14,8 @@ import re
 import sys
 
 KEY_RE = re.compile(r"""_\(\s*['"]([A-Za-z0-9_]+)['"]""")
+# Ключи, которые UI не рендерит, а панель отдаёт текстом: ошибки, письма.
+PY_KEY_RE = re.compile(r"""_t\(\s*['"]([A-Za-z0-9_]+)['"]""")
 SKIP_MARKS = ('.bak.', '.old-', '/vendor/')
 # Ключи, которых в словаре нет намеренно: код собирает их из префикса
 # (`mail_status_` + статус), а у `saved` есть fallback в самом шаблоне.
@@ -21,17 +23,22 @@ SKIP_KEYS = {'saved'}
 
 
 def collect_used(root):
-    """Ключи, которые шаблоны и JS передают в `_()`: {ключ: {файлы}}."""
+    """Ключи из `_()` в шаблонах/JS и из `_t()` в Python: {ключ: {файлы}}."""
     root = pathlib.Path(root)
     used = {}
-    sources = ((root / 'templates', '**/*.html'), (root / 'static' / 'js', '*.js'))
-    for folder, pattern in sources:
+    sources = (
+        (root / 'templates', '**/*.html', KEY_RE),
+        (root / 'static' / 'js', '*.js', KEY_RE),
+        (root, '*.py', PY_KEY_RE),
+        (root / 'managers', '*.py', PY_KEY_RE),
+    )
+    for folder, pattern, regex in sources:
         for path in folder.glob(pattern):
             marker = str(path).replace('\\', '/')
             if any(mark in marker for mark in SKIP_MARKS):
                 continue
             text = path.read_text(encoding='utf-8', errors='ignore')
-            for key in KEY_RE.findall(text):
+            for key in regex.findall(text):
                 used.setdefault(key, set()).add(path.name)
     return {key: files for key, files in used.items()
             if not key.endswith('_') and key not in SKIP_KEYS}
