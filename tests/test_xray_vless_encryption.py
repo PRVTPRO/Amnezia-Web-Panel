@@ -76,8 +76,10 @@ class ToggleTests(unittest.TestCase):
         config = json.loads(json.dumps(XHTTP_CONFIG))
         manager, ssh = make_manager(self.VLESSENC_OUT, config)
 
-        manager.set_vless_encryption(True)
+        state = manager.set_vless_encryption(True)
 
+        self.assertTrue(state['enabled'])
+        self.assertEqual(state['transport'], 'xhttp')
         inbound = config['inbounds'][0]
         self.assertEqual(inbound['settings']['decryption'],
                          'mlkem768x25519plus.native.600s.ServerPriv')

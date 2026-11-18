@@ -1235,6 +1235,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
             self.ssh.run_sudo_command(
                 f"rm -f {shlex.quote(self._config_dir() + '/' + VLESS_ENC_KEY_FILE)}")
         self._write_server_json(config, restart=True)
+        return self.get_vless_encryption_state()
 
     def apply_selfsteal(self, domain, dest):
         """Point Reality at the local NGINX site (self-steal SNI).
