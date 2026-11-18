@@ -48,11 +48,20 @@ def _xhttp_extra():
     }
 
 
-def _client_flow(stream_settings):
-    """xtls-rprx-vision only rides on raw TCP; other transports must
-    leave the flow empty — Xray rejects vision over anything else."""
-    network = (stream_settings or {}).get('network', 'tcp')
-    return "xtls-rprx-vision" if network == 'tcp' else ""
+def _client_flow(inbound):
+    """Vision flow for the client entry: on raw TCP (legacy), or with
+    VLESS Encryption on XHTTP (Vision rides any transport when VLESS
+    Encryption is on)."""
+    if not inbound:
+        return ""
+    stream = inbound.get('streamSettings', {}) or {}
+    settings = inbound.get('settings', {}) or {}
+    network = stream.get('network', 'tcp')
+    decryption = settings.get('decryption')
+    encryption_on = isinstance(decryption, str) and decryption not in ('', 'none')
+    if encryption_on or network == 'tcp':
+        return "xtls-rprx-vision"
+    return ""
 
 # uname -m -> asset suffix of the Xray-core Linux release archive
 XRAY_ARCH_ZIPS = {'x86_64': '64', 'aarch64': 'arm64-v8a', 'armv7l': 'arm32-v7a'}
@@ -1298,7 +1307,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         clients_node = inbound.setdefault('settings', {}).setdefault('clients', [])
         client = {
             "id": client_id,
-            "flow": _client_flow(inbound.get('streamSettings')),
+            "flow": _client_flow(inbound),
             "email": client_id
         }
         if not self._xray_api_add_user(config, client):
@@ -1342,7 +1351,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
             if not any(c['id'] == client_id for c in clients_node):
                 client = {
                     "id": client_id,
-                    "flow": _client_flow(inbound.get('streamSettings')),
+                    "flow": _client_flow(inbound),
                     "email": client_id
                 }
                 if not self._xray_api_add_user(config, client):
