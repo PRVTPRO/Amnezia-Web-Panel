@@ -175,8 +175,9 @@
                 <div id="chebur-alert-{{ loop.index0 }}" style="display:none;"></div>
             </div>
             {% endif %}
-            <div class="server-alerts" id="torrent-alert-{{ loop.index0 }}"
-                style="margin-top: var(--space-sm); display:none;"></div>
+            {% if torrent_plugin_servers and torrent_plugin_servers[loop.index0] %}
+            <div class="server-alerts tp-alert" id="torrent-alert-{{ loop.index0 }}"></div>
+            {% endif %}
 
             <div class="server-actions">
                 <span class="reorder-btns">
@@ -940,10 +941,6 @@
         setupDragAndDrop();
         loadRknScanFlags();
         loadCheburcheckFlags();
-        loadTorrentFlags();
-        // Метка торрент-активности обновляется сама: снятая метка или истёкший
-        // TTL не должны висеть на плитке до F5.
-        setInterval(loadTorrentFlags, 60000);
     });
 
     // Red "scans detected" button per server card, fed from the cached flags endpoint.
@@ -999,38 +996,6 @@
             console.warn('cheburcheck flags failed:', e);
         }
     }
-    // TORRENT-активность на плитке. Клик ведёт на страницу сервера штатным
-    // deep link: ?protocol= переключает инстанс, &highlight= подсвечивает ключ.
-    async function loadTorrentFlags() {
-        try {
-            const res = await apiCall('/api/servers/torrent_flags', 'GET');
-            const flags = (res && res.flags) ? res.flags : {};
-            // Гасим всё, чего нет в ответе: иначе снятая метка или истёкший
-            // TTL оставляли кнопку на плитке до перезагрузки страницы.
-            document.querySelectorAll('[id^="torrent-alert-"]').forEach(el => {
-                el.style.display = 'none';
-                el.innerHTML = '';
-            });
-            for (const [id, protos] of Object.entries(flags)) {
-                const el = document.getElementById('torrent-alert-' + id);
-                if (!el) continue;
-                const entries = Object.entries(protos || {});
-                if (!entries.length) { el.style.display = 'none'; continue; }
-                let total = 0;
-                for (const [, f] of entries) total += (f && f.events) || 0;
-                const proto = entries[0][0];
-                const f = entries[0][1] || {};
-                let url = `/server/${id}?protocol=${encodeURIComponent(proto)}`;
-                if (f.client_id) url += `&highlight=${encodeURIComponent(f.client_id)}`;
-                el.innerHTML = `<button class="btn btn-danger btn-sm" style="width:100%; font-weight:700">🔴 {{ _('torrent_badge') }} (${total})</button>`;
-                const btn = el.querySelector('button');
-                if (btn) btn.addEventListener('click', function () { window.location.href = url; });
-                el.style.display = '';
-            }
-        } catch (e) {
-            console.warn('torrent flags failed:', e);
-        }
-    }
 </script>
 <script>
     window.SERVER_LOAD_I18N = {{ {
@@ -1043,4 +1008,14 @@
     } | tojson }};
 </script>
 <script src="/static/js/server-load.js?v={{ static_v }}" defer></script>
+{% if torrent_plugin_any %}
+<script>
+    window.TORRENT_ALERTS = {
+        endpoint: '/api/plugins/torrent_guard/flags',
+        i18n: { badge: {{ _('torrent_badge') | tojson }},
+                error: {{ _('error') | tojson }} }
+    };
+</script>
+<script src="/static/js/torrent-plugin-flags.js?v={{ static_v }}" defer></script>
+{% endif %}
 {% endblock %}

@@ -85,14 +85,6 @@
                     </div>
                     <div class="text-muted sm-hint">${_('peer_poll_hint')}</div>
                 </div>
-                <div class="sm-section">
-                    <label class="sm-toggle" for="torrentGuardCardToggle">
-                        <input type="checkbox" id="torrentGuardCardToggle" disabled>
-                        <span class="btn-text-with-icon">${icon('shield', 16)} ${_('torrent_guard_card_title')}</span>
-                    </label>
-                    <div class="text-muted sm-hint">${_('torrent_guard_card_hint')}</div>
-                    <div id="torrentGuardCardState" class="text-muted sm-state" role="status"></div>
-                </div>
             </div>`;
     }
 
@@ -179,82 +171,6 @@
         }
     }
 
-    // Тумблер «Фильтр торрентов» в карточке сервера: состояние тянем с сервера,
-    // потому что режимы живут по инстансам и могли быть изменены на странице
-    // сервера (on / count / off).
-    //
-    // Чекбокс рендерится с disabled и «оживает» ТОЛЬКО здесь. Если этот
-    // запрос не выполнится, тумблер останется серым и не нажмётся — так и
-    // было в сборке на SERVERA: open() не вызывал refreshTorrentGuard(),
-    // поэтому в журнале не было ни одного GET /api/servers/N/torrent_guard,
-    // а пользователь видел мёртвую галочку.
-    function torrentState(text, errorTitle) {
-        const state = document.getElementById('torrentGuardCardState');
-        if (!state) return;
-        state.textContent = text || '';
-        state.title = errorTitle || '';
-        state.classList.toggle('is-error', !!errorTitle);
-    }
-
-    let torrentGuardRead = 0;
-
-    async function refreshTorrentGuard() {
-        const box = document.getElementById('torrentGuardCardToggle');
-        if (!box || !context) return;
-        // Модалку могли переоткрыть на другом сервере, пока шёл ответ:
-        // чужое состояние на этом экране — ложь.
-        const readId = ++torrentGuardRead;
-        const serverId = context.serverId;
-        const stillCurrent = () => readId === torrentGuardRead && context
-            && String(context.serverId) === String(serverId);
-        try {
-            const data = await api()(`/api/servers/${serverId}/torrent_guard`, 'GET');
-            if (!stillCurrent() || !document.body.contains(box)) return;
-            box.checked = !!data.enabled;
-            box.disabled = !data.supported;
-            const health = data.health || {};
-            if (!data.supported) {
-                // Некуда ставить правила: не AWG/WG-сервер.
-                torrentState(_('torrent_guard_card_unsupported'));
-            } else if (health.ok === false) {
-                // Правила не подтверждены (нет модулей/ошибка iptables):
-                // «включено» без этого выглядело бы как рабочая защита.
-                torrentState(_('torrent_guard_card_degraded'), health.error || '');
-            } else if (!data.enabled) {
-                torrentState(_('torrent_guard_card_off_hint'));
-            } else {
-                torrentState('');
-            }
-        } catch (error) {
-            if (!stillCurrent()) return;
-            // Состояние неизвестно — тумблер не должен выглядеть рабочим.
-            box.disabled = true;
-            torrentState(_('error') + ': ' + error.message);
-        }
-    }
-
-    async function toggleTorrentGuard(box) {
-        if (!box || !context) return;
-        const wanted = !!box.checked;
-        const serverId = context.serverId;
-        box.disabled = true;
-        try {
-            const res = await api()(`/api/servers/${serverId}/torrent_guard`, 'POST', {enabled: wanted});
-            if (res && res.errors && res.errors.length) {
-                notify(_('error') + ': ' + res.errors.join('; '), 'error');
-            } else {
-                notify(wanted ? _('torrent_guard_card_enabled') : _('torrent_guard_card_disabled'), 'success');
-            }
-        } catch (error) {
-            if (String(context && context.serverId) === String(serverId)) box.checked = !wanted;
-            notify(_('error') + ': ' + error.message, 'error');
-        } finally {
-            // Перечитываем состояние в любом случае: сервер мог применить
-            // режим частично, а тумблер обязан показывать факт, а не желание.
-            await refreshTorrentGuard();
-        }
-    }
-
     async function savePoll() {
         const select = document.getElementById('peerPollSelect');
         const button = document.getElementById('peerPollSaveBtn');
@@ -276,11 +192,6 @@
         }
     }
 
-    document.addEventListener('change', event => {
-        const box = event.target.closest('#torrentGuardCardToggle');
-        if (box) toggleTorrentGuard(box);
-    });
-
     document.addEventListener('click', event => {
         const button = event.target.closest('[data-server-management-action]');
         if (!button || !context) return;
@@ -301,7 +212,6 @@
             context = Object.assign({}, options);
             render();
             openModal('serverManagementModal');
-            refreshTorrentGuard();
         },
     };
 }());

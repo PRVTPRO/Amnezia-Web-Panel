@@ -104,14 +104,62 @@ TORRENT_GUARD_KEYS = {
     'torrent_sig_dht_query',
     'torrent_sig_dht_short',
     'torrent_sig_tracker',
+    'torrent_sig_unknown',
     'torrent_clear_confirm',
-    'torrent_guard_card_title',
-    'torrent_guard_card_hint',
-    'torrent_guard_card_off_hint',
-    'torrent_guard_card_unsupported',
-    'torrent_guard_card_enabled',
-    'torrent_guard_card_disabled',
-    'torrent_guard_card_degraded',
+}
+
+TORRENT_PLUGIN_KEYS = {
+    'tp_clear_marks_on_disable',
+    'tp_days',
+    'tp_default_mode',
+    'tp_default_mode_hint',
+    'tp_desc',
+    'tp_disabled_toast',
+    'tp_enabled_toast',
+    'tp_health_degraded',
+    'tp_health_ok',
+    'tp_health_unknown',
+    'tp_include_wireguard',
+    'tp_install',
+    'tp_install_done',
+    'tp_instances_title',
+    'tp_marks_clear',
+    'tp_marks_clear_confirm',
+    'tp_marks_cleared',
+    'tp_marks_last',
+    'tp_marks_title',
+    'tp_marks_total',
+    'tp_marks_ttl',
+    'tp_master_hint',
+    'tp_master_title',
+    'tp_mode_count',
+    'tp_mode_label',
+    'tp_mode_off',
+    'tp_mode_on',
+    'tp_name',
+    'tp_no_instances',
+    'tp_no_instances_hint',
+    'tp_open',
+    'tp_poll_manual',
+    'tp_poll_seconds',
+    'tp_reapplied',
+    'tp_reapply',
+    'tp_refresh',
+    'tp_refreshed',
+    'tp_save',
+    'tp_saved',
+    'tp_settings_title',
+    'tp_short',
+    'tp_state_count',
+    'tp_state_degraded',
+    'tp_state_not_installed',
+    'tp_state_off',
+    'tp_state_on',
+    'tp_state_unknown',
+    'tp_state_unsupported',
+    'tp_uninstall',
+    'tp_uninstall_confirm',
+    'tp_uninstall_done',
 }
 
 PRE_PANEL_ACCESS_KEYS_SHA256 = 'c70dff505a825b0a8506b2d1ca7d76fca9378e3f9514cc44231f7fd2a847af36'
@@ -452,10 +500,12 @@ class TestC6Translations(unittest.TestCase):
         previous = '\n'.join(sorted(base - PANEL_ACCESS_KEYS - SECURITY_SETUP_KEYS
                                     - CHEBURCHECK_KEYS - PROTOCOL_UNINSTALL_KEYS
                                     - TORRENT_GUARD_KEYS
+                                    - TORRENT_PLUGIN_KEYS
                                     - AWG_I1_KEYS - SRV_WARP_NO_AWG_KEYS
                                     - COPY_INSTANCE_KEYS - LATER_FEATURE_KEYS
                                     - RELEASE_1811_KEYS - USER_LIMIT_KEYS - TELEGRAM_ACCOUNT_KEYS
-                                    - LIFECYCLE_FENCE_KEYS - STORAGE_KEYS))
+                                    - LIFECYCLE_FENCE_KEYS - STORAGE_KEYS
+                                    - SUBSCRIPTION_KEYS))
         self.assertEqual(hashlib.sha256(previous.encode('utf-8')).hexdigest(),
                          PRE_PANEL_ACCESS_KEYS_SHA256,
                          'Existing catalogue changed outside the declared additions')
@@ -464,8 +514,8 @@ class TestC6Translations(unittest.TestCase):
         for locale in LOCALES:
             data = translation(locale)
             for key in (NEW_KEYS | PANEL_ACCESS_KEYS | PROTOCOL_UNINSTALL_KEYS
-                        | TORRENT_GUARD_KEYS | AWG_I1_KEYS | USER_LIMIT_KEYS | TELEGRAM_ACCOUNT_KEYS
-                        | LIFECYCLE_FENCE_KEYS):
+                        | TORRENT_GUARD_KEYS | TORRENT_PLUGIN_KEYS | AWG_I1_KEYS | USER_LIMIT_KEYS | TELEGRAM_ACCOUNT_KEYS
+                        | LIFECYCLE_FENCE_KEYS | SUBSCRIPTION_KEYS):
                 self.assertIn(key, data)
                 self.assertTrue(str(data[key]).strip(), "%s empty in %s" % (key, locale))
 

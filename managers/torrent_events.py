@@ -122,12 +122,23 @@ def _peers(data, key, protocol):
     return pdata.setdefault('peers', {})
 
 
-def prune(data, now=None):
-    """Снимает события старше TTL и пустые ветки. Возвращает число снятых."""
+def prune(data, now=None, ttl_by_key=None):
+    """Снимает события старше TTL и пустые ветки. Возвращает число снятых.
+
+    ``ttl_by_key`` — необязательная функция ``key -> секунды``: плагин
+    «Защита от торрентов» хранит срок жизни меток в настройках каждого
+    сервера, а не одну константу на весь файл. None — значение по умолчанию
+    (TTL_SECONDS), как было до появления плагина.
+    """
     now = int(time.time()) if now is None else int(now)
-    cutoff = now - TTL_SECONDS
     removed = 0
     for key, entry in list((data.get('servers') or {}).items()):
+        ttl = TTL_SECONDS
+        if ttl_by_key is not None:
+            value = ttl_by_key(key)
+            if value is not None:
+                ttl = int(value)
+        cutoff = now - ttl
         protocols = entry.get('protocols') or {}
         for proto, pdata in list(protocols.items()):
             peers = pdata.get('peers') or {}

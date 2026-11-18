@@ -500,52 +500,74 @@ class ManagerWiringTests(unittest.TestCase):
                          '/opt/amnezia/wireguard/torrent_guard.json')
 
 
-class AppRouteTests(unittest.TestCase):
-    def test_routes_registered(self):
+class AppPluginRouteTests(unittest.TestCase):
+    """Фича живёт в плагине: ядровых торрент-роутов в приложении больше нет."""
+
+    def test_plugin_routes_registered_and_core_routes_removed(self):
         import app as panel
         paths = {getattr(route, 'path', '') for route in panel.app.routes}
-        for path in ('/api/servers/torrent_flags',
+        for path in ('/api/servers/{server_id}/plugins/torrent_guard',
+                     '/api/plugins/torrent_guard/flags',
+                     '/api/servers/{server_id}/plugins/torrent_guard/install',
+                     '/api/servers/{server_id}/plugins/torrent_guard/uninstall',
+                     '/api/servers/{server_id}/plugins/torrent_guard/settings',
+                     '/api/servers/{server_id}/plugins/torrent_guard/enabled',
+                     '/api/servers/{server_id}/plugins/torrent_guard/mode',
+                     '/api/servers/{server_id}/plugins/torrent_guard/refresh',
+                     '/api/servers/{server_id}/plugins/torrent_guard/marks/clear'):
+            self.assertIn(path, paths)
+        for gone in ('/api/servers/torrent_flags',
                      '/api/servers/{server_id}/connections/torrent_guard',
                      '/api/servers/{server_id}/connections/torrent_clear',
                      '/api/servers/{server_id}/torrent_guard'):
-            self.assertIn(path, paths)
+            self.assertNotIn(gone, paths)
 
     def test_default_mode_is_protection(self):
-        import app as panel
-        self.assertEqual(panel.TORRENT_DEFAULT_MODE, 'on')
-        self.assertIn('wireguard', panel.TORRENT_GUARD_PROTOCOLS)
-        self.assertEqual(
-            panel._torrent_mode_of({'protocols': {'awg2': {}}}, 'awg2'), 'on')
+        from torrent_plugin_service import CAPABLE_PROTOCOLS, DEFAULT_SETTINGS
+        self.assertEqual(DEFAULT_SETTINGS['default_mode'], 'on')
+        self.assertIn('wireguard', CAPABLE_PROTOCOLS)
 
     def test_capable_protocols_only_awg_and_wireguard(self):
-        import app as panel
+        import tempfile
+        from torrent_plugin_service import TorrentPlugin
+        plugin = TorrentPlugin(
+            lambda: os.path.join(tempfile.gettempdir(), 'tg-capable.json'))
         server = {'protocols': {'awg': {}, 'awg3': {}, 'wireguard': {},
                                 'xray': {}, 'telemt': {}}}
-        self.assertEqual(sorted(panel._torrent_capable_protocols(server)),
+        self.assertEqual(sorted(plugin.capable(server, True)),
                          ['awg', 'awg3', 'wireguard'])
+        self.assertEqual(sorted(plugin.capable(server, False)), ['awg', 'awg3'])
+        # Нумерованные инстансы: база отделяется по `__`, а не суффиксом.
+        numbered = {'protocols': {'awg3__2': {}, 'awg2__3': {},
+                                  'wireguard__2': {}}}
+        self.assertEqual(sorted(plugin.capable(numbered, True)),
+                         ['awg2__3', 'awg3__2', 'wireguard__2'])
 
     def test_health_registry_roundtrip(self):
-        import app as panel
+        import tempfile
+        from torrent_plugin_service import TorrentPlugin
+        plugin = TorrentPlugin(
+            lambda: os.path.join(tempfile.gettempdir(), 'tg-health.json'))
         server = {'uid': 'health-test-uid', 'host': 'h'}
-        panel._torrent_set_health(server, 'awg2', {'error': ''})
-        health = panel._torrent_health_for(server)
-        self.assertTrue(health['ok'])
-        panel._torrent_set_health(server, 'awg2',
-                                  {'error': 'iptables rejected'})
-        health = panel._torrent_health_for(server)
-        self.assertFalse(health['ok'])
+        self.assertEqual(plugin.health_for(server)['state'], 'unknown')
+        plugin.set_health(server, 'awg2', {'error': ''})
+        health = plugin.health_for(server)
+        self.assertEqual(health['state'], 'ok')
+        plugin.set_health(server, 'awg2', {'error': 'iptables rejected'})
+        health = plugin.health_for(server)
+        self.assertEqual(health['state'], 'degraded')
         self.assertIn('rejected', health['error'])
 
-    def test_modal_renders_switch_and_wires_actions(self):
+    def test_management_modal_has_no_torrent_controls(self):
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         with open(os.path.join(root, 'static', 'js', 'server-management.js'),
                   encoding='utf-8') as fh:
             js = fh.read()
-        self.assertIn('torrentGuardCardToggle', js)
-        self.assertIn('/torrent_guard', js)
-        self.assertIn('refreshTorrentGuard()', js)
-        self.assertIn("addEventListener('change'", js)
-        self.assertIn('torrent_guard_card_degraded', js)
+        # Тумблер уехал в плагин: в общей модалке его нет ни в разметке, ни в
+        # обработчиках, ни в запросах.
+        self.assertNotIn('torrentGuardCardToggle', js)
+        self.assertNotIn('/torrent_guard', js)
+        self.assertNotIn('refreshTorrentGuard', js)
 
 
 if __name__ == '__main__':
