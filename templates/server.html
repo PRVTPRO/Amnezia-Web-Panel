@@ -723,6 +723,10 @@
         const dot = document.getElementById('sshTrustDot');
         if (!btn || !text || !dot) return;
         btn.removeAttribute('aria-busy');
+        // Без этого атрибут data-state="loading" из разметки остаётся навсегда:
+        // его CSS-правило специфичнее is-ok/is-urgent, и точка продолжает
+        // пульсировать серым даже после того, как ответ уже пришёл.
+        btn.removeAttribute('data-state');
         btn.classList.remove('is-urgent', 'is-danger', 'is-ok');
         dot.classList.remove('is-urgent', 'is-danger', 'is-ok');
         if (state === 'changed') {
@@ -1248,7 +1252,12 @@
         openModal('awgPluginModal');
         renderAwgPluginModal();
         if (!awgPluginStatus) loadAwgPluginStatus().then(renderAwgPluginModal);
-        else if (xrayProtocols.length && !xrayCoreStatus) loadXrayCoreStatus().then(renderAwgPluginModal);
+        if (xrayProtocols.length) {
+            // The user is looking at the update dialog: re-probe the core
+            // for real. A cached badge may lag a core that was updated
+            // outside the panel (or anywhere the 12h cache cannot see).
+            loadXrayCoreStatus(true).then(renderAwgPluginModal);
+        }
     }
 
     function closeAwgPluginModal() {
@@ -1489,7 +1498,16 @@
                 }
                 const button = document.getElementById('awgPluginUpdate-' + component);
                 if (button) button.remove();
-                if (xrayCoreStatus && xrayCoreStatus[proto]) xrayCoreStatus[proto].update_available = false;
+                if (xrayCoreStatus && xrayCoreStatus[proto]) {
+                    // Sync the localStorage copy too: it outlives the page
+                    // (12h TTL) and a stale entry would resurrect the
+                    // "update available" badge on every reload even though
+                    // the core is already at the target version.
+                    xrayCoreStatus[proto].version = (data.result && data.result.version)
+                        || xrayCoreStatus[proto].version;
+                    xrayCoreStatus[proto].update_available = false;
+                    writeXrayCoreCache(xrayCoreStatus);
+                }
                 applyPluginButtonState();
                 setTimeout(() => checkServer(), 800);
             }
@@ -1935,7 +1953,8 @@
         }
     }
 
-    document.addEventListener('DOMContentLoaded', loadAwgPluginStatus);
+    // Статус плагина тоже дорогой (16 SSH-команд): грузим последним.
+    window.addEventListener('load', () => loadAwgPluginStatus());
 </script>
 {% endif %}
 <a href="/" class="back-link page-back-link">{{ _('back_to_servers') }}</a>
@@ -2013,10 +2032,10 @@
     <div id="serverStatus" class="srv-header__status">
         <div class="srv-header__badges" id="statusBadges"></div>
         <div class="srv-header__actions">
-            <button class="btn btn-primary btn-sm srv-action" onclick="openMarketplaceModal()" id="marketplaceBtn" disabled>
+            <button class="btn btn-primary btn-sm srv-action" onclick="openMarketplaceModal()" id="marketplaceBtn">
                 {{ ui_icon('store', 15) }} <span>{{ _('marketplace') }}</span>
             </button>
-            <button class="btn btn-secondary btn-sm srv-action" onclick="openServerManagement()" id="managementBtn" disabled>
+            <button class="btn btn-secondary btn-sm srv-action" onclick="openServerManagement()" id="managementBtn">
                 {{ ui_icon('sliders', 15) }} <span>{{ _('management') }}</span>
             </button>
             <button class="btn btn-secondary btn-sm srv-action" onclick="openHostTuning()" id="hostTuningBtn">
@@ -5196,7 +5215,7 @@
         return `<span class="badge badge-${tone}">${HEADER_BADGE_ICONS[icon] || ''} ${text}</span>`;
     }
 
-    async function checkServer(forcePlugins) {
+    async function checkServer(forcePlugins, boot) {
         loadRknBlock();
         if (typeof loadWarpStatus === 'function') loadWarpStatus(true);
         setInstalledAppsLoading(true);
@@ -5208,7 +5227,8 @@
         // the card pops in one round-trip after every other badge.
         const smartRouteProbe = loadSmartRouteStatus().catch(() => null);
         try {
-            const data = await apiCall(`/api/servers/${SERVER_ID}/check`, 'POST');
+            const data = await apiCall(
+                `/api/servers/${SERVER_ID}/check` + (boot ? '?boot=1' : ''), 'POST');
             const statusDiv = document.getElementById('serverStatus');
             const badges = document.getElementById('statusBadges');
             statusDiv.classList.remove('hidden');
@@ -5264,7 +5284,15 @@
             // exit-node marks now that "installed/enabled" is known.
             refreshExitMarks();
             updateStatusCounts(data.protocols || {});
-            showToast(_('server_check_complete'), 'success');
+            if (data.cached) {
+                // Сетка уже нарисована из снимка панели: свежую проверку
+                // догоняем фоном. У её ответа флага cached нет, поэтому
+                // второго круга не будет.
+                checkServer(forcePlugins).catch(error => console.warn(
+                    'Fresh server check failed:', error));
+            } else {
+                showToast(_('server_check_complete'), 'success');
+            }
         } catch (err) {
             showToast(_('error') + ': ' + err.message, 'error');
             const statusDiv = document.getElementById('serverStatus');
@@ -5553,12 +5581,18 @@
             } else if (protoBase(proto) === 'xray') {
                 actionsEl.innerHTML = `
                     <button class="btn btn-secondary btn-sm" onclick="selectProtocolForConns('${proto}')" style="flex:1">${_('connections')}</button>
-                    <button class="btn btn-secondary btn-sm" onclick="openXrayFingerprint('${proto}')" title="${_('xray_fingerprint_hint')}">${_('xray_fingerprint_btn')}</button>
                     <button class="btn btn-secondary btn-sm" onclick="showProtocolBackups('${proto}')">${_('backup')}</button>
                     <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')">${_('uninstall')}</button>
                 `;
                 showConnectionsSection();
             } else {
+                actionsEl.innerHTML = `
+                    <button class="btn btn-secondary btn-sm" onclick="selectProtocolForConns('${proto}')" style="flex:1">${_('connections')}</button>
+                    <button class="btn btn-secondary btn-sm" onclick="showProtocolBackups('${proto}')">${_('backup')}</button>
+                    <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')">${_('uninstall')}</button>
+                `;
+                showConnectionsSection();
+            }
             // Show control buttons (stop + optional config). Services use the
             // container's own config UI (AdGuard web wizard / our SOCKS5 modal /
             // unbound's static config), so we don't expose a raw editor for them.
@@ -5587,6 +5621,9 @@
                     const selfstealBtn = protoBase(proto) === 'xray'
                         ? `<button class="btn btn-secondary btn-sm" onclick="openSelfstealModal('${proto}')" title="${_('xray_selfsteal_title')}">🎭 ${_('xray_selfsteal')}</button>`
                         : '';
+                    const fingerprintBtn = protoBase(proto) === 'xray'
+                        ? `<button class="btn btn-secondary btn-sm" onclick="openXrayFingerprint('${proto}')" title="${_('xray_fingerprint_hint')}">${_('xray_fingerprint_btn')}</button>`
+                        : '';
                     const copyBtn = COPYABLE_PROTOCOLS.includes(protoBase(proto))
                         ? `<button class="btn btn-secondary btn-sm" onclick="openCopyInstance('${proto}')" title="${_('copy_instance_title')}">${_('copy_instance_btn')}</button>`
                         : '';
@@ -5595,12 +5632,12 @@
                         ${exitBtn}
                         ${endpointBtn}
                         ${selfstealBtn}
+                        ${fingerprintBtn}
                         ${copyBtn}
                         <button class="btn btn-secondary btn-sm" onclick="showServerConfig('${proto}')" title="${_('server_config')}">${_('config_btn')}</button>
                         <button class="btn btn-danger btn-sm" onclick="toggleContainer('${proto}', true)" title="${_('stop_container_confirm').replace('{}', '')}">${_('stop_btn')}</button>
                     `;
                 }
-            }
             }
         } else if (info.container_exists) {
             installedProtocols[proto] = true;
@@ -6708,6 +6745,12 @@
                 const message = _('uninstall_archive_confirm')
                     .replace('{name}', name).replace('{ids}', ids);
                 if (confirm(message)) await uninstallProtocol(proto, true);
+                return;
+            }
+            if (err.payload?.code === 'blocked_peer_still_active' && blocking.length) {
+                const ids = blocking.map(row => [row.connection_id, row.client_id]
+                    .filter(Boolean).join('/')).join(', ');
+                showToast(`${_('blocked_peer_still_active')} (${ids})`, 'error');
                 return;
             }
             showToast(_('error') + ': ' + err.message, 'error');
@@ -9273,9 +9316,11 @@
 
     // ========== Init ==========
     applyInstalledAppsVisibility();
-    checkServer();
+    checkServer(false, true);
     loadServerStats();
-    loadIpStatus();
+    // ip-status - самая дорогая проба (десятки SSH-команд): уходит
+    // последней, после того как браузер получил дешёвые ответы.
+    window.addEventListener('load', function () { loadIpStatus(); });
     let ipStatusPoller = null;
     if (!ipStatusPoller) {
         ipStatusPoller = setInterval(() => { if (!document.hidden) loadIpStatus(); }, 60000);

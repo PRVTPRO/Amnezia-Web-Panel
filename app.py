@@ -39,6 +39,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi import FastAPI, Request, Query, UploadFile, File, Form
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
+from starlette.datastructures import Headers, MutableHeaders
 from starlette.middleware.sessions import SessionMiddleware
 from pydantic import BaseModel, Field, StrictBool, constr, conint
 from typing import Optional, List
@@ -131,6 +132,7 @@ from connection_service import (
     sanitize_allowed_protocols,
     self_service_protocol_choices,
 )
+import panel_storage
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -391,6 +393,144 @@ async def panel_access_middleware(request, call_next):
 # Sessions must wrap every other middleware: the auth middleware above
 # reads request.session, so SessionMiddleware has to sit outside it.
 app.add_middleware(SessionMiddleware, secret_key=os.environ.get('SECRET_KEY', secrets.token_hex(32)))
+# Публичный порт держит panel_front.py - это релей байтов, он ничего не
+# сжимает. Без gzip страница сервера уходит по проводу как есть: HTML
+# /server/N ~800 КБ (вместе со словарём локали), CodeMirror 170 КБ, CSS 90 КБ.
+# GZipMiddleware сжимает текстовые ответы; гейт ниже не даёт ему трогать
+# уже сжатые бинарные (PNG-капча, zip-архив бэкапа, иконки, шрифты).
+COMPRESS_SKIP_PATHS = ('/api/auth/captcha', '/api/settings/backup/archive')
+COMPRESS_SKIP_SUFFIXES = (
+    '/backups/download',
+    '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.svgz',
+    '.woff', '.woff2', '.ttf', '.zip', '.gz', '.tgz', '.bz2', '.xz',
+    '.7z', '.pdf', '.mp4', '.webm',
+)
+
+
+def _compression_skipped(scope):
+    """True for responses that must reach the client uncompressed."""
+    path = str(scope.get('path') or '').lower()
+    if path in COMPRESS_SKIP_PATHS:
+        return True
+    return path.endswith(COMPRESS_SKIP_SUFFIXES)
+
+
+class CompressionGate:
+    """Снимает Accept-Encoding с запросов к бинарным ответам.
+
+    Порядок важен: гейт добавляется последним, поэтому он внешний по
+    отношению к GZipMiddleware и видит запрос раньше него. Ответ без
+    Accept-Encoding middleware отдаёт как есть - без повторного gzip.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] == 'http' and _compression_skipped(scope):
+            scope = dict(scope, headers=[
+                (name, value) for name, value in scope['headers']
+                if name.lower() != b'accept-encoding'])
+        await self.app(scope, receive, send)
+
+
+class _GzipResponder:
+    """Потоковый gzip через zlib (заголовок gzip без mtime)."""
+
+    def __init__(self, app, minimum_size, compresslevel):
+        self.app = app
+        self.minimum_size = minimum_size
+        self.compresslevel = compresslevel
+        self.send = None
+        self.start = None
+        self.started = False
+        self.skip = False
+        self.passthrough = False
+        self.compressor = None
+
+    async def __call__(self, scope, receive, send):
+        self.send = send
+        await self.app(scope, receive, self.send_with_compression)
+
+    async def send_with_compression(self, message):
+        kind = message['type']
+        if kind == 'http.response.start':
+            headers = Headers(raw=message['headers'])
+            # Уже сжатое, поток событий и «пустые» статусы не трогаем.
+            self.skip = ('content-encoding' in headers
+                         or headers.get('content-type', '').startswith('text/event-stream')
+                         or message['status'] in (204, 304))
+            self.start = message
+            return
+        if kind != 'http.response.body':
+            await self.send(message)
+            return
+        if self.passthrough:
+            await self.send(message)
+            return
+        if self.started:
+            await self.send_body(message)
+            return
+        self.started = True
+        body = message.get('body', b'')
+        more = message.get('more_body', False)
+        if self.skip or (not more and len(body) < self.minimum_size):
+            self.passthrough = True
+            await self.send(self.start)
+            await self.send(message)
+            return
+        self.start_stream()
+        await self.send(self.start)
+        await self.send_body(message)
+
+    def start_stream(self):
+        headers = MutableHeaders(raw=self.start['headers'])
+        headers.add_vary_header('Accept-Encoding')
+        headers['Content-Encoding'] = 'gzip'
+        if 'content-length' in headers:
+            del headers['Content-Length']
+        # wbits=31 — gzip-обёртка zlib: заголовок с mtime=0, без обращения
+        # к системным часам (stock GZipMiddleware падает, если часы сдвинуты).
+        self.compressor = zlib.compressobj(
+            self.compresslevel, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
+
+    async def send_body(self, message):
+        body = message.get('body', b'')
+        more = message.get('more_body', False)
+        out = self.compressor.compress(body) if body else b''
+        if not more:
+            out += self.compressor.flush()
+        await self.send({'type': 'http.response.body', 'body': out,
+                         'more_body': more})
+
+
+class TextGZipMiddleware:
+    """gzip для текстовых ответов без зависимости от системных часов.
+
+    Starlette'овский GZipMiddleware пишет в gzip-заголовок текущее время
+    (gzip.GzipFile по умолчанию), поэтому запрос при сдвинутых часах —
+    например, в тестах с `mock.patch(time.time)` — падает на struct.pack.
+    """
+
+    def __init__(self, app, minimum_size=1024, compresslevel=6):
+        self.app = app
+        self.minimum_size = minimum_size
+        self.compresslevel = compresslevel
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] != 'http':
+            await self.app(scope, receive, send)
+            return
+        headers = Headers(scope=scope)
+        if 'gzip' not in headers.get('accept-encoding', '').lower():
+            await self.app(scope, receive, send)
+            return
+        responder = _GzipResponder(self.app, self.minimum_size, self.compresslevel)
+        await responder(scope, receive, send)
+
+
+app.add_middleware(TextGZipMiddleware, minimum_size=1024, compresslevel=6)
+app.add_middleware(CompressionGate)
 
 class CachedStaticFiles(StaticFiles):
     """Static assets that carry ?v=<static mtime> (see static_version()) change
@@ -499,12 +639,68 @@ from peer_finalization import (
     connection_scope,
     find_connection,
     read_peer_state,
+    apply_final_sample,
     finalize_connection_record,
     commit_finalize,
     make_intent,
 )
 
 peer_lifecycle_lock.configure(DATA_FILE)
+
+
+def _ssh_scope_for(server):
+    """Identity the lifecycle fence compares against (never credentials)."""
+    return {'server_uid': server.get('uid'),
+            'host': server.get('host'),
+            'ssh_port': server.get('ssh_port', 22),
+            'username': server.get('username')}
+
+
+def _lifecycle_identity_for(server_id):
+    """Identity of the server an endpoint targets, by inventory index.
+
+    Returning None makes the fence behave as global for that call: an endpoint
+    that cannot name its target is never assumed to be unaffected.
+    """
+    try:
+        data = load_data()
+        if not 0 <= int(server_id) < len(data.get('servers', [])):
+            return None
+        return _ssh_scope_for(data['servers'][int(server_id)])
+    except Exception:
+        logger.warning('Cannot resolve the lifecycle target %s', server_id, exc_info=True)
+        return None
+
+
+def _lifecycle_dependents(server_uid):
+    """Servers whose lifecycle operations touch this server (exit links).
+
+    A fence on an exit node also covers the entries linked to it, and a fence
+    on an entry covers its exit: relink/detach on either side rewrites the
+    other side's configuration.
+    """
+    try:
+        data = load_data()
+    except Exception:
+        return ()
+    uid = str(server_uid or '')
+    if not uid:
+        return ()
+    linked = set()
+    for server in data.get('servers', []):
+        own = str(server.get('uid') or '')
+        for record in (server.get('protocols') or {}).values():
+            exit_uid = str(((record or {}).get('exit_link') or {}).get('exit_uid') or '')
+            if not exit_uid:
+                continue
+            if exit_uid == uid and own and own != uid:
+                linked.add(own)
+            if own == uid:
+                linked.add(exit_uid)
+    return tuple(sorted(linked))
+
+
+peer_lifecycle_lock.configure_resolvers(_lifecycle_identity_for, _lifecycle_dependents)
 _panel_lease = None
 
 DATA_LOCK = asyncio.Lock()
@@ -724,6 +920,7 @@ def _ssh_manager_for(server, data, *, allow_jump=True):
         private_key=private_key,
         connect_cooldown_base=float(server.get('ssh_cooldown_base') or 30),
         jump_manager=jump_manager,
+        server_scope=_ssh_scope_for(server),
     )
 
 
@@ -776,6 +973,7 @@ def get_ssh(server):
             _SSH_POOL[key] = ssh
         # Apply edits without dropping the pooled connection.
         ssh._connect_cooldown_base = cooldown_base
+        ssh.server_scope = _ssh_scope_for(server)
         ssh.pooled = True
     ssh.ensure_connected()
     return ssh
@@ -2713,6 +2911,19 @@ def cheburcheck_enabled(data=None):
     return bool((data.get('settings') or {}).get('cheburcheck', {}).get('enabled'))
 
 
+def _script_json(value):
+    """JSON для вставки в <script> как готовый JS-объект.
+
+    ensure_ascii=False почти вдвое уменьшает русскую и персидскую локаль
+    (escaped JSON: 290 КБ против 128 КБ). `</` экранируется, иначе перевод
+    с `</script>` закрыл бы тег раньше времени; U+2028/U+2029 в JS-строках
+    недопустимы, хотя в JSON валидны.
+    """
+    return (json.dumps(value, ensure_ascii=False)
+            .replace('</', '<\\/')
+            .replace('\u2028', '\\u2028')
+            .replace('\u2029', '\\u2029'))
+
 def tpl(request, template, **kwargs):
     data = load_data()
     lang = request.cookies.get('lang', 'en')
@@ -2731,24 +2942,22 @@ def tpl(request, template, **kwargs):
         'bot_running': tg_bot.is_running(),
         'lang': lang,
         '_': lambda text_id: _t(text_id, lang),
-        'translations_json': json.dumps(TRANSLATIONS.get(lang, TRANSLATIONS.get('en', {}))),
+        'translations_json': _script_json(TRANSLATIONS.get(lang, TRANSLATIONS.get('en', {}))),
         # The login page is the only public page; it must not dump the whole
         # UI dictionary (a feature showcase of the panel) into view-source.
-        'login_translations_json': json.dumps({
+        'login_translations_json': _script_json({
             k: _t(k, lang) for k in ('login', 'logging_in', 'login_error',
                                      'setup_submit', 'setup_creating', 'setup_error',
                                      'telegram_webapp_auth_invalid',
                                      'telegram_webapp_account_not_found',
                                      'telegram_webapp_auth_unavailable')
         }),
-        'all_translations_json': json.dumps(TRANSLATIONS),
         'cheburcheck_enabled': cheburcheck_enabled(data),
         'telegram_webapp_auth_enabled': bool(
             data.get('users')
             and (data.get('settings', {}).get('telegram') or {}).get('webapp_initdata_auth')
             and (data.get('settings', {}).get('telegram') or {}).get('token')
         ),
-        'all_translations_json': json.dumps(TRANSLATIONS)
     }
     ctx.update(kwargs)
     return templates.TemplateResponse(template, ctx)
@@ -3351,6 +3560,8 @@ class TunnelStartRequest(BaseModel):
 # conntrack summary), so detection works 24/7 without anyone watching the UI
 # and the 6s UI refresh only reads the small snapshot files.
 CONN_MONITOR_INTERVAL = 600
+SUBSCRIPTION_MONITOR_INTERVAL = 600
+_subscription_monitor_started = False
 
 
 
@@ -3552,6 +3763,27 @@ def _conn_monitor_once(data):
             list(pool.map(work, tasks))
 
 
+def _subscriptions_monitor_loop():
+    while True:
+        time.sleep(SUBSCRIPTION_MONITOR_INTERVAL)
+        try:
+            data = load_data()
+            if subscription_settings(data)['enabled']:
+                auto_push_subscriptions(data)
+        except Exception as e:
+            logger.warning(f"subscription monitor loop: {e}")
+
+
+def _start_subscriptions_monitor():
+    global _subscription_monitor_started
+    if _subscription_monitor_started:
+        return
+    _subscription_monitor_started = True
+    threading.Thread(target=_subscriptions_monitor_loop, daemon=True,
+                     name='subscriptions-monitor').start()
+    logger.info(f"Subscription monitor started (every {SUBSCRIPTION_MONITOR_INTERVAL}s)")
+
+
 def _conn_monitor_loop():
     while True:
         try:
@@ -3589,6 +3821,7 @@ async def startup():
         raise RuntimeError('Disaster recovery requires independent node reconciliation before startup')
     _start_conn_monitor()
     _start_duckdns_monitor()
+    _start_subscriptions_monitor()
     changed = False
     # No fixed credentials are created. A fresh installation stays at the
     # first-run setup form until an administrator is explicitly registered.
@@ -7279,6 +7512,32 @@ async def _rkn_migration_finish(pending):
         save_data(data)
 
 
+# Последний ответ /check - чтобы первая отрисовка не ждала SSH. Страница
+# просит его с ?boot=1 и получает снимок сразу, а свежую проверку запускает
+# фоном. Мутации кэш не сбрасывают: снимок живёт только до ответа фоновой
+# проверки, а ручная проверка кнопкой идёт без boot и всегда свежая.
+_CHECK_CACHE = {}
+_CHECK_CACHE_LOCK = threading.Lock()
+_CHECK_CACHE_MAX_AGE = 900.0
+
+
+def _check_cache_get(server_uid):
+    with _CHECK_CACHE_LOCK:
+        entry = _CHECK_CACHE.get(server_uid)
+    if not entry:
+        return None
+    stamp, payload = entry
+    if time.time() - stamp > _CHECK_CACHE_MAX_AGE:
+        return None
+    return stamp, payload
+
+
+def _check_cache_put(server_uid, payload):
+    if not server_uid:
+        return
+    with _CHECK_CACHE_LOCK:
+        _CHECK_CACHE[server_uid] = (time.time(), payload)
+
 # --- one-shot ICMP echo-unblock migration -----------------------------------
 # Older panels added `-p icmp --icmp-type echo-request -j DROP` to INPUT in
 # setup_firewall(). The host itself stopped answering ping, and ICMP that
@@ -7364,6 +7623,16 @@ def api_check_server(request: Request, server_id: int):
         if server_id >= len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
+        server_uid = server.get('uid') or f'#{server_id}'
+        boot = str(request.query_params.get('boot') or '').lower() in ('1', 'true', 'yes')
+        if boot:
+            cached = _check_cache_get(server_uid)
+            if cached is not None:
+                stamp, payload = cached
+                snapshot = dict(payload)
+                snapshot['cached'] = True
+                snapshot['cached_age'] = round(time.time() - stamp, 1)
+                return snapshot
         ssh = get_ssh(server)
         ssh.connect()
         # Just use awg's docker checker since it uses the same command
@@ -7461,6 +7730,19 @@ def api_check_server(request: Request, server_id: int):
                 return proto, merge_saved_protocol_status(proto, {}, str(e)), str(e)
 
         protocols_to_check = list(dict.fromkeys(BASE_PROTOCOLS + list(server.get('protocols', {}).keys())))
+        # Снимок docker ps -a: если контейнера протокола нет ни в снимке, ни в
+        # data.json, отдельная SSH-команда всё равно вернёт "не установлен".
+        # Раньше на каждый такой протокол уходил круг SSH, и /check держал
+        # первую отрисовку несколько секунд. Команду берём только когда есть
+        # что пропускать: на полностью укомплектованном сервере она лишняя.
+        docker_snapshot = None
+        if any(p not in server.get('protocols', {}) for p in protocols_to_check):
+            try:
+                docker_snapshot = ssh.docker_ps_snapshot()
+            except Exception:
+                docker_snapshot = None
+            if not isinstance(docker_snapshot, dict):
+                docker_snapshot = None
         # One batched round trip for all AWG containers (ps snapshot + configs
         # + clientsTables) instead of 3-5 SSH commands per instance - this is
         # what made /check take seconds on high-latency servers.
@@ -7474,6 +7756,14 @@ def api_check_server(request: Request, server_id: int):
         # checking them in parallel through one SSH object can produce false
         # negatives and previously caused dynamic AWG instances to be removed.
         for proto in protocols_to_check:
+            container_name = protocol_container_name(proto)
+            if (docker_snapshot is not None
+                    and container_name
+                    and container_name not in docker_snapshot
+                    and proto not in server.get('protocols', {})):
+                status['protocols'][proto] = merge_saved_protocol_status(
+                    proto, {'container_exists': False, 'container_running': False})
+                continue
             proto, result, err = check_proto(proto)
             status['protocols'][proto] = result
             if err:
@@ -7539,9 +7829,16 @@ def api_check_server(request: Request, server_id: int):
                 
         if changed:
             save_data(data)
-            
+
+        _check_cache_put(server_uid, status)
         ssh.disconnect()
         return status
+    except (peer_lifecycle_lock.PeerLifecycleBusy,
+            peer_lifecycle_lock.PeerLifecycleUncertain):
+        # Штатные обработчики этих двух состояний отдают 503 с машинным кодом.
+        # Перехватывать их общим except нельзя: пользователь увидит «сервер
+        # недоступен» вместо «требуется восстановление администратором».
+        raise
     except Exception as e:
         logger.exception("Error checking server")
         return JSONResponse({'error': str(e), 'connection': 'failed'}, status_code=500)
@@ -7623,10 +7920,12 @@ def _docker_networks(ssh, container):
 
 
 def _selfsteal_dest(xray_networks, nginx_networks, nginx_container):
-    """Container-to-container Reality target. On a shared docker network
-    the NGINX name resolves via embedded DNS and survives container
-    re-creation; otherwise fall back to the current bridge IP."""
-    if set(xray_networks) & set(nginx_networks):
+    """Container-to-container Reality target. On a shared user-defined
+    docker network the NGINX name resolves via embedded DNS and survives
+    container re-creation. The default bridge has no embedded DNS —
+    there the current IP is the only working target, so fall back to it."""
+    resolvable = (set(xray_networks) & set(nginx_networks)) - {'bridge'}
+    if resolvable:
         return f"{nginx_container}:443"
     for networks in (nginx_networks, xray_networks):
         for info in networks.values():
@@ -7636,12 +7935,19 @@ def _selfsteal_dest(xray_networks, nginx_networks, nginx_container):
     return None
 
 
-def _selfsteal_site_ok(ssh, domain, port):
+def _selfsteal_site_ok(ssh, xray_container, domain, dest):
     """The mask only holds while the site answers with a valid
-    certificate for the domain — verified from the host itself. DNS may
+    certificate for the domain. Probe from inside the Xray container
+    against the exact dest that will be written — the container-to-
+    container hop is the path Reality actually uses, so host-side port
+    publishing, proxy env and CA bundles cannot skew the result. DNS may
     point anywhere (relays included); --resolve forces the local hop."""
-    out, _, code = ssh.run_command(
-        f"curl -s 2>/dev/null --resolve {shlex.quote(f'{domain}:{port}:127.0.0.1')} "
+    dest_host, _, dest_port = str(dest).rpartition(':')
+    if not dest_host:
+        return False
+    out, _, code = ssh.run_sudo_command(
+        f"docker exec {shlex.quote(str(xray_container))} "
+        f"curl -s 2>/dev/null --resolve {shlex.quote(f'{domain}:{dest_port or 443}:{dest_host}')} "
         f"{shlex.quote('https://' + domain + '/')} -o /dev/null "
         f"-w '%{{http_code}}' --max-time 8")
     return code == 0 and bool(re.fullmatch(r'\d{3}', out.strip()))
@@ -7687,7 +7993,7 @@ def api_xray_selfsteal_plan(request: Request, server_id: int, protocol: str = 'x
                 'port': int(status.get('port') or 443),
                 'dest': dest,
                 'site_ok': bool(dest) and _selfsteal_site_ok(
-                    ssh, status['domain'], int(status.get('port') or 443)),
+                    ssh, xray_container, status['domain'], dest),
             })
         return {
             'xray_running': xray_running,
@@ -7727,17 +8033,16 @@ def api_xray_selfsteal_apply(request: Request, server_id: int, req: XraySelfstea
         if not domain or not status.get('container_running'):
             return JSONResponse({'error': 'The NGINX site is not ready'},
                                 status_code=409)
-        port = int(status.get('port') or 443)
+        xray_container = (protocols.get(req.protocol) or {}).get('container_name') \
+            or manager.container_name
         dest = _selfsteal_dest(
-            _docker_networks(
-                ssh, (protocols.get(req.protocol) or {}).get('container_name')
-                or manager.container_name),
+            _docker_networks(ssh, xray_container),
             _docker_networks(ssh, status['container_name']),
             status['container_name'])
         if not dest:
             return JSONResponse({'error': 'No route from the Xray container to NGINX'},
                                 status_code=409)
-        if not _selfsteal_site_ok(ssh, domain, port):
+        if not _selfsteal_site_ok(ssh, xray_container, domain, dest):
             return JSONResponse(
                 {'error': 'The site does not answer with a valid certificate '
                           'for the domain yet — issue the certificate first'},
@@ -8174,7 +8479,13 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
         if (will_link_default or carries_exit_link) and ipv6_pref is not False:
             ipv6_pref = False
             forced_ipv6_off = True
-        if ipv6_pref is True and env_pref != 'off':
+        # IPv6 is an AWG-only instance property: the preference never reaches
+        # the install call of any other protocol, and only AWGManager knows how
+        # to probe Docker for it. Probing unconditionally crashed installs of
+        # telemt / socks5 / xray / exit nodes with
+        # "'<Manager>' object has no attribute '_docker_ipv6_info'" whenever the
+        # server preference was "on" or AWG_IPV6=on.
+        if ipv6_pref is True and env_pref != 'off' and install_base in AWG_PROTOCOLS:
             docker_info = await asyncio.to_thread(manager._docker_ipv6_info)
             if not docker_info.get('ipv6_enabled'):
                 ssh.disconnect()
@@ -8918,6 +9229,11 @@ async def api_smartroute_status(request: Request, server_id: int):
         return await smartroute_svc.status(server_id)
     except SmartRouteError as e:
         return _smartroute_error(e)
+    except (peer_lifecycle_lock.PeerLifecycleBusy,
+            peer_lifecycle_lock.PeerLifecycleUncertain):
+        # Не маскировать жизненный цикл в generic 500: штатный обработчик
+        # отдаёт 503 + code, и UI показывает реальную причину.
+        raise
     except Exception as e:
         logger.exception("Error reading Smart Route status")
         return JSONResponse({'error': str(e)}, status_code=500)
@@ -9032,6 +9348,10 @@ async def api_awg_plugin_status(request: Request, server_id: int):
         return result
     except PluginUpdateError as e:
         return _awg_plugin_error(e, 502)
+    except (peer_lifecycle_lock.PeerLifecycleBusy,
+            peer_lifecycle_lock.PeerLifecycleUncertain):
+        # См. /smartroute/status: штатный 503 + code вместо generic 500.
+        raise
     except Exception as e:
         logger.exception("Error reading AWG plugin status")
         return JSONResponse({'error': str(e), 'code': 'internal_error'}, status_code=500)
@@ -9310,6 +9630,35 @@ def api_awg_settings_save(request: Request, server_id: int, req: AwgSettingsRequ
             proto_record['mtu'] = settings.get('mtu')
             proto_record['dns'] = settings.get('dns')
             proto_record['dns6'] = settings.get('dns6')
+            # I1-I5 live in the server config, but the panel keeps its own copy
+            # for the instance card and for copying the instance to another
+            # host. Without this the stored packet keeps the value from install
+            # time and silently disagrees with the server after I1 is edited or
+            # regenerated (PR #346). An empty value means "the packet is gone",
+            # so the key is dropped instead of stored as ''.
+            if settings.get('supports_special_junk'):
+                params = proto_record.get('awg_params')
+                if params is None or params == '':
+                    # Instances installed before PR #346 carry no mapping.
+                    params = {}
+                elif not isinstance(params, dict):
+                    # A hand-edited or damaged record: do not overwrite what
+                    # the admin may still want to recover by hand.
+                    logger.warning(
+                        "awg_params for %s is %s, not a mapping; "
+                        "skipping the I1-I5 write-back", req.protocol,
+                        type(params).__name__)
+                    params = None
+                if params is not None:
+                    for key in ('i1', 'i2', 'i3', 'i4', 'i5'):
+                        raw = settings.get(key)
+                        value = raw.strip() if isinstance(raw, str) else ''
+                        if value:
+                            params[key] = value
+                        else:
+                            params.pop(key, None)
+                    if params or 'awg_params' in proto_record:
+                        proto_record['awg_params'] = params
             save_data(data)
         settings['dns1'], settings['dns2'] = split_dns(settings.get('dns'))
         settings['status'] = 'success'
@@ -9568,7 +9917,17 @@ def _ip_status_cache_put(server_uid, payload):
 
 
 def _invalidate_ip_status(server_uid=None):
-    """Drop one cached status, or all of them after a global change."""
+    """Drop one cached status, or all of them after a global change.
+
+    Снимок /check (?boot=1) инвалидируется вместе с ip-status: после
+    установки, удаления или переключения протокола страница не должна
+    показывать состояние до мутации.
+    """
+    with _CHECK_CACHE_LOCK:
+        if server_uid is None:
+            _CHECK_CACHE.clear()
+        else:
+            _CHECK_CACHE.pop(server_uid, None)
     if server_uid is None:
         _IP_STATUS_CACHE.clear()
     else:
@@ -10143,11 +10502,8 @@ def api_protocol_backup_download(request: Request, server_id: int, req: BackupDo
             return JSONResponse({'error': err or 'Backup not found'}, status_code=404)
         fd, tmp_path = tempfile.mkstemp(prefix='amnezia-backup-', suffix='.tar.gz')
         os.close(fd)
-        sftp = ssh.client.open_sftp()
-        try:
+        with ssh.sftp_transfer() as sftp:
             sftp.get(tmp_remote, tmp_path)
-        finally:
-            sftp.close()
         return FileResponse(
             tmp_path,
             media_type='application/gzip',
@@ -11460,8 +11816,27 @@ def api_server_config_save(request: Request, server_id: int, req: ServerConfigSa
                 unchanged = False
             if unchanged:
                 return {'status': 'success', 'unchanged': True}
-            return JSONResponse({'error': 'Applying this configuration may restart the protocol and reset peer counters. A counter-preserving apply procedure is required.',
-                                 'code': 'traffic_finalization_required'}, status_code=409)
+            if base != 'xray':
+                # Other protocols have no counter-preserving apply; keep
+                # their accounted configs read-only.
+                return JSONResponse({'error': 'Applying this configuration may restart the protocol and reset peer counters. A counter-preserving apply procedure is required.',
+                                     'code': 'traffic_finalization_required'}, status_code=409)
+            # Counter-preserving apply for xray: commit the owned peers'
+            # current counters against their baselines, apply the config,
+            # then move the baselines to the restarted core's zero counters.
+            owned_rows = ownership_rows(current, server_id=server_id,
+                                        protocol=req.protocol)
+            now = time.time()
+            for conn in owned_rows:
+                observed, _quiescent = read_peer_state(
+                    mgr, conn['protocol'], conn.get('client_id'))
+                if observed is not None:
+                    apply_final_sample(current, conn, server, observed, now)
+                else:
+                    # Peer gone or counters unreadable: the restart resets
+                    # the core counters to zero anyway — rebase up front.
+                    conn['last_bytes'] = 0
+            save_data(current)
         if protocol_base(req.protocol) == 'xray':
             from managers.xray_manager import XrayManager
             mgr = XrayManager(ssh, req.protocol)
@@ -11471,6 +11846,19 @@ def api_server_config_save(request: Request, server_id: int, req: ServerConfigSa
             except Exception as e:
                 return JSONResponse({'error': f'Invalid JSON format: {str(e)}'}, status_code=400)
             mgr._save_server_json(data_json)
+            if protected and owned_rows:
+                # The recreation restarted the core with zeroed counters:
+                # move the owned peers' baselines with them, otherwise the
+                # first poll would read observed < baseline.
+                owned_ids = {(c.get('user_id'), c.get('client_id'))
+                             for c in owned_rows}
+                data = load_data()
+                for conn in data.get('user_connections', []):
+                    if (conn.get('server_id') == server_id
+                            and protocol_base(conn.get('protocol')) == base
+                            and (conn.get('user_id'), conn.get('client_id')) in owned_ids):
+                        conn['last_bytes'] = 0
+                save_data(data)
         elif protocol_base(req.protocol) == 'telemt':
             from managers.telemt_manager import TelemtManager
             mgr = TelemtManager(ssh, req.protocol)
@@ -12369,6 +12757,7 @@ def api_list_users(request: Request, search: str = '', page: int = 1, size: int 
             'share_enabled': u.get('share_enabled', False),
             'share_token': u.get('share_token'),
             'has_share_password': bool(u.get('share_password_hash')),
+            'sub_url': u.get('sub_url'),
             'source': 'Remnawave' if u.get('remnawave_uuid') else 'Local'
         })
     return {
@@ -12712,6 +13101,14 @@ async def api_add_user_connection(request: Request, user_id: str, req: AddUserCo
             data = load_data()
             data['user_connections'].append(conn)
             save_data(data)
+            if protocol_base(req.protocol) == 'xray':
+                # Refresh the user's subscription file right away; the
+                # periodic monitor covers every other change source.
+                try:
+                    await asyncio.to_thread(auto_push_subscriptions, data,
+                                            [user_id])
+                except Exception:
+                    logger.warning("subscription auto-push failed", exc_info=True)
 
         resp = {'status': 'success'}
         if result.get('config'):
@@ -13259,6 +13656,8 @@ def settings_page(request: Request):
         return RedirectResponse('/login')
     data = load_data()
     backup_csrf = request.session.setdefault('backup_csrf', secrets.token_urlsafe(32)) if user['role'] == 'admin' else ''
+    # Bucket and endpoint details are admin-only, like backups: support never gets them.
+    storage_status = panel_storage.status() if user['role'] == 'admin' else {}
     return tpl(
         request,
         'settings.html',
@@ -13266,9 +13665,448 @@ def settings_page(request: Request):
         servers=data.get('servers', []),
         current_version=CURRENT_VERSION,
         backup_csrf=backup_csrf,
+        storage_status=storage_status,
         self_service_protocol_choices=self_service_protocol_choices(),
         cheburcheck_targets=_cheburcheck_targets_context(data),
+        subscription_settings=subscription_settings(data),
+        subscription_servers=[
+            {'id': index, 'label': server.get('name') or server.get('host')}
+            for index, server in enumerate(data.get('servers', []))
+            if any(protocol_base(key) == 'nginx'
+                   for key in (server.get('protocols') or {}))
+        ],
     )
+
+
+# ===== Subscriptions (Xray): the panel builds each user's link list and
+# pushes ready base64 files into the html root of an NGINX mask server,
+# where clients fetch them over the entry domain. The panel itself stays
+# unreachable from the internet — it only initiates outbound SSH. =====
+
+def subscription_settings(data):
+    settings = (data.get('settings') or {}).get('subscription') or {}
+    try:
+        path = normalize_subscription_path(settings.get('path'))
+    except ValueError:
+        path = 'sub'
+    return {'enabled': bool(settings.get('enabled')),
+            'server_id': settings.get('server_id'),
+            'path': path,
+            'name': normalize_subscription_name(settings.get('name'))}
+
+
+def normalize_subscription_path(path):
+    path = (path or '').strip().strip('/').lower() or 'sub'
+    if not re.fullmatch(r'[a-z0-9][a-z0-9/_-]{0,63}', path):
+        raise ValueError('Invalid subscription path')
+    return path
+
+
+def normalize_subscription_name(name):
+    return ' '.join((name or '').split())[:96]
+
+
+def _subscription_profile_title(name):
+    """profile-title header value: raw when ASCII-safe, base64-prefixed
+    otherwise (the widely supported way to carry non-ASCII names)."""
+    name = name or ''
+    if all(32 <= ord(c) < 127 for c in name):
+        return name
+    return 'base64:' + base64.b64encode(name.encode()).decode()
+
+
+def _subscription_config_block(sub_path, profile_title):
+    return (
+        "\n    # === panel subscription (managed) ===\n"
+        f"    location /{sub_path}/ {{\n"
+        f"        add_header profile-title \"{profile_title}\" always;\n"
+        f"        add_header profile-update-interval \"24\" always;\n"
+        f"        try_files $uri =404;\n"
+        f"    }}\n"
+        "    # === end panel subscription block ===\n"
+    )
+
+
+def _apply_subscription_config_text(config, sub_path='sub', profile_title='',
+                                    remove=False):
+    """Inject/replace/remove the managed subscription location inside the
+    last server block of the mask site config (pure text, testable)."""
+    cleaned = re.sub(r"\n?[ \t]*# === panel subscription \(managed\) ===.*?"
+                     r"# === end panel subscription block ===\n?",
+                     "\n", config, flags=re.S)
+    if remove:
+        return cleaned
+    index = cleaned.rstrip().rfind('}')
+    if index == -1:
+        raise RuntimeError('unexpected NGINX config shape')
+    return cleaned[:index] + _subscription_config_block(sub_path, profile_title) \
+        + cleaned[index:]
+
+
+def _apply_subscription_config(nginx_server, nginx_protocol, sub_settings,
+                               remove=False):
+    """Apply the managed subscription location on the live mask (nginx -t
+    validated by save_server_config, which reverts on failure)."""
+    from managers.nginx_manager import NginxManager
+    ssh = get_ssh(nginx_server)
+    ssh.connect()
+    try:
+        nginx = NginxManager(ssh)
+        config = nginx._get_server_config(nginx_protocol)
+        new_config = _apply_subscription_config_text(
+            config, sub_settings['path'],
+            _subscription_profile_title(sub_settings.get('name')),
+            remove=remove)
+        return nginx.save_server_config(nginx_protocol, new_config)
+    finally:
+        ssh.disconnect()
+
+
+def subscription_nginx_server(data, sub_settings):
+    """The NGINX server chosen as the subscription file host, or None."""
+    server_id = sub_settings.get('server_id')
+    if not isinstance(server_id, int) or not 0 <= server_id < len(data.get('servers', [])):
+        return None
+    server = data['servers'][server_id]
+    if not any(protocol_base(key) == 'nginx'
+               for key in (server.get('protocols') or {})):
+        return None
+    return server
+
+
+def ensure_subscription_token(user):
+    token = user.get('sub_token')
+    if not token or not re.fullmatch(r'[0-9a-f]{32}', str(token)):
+        token = secrets.token_hex(16)
+        user['sub_token'] = token
+    return token
+
+
+def _subscription_mask_domain(nginx_server):
+    """The LE domain the NGINX mask serves (best-effort live lookup)."""
+    try:
+        from managers.nginx_manager import NginxManager
+        ssh = get_ssh(nginx_server)
+        ssh.connect()
+        try:
+            return NginxManager(ssh).get_server_status(
+                next(key for key in (nginx_server.get('protocols') or {})
+                     if protocol_base(key) == 'nginx')).get('domain')
+        finally:
+            ssh.disconnect()
+    except Exception:
+        logger.warning("subscription mask domain lookup failed", exc_info=True)
+        return None
+
+
+def _subscription_user_targets(data, user):
+    """[(server, [connection, ...])] for the user's xray connections."""
+    groups = {}
+    for conn in data.get('user_connections', []):
+        if conn.get('user_id') != user.get('id'):
+            continue
+        protocol = conn.get('protocol') or ''
+        if not protocol.startswith('xray'):
+            continue
+        server_id = conn.get('server_id')
+        if isinstance(server_id, int) and 0 <= server_id < len(data.get('servers', [])):
+            groups.setdefault(server_id, []).append(conn)
+    return [(data['servers'][server_id], conns)
+            for server_id, conns in groups.items()]
+
+
+def push_user_subscription(data, user, sub_settings, nginx_server):
+    """Build the user's link list and write the base64 file into the mask
+    html root. One SSH hop per entry server (the live config is the link
+    source) plus one write into the mask server.
+    Returns (token, link_count, per-entry-server errors)."""
+    from managers.nginx_manager import NginxManager
+    token = ensure_subscription_token(user)
+    links = []
+    errors = []
+    for server, conns in _subscription_user_targets(data, user):
+        instance_names = server_protocol_names(server)
+        try:
+            ssh = get_ssh(server)
+            ssh.connect()
+            try:
+                for conn in conns:
+                    protocol = conn['protocol']
+                    proto_info = server.get('protocols', {}).get(protocol, {})
+                    port = proto_info.get('port', 443)
+                    pub_host, pub_port = protocol_public_endpoint(server, protocol)
+                    link = _manager_call(
+                        get_protocol_manager(ssh, protocol), 'get_client_config',
+                        protocol, conn.get('client_id'), pub_host, port,
+                        public_port=pub_port,
+                        **xray_fp_kwargs(server, protocol))
+                    if link:
+                        # The link fragment is what the user sees in their
+                        # client: "server · xray instance". The panel-side
+                        # connection name is the admin's private note and
+                        # must not leak into the subscription.
+                        instance_name = (proto_info.get('custom_name')
+                                         or instance_names.get(protocol)
+                                         or protocol_display_name(protocol))
+                        entry_name = (f"{server.get('name') or server.get('host')}"
+                                      f" · {instance_name}")
+                        fragment = urllib.parse.quote(entry_name)
+                        links.append(link.rpartition('#')[0] + '#' + fragment
+                                     if '#' in link
+                                     else link + '#' + fragment)
+            finally:
+                ssh.disconnect()
+        except Exception as e:
+            errors.append(f"{server.get('host')}: {e}")
+    if not links:
+        raise RuntimeError('no links collected: '
+                           + ('; '.join(errors) or 'no xray connections'))
+    payload = base64.b64encode('\n'.join(links).encode()).decode()
+    sub_dir = f"{NginxManager.HTML_DIR}/{sub_settings['path']}"
+    remote_path = f"{sub_dir}/{token}"
+    ssh = get_ssh(nginx_server)
+    ssh.connect()
+    try:
+        # Skip the write when the served file is already current: the
+        # periodic auto-push runs this for every user around the clock.
+        out, _, _ = ssh.run_sudo_command(f"cat {shlex.quote(remote_path)} 2>/dev/null")
+        if (out or '').strip() == payload:
+            return token, len(links), errors, True
+        ssh.run_sudo_command(f"mkdir -p {shlex.quote(sub_dir)}")
+        ssh.upload_file_sudo(payload, remote_path)
+    finally:
+        ssh.disconnect()
+    return token, len(links), errors, False
+
+
+def auto_push_subscriptions(data, user_ids=None):
+    """Best-effort regeneration of the affected users' subscription files.
+    Never raises; no-ops when subscriptions are disabled. Persists minted
+    tokens and cached sub URLs via save_data."""
+    sub_settings = subscription_settings(data)
+    if not sub_settings['enabled']:
+        return
+    nginx_server = subscription_nginx_server(data, sub_settings)
+    if nginx_server is None:
+        return
+    domain = _subscription_mask_domain(nginx_server)
+    users_by_id = {u.get('id'): u for u in data.get('users', [])}
+    if user_ids is None:
+        targets = [u for u in data.get('users', [])
+                   if _subscription_user_targets(data, u)]
+    else:
+        targets = [users_by_id[uid] for uid in user_ids if uid in users_by_id]
+    for user in targets:
+        if not _subscription_user_targets(data, user):
+            user.pop('sub_url', None)  # all xray connections are gone
+            continue
+        try:
+            token, count, errors, unchanged = push_user_subscription(
+                data, user, sub_settings, nginx_server)
+            if domain:
+                user['sub_url'] = (f"https://{domain}/{sub_settings['path']}/"
+                                   f"{token}")
+        except Exception as e:
+            logger.warning("subscription auto-push failed for %s: %s",
+                           user.get('username'), e)
+    save_data(data)
+
+
+def push_all_subscriptions(data):
+    sub_settings = subscription_settings(data)
+    nginx_server = subscription_nginx_server(data, sub_settings)
+    if nginx_server is None:
+        raise ValueError('No NGINX server selected for subscriptions')
+    domain = _subscription_mask_domain(nginx_server)
+    pushed, errors = [], []
+    valid_tokens = set()
+    for user in data.get('users', []):
+        if not _subscription_user_targets(data, user):
+            continue
+        try:
+            token, count, user_errors, unchanged = push_user_subscription(
+                data, user, sub_settings, nginx_server)
+            errors.extend(f"{user.get('username')}: {text}" for text in user_errors)
+            valid_tokens.add(token)
+            url = (f"https://{domain}/{sub_settings['path']}/{token}"
+                   if domain else None)
+            if url:
+                user['sub_url'] = url  # cached for the /users page
+            pushed.append({
+                'username': user.get('username'), 'token': token, 'links': count,
+                'unchanged': unchanged, 'url': url,
+            })
+        except Exception as e:
+            errors.append(f"{user.get('username')}: {e}")
+    _subscription_prune_stale_files(data, nginx_server, sub_settings, valid_tokens)
+    return {'pushed': pushed, 'errors': errors,
+            'path': sub_settings['path'], 'domain': domain}
+
+
+def _subscription_prune_stale_files(data, nginx_server, sub_settings,
+                                    valid_tokens):
+    """Remove subscription files of users that no longer exist (deleting a
+    user does not walk the mask's html root)."""
+    from managers.nginx_manager import NginxManager
+    sub_dir = f"{NginxManager.HTML_DIR}/{sub_settings['path']}"
+    ssh = get_ssh(nginx_server)
+    ssh.connect()
+    try:
+        out, _, code = ssh.run_sudo_command(
+            f"ls -1 {shlex.quote(sub_dir)} 2>/dev/null")
+        if code != 0 or not (out or '').strip():
+            return
+        stale = [name.strip() for name in out.strip().split('\n')
+                 if name.strip() and name.strip() not in valid_tokens
+                 and re.fullmatch(r'[0-9a-f]{32}', name.strip())]
+        for name in stale:
+            ssh.run_sudo_command(f"rm -f {shlex.quote(f'{sub_dir}/{name}')}")
+        if stale:
+            logger.info("removed %d stale subscription files", len(stale))
+    finally:
+        ssh.disconnect()
+
+
+class SubscriptionSettingsRequest(BaseModel):
+    enabled: bool = False
+    server_id: Optional[int] = None
+    path: Optional[str] = None
+    name: Optional[str] = None
+
+
+@app.get('/api/subscription/status', tags=["Settings"])
+def api_subscription_status(request: Request):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    data = load_data()
+    sub_settings = subscription_settings(data)
+    nginx_server = (subscription_nginx_server(data, sub_settings)
+                    if sub_settings['enabled'] else None)
+    domain = _subscription_mask_domain(nginx_server) if nginx_server is not None else None
+    urls = []
+    if nginx_server is not None:
+        prefix = f"https://{domain or '<mask-domain>'}/{sub_settings['path']}/"
+        for user in data.get('users', []):
+            token = user.get('sub_token')
+            if token and _subscription_user_targets(data, user):
+                urls.append({'username': user.get('username'),
+                             'url': prefix + token})
+    return {**sub_settings, 'domain': domain, 'urls': urls}
+
+
+@app.post('/api/settings/subscription', tags=["Settings"])
+def api_subscription_settings_save(request: Request, req: SubscriptionSettingsRequest):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        sub_path = normalize_subscription_path(req.path)
+        sub_name = normalize_subscription_name(req.name)
+        old = subscription_settings(data)
+        if req.enabled:
+            probe = subscription_nginx_server(
+                data, {'enabled': True, 'server_id': req.server_id})
+            if probe is None:
+                return JSONResponse(
+                    {'error': 'Select a server with NGINX installed'}, status_code=400)
+        settings = data.setdefault('settings', {}).setdefault('subscription', {})
+        settings['enabled'] = req.enabled
+        settings['server_id'] = req.server_id
+        settings['path'] = sub_path
+        settings['name'] = sub_name
+        save_data(data)
+        result = {'status': 'success', 'enabled': req.enabled, 'path': sub_path,
+                  'pushed': [], 'errors': []}
+        if req.enabled:
+            nginx_key = next(key for key in (probe.get('protocols') or {})
+                             if protocol_base(key) == 'nginx')
+            _apply_subscription_config(probe, nginx_key,
+                                       subscription_settings(data))
+            outcome = push_all_subscriptions(data)
+            save_data(data)  # freshly minted sub tokens
+            result['pushed'] = outcome['pushed']
+            result['errors'] = outcome['errors']
+            result['domain'] = outcome.get('domain')
+        elif old['enabled']:
+            old_server = subscription_nginx_server(data, {'server_id': old['server_id']})
+            nginx_key = next((key for key in (old_server.get('protocols') or {})
+                              if protocol_base(key) == 'nginx'), None) \
+                if old_server is not None else None
+            if nginx_key:
+                # Strip the managed location the previous configuration added
+                # and stop serving the files entirely.
+                _apply_subscription_config(old_server, nginx_key,
+                                           subscription_settings(data),
+                                           remove=True)
+                try:
+                    from managers.nginx_manager import NginxManager
+                    ssh = get_ssh(old_server)
+                    ssh.connect()
+                    try:
+                        ssh.run_sudo_command(
+                            f"rm -rf {shlex.quote(NginxManager.HTML_DIR + '/' + old['path'])}")
+                    finally:
+                        ssh.disconnect()
+                except Exception:
+                    logger.warning("subscription file cleanup failed", exc_info=True)
+            for user in data.get('users', []):
+                user.pop('sub_url', None)
+        return result
+    except ValueError as e:
+        return JSONResponse({'error': str(e)}, status_code=400)
+    except Exception as e:
+        logger.exception("subscription settings save failed")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/subscription/push', tags=["Settings"])
+def api_subscription_push(request: Request):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if not subscription_settings(data)['enabled']:
+            return JSONResponse({'error': 'Subscriptions are disabled'},
+                                status_code=409)
+        outcome = push_all_subscriptions(data)
+        save_data(data)
+        return {'status': 'success', **outcome}
+    except ValueError as e:
+        return JSONResponse({'error': str(e)}, status_code=400)
+    except Exception as e:
+        logger.exception("subscription push failed")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/users/{user_id}/subscription/reset', tags=["Settings"])
+def api_subscription_reset(request: Request, user_id: str):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        sub_settings = subscription_settings(data)
+        nginx_server = subscription_nginx_server(data, sub_settings)
+        if nginx_server is None:
+            return JSONResponse({'error': 'Subscriptions are disabled'},
+                                status_code=409)
+        user = next((u for u in data.get('users', []) if u.get('id') == user_id), None)
+        if not user:
+            return JSONResponse({'error': 'User not found'}, status_code=404)
+        user['sub_token'] = secrets.token_hex(16)  # force a fresh token
+        token, count, errors, _ = push_user_subscription(data, user, sub_settings,
+                                                         nginx_server)
+        save_data(data)
+        domain = _subscription_mask_domain(nginx_server)
+        url = (f"https://{domain}/{sub_settings['path']}/{token}"
+               if domain else None)
+        if url:
+            user['sub_url'] = url
+        save_data(data)
+        return {'status': 'success', 'token': token, 'links': count,
+                'url': url, 'errors': errors}
+    except Exception as e:
+        logger.exception("subscription token reset failed")
+        return JSONResponse({'error': str(e)}, status_code=500)
 
 
 @app.get('/api/settings', tags=["Settings"])
@@ -13838,6 +14676,30 @@ def _backup_admin(request):
     return actor
 
 
+# Optional S3 mirror of the data directory (docs/S3_STORAGE.md); every hook is a
+# no-op unless PANEL_STORAGE=s3. Registered after startup(), so the sync thread
+# starts only once PanelLease is held and the migrations have been saved.
+@app.on_event('startup')
+async def start_panel_storage():
+    panel_storage.start()
+
+
+@app.on_event('shutdown')
+async def stop_panel_storage():
+    # Requests the final flush at once and polls for it: the default executor may be
+    # full of slow SSH calls, and a queued stop() could miss the pod's grace period.
+    await panel_storage.stop_async()
+
+
+@app.get('/api/settings/storage', tags=["Settings"])
+def api_storage_status(request: Request):
+    # Bucket, endpoint and lease owner: same audience as backups (admin only).
+    if not _backup_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403,
+                            headers=PRIVATE_HEADERS)
+    return JSONResponse(panel_storage.status(), headers=PRIVATE_HEADERS)
+
+
 @app.get('/api/integration/inventory', tags=["Servers"])
 async def api_integration_inventory(request: Request):
     if not _check_admin(request):
@@ -14043,22 +14905,60 @@ def api_recovery_status(request: Request):
 def _probe_blocking_peer(server, conn):
     """Return (observed_bytes, quiescent) for a leftover accounting row.
 
-    ``quiescent`` is True only when the peer is absent from the live protocol
-    instance or is explicitly disabled there.  Unknown state is NOT quiescent.
+    ``quiescent`` is True only when the peer cannot carry traffic on the
+    live instance: absent from it, explicitly disabled there, or — for
+    xray — gone from the runtime config while only lingering in the
+    clientsTable (a hand-edited config carries no traffic).  Unknown
+    state is NOT quiescent.
     """
     ssh = get_ssh(server)
     try:
         ssh.connect()
         manager = get_protocol_manager(ssh, conn['protocol'])
+        runtime_ids = None
         if protocol_base(conn['protocol']) == 'xray':
             try:
-                clients = manager.get_clients(conn['protocol'], strict=True)
+                runtime_ids = manager.get_runtime_client_ids()
             except RuntimeError as error:
                 raise RecoveryError('incomplete_peer_state') from error
+            if conn.get('client_id') not in runtime_ids:
+                # Absent from the live config: nothing can flow through it,
+                # whatever the clientsTable says. The table may still hold
+                # final counters worth archiving.
+                try:
+                    clients = manager.get_clients(conn['protocol'], strict=True)
+                except RuntimeError as error:
+                    clients = None
+                peers = [c for c in (clients or [])
+                         if isinstance(c, dict) and c.get('clientId') == conn.get('client_id')]
+                observed = None
+                if len(peers) == 1:
+                    ud = peers[0].get('userData') or {}
+                    rx, tx = ud.get('dataReceivedBytes'), ud.get('dataSentBytes')
+                    if type(rx) is int and type(tx) is int and rx >= 0 and tx >= 0:
+                        observed = rx + tx
+                return observed, True
         else:
             clients = _manager_call(manager, 'get_clients', conn['protocol'])
-        if not isinstance(clients, list):
-            raise RecoveryError('incomplete_peer_state')
+            if not isinstance(clients, list):
+                raise RecoveryError('incomplete_peer_state')
+            peers = [c for c in clients
+                     if isinstance(c, dict) and c.get('clientId') == conn.get('client_id')]
+            if len(peers) > 1:
+                raise RecoveryError('peer_identity_ambiguous')
+            if not peers:
+                return None, True
+            ud = peers[0].get('userData') or {}
+            rx, tx = ud.get('dataReceivedBytes'), ud.get('dataSentBytes')
+            observed = (rx + tx if type(rx) is int and type(tx) is int
+                        and rx >= 0 and tx >= 0 else None)
+            return observed, not bool(ud.get('enabled', True))
+        # Xray peer present in the live config: traffic can flow through it —
+        # the clientsTable enabled flag does not gate the core.
+        try:
+            clients = manager.get_clients(conn['protocol'], strict=True)
+        except RuntimeError as error:
+            raise RecoveryError('incomplete_peer_state') from error
         peers = [c for c in clients
                  if isinstance(c, dict) and c.get('clientId') == conn.get('client_id')]
         if len(peers) > 1:
@@ -14069,7 +14969,7 @@ def _probe_blocking_peer(server, conn):
         rx, tx = ud.get('dataReceivedBytes'), ud.get('dataSentBytes')
         observed = (rx + tx if type(rx) is int and type(tx) is int
                     and rx >= 0 and tx >= 0 else None)
-        return observed, not bool(ud.get('enabled', True))
+        return observed, False
     finally:
         ssh.disconnect()
 
@@ -14199,6 +15099,9 @@ def pathlib_read_data_bytes():
 
 
 if __name__ == '__main__':
+    # PANEL_STORAGE=s3: restore the data directory from the bucket before anything
+    # reads it (the main thread is required for the SIGTERM handler). No-op by default.
+    panel_storage.bootstrap(DATA_FILE, app_dir=application_path, panel_version=CURRENT_VERSION)
     data = load_data()
     ssl_conf = data.get('settings', {}).get('ssl', {})
     
@@ -14234,6 +15137,8 @@ if __name__ == '__main__':
         # public front answers like an empty nginx instead.
         "server_header": False,
     }
+    # s3 mode bounds uvicorn's graceful shutdown so the final S3 flush fits the pod's grace period.
+    uvicorn_kwargs.update(panel_storage.uvicorn_overrides())
 
     if ssl_conf.get('enabled') and cert_file and key_file:
         if os.path.exists(cert_file) and os.path.exists(key_file):
