@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 #  Global state
 # ----------------------------------------------------------------------- #
 _bot_task: Optional[asyncio.Task] = None
+_RETRY_MAX_DELAY = 60
 _callback_refs = {}
 _pending_inputs = {}
 
@@ -839,9 +840,11 @@ _ssh_credential_resolver = None
 
 def launch_bot(token: str, load_data_fn: Callable, generate_vpn_link_fn: Callable, save_data_fn: Optional[Callable] = None, self_service_svc=None, credential_resolver=None):
     global _bot_task, _ssh_credential_resolver
+    if is_running():
+        return _bot_task
     _ssh_credential_resolver = credential_resolver
     _bot_task = asyncio.create_task(
-        _run_bot(token, load_data_fn, generate_vpn_link_fn, save_data_fn, self_service_svc),
+        _supervise_bot(token, load_data_fn, generate_vpn_link_fn, save_data_fn, self_service_svc),
         name="telegram_bot",
     )
     return _bot_task
@@ -849,14 +852,43 @@ def launch_bot(token: str, load_data_fn: Callable, generate_vpn_link_fn: Callabl
 
 async def stop_bot():
     global _bot_task
-    if _bot_task and not _bot_task.done():
-        _bot_task.cancel()
+    task = _bot_task
+    if task is not None:
+        if not task.done():
+            task.cancel()
         try:
-            await _bot_task
+            await task
         except asyncio.CancelledError:
             pass
-        _bot_task = None
+        finally:
+            if _bot_task is task:
+                _bot_task = None
         logger.info("Telegram bot stopped.")
+
+
+class _InvalidBotToken(Exception):
+    pass
+
+
+async def _supervise_bot(token, load_data_fn, generate_vpn_link_fn,
+                         save_data_fn=None, self_service_svc=None):
+    delay = 5
+    while True:
+        try:
+            await _run_bot(token, load_data_fn, generate_vpn_link_fn,
+                           save_data_fn, self_service_svc)
+            return
+        except asyncio.CancelledError:
+            raise
+        except _InvalidBotToken:
+            logger.error("Telegram bot authentication failed; correct the saved token and start again.")
+            return
+        except Exception as exc:
+            # HTTP exception strings may include the bot token in the URL.
+            logger.warning("Telegram bot startup failed (%s); retrying in %ss",
+                           type(exc).__name__, delay)
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, _RETRY_MAX_DELAY)
 
 
 # ----------------------------------------------------------------------- #
@@ -2577,8 +2609,9 @@ async def _run_bot(token: str, load_data_fn: Callable, generate_vpn_link_fn: Cal
 
         me = await api.call("getMe")
         if not me.get("ok"):
-            logger.error(f"Telegram bot: invalid token or API error: {me}")
-            return
+            if me.get("error_code") in (401, 404):
+                raise _InvalidBotToken()
+            raise RuntimeError("Telegram getMe failed")
         logger.info(f"Telegram bot logged in as @{me['result']['username']}")
         await _set_default_commands(api)
         try:
@@ -2593,7 +2626,7 @@ async def _run_bot(token: str, load_data_fn: Callable, generate_vpn_link_fn: Cal
                 logger.info("Telegram bot polling cancelled.")
                 return
             except Exception as e:
-                logger.warning(f"Telegram bot polling error: {e}")
+                logger.warning("Telegram bot polling error (%s)", type(e).__name__)
                 await asyncio.sleep(5)
                 continue
 

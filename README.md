@@ -97,6 +97,9 @@ Configuration panel for system parameters and preferences:
 *   **🤖 Telegram Bot Integration**:
     *   Notify users about new connections or limits.
     *   Integrated management via Telegram commands.
+    *   Start/Stop persists the bot's enabled state: enabled bots start again after a panel/container restart; manually stopped bots stay stopped. Saving other settings does not change this choice.
+    *   Temporary initialization failures retry after 5, 10, 20, 40, then 60 seconds (capped). Stop cancels pending retries; invalid tokens require correction and a new Start.
+    *   API clients should use `POST /api/settings/telegram/toggle` with `{"enabled": true}` or `{"enabled": false}`. Empty POSTs toggle saved intent for compatibility. The general settings save preserves the existing `telegram.enabled` value, even if an older client submits it.
     *   Admin-role workflows for managing servers, protocols, users, and connections directly from Telegram.
 *   **🔄 Built-in Update Checker**:
     *   View your current panel version directly in Settings.
