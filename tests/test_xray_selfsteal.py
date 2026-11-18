@@ -113,6 +113,12 @@ class SelfstealHelpersTests(unittest.TestCase):
                                      'amnezia-nginx')
         self.assertEqual(dest, 'amnezia-nginx:443')
 
+    def test_default_bridge_has_no_embedded_dns_so_the_ip_is_used(self):
+        dest = panel._selfsteal_dest({'bridge': {'IPAddress': '172.17.0.2'}},
+                                     {'bridge': {'IPAddress': '172.17.0.3'}},
+                                     'amnezia-nginx')
+        self.assertEqual(dest, '172.17.0.3:443')
+
     def test_without_shared_network_falls_back_to_the_nginx_ip(self):
         dest = panel._selfsteal_dest({'bridge': {'IPAddress': '172.17.0.3'}},
                                      {'bridge2': {'IPAddress': '172.18.0.7'}},
@@ -122,14 +128,23 @@ class SelfstealHelpersTests(unittest.TestCase):
     def test_no_networks_yields_no_dest(self):
         self.assertIsNone(panel._selfsteal_dest({}, {}, 'amnezia-nginx'))
 
-    def test_site_check_demands_a_three_digit_curl_answer(self):
+    def test_site_check_probes_the_dest_from_inside_the_xray_container(self):
         ssh = Mock()
-        ssh.run_command.return_value = ('200', '', 0)
-        self.assertTrue(panel._selfsteal_site_ok(ssh, 'own.example', 443))
-        ssh.run_command.return_value = ('', '', 1)
-        self.assertFalse(panel._selfsteal_site_ok(ssh, 'own.example', 443))
-        ssh.run_command.return_value = ('', '', 0)
-        self.assertFalse(panel._selfsteal_site_ok(ssh, 'own.example', 443))
+        ssh.run_sudo_command.return_value = ('200', '', 0)
+        self.assertTrue(panel._selfsteal_site_ok(
+            ssh, 'amnezia-xray', 'own.example', 'amnezia-nginx:443'))
+        command = ssh.run_sudo_command.call_args[0][0]
+        self.assertIn('docker exec amnezia-xray', command)
+        self.assertIn('--resolve', command)
+        self.assertIn('own.example:443:amnezia-nginx', command)
+        ssh.run_sudo_command.return_value = ('', '', 1)
+        self.assertFalse(panel._selfsteal_site_ok(
+            ssh, 'amnezia-xray', 'own.example', 'amnezia-nginx:443'))
+        ssh.run_sudo_command.return_value = ('', '', 0)
+        self.assertFalse(panel._selfsteal_site_ok(
+            ssh, 'amnezia-xray', 'own.example', 'amnezia-nginx:443'))
+        self.assertFalse(panel._selfsteal_site_ok(
+            ssh, 'amnezia-xray', 'own.example', 'amnezia-nginx'))
 
 
 if __name__ == '__main__':
