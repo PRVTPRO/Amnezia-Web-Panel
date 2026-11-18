@@ -159,6 +159,7 @@ STORAGE_KEYS = {
 
 PROTOCOL_UNINSTALL_KEYS = {
     'uninstall_archive_confirm', 'uninstall_archived',
+    'blocked_peer_still_active',
 }
 
 # I1 masking block (per-instance special-junk packet): install and settings.

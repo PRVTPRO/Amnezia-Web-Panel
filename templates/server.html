@@ -6733,6 +6733,12 @@
                 if (confirm(message)) await uninstallProtocol(proto, true);
                 return;
             }
+            if (err.payload?.code === 'blocked_peer_still_active' && blocking.length) {
+                const ids = blocking.map(row => [row.connection_id, row.client_id]
+                    .filter(Boolean).join('/')).join(', ');
+                showToast(`${_('blocked_peer_still_active')} (${ids})`, 'error');
+                return;
+            }
             showToast(_('error') + ': ' + err.message, 'error');
         }
     }

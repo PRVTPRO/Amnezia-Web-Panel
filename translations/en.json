@@ -117,6 +117,7 @@
   "uninstall_confirm": "Uninstall {}? All connections and configurations will be lost.",
   "uninstall_archive_confirm": "{name} has leftover accounting records: {ids}. The panel will verify that each peer is stopped or absent, archive the records with unverified final counters, and uninstall the protocol. Continue?",
   "uninstall_archived": "Archived {count} leftover accounting record(s).",
+  "blocked_peer_still_active": "Peer still enabled on the live server - remove or stop the listed connection, then retry.",
   "stop_container_confirm": "Stop container {}?",
   "start_container_confirm": "Start container {}?",
   "stopping": "Stopping",

@@ -116,6 +116,7 @@
   "uninstall_confirm": "Désinstaller {} ? Toutes les données seront perdues.",
   "uninstall_archive_confirm": "{name} conserve des enregistrements de comptabilité : {ids}. Le panneau vérifiera que chaque pair est arrêté ou absent, archivera les enregistrements avec des compteurs finaux non vérifiés, puis désinstallera le protocole. Continuer ?",
   "uninstall_archived": "{count} enregistrement(s) de comptabilité archivé(s).",
+  "blocked_peer_still_active": "Le pair est toujours activé sur le serveur en cours - supprimez ou arrêtez la connexion listée, puis réessayez.",
   "stop_container_confirm": "Arrêter le conteneur {} ?",
   "start_container_confirm": "Démarrer le conteneur {} ?",
   "stopping": "Arrêt",

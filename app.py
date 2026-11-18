@@ -14294,22 +14294,60 @@ def api_recovery_status(request: Request):
 def _probe_blocking_peer(server, conn):
     """Return (observed_bytes, quiescent) for a leftover accounting row.
 
-    ``quiescent`` is True only when the peer is absent from the live protocol
-    instance or is explicitly disabled there.  Unknown state is NOT quiescent.
+    ``quiescent`` is True only when the peer cannot carry traffic on the
+    live instance: absent from it, explicitly disabled there, or — for
+    xray — gone from the runtime config while only lingering in the
+    clientsTable (a hand-edited config carries no traffic).  Unknown
+    state is NOT quiescent.
     """
     ssh = get_ssh(server)
     try:
         ssh.connect()
         manager = get_protocol_manager(ssh, conn['protocol'])
+        runtime_ids = None
         if protocol_base(conn['protocol']) == 'xray':
             try:
-                clients = manager.get_clients(conn['protocol'], strict=True)
+                runtime_ids = manager.get_runtime_client_ids()
             except RuntimeError as error:
                 raise RecoveryError('incomplete_peer_state') from error
+            if conn.get('client_id') not in runtime_ids:
+                # Absent from the live config: nothing can flow through it,
+                # whatever the clientsTable says. The table may still hold
+                # final counters worth archiving.
+                try:
+                    clients = manager.get_clients(conn['protocol'], strict=True)
+                except RuntimeError as error:
+                    clients = None
+                peers = [c for c in (clients or [])
+                         if isinstance(c, dict) and c.get('clientId') == conn.get('client_id')]
+                observed = None
+                if len(peers) == 1:
+                    ud = peers[0].get('userData') or {}
+                    rx, tx = ud.get('dataReceivedBytes'), ud.get('dataSentBytes')
+                    if type(rx) is int and type(tx) is int and rx >= 0 and tx >= 0:
+                        observed = rx + tx
+                return observed, True
         else:
             clients = _manager_call(manager, 'get_clients', conn['protocol'])
-        if not isinstance(clients, list):
-            raise RecoveryError('incomplete_peer_state')
+            if not isinstance(clients, list):
+                raise RecoveryError('incomplete_peer_state')
+            peers = [c for c in clients
+                     if isinstance(c, dict) and c.get('clientId') == conn.get('client_id')]
+            if len(peers) > 1:
+                raise RecoveryError('peer_identity_ambiguous')
+            if not peers:
+                return None, True
+            ud = peers[0].get('userData') or {}
+            rx, tx = ud.get('dataReceivedBytes'), ud.get('dataSentBytes')
+            observed = (rx + tx if type(rx) is int and type(tx) is int
+                        and rx >= 0 and tx >= 0 else None)
+            return observed, not bool(ud.get('enabled', True))
+        # Xray peer present in the live config: traffic can flow through it —
+        # the clientsTable enabled flag does not gate the core.
+        try:
+            clients = manager.get_clients(conn['protocol'], strict=True)
+        except RuntimeError as error:
+            raise RecoveryError('incomplete_peer_state') from error
         peers = [c for c in clients
                  if isinstance(c, dict) and c.get('clientId') == conn.get('client_id')]
         if len(peers) > 1:
@@ -14320,7 +14358,7 @@ def _probe_blocking_peer(server, conn):
         rx, tx = ud.get('dataReceivedBytes'), ud.get('dataSentBytes')
         observed = (rx + tx if type(rx) is int and type(tx) is int
                     and rx >= 0 and tx >= 0 else None)
-        return observed, not bool(ud.get('enabled', True))
+        return observed, False
     finally:
         ssh.disconnect()
 
