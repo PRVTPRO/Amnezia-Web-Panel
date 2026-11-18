@@ -42,7 +42,8 @@ class JumpTransportTests(unittest.TestCase):
 
         jump.ensure_connected = mock.Mock()
         jump_transport.open_channel.assert_called_once_with(
-            'direct-tcpip', ('target.example', 2222), ('127.0.0.1', 0))
+            'direct-tcpip', ('target.example', 2222), ('127.0.0.1', 0),
+            timeout=30.0)
         self.assertIs(target_client.connect.call_args.kwargs['sock'], channel)
         self.assertEqual(target_client.connect.call_args.kwargs['hostname'], 'target.example')
 
@@ -70,7 +71,8 @@ class JumpTransportTests(unittest.TestCase):
             key = panel.ssh_trust.probe('target.example', 22, jump)
         self.assertIs(key, mock.sentinel.key)
         transport.open_channel.assert_called_once_with(
-            'direct-tcpip', ('target.example', 22), ('127.0.0.1', 0))
+            'direct-tcpip', ('target.example', 22), ('127.0.0.1', 0),
+            timeout=30)
         target_transport.start_client.assert_called_once_with(timeout=10)
 
 

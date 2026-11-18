@@ -12,7 +12,7 @@ class BackupDownloadSecurityTests(unittest.TestCase):
         ssh._make_private_temp_dir.return_value = '/tmp/amnezia-private.ABC123def0'
         ssh.run_sudo_command.return_value = ('', '', 0)
         if failure == 'sftp':
-            ssh.client.open_sftp.side_effect = OSError('sftp unavailable')
+            ssh.sftp_transfer.side_effect = OSError('sftp unavailable')
         with patch.object(panel, '_check_admin', return_value=True), \
              patch.object(panel, 'load_data', return_value={'servers': [{}]}), \
              patch.object(panel, 'get_ssh', return_value=ssh):
@@ -30,7 +30,8 @@ class BackupDownloadSecurityTests(unittest.TestCase):
         try:
             self.assertEqual(result.status_code, 200)
             ssh._make_private_temp_dir.assert_called_once()
-            self.assertEqual(ssh.client.open_sftp.return_value.get.call_args[0][0],
+            sftp = ssh.sftp_transfer.return_value.__enter__.return_value
+            self.assertEqual(sftp.get.call_args[0][0],
                              '/tmp/amnezia-private.ABC123def0/backup.tar.gz')
             self.assertIn('rm -rf -- /tmp/amnezia-private.ABC123def0',
                           [c.args[0] for c in ssh.run_sudo_command.call_args_list])

@@ -30,6 +30,21 @@ class TrustUITests(unittest.TestCase):
         # Non-status endpoints keep using the network probe.
         self.assertIn('ssh_trust.inspect(', app_source)
 
+    def test_loading_state_is_cleared_by_the_status_update(self):
+        """Чип не должен навсегда оставаться в состоянии «загрузка»."""
+        source = (ROOT / 'templates/server.html').read_text(encoding='utf-8')
+        # Разметка стартует в loading: до ответа пробы точка пульсирует серым.
+        markup = source[source.index('id="sshTrustBtn"'):]
+        self.assertIn('data-state="loading"', markup[:400])
+        # Сеттер обязан снять атрибут: CSS-правило с [data-state="loading"]
+        # специфичнее .is-ok/.is-urgent и перебивает цвет точки.
+        body_at = source.index('function setSSHTrustButton')
+        body = source[body_at:source.index('\n    }', body_at)]
+        self.assertIn("removeAttribute('data-state')", body)
+        # Пульсация привязана только к data-state="loading".
+        self.assertIn('.srv-status-btn[data-state="loading"] .ssh-trust-dot', source)
+        self.assertNotIn('.ssh-trust-btn[data-state', source)
+
     def test_listing_does_not_call_tcp_ping_ssh_success(self):
         app_source = (ROOT / 'app.py').read_text(encoding='utf-8')
         marker = "@app.get('/api/servers/{server_id}/ping'"
