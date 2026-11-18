@@ -1,0 +1,11 @@
+[Unit]
+Description=Managed AmneziaWG exit %i
+
+[Service]
+Type=simple
+UMask=0077
+ExecStart=/opt/vless-awg/amneziawg-go -f %i
+ExecStartPost=/usr/bin/python3 /opt/vless-awg/xray-exit-control.py interface %i
+Restart=on-failure
+RestartSec=3s
+TimeoutStartSec=20s

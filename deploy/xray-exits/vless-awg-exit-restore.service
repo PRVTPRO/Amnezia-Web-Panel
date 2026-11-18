@@ -1,0 +1,11 @@
+[Unit]
+Description=Restore the selected Xray egress
+After=vless-awg-tunnel.service
+Before=vless-awg-xray.service
+
+[Service]
+Type=oneshot
+UMask=0077
+ExecStart=/usr/bin/python3 /opt/vless-awg/xray-exit-control.py restore
+TimeoutStartSec=45s
+RemainAfterExit=yes

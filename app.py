@@ -1749,6 +1749,9 @@ def get_protocol_manager(ssh, protocol: str):
     base = protocol_base(protocol)
     if base == 'xray':
         from managers.xray_manager import XrayManager
+        from managers.systemd_xray_manager import SystemdXrayManager
+        if SystemdXrayManager.matches(ssh, protocol):
+            return SystemdXrayManager(ssh, protocol)
         return XrayManager(ssh, protocol)
     elif base == 'telemt':
         from managers.telemt_manager import TelemtManager
@@ -7800,6 +7803,12 @@ def api_check_server(request: Request, server_id: int):
                         })
                     changed = True
                 record = server['protocols'][proto]
+                if protocol_base(proto) == 'xray' and result.get('backend') != record.get('backend'):
+                    if result.get('backend'):
+                        record['backend'] = result['backend']
+                    else:
+                        record.pop('backend', None)
+                    changed = True
                 if protocol_base(proto) == 'awg2' and 'header_protection' in result:
                     header_protection = bool(result['header_protection'])
                     name = protocol_display_name(proto, header_protection, result.get('protocol_version'))
@@ -8472,6 +8481,12 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
                               f'Choose another port.'},
                     status_code=400)
 
+        manager = await asyncio.to_thread(get_protocol_manager, ssh, install_protocol)
+        if install_base == 'xray':
+            from managers.systemd_xray_manager import SystemdXrayManager
+            if isinstance(manager, SystemdXrayManager):
+                return JSONResponse({'error': 'This Xray service is installed independently of AWP.'},
+                                    status_code=409)
         op = op_create(server_id, 'protocol', PROTOCOL_INSTALL_TOTAL)
         op['protocol'] = install_protocol
         op_log(op, 'start', f"installing {protocol_display_name(install_protocol)} "
@@ -8483,7 +8498,6 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
                 op_log(op, 'docker', line)
         else:
             op_log(op, 'docker', 'Docker is already installed')
-        manager = get_protocol_manager(ssh, install_protocol)
 
         # IPv6 for the new instance: AWG_IPV6 overrides the server preference,
         # otherwise the preference and auto-detection keep the legacy
@@ -9835,7 +9849,7 @@ async def api_xray_core_version(request: Request, server_id: int,
         ssh = get_ssh(server)
         await asyncio.to_thread(ssh.connect)
         try:
-            manager = XrayManager(ssh, protocol)
+            manager = await asyncio.to_thread(get_protocol_manager, ssh, protocol)
             current = await asyncio.to_thread(manager.get_core_version)
         finally:
             await asyncio.to_thread(ssh.disconnect)
@@ -9894,7 +9908,7 @@ async def _run_xray_update(op, server_id, protocol, target):
     try:
         op_log(op, 'start', f"updating Xray-core of {protocol}")
         await asyncio.to_thread(ssh.connect)
-        manager = XrayManager(ssh, protocol)
+        manager = await asyncio.to_thread(get_protocol_manager, ssh, protocol)
         if not target:
             target = await asyncio.to_thread(_xray_latest_release)
         if not target:
@@ -11165,6 +11179,11 @@ def api_container_toggle(request: Request, server_id: int, req: ContainerToggleR
         server = data['servers'][server_id]
         ssh = get_ssh(server)
         ssh.connect()
+        if protocol_base(req.protocol) == 'xray':
+            from managers.systemd_xray_manager import SystemdXrayManager
+            if isinstance(get_protocol_manager(ssh, req.protocol), SystemdXrayManager):
+                return JSONResponse({'error': 'Control the systemd Xray service on the entry VPS.'},
+                                    status_code=409)
         # Check current state
         out, _, _ = ssh.run_sudo_command(
             f"docker inspect -f '{{{{.State.Running}}}}' {container} 2>/dev/null"
@@ -11191,6 +11210,36 @@ def api_container_toggle(request: Request, server_id: int, req: ContainerToggleR
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
+class XrayExitRequest(BaseModel):
+    operation: constr(pattern=r'^(list|import|test|activate|remove)$')
+    id: str = Field(default='', max_length=60)
+    name: str = Field(default='', max_length=80)
+    config: str = Field(default='', max_length=12000)
+
+
+@app.post('/api/servers/{server_id}/xray/exits', tags=["Xray exits"])
+@serialize_peer_lifecycle
+def api_systemd_xray_exits(request: Request, server_id: int, req: XrayExitRequest,
+                          server_uid: str | None = None):
+    if not _ssh_trust_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    server, error = _server_identity(server_id, server_uid)
+    if error is not None:
+        return error
+    if not server_uid:
+        return JSONResponse({'error': 'Reload the server page'}, status_code=409)
+    try:
+        from managers.systemd_xray_manager import SystemdXrayManager
+        manager = get_protocol_manager(get_ssh(server), 'xray')
+        if not isinstance(manager, SystemdXrayManager):
+            return JSONResponse({'error': 'Requires systemd-managed Xray'}, status_code=400)
+        return manager.manage_exits(req.model_dump())
+    except ValueError as exc:
+        return JSONResponse({'error': str(exc)}, status_code=400)
+    except Exception:
+        return JSONResponse({'error': 'Could not reach the Xray exit manager'}, status_code=503)
+
+
 @app.post('/api/servers/{server_id}/server_config', tags=["Protocols"])
 @serialize_peer_lifecycle
 def api_server_config(request: Request, server_id: int, req: ProtocolRequest, server_uid: str | None = None):
@@ -11212,8 +11261,7 @@ def api_server_config(request: Request, server_id: int, req: ProtocolRequest, se
                 traffic_server_identity(current['servers'][server_id]) != traffic_server_identity(server)):
             return JSONResponse({'error': 'Server identity changed; refresh the inventory'}, status_code=409)
         if protocol_base(req.protocol) == 'xray':
-            from managers.xray_manager import XrayManager
-            mgr = XrayManager(ssh, req.protocol)
+            mgr = get_protocol_manager(ssh, req.protocol)
             data_json = mgr._get_server_json()
             import json as _json
             config = _json.dumps(data_json, indent=2, ensure_ascii=False) if data_json else ''
@@ -11881,6 +11929,12 @@ def api_server_config_save(request: Request, server_id: int, req: ServerConfigSa
         if srv_warp_ctx(current['servers'][server_id], req.protocol).get('active'):
             # A warp link created while SSH was connecting owns MTU/DNS too.
             raise SrvWarpError('srv_warp_settings_locked', 409)
+        if base == 'xray':
+            from managers.systemd_xray_manager import SystemdXrayManager
+            mgr = get_protocol_manager(ssh, req.protocol)
+            if isinstance(mgr, SystemdXrayManager):
+                return JSONResponse({'error': 'Edit the systemd Xray configuration on the entry server.'},
+                                    status_code=409)
         if protected:
             mgr = get_protocol_manager(ssh, req.protocol)
             if base == 'xray':
@@ -11929,8 +11983,7 @@ def api_server_config_save(request: Request, server_id: int, req: ServerConfigSa
                     conn['last_bytes'] = 0
             save_data(current)
         if protocol_base(req.protocol) == 'xray':
-            from managers.xray_manager import XrayManager
-            mgr = XrayManager(ssh, req.protocol)
+            mgr = get_protocol_manager(ssh, req.protocol)
             import json as _json
             try:
                 data_json = _json.loads(req.config)

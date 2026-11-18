@@ -2048,6 +2048,28 @@
     </div>
 </div>
 
+{% if current_user and current_user.role == 'admin' and (server.get('protocols', {}).get('xray') or {}).get('backend') == 'systemd' %}
+{% set exits_ru = request.cookies.get('lang', 'ru') == 'ru' %}
+<details class="card" id="xray-exits" data-url="/api/servers/{{ server_id }}/xray/exits?server_uid={{ server.uid }}"
+         data-ru="{{ '1' if exits_ru else '0' }}" style="padding: var(--space-md); margin-bottom: var(--space-md);">
+    <summary style="cursor: pointer; font-weight: 600;">{{ 'Зарубежные выходы Xray' if exits_ru else 'Xray exit servers' }}</summary>
+    <div id="xray-exit-list" style="margin: var(--space-sm) 0;"></div>
+    <form id="xray-exit-import" style="display: flex; gap: var(--space-sm); flex-wrap: wrap; align-items: end;">
+        <label>
+            {{ 'Название выхода' if exits_ru else 'Exit name' }}
+            <input name="name" class="form-input" maxlength="80" required>
+        </label>
+        <label>
+            {{ 'Конфигурация AmneziaWG' if exits_ru else 'AmneziaWG configuration' }}
+            <input name="conf" type="file" accept=".conf,text/plain" required>
+        </label>
+        <button type="submit" class="btn btn-secondary btn-sm">{{ 'Импортировать .conf' if exits_ru else 'Import .conf' }}</button>
+    </form>
+    <p id="xray-exit-status" aria-live="polite" style="margin-top: var(--space-sm);"></p>
+</details>
+<script src="/static/js/xray-exits.js" defer></script>
+{% endif %}
+
 <!-- Installed Applications Section -->
 
 <div class="apps-loading" id="installedAppsLoading">
