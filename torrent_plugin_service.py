@@ -573,20 +573,25 @@ class TorrentPlugin:
         merged = merge_settings((record or {}).get('settings') or {},
                                 settings or {})
         protocols = self.capable(server, merged['include_wireguard'])
+        # После установки контроль ВЫКЛЮЧЕН: правил на хосте нет. Включает его
+        # админ в панели плагина («Включить контроль»). Переустановка правил
+        # сохраняет текущее состояние: выключено — снимаем, включено —
+        # возвращаем настроенные режимы.
+        enabled_now = bool(record and record.get('enabled')) if reapply else False
         wanted = {}
         for proto in protocols:
+            if not enabled_now:
+                wanted[proto] = 'off'
+                continue
             entry = server.get('protocols', {}).get(proto) or {}
             stored = entry.get('torrent_guard') if isinstance(entry, dict) \
                 else None
-            # Переустановка не сбрасывает выбранный режим инстанса: она
-            # возвращает то, что уже настроено, а default_mode — только туда,
-            # где режима ещё нет.
             wanted[proto] = normalize_mode(stored) if stored \
                 else merged['default_mode']
         record = {
             'installed': True,
             'installed_at': (record or {}).get('installed_at') or int(time.time()),
-            'enabled': True,
+            'enabled': enabled_now,
             'suspended_modes': {},
             'settings': merged,
             'pending': True,

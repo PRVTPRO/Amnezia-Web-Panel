@@ -91,7 +91,7 @@
                     <div class="tp-instance__head">
                         <span class="tp-instance__name">${esc(proto)}</span>
                         <select class="form-select tp-select" data-tp-proto="${esc(proto)}"
-                            aria-label="${esc(_('tp_mode_label'))}">
+                            aria-label="${esc(_('tp_mode_label'))}"${state.enabled ? '' : ' disabled'}>
                             ${MODES.map(item => `<option value="${item}"${item === mode ? ' selected' : ''}>${modeLabel(item)}</option>`).join('')}
                         </select>
                     </div>
@@ -178,6 +178,7 @@
                 <div class="sm-section">
                     <div class="sm-field-label">${esc(_('tp_instances_title'))}</div>
                     <div class="tp-instances">${renderInstances()}</div>
+                    ${state.enabled ? '' : `<div class="text-muted sm-hint">${esc(_('tp_control_off_hint'))}</div>`}
                 </div>
                 <div class="sm-section">
                     <div class="sm-field-label">${esc(_('tp_settings_title'))}</div>
@@ -195,16 +196,11 @@
         updateHeaderBadge();
     }
 
+    // Плитка в сетке инстансов перерисовывается ядром: отдельной кнопки в
+    // шапке сервера у плагина нет.
     function updateHeaderBadge() {
-        const btn = document.getElementById('torrentPluginBtn');
-        if (!btn) return;
-        const value = state.state || 'not_installed';
-        const current = typeof btn.className === 'string' ? btn.className : '';
-        btn.className = current.replace(/\btp-header--[a-z_]+\b/g, '').trim() +
-            ' tp-header--' + value;
-        btn.title = _('tp_name') + ': ' + stateLabel(value);
-        if (typeof btn.setAttribute === 'function') {
-            btn.setAttribute('aria-label', btn.title);
+        if (typeof window.renderTorrentPluginCard === 'function') {
+            window.renderTorrentPluginCard();
         }
     }
 

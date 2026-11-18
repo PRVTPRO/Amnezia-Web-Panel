@@ -2038,15 +2038,6 @@
             <button class="btn btn-secondary btn-sm srv-action" onclick="openServerManagement()" id="managementBtn">
                 {{ ui_icon('sliders', 15) }} <span>{{ _('management') }}</span>
             </button>
-            {% if torrent_plugin and torrent_plugin.installed %}
-            <button class="btn btn-secondary btn-sm srv-action tp-header tp-header--{{ torrent_plugin.state }}"
-                onclick="TorrentPlugin.open()" id="torrentPluginBtn"
-                title="{{ _('tp_name') }}" aria-label="{{ _('tp_name') }}">
-                {{ ui_icon('shield', 15) }}
-                <span>{{ _('tp_short') }}</span>
-                <span class="tp-dot" aria-hidden="true"></span>
-            </button>
-            {% endif %}
             <button class="btn btn-secondary btn-sm srv-action" onclick="openHostTuning()" id="hostTuningBtn">
                 {{ ui_icon('file-code', 15) }} <span>{{ _('host_tuning') }}</span>
             </button>
@@ -2393,6 +2384,30 @@
             </button>
         </div>
     </div>
+
+    {% if torrent_plugin and torrent_plugin.installed %}
+    <!-- Плагин «Защита от торрентов»: установлен на этом сервере, поэтому у
+         него есть собственная плитка в сетке инстансов. Пока контроль
+         выключен, правил на сервере нет. -->
+    <div class="card card-hover protocol-card tp-grid-card" id="torrent-plugin-card"
+        role="button" tabindex="0" onclick="TorrentPlugin.open()"
+        onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); TorrentPlugin.open(); }">
+        <div class="protocol-card-head">
+            <div class="protocol-icon">{{ ui_icon('shield', 18) }}</div>
+            <div class="protocol-name">{{ _('tp_name') }}</div>
+        </div>
+        <div class="protocol-desc">{{ _('tp_desc') }}</div>
+        <div class="protocol-status" id="torrentPluginCardStatus">
+            <span class="badge {% if torrent_plugin.state in ('on',) %}badge-success{% elif torrent_plugin.state in ('count',) %}badge-info{% elif torrent_plugin.state in ('degraded',) %}badge-danger{% elif torrent_plugin.state in ('unknown', 'unsupported', 'off') %}badge-secondary{% else %}badge-warn{% endif %}"><span class="badge-dot"></span> {{ _('tp_state_' ~ (torrent_plugin.state or 'not_installed')) }}</span>
+        </div>
+        <div class="flex gap-sm">
+            <button class="btn btn-secondary btn-sm tp-grid-card__open"
+                onclick="event.stopPropagation(); TorrentPlugin.open()">
+                {{ _('tp_open') }}
+            </button>
+        </div>
+    </div>
+    {% endif %}
 
     <!-- RKN Block Card (host-level app, C24Be lists) -->
     <div class="card card-hover protocol-card protocol-rknblock" id="proto-rknblock">
@@ -4328,6 +4343,87 @@
         return `<span class="badge badge-warn"><span class="badge-dot"></span> ${_('not_installed')}</span>`;
     }
 
+    function renderMarketplace() {
+        const el = document.getElementById('marketplaceContent');
+        if (!el) return;
+        el.innerHTML = MARKETPLACE_CATEGORIES.map(cat => {
+            const apps = MARKETPLACE_APPS.filter(app => app.category === cat.id);
+            return `
+                <div class="marketplace-category">
+                    <div class="marketplace-category-title"><span>${cat.icon}</span> ${_(cat.titleKey)}</div>
+                    <div class="marketplace-grid">
+                        ${apps.map(app => {
+                            if (app.kind === 'plugin') {
+                                return renderMarketplacePluginCard(app);
+                            }
+                            const isSmart = app.proto === 'smartroute';
+                            const isRkn = app.proto === 'rknblock';
+                            const isWarp = app.proto === 'warp';
+                            const rknUnknown = isRkn && (!rknBlockStatus || rknBlockStatus.available === false);
+                            const isHostApp = isSmart || isRkn || isWarp;
+                            const installed = isSmart ? !!(smartRouteStatus && smartRouteStatus.installed)
+                                : (isRkn ? !!(rknBlockStatus && rknBlockStatus.installed)
+                                    : (isWarp ? warpIsInstalled()
+                                        : baseInstalled(app.proto)));
+                            const canInstallAnother = installed && isMultiInstanceBase(app.proto);
+                            // WARP is not a host-level binary: wgcf and
+                            // warp0.conf live inside an AmneziaWG container, so
+                            // an exit-only host has nothing to install into.
+                            const warpNoTarget = isWarp && !installed && !warpHasTargetInstance();
+                            // Установленное приложение не открывается из
+                            // магазина: у него есть своя плитка, а клик по
+                            // «Открыть» закрывал модалку и прокручивал страницу
+                            // наверх. Кнопка просто «Установлен».
+                            const action = isSmart
+                                ? (installed ? 'disabled' : `onclick="openSmartRouteModal()"`)
+                                : (isWarp
+                                    ? (installed || warpNoTarget ? 'disabled' : `onclick="closeModal('marketplaceModal'); installWarp()"`)
+                                    : (isRkn
+                                        ? (installed || rknUnknown ? 'disabled' : `onclick="closeModal('marketplaceModal'); installRknBlock()"`)
+                                        : (installed && !canInstallAnother ? 'disabled' : `onclick="installFromMarketplace('${app.proto}', ${canInstallAnother ? 'true' : 'false'})"`)));
+                            const statusBadge = isWarp
+                                ? (warpNoTarget
+                                    ? `<span class="badge badge-warn"><span class="badge-dot"></span> ${escapeHtml(_('srv_warp_no_awg'))}</span>`
+                                    : warpAggregateBadge())
+                                : (isHostApp
+                                    ? (installed
+                                        ? `<span class="badge badge-success"><span class="badge-dot"></span> ${_('installed')}</span>`
+                                        : `<span class="badge badge-warn"><span class="badge-dot"></span> ${_(rknUnknown ? 'rknblock_state_unreachable' : 'not_installed')}</span>`)
+                                    : marketplaceAppStatus(app.proto));
+                            return `
+                                <div class="marketplace-app-card">
+                                    <div class="marketplace-app-top">
+                                        <div class="flex items-center gap-sm">
+                                            <div class="protocol-icon" style="width:38px;height:38px;font-size:1.2rem;">${app.icon}</div>
+                                            <div>
+                                                <div class="marketplace-app-title">${app.title} ${app.badge ? `<span class="badge badge-info" style="font-size:0.65rem;">${app.badge}</span>` : ''}</div>
+                                                ${statusBadge}
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="marketplace-app-desc">${_(app.descKey)}</div>
+                                    <button class="btn ${installed && !canInstallAnother ? 'btn-secondary' : 'btn-primary'} btn-sm" ${action}>
+                                        ${isSmart ? (installed ? _('installed') : _('smartroute_open')) : (warpNoTarget ? _('srv_warp_no_awg') : (canInstallAnother ? _('install_another') : (installed ? _('installed') : _('install'))))}
+                                    </button>
+                                </div>
+                            `;
+                        }).join('')}
+                    </div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    function openMarketplaceModal() {
+        renderMarketplace();
+        openModal('marketplaceModal');
+    }
+
+    function installFromMarketplace(proto, installAnother = false) {
+        closeModal('marketplaceModal');
+        openInstallModal(proto, installAnother);
+    }
+
     // ===== Плагин «Защита от торрентов» в магазине =====
     // Состояние приходит из ядра (TORRENT_PLUGIN), а не из плагинного API:
     // до установки JS плагина на странице нет вовсе.
@@ -4347,14 +4443,29 @@
         return _('tp_state_' + (state || 'not_installed'));
     }
 
+    // Плитка плагина в сетке инстансов: состояние берётся из того же
+    // TORRENT_PLUGIN, что и карточка магазина. Панель плагина зовёт эту
+    // функцию после каждого изменения.
+    function renderTorrentPluginCard() {
+        const el = document.getElementById('torrentPluginCardStatus');
+        if (!el) return;
+        const state = (TORRENT_PLUGIN && TORRENT_PLUGIN.state) || 'off';
+        el.innerHTML = '<span class="badge ' + tpStateClass(state) +
+            '"><span class="badge-dot"></span> ' + tpStateLabel(state) + '</span>';
+    }
+
+    renderTorrentPluginCard();
+
+    // Плагин «Защита от торрентов»: плитка в сетке инстансов перерисовывается
+    // из ядра, чтобы состояние менялось сразу после «включить/выключить».
+    window.renderTorrentPluginCard = renderTorrentPluginCard;
+
     function renderMarketplacePluginCard(app) {
         const state = (TORRENT_PLUGIN && TORRENT_PLUGIN.id === app.id)
             ? (TORRENT_PLUGIN.state || 'not_installed') : 'not_installed';
         const installed = state !== 'not_installed';
-        const action = installed
-            ? `onclick="closeModal('marketplaceModal'); TorrentPlugin.open()"`
-            : 'onclick="installTorrentPlugin()"';
-        const buttonLabel = installed ? _('tp_open') : _('tp_install');
+        const action = installed ? 'disabled' : 'onclick="installTorrentPlugin()"';
+        const buttonLabel = installed ? _('installed') : _('tp_install');
         return `
             <div class="marketplace-app-card tp-card">
                 <div class="marketplace-app-top">
@@ -4391,83 +4502,6 @@
                 if (btn) btn.disabled = false;
                 showToast(_('error') + ': ' + err.message, 'error');
             });
-    }
-
-    function renderMarketplace() {
-        const el = document.getElementById('marketplaceContent');
-        if (!el) return;
-        el.innerHTML = MARKETPLACE_CATEGORIES.map(cat => {
-            const apps = MARKETPLACE_APPS.filter(app => app.category === cat.id);
-            return `
-                <div class="marketplace-category">
-                    <div class="marketplace-category-title"><span>${cat.icon}</span> ${_(cat.titleKey)}</div>
-                    <div class="marketplace-grid">
-                        ${apps.map(app => {
-                            if (app.kind === 'plugin') {
-                                return renderMarketplacePluginCard(app);
-                            }
-                            const isSmart = app.proto === 'smartroute';
-                            const isRkn = app.proto === 'rknblock';
-                            const isWarp = app.proto === 'warp';
-                            const rknUnknown = isRkn && (!rknBlockStatus || rknBlockStatus.available === false);
-                            const isHostApp = isSmart || isRkn || isWarp;
-                            const installed = isSmart ? !!(smartRouteStatus && smartRouteStatus.installed)
-                                : (isRkn ? !!(rknBlockStatus && rknBlockStatus.installed)
-                                    : (isWarp ? warpIsInstalled()
-                                        : baseInstalled(app.proto)));
-                            const canInstallAnother = installed && isMultiInstanceBase(app.proto);
-                            // WARP is not a host-level binary: wgcf and
-                            // warp0.conf live inside an AmneziaWG container, so
-                            // an exit-only host has nothing to install into.
-                            const warpNoTarget = isWarp && !installed && !warpHasTargetInstance();
-                            const action = isSmart
-                                ? `onclick="openSmartRouteModal()"`
-                                : (isWarp
-                                    ? (installed || warpNoTarget ? 'disabled' : `onclick="closeModal('marketplaceModal'); installWarp()"`)
-                                    : (isRkn
-                                        ? (installed || rknUnknown ? 'disabled' : `onclick="closeModal('marketplaceModal'); installRknBlock()"`)
-                                        : (installed && !canInstallAnother ? 'disabled' : `onclick="installFromMarketplace('${app.proto}', ${canInstallAnother ? 'true' : 'false'})"`)));
-                            const statusBadge = isWarp
-                                ? (warpNoTarget
-                                    ? `<span class="badge badge-warn"><span class="badge-dot"></span> ${escapeHtml(_('srv_warp_no_awg'))}</span>`
-                                    : warpAggregateBadge())
-                                : (isHostApp
-                                    ? (installed
-                                        ? `<span class="badge badge-success"><span class="badge-dot"></span> ${_('installed')}</span>`
-                                        : `<span class="badge badge-warn"><span class="badge-dot"></span> ${_(rknUnknown ? 'rknblock_state_unreachable' : 'not_installed')}</span>`)
-                                    : marketplaceAppStatus(app.proto));
-                            return `
-                                <div class="marketplace-app-card">
-                                    <div class="marketplace-app-top">
-                                        <div class="flex items-center gap-sm">
-                                            <div class="protocol-icon" style="width:38px;height:38px;font-size:1.2rem;">${app.icon}</div>
-                                            <div>
-                                                <div class="marketplace-app-title">${app.title} ${app.badge ? `<span class="badge badge-info" style="font-size:0.65rem;">${app.badge}</span>` : ''}</div>
-                                                ${statusBadge}
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <div class="marketplace-app-desc">${_(app.descKey)}</div>
-                                    <button class="btn ${installed && !canInstallAnother ? 'btn-secondary' : 'btn-primary'} btn-sm" ${action}>
-                                        ${isSmart ? _('smartroute_open') : (warpNoTarget ? _('srv_warp_no_awg') : (canInstallAnother ? _('install_another') : (installed ? _('installed') : _('install'))))}
-                                    </button>
-                                </div>
-                            `;
-                        }).join('')}
-                    </div>
-                </div>
-            `;
-        }).join('');
-    }
-
-    function openMarketplaceModal() {
-        renderMarketplace();
-        openModal('marketplaceModal');
-    }
-
-    function installFromMarketplace(proto, installAnother = false) {
-        closeModal('marketplaceModal');
-        openInstallModal(proto, installAnother);
     }
 
     function setInstalledAppsLoading(isLoading) {

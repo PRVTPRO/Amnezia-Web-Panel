@@ -1518,8 +1518,8 @@
   "tp_state_degraded": "Needs attention",
   "tp_state_unknown": "Not checked yet",
   "tp_state_unsupported": "No suitable instances",
-  "tp_master_title": "Torrent filter is on",
-  "tp_master_hint": "Turning it off removes the rules from every instance; turning it on restores the previous modes.",
+  "tp_master_title": "Enable torrent control",
+  "tp_master_hint": "Control is off after installation: no rules exist on the server. Enabling applies the default mode to the instances.",
   "tp_refresh": "Check now",
   "tp_reapply": "Reinstall rules",
   "tp_refreshed": "State refreshed",
@@ -1552,9 +1552,10 @@
   "tp_uninstall": "Remove plugin",
   "tp_uninstall_confirm": "Remove the plugin? Rules will be removed from every instance and the marks cleared.",
   "tp_uninstall_done": "Plugin removed",
-  "tp_enabled_toast": "Protection enabled",
-  "tp_disabled_toast": "Protection disabled",
+  "tp_enabled_toast": "Torrent control enabled",
+  "tp_disabled_toast": "Torrent control disabled",
   "tp_no_instances": "No suitable instances",
   "tp_no_instances_hint": "The plugin can stay installed, but there is nothing to filter: this server has no AWG/WireGuard.",
-  "torrent_sig_unknown": "unknown signature"
+  "torrent_sig_unknown": "unknown signature",
+  "tp_control_off_hint": "Control is off — there are no rules on the server."
 }

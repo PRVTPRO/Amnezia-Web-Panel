@@ -1518,8 +1518,8 @@
   "tp_state_degraded": "需要处理",
   "tp_state_unknown": "尚未检查",
   "tp_state_unsupported": "没有可用的实例",
-  "tp_master_title": "种子过滤器已开启",
-  "tp_master_hint": "关闭会移除所有实例的规则；开启会恢复之前的模式。",
+  "tp_master_title": "启用种子流量控制",
+  "tp_master_hint": "安装后控制默认关闭：服务器上没有规则。启用后会对实例应用默认模式。",
   "tp_refresh": "立即检查",
   "tp_reapply": "重新安装规则",
   "tp_refreshed": "状态已更新",
@@ -1552,9 +1552,10 @@
   "tp_uninstall": "删除插件",
   "tp_uninstall_confirm": "删除插件？将从所有实例移除规则并清除标记。",
   "tp_uninstall_done": "插件已删除",
-  "tp_enabled_toast": "防护已启用",
-  "tp_disabled_toast": "防护已关闭",
+  "tp_enabled_toast": "种子流量控制已启用",
+  "tp_disabled_toast": "种子流量控制已关闭",
   "tp_no_instances": "没有可用的实例",
   "tp_no_instances_hint": "插件可以保持安装，但没有可过滤的对象：此服务器没有 AWG/WireGuard。",
-  "torrent_sig_unknown": "未知特征"
+  "torrent_sig_unknown": "未知特征",
+  "tp_control_off_hint": "控制已关闭——服务器上没有规则。"
 }

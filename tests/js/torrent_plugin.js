@@ -200,6 +200,24 @@ async function run() {
     check('get состояния при открытии',
         env.calls.some(c => c.method === 'GET' && c.url.endsWith('/plugins/torrent_guard')));
 
+    // 1b. Контроль выключен: режимы недоступны и есть объяснение.
+    const envOff = createEnv({ state: {
+        id: 'torrent_guard', installed: true, enabled: false, supported: true,
+        state: 'off', protocols: ['awg3'], modes: { awg3: 'off' },
+        settings: { default_mode: 'on', include_wireguard: true,
+                    marks_ttl_days: 30, clear_marks_on_disable: false,
+                    poll_seconds: 60 },
+        health: { state: 'unknown', protocols: {} }, events: 0, last_at: null,
+    } });
+    envOff.sandbox.TorrentPlugin.open();
+    await flush();
+    const offHtml = renderHtml(envOff);
+    check('выключено: селект режима disabled', /data-tp-proto="awg3"[^>]*disabled/.test(offHtml));
+    check('выключено: подсказка о отсутствии правил', offHtml.includes('tp_control_off_hint'));
+
+    // 1c. Кнопки в шапке больше нет — плагин живёт плиткой в сетке.
+    check('нет ссылок на torrentPluginBtn', !SOURCE.includes('torrentPluginBtn'));
+
     // 2. Мастер-выключатель: POST {enabled}.
     const enabled = env.byId('tpEnabled');
     enabled.checked = false;

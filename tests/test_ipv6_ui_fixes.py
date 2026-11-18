@@ -110,6 +110,7 @@ TORRENT_GUARD_KEYS = {
 
 TORRENT_PLUGIN_KEYS = {
     'tp_clear_marks_on_disable',
+    'tp_control_off_hint',
     'tp_days',
     'tp_default_mode',
     'tp_default_mode_hint',

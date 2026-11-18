@@ -86,7 +86,8 @@ class Base(unittest.TestCase):
 
 
 class StoreAndInstallTests(Base):
-    def test_install_applies_default_mode_and_persists(self):
+    def test_install_is_disabled_until_enabled_explicitly(self):
+        # После установки контроля нет: правила снимаются, состояние off.
         node = self.data()['servers'][0]
         node['protocols'] = {'awg3': {}, 'wireguard': {}}
         guards = {}
@@ -97,12 +98,19 @@ class StoreAndInstallTests(Base):
 
         result = self.plugin.install(node, factory)
         self.assertTrue(result['installed'])
-        self.assertEqual(result['state'], 'on')
-        self.assertEqual(node['protocols']['awg3']['torrent_guard'], 'on')
-        self.assertEqual(node['protocols']['wireguard']['torrent_guard'], 'on')
-        self.assertEqual(guards['awg3'].applied, ['on'])
+        self.assertFalse(result['enabled'])
+        self.assertEqual(result['state'], 'off')
+        self.assertEqual(node['protocols']['awg3']['torrent_guard'], 'off')
+        self.assertEqual(guards['awg3'].applied, ['off'])
         self.assertTrue(os.path.exists(self.plugin.state_file))
         self.assertTrue(self.plugin.installed(node))
+        # «Включить контроль» применяет default_mode.
+        guard = FakeGuard()
+        enabled = self.plugin.set_enabled(node, lambda proto: guard, True)
+        self.assertTrue(enabled['enabled'])
+        self.assertEqual(enabled['state'], 'on')
+        self.assertEqual(guard.applied, ['on', 'on'])
+        self.assertEqual(node['protocols']['awg3']['torrent_guard'], 'on')
 
     def test_install_is_idempotent_without_reapply(self):
         node = self.data()['servers'][0]
@@ -114,14 +122,16 @@ class StoreAndInstallTests(Base):
         self.assertTrue(result['installed'])
         self.assertEqual(calls, [])
 
-    def test_install_keeps_explicit_instance_mode(self):
+    def test_install_clears_leftover_rules(self):
+        # Установка снимает возможные остатки правил старой фичи: включённым
+        # плагин после установки не считается.
         node = self.data()['servers'][0]
         node['protocols'] = {'awg3': {'torrent_guard': 'count'}}
         guard = FakeGuard()
         result = self.plugin.install(node, lambda proto: guard)
-        self.assertEqual(node['protocols']['awg3']['torrent_guard'], 'count')
-        self.assertEqual(guard.applied, ['count'])
-        self.assertEqual(result['state'], 'count')
+        self.assertEqual(node['protocols']['awg3']['torrent_guard'], 'off')
+        self.assertEqual(guard.applied, ['off'])
+        self.assertEqual(result['state'], 'off')
 
     def test_install_without_capable_instances_is_allowed(self):
         node = self.data()['servers'][0]
@@ -149,8 +159,9 @@ class StoreAndInstallTests(Base):
         def factory(proto):
             return healthy if proto == 'awg3' else FakeGuard(fail=True)
 
-        result = self.plugin.install(node, factory)
-        self.assertTrue(result['installed'])
+        self.plugin.install(node, lambda proto: FakeGuard())
+        result = self.plugin.set_enabled(node, factory, True)
+        self.assertTrue(result['enabled'])
         self.assertTrue(result['errors'])
         self.assertEqual(node['protocols']['awg3']['torrent_guard'], 'on')
         self.assertEqual(self.plugin.health_for(node)['state'], 'degraded')
@@ -158,6 +169,7 @@ class StoreAndInstallTests(Base):
     def test_reapply_keeps_per_instance_mode(self):
         node = self.data()['servers'][0]
         self.plugin.install(node, lambda proto: FakeGuard())
+        self.plugin.set_enabled(node, lambda proto: FakeGuard(), True)
         self.plugin.set_mode(node, lambda proto: FakeGuard(), 'awg3', 'count')
         guard = FakeGuard()
         self.plugin.install(node, lambda proto: guard, reapply=True)
@@ -173,6 +185,7 @@ class StoreAndInstallTests(Base):
         node = self.data()['servers'][0]
         node['protocols'] = {'awg3': {}, 'wireguard': {}}
         self.plugin.install(node, lambda proto: FakeGuard())
+        self.plugin.set_enabled(node, lambda proto: FakeGuard(), True)
         stop = self.plugin.excluded_wireguard(node, {'include_wireguard': False})
         self.assertEqual(stop, ['wireguard'])
         guard = FakeGuard()
@@ -229,6 +242,7 @@ class StoreAndInstallTests(Base):
     def test_master_switch_preserves_count_mode(self):
         node = self.data()['servers'][0]
         self.plugin.install(node, lambda proto: FakeGuard())
+        self.plugin.set_enabled(node, lambda proto: FakeGuard(), True)
         self.plugin.set_mode(node, lambda proto: FakeGuard(), 'awg3', 'count')
         self.assertEqual(node['protocols']['awg3']['torrent_guard'], 'count')
         guard = FakeGuard()
@@ -366,7 +380,13 @@ class RouteTests(Base):
                 self.assertEqual(installed.status_code, 200, installed.text)
                 self.assertTrue(installed.json()['installed'])
                 state = client.get('/api/servers/0/plugins/torrent_guard').json()
-                self.assertEqual(state['state'], 'on')
+                # Установка ничего не блокирует: контроль включается отдельно.
+                self.assertEqual(state['state'], 'off')
+                enabled = client.post(
+                    '/api/servers/0/plugins/torrent_guard/enabled',
+                    json={'enabled': True})
+                self.assertEqual(enabled.status_code, 200, enabled.text)
+                self.assertEqual(enabled.json()['state'], 'on')
                 flags = client.get('/api/plugins/torrent_guard/flags')
                 self.assertEqual(flags.status_code, 200)
                 self.assertEqual(flags.json(), {'flags': {}})
@@ -485,6 +505,28 @@ class TemplateTests(unittest.TestCase):
         self.assertNotIn('torrentGuardHealth', page)
         self.assertNotIn('/api/servers/${SERVER_ID}/connections/torrent_guard', page)
         self.assertNotIn("clearTorrentEvents", page)
+        # Отдельной кнопки в шапке нет: плагин выглядит как инстанс в сетке.
+        self.assertNotIn('id="torrentPluginBtn"', page)
+        self.assertIn('id="torrent-plugin-card"', page)
+        self.assertIn('id="torrentPluginCardStatus"', page)
+        # Статус плитки рисуется Jinja при загрузке, а не только из JS.
+        self.assertIn("_('tp_state_' ~ (torrent_plugin.state or 'not_installed'))", page)
+        self.assertIn('window.renderTorrentPluginCard = renderTorrentPluginCard', page)
+        # В магазине установленное приложение — «Установлен», без «Открыть».
+        self.assertIn("const action = installed ? 'disabled' : 'onclick=\"installTorrentPlugin()\"';", page)
+        self.assertIn("const buttonLabel = installed ? _('installed') : _('tp_install');", page)
+
+    def test_installed_apps_show_installed_instead_of_open(self):
+        # Правки владельца: у установленного приложения кнопка «Установлен»,
+        # а не «Открыть» — «Открыть» закрывала модалку и скроллила наверх.
+        page = self.read('templates/server.html')
+        self.assertIn("isSmart ? (installed ? _('installed') : _('smartroute_open'))", page)
+        self.assertIn("const action = installed ? 'disabled' : 'onclick=\"installTorrentPlugin()\"';", page)
+        # Диагностика (Speedtest / Ping-MTR) есть только в прод-дереве: в
+        # upstream-шаблоне карточек `diagnostics` нет, поэтому проверяем по
+        # файлу прода отдельно (см. HANDOFF, раздел про выкладку).
+        css = self.read('static/css/style.css')
+        self.assertNotIn('.tp-header', css)
 
     def test_dashboard_renders_alerts_only_when_installed(self):
         page = self.read('templates/index.html')

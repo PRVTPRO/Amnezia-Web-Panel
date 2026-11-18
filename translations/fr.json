@@ -1518,8 +1518,8 @@
   "tp_state_degraded": "Attention requise",
   "tp_state_unknown": "Pas encore vérifié",
   "tp_state_unsupported": "Aucune instance compatible",
-  "tp_master_title": "Filtre torrent activé",
-  "tp_master_hint": "La désactivation retire les règles de toutes les instances, la réactivation restaure les modes précédents.",
+  "tp_master_title": "Activer le contrôle torrent",
+  "tp_master_hint": "Après l'installation, le contrôle est désactivé : aucune règle sur le serveur. L'activation applique le mode par défaut aux instances.",
   "tp_refresh": "Vérifier",
   "tp_reapply": "Réinstaller les règles",
   "tp_refreshed": "État actualisé",
@@ -1552,9 +1552,10 @@
   "tp_uninstall": "Supprimer le plugin",
   "tp_uninstall_confirm": "Supprimer le plugin ? Les règles seront retirées de toutes les instances et les marques effacées.",
   "tp_uninstall_done": "Plugin supprimé",
-  "tp_enabled_toast": "Protection activée",
-  "tp_disabled_toast": "Protection désactivée",
+  "tp_enabled_toast": "Contrôle torrent activé",
+  "tp_disabled_toast": "Contrôle torrent désactivé",
   "tp_no_instances": "Aucune instance compatible",
   "tp_no_instances_hint": "Le plugin peut rester installé, mais il n'y a rien à filtrer : ce serveur n'a pas d'AWG/WireGuard.",
-  "torrent_sig_unknown": "signature inconnue"
+  "torrent_sig_unknown": "signature inconnue",
+  "tp_control_off_hint": "Contrôle désactivé — aucune règle sur le serveur."
 }
