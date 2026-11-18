@@ -114,28 +114,43 @@ class ConfigAccountingEdits(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await self.call(new, protocol), {'status': 'success', 'unchanged': True})
         self.untouched()
 
-    async def test_current_xray_duplicate_keys_cannot_be_collapsed_into_noop(self):
+    async def test_current_xray_duplicate_keys_are_fixed_by_an_explicit_apply(self):
+        # The messy live config is replaced by the clean proposed one; the
+        # counter-preserving apply finalizes the owned peers' counters.
         self.data['user_connections'][0]['protocol'] = 'xray'
         self.manager._get_server_json.return_value = {'stats': {}}
         self.manager.container_name = 'amnezia-xray'
         self.manager._config_path.return_value = '/opt/amnezia/xray/server.json'
         self.ssh.run_sudo_command.return_value = ('{"stats":{"changed":true},"stats":{}}', '', 0)
-        self.assertEqual((await self.call('{"stats":{}}', 'xray')).status_code, 409)
-        self.untouched()
+        with patch.object(panel, 'read_peer_state', return_value=(120, False)), \
+             patch.object(panel, 'apply_final_sample') as finalize:
+            result = await self.call('{"stats":{}}', 'xray')
+        self.assertEqual(result, {'status': 'success'})
+        uploads = [str(c) for c in self.ssh.upload_file_sudo.call_args_list]
+        self.assertTrue(any('"stats": {}' in u for u in uploads), uploads)
+        finalize.assert_called_once()
+        self.assertEqual(finalize.call_args[0][3], 120)
 
-    async def test_toml_client_secret_and_json_peer_changes_remain_blocked(self):
-        for protocol, current, proposed in (
-                ('telemt', '[access.users]\nfixture="original"', '[access.users]\nfixture="changed"'),
-                ('xray', '{"inbounds":[{"settings":{"clients":[{"id":"original"}]}}]}',
-                 '{"inbounds":[{"settings":{"clients":[{"id":"changed"}]}}]}')):
-            with self.subTest(protocol=protocol):
-                self.data['user_connections'][0]['protocol'] = protocol
-                self.manager._get_server_config.return_value = current
-                self.ssh.run_sudo_command.return_value = (current, '', 0)
-                self.manager.container_name = 'amnezia-xray'
-                self.manager._config_path.return_value = '/opt/amnezia/xray/server.json'
-                self.assertEqual((await self.call(proposed, protocol)).status_code, 409)
-        self.untouched()
+    async def test_toml_client_secret_remains_blocked_and_xray_peer_edits_apply(self):
+        # telemt has no counter-preserving apply: keep the read-only guard.
+        self.data['user_connections'][0]['protocol'] = 'telemt'
+        self.manager._get_server_config.return_value = '[access.users]\nfixture="original"'
+        self.ssh.run_sudo_command.return_value = ('[access.users]\nfixture="original"', '', 0)
+        result = await self.call('[access.users]\nfixture="changed"', 'telemt')
+        self.assertEqual(result.status_code, 409)
+        # xray peer edits apply: counters are finalized, baselines follow the
+        # restarted core.
+        self.data['user_connections'][0]['protocol'] = 'xray'
+        self.ssh.run_sudo_command.return_value = ('{"inbounds":[{"settings":{"clients":[{"id":"original"}]}}]}', '', 0)
+        self.manager._config_path.return_value = '/opt/amnezia/xray/server.json'
+        self.manager.container_name = 'amnezia-xray'
+        with patch.object(panel, 'read_peer_state', return_value=(500, False)), \
+             patch.object(panel, 'apply_final_sample') as finalize:
+            result = await self.call(
+                '{"inbounds":[{"settings":{"clients":[{"id":"changed"}]}}]}', 'xray')
+        self.assertEqual(result, {'status': 'success'})
+        finalize.assert_called_once()
+        self.assertEqual(finalize.call_args[0][3], 500)
 
     async def test_json_ambiguous_keys_are_not_a_safe_noop(self):
         self.data['user_connections'][0]['protocol'] = 'xray'
