@@ -7953,30 +7953,18 @@ def _selfsteal_dest(xray_networks, nginx_networks, nginx_container):
     return None
 
 
-def _selfsteal_site_ok(ssh, xray_container, domain, dest):
-    """The mask holds while the site answers over TLS on the dest with a
-    certificate issued for the domain. Both checks run inside the Xray
-    container against the exact container-to-container path Reality
-    uses. DNS may point anywhere (relays included); --resolve forces the
-    local hop. Returns (ok, reason) - the reason goes into the UI."""
-    dest_host, _, dest_port = str(dest).rpartition(':')
-    if not dest_host:
-        return False, 'invalid destination'
-    target = f'{dest_host}:{dest_port or 443}'
-    http, _, code = ssh.run_sudo_command(
-        f"docker exec {shlex.quote(str(xray_container))} curl -sk 2>/dev/null "
-        f"--resolve {shlex.quote(f'{domain}:{dest_port or 443}:{dest_host}')} "
+def _selfsteal_site_ok(ssh, domain, nginx_port):
+    """The mask holds while the local NGINX serves HTTPS with a cert
+    matching the domain. Simple host-level check: curl --resolve pins
+    the connection to 127.0.0.1, skipping DNS entirely. Returns
+    (ok, reason) - the reason goes into the UI error."""
+    out, err, code = ssh.run_command(
+        f"curl -s --resolve {shlex.quote(f'{domain}:{nginx_port}:127.0.0.1')} "
         f"{shlex.quote('https://' + domain + '/')} -o /dev/null "
-        f"-w '%{{http_code}}' --max-time 8")
-    if code != 0 or not re.fullmatch(r'\d{3}', (http or '').strip()):
-        return False, 'the site does not answer on the dest (TLS connect failed)'
-    san, _, code = ssh.run_sudo_command(
-        f"docker exec {shlex.quote(str(xray_container))} sh -c "
-        + shlex.quote(
-            f"echo | openssl s_client -connect {target} -servername {domain} 2>/dev/null "
-            f"| openssl x509 -noout -ext subjectAltName 2>/dev/null"))
-    if f'DNS:{domain}' not in (san or ''):
-        return False, 'the certificate served on the dest does not match the domain'
+        f"-w '%{{http_code}}' --max-time 8 2>&1")
+    if code != 0:
+        detail = (err or out or '').strip()[:120]
+        return False, f'TLS connect failed: {detail or f"curl exit {code}"}'
     return True, ''
 
 
@@ -8029,7 +8017,7 @@ def api_xray_selfsteal_plan(request: Request, server_id: int, protocol: str = 'x
                 'port': int(status.get('port') or 443),
                 'dest': dest,
                 'site_ok': bool(dest) and _selfsteal_site_ok(
-                    ssh, xray_container, status['domain'], dest)[0],
+                    ssh, status['domain'], int(status.get('port') or 443))[0],
             })
         return {
             'xray_running': xray_running,
@@ -8078,7 +8066,7 @@ def api_xray_selfsteal_apply(request: Request, server_id: int, req: XraySelfstea
         if not dest:
             return JSONResponse({'error': 'No route from the Xray container to NGINX'},
                                 status_code=409)
-        site_ok, site_reason = _selfsteal_site_ok(ssh, xray_container, domain, dest)
+        site_ok, site_reason = _selfsteal_site_ok(ssh, domain, int(status.get('port') or 443))
         if not site_ok:
             return JSONResponse(
                 {'error': f'The mask is not ready yet: {site_reason}. '

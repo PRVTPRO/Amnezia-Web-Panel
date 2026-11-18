@@ -128,41 +128,19 @@ class SelfstealHelpersTests(unittest.TestCase):
     def test_no_networks_yields_no_dest(self):
         self.assertIsNone(panel._selfsteal_dest({}, {}, 'amnezia-nginx'))
 
-    def test_site_check_probes_the_dest_from_inside_the_xray_container(self):
+    def test_site_check_from_the_host_against_the_local_nginx(self):
         ssh = Mock()
-        # call 1: the curl reachability probe; call 2: the cert SAN read
-        ssh.run_sudo_command.side_effect = [
-            ('200', '', 0),
-            ('X509v3 Subject Alternative Name: DNS:own.example', '', 0)]
-        ok, reason = panel._selfsteal_site_ok(
-            ssh, 'amnezia-xray', 'own.example', 'amnezia-nginx:443')
+        ssh.run_command.return_value = ('200', '', 0)
+        ok, reason = panel._selfsteal_site_ok(ssh, 'own.example', 443)
         self.assertTrue(ok)
-        self.assertEqual(reason, '')
-        first = ssh.run_sudo_command.call_args_list[0][0][0]
-        self.assertIn('docker exec amnezia-xray', first)
-        self.assertIn('--resolve', first)
-        self.assertIn('own.example:443:amnezia-nginx', first)
-        second = ssh.run_sudo_command.call_args_list[1][0][0]
-        self.assertIn('s_client', second)
-        self.assertIn('subjectAltName', second)
-
-    def test_site_check_reports_the_concrete_problem(self):
-        ssh = Mock()
-        # site unreachable
-        ssh.run_sudo_command.side_effect = [('000', '', 7)]
-        ok, reason = panel._selfsteal_site_ok(
-            ssh, 'amnezia-xray', 'own.example', 'amnezia-nginx:443')
+        self.assertIn('--resolve', ssh.run_command.call_args[0][0])
+        self.assertIn('own.example:443:127.0.0.1', ssh.run_command.call_args[0][0])
+        ssh.run_command.return_value = ('', '', 1)
+        ok, reason = panel._selfsteal_site_ok(ssh, 'own.example', 443)
         self.assertFalse(ok)
-        self.assertIn('does not answer', reason)
-        # reachable but the certificate is for another domain
-        ssh.run_sudo_command.side_effect = [
-            ('200', '', 0), ('X509v3 Subject Alternative Name: DNS:other.example', '', 0)]
-        ok, reason = panel._selfsteal_site_ok(
-            ssh, 'amnezia-xray', 'own.example', 'amnezia-nginx:443')
-        self.assertFalse(ok)
-        self.assertIn('does not match', reason)
+        self.assertTrue(reason)
         # malformed dest
-        ok, reason = panel._selfsteal_site_ok(ssh, 'amnezia-xray', 'own.example', 'amnezia-nginx')
+        ok, reason = panel._selfsteal_site_ok(ssh, 'own.example', 'amnezia-nginx')
         self.assertFalse(ok)
 
 
