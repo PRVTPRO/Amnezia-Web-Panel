@@ -128,22 +128,6 @@ class SelfstealHelpersTests(unittest.TestCase):
     def test_no_networks_yields_no_dest(self):
         self.assertIsNone(panel._selfsteal_dest({}, {}, 'amnezia-nginx'))
 
-    def test_site_check_from_the_host_against_the_local_nginx(self):
-        ssh = Mock()
-        ssh.run_command.return_value = ('200', '', 0)
-        ok, reason = panel._selfsteal_site_ok(ssh, 'own.example', 443)
-        self.assertTrue(ok)
-        self.assertIn('--resolve', ssh.run_command.call_args[0][0])
-        self.assertIn('own.example:443:127.0.0.1', ssh.run_command.call_args[0][0])
-        ssh.run_command.return_value = ('', '', 1)
-        ok, reason = panel._selfsteal_site_ok(ssh, 'own.example', 443)
-        self.assertFalse(ok)
-        self.assertTrue(reason)
-        # malformed dest
-        ok, reason = panel._selfsteal_site_ok(ssh, 'own.example', 'amnezia-nginx')
-        self.assertFalse(ok)
-
-
 class SelfstealNetworkProvisioningTests(unittest.TestCase):
     def test_provisioning_creates_the_network_and_attaches_both_containers(self):
         ssh = Mock()

@@ -7953,21 +7953,6 @@ def _selfsteal_dest(xray_networks, nginx_networks, nginx_container):
     return None
 
 
-def _selfsteal_site_ok(ssh, domain, nginx_port):
-    """The mask holds while the local NGINX serves HTTPS with a cert
-    matching the domain. Simple host-level check: curl --resolve pins
-    the connection to 127.0.0.1, skipping DNS entirely. Returns
-    (ok, reason) - the reason goes into the UI error."""
-    out, err, code = ssh.run_command(
-        f"curl -s --resolve {shlex.quote(f'{domain}:{nginx_port}:127.0.0.1')} "
-        f"{shlex.quote('https://' + domain + '/')} -o /dev/null "
-        f"-w '%{{http_code}}' --max-time 8 2>&1")
-    if code != 0:
-        detail = (err or out or '').strip()[:120]
-        return False, f'TLS connect failed: {detail or f"curl exit {code}"}'
-    return True, ''
-
-
 @app.get('/api/servers/{server_id}/xray/selfsteal/plan', tags=["Protocols"])
 def api_xray_selfsteal_plan(request: Request, server_id: int, protocol: str = 'xray'):
     if not _check_admin(request):
@@ -8016,8 +8001,6 @@ def api_xray_selfsteal_plan(request: Request, server_id: int, protocol: str = 'x
                 'container_name': status['container_name'],
                 'port': int(status.get('port') or 443),
                 'dest': dest,
-                'site_ok': bool(dest) and _selfsteal_site_ok(
-                    ssh, status['domain'], int(status.get('port') or 443))[0],
             })
         return {
             'xray_running': xray_running,
@@ -8066,12 +8049,6 @@ def api_xray_selfsteal_apply(request: Request, server_id: int, req: XraySelfstea
         if not dest:
             return JSONResponse({'error': 'No route from the Xray container to NGINX'},
                                 status_code=409)
-        site_ok, site_reason = _selfsteal_site_ok(ssh, domain, int(status.get('port') or 443))
-        if not site_ok:
-            return JSONResponse(
-                {'error': f'The mask is not ready yet: {site_reason}. '
-                          'Issue the certificate for this domain first'},
-                status_code=409)
         result = manager.apply_selfsteal(domain, dest)
         result['protocol'] = req.protocol
         return result
