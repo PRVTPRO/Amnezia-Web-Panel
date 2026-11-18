@@ -39,6 +39,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi import FastAPI, Request, Query, UploadFile, File, Form
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
+from starlette.datastructures import Headers, MutableHeaders
 from starlette.middleware.sessions import SessionMiddleware
 from pydantic import BaseModel, Field, StrictBool, constr, conint
 from typing import Optional, List
@@ -131,6 +132,7 @@ from connection_service import (
     sanitize_allowed_protocols,
     self_service_protocol_choices,
 )
+import panel_storage
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -391,6 +393,144 @@ async def panel_access_middleware(request, call_next):
 # Sessions must wrap every other middleware: the auth middleware above
 # reads request.session, so SessionMiddleware has to sit outside it.
 app.add_middleware(SessionMiddleware, secret_key=os.environ.get('SECRET_KEY', secrets.token_hex(32)))
+# Публичный порт держит panel_front.py - это релей байтов, он ничего не
+# сжимает. Без gzip страница сервера уходит по проводу как есть: HTML
+# /server/N ~800 КБ (вместе со словарём локали), CodeMirror 170 КБ, CSS 90 КБ.
+# GZipMiddleware сжимает текстовые ответы; гейт ниже не даёт ему трогать
+# уже сжатые бинарные (PNG-капча, zip-архив бэкапа, иконки, шрифты).
+COMPRESS_SKIP_PATHS = ('/api/auth/captcha', '/api/settings/backup/archive')
+COMPRESS_SKIP_SUFFIXES = (
+    '/backups/download',
+    '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.svgz',
+    '.woff', '.woff2', '.ttf', '.zip', '.gz', '.tgz', '.bz2', '.xz',
+    '.7z', '.pdf', '.mp4', '.webm',
+)
+
+
+def _compression_skipped(scope):
+    """True for responses that must reach the client uncompressed."""
+    path = str(scope.get('path') or '').lower()
+    if path in COMPRESS_SKIP_PATHS:
+        return True
+    return path.endswith(COMPRESS_SKIP_SUFFIXES)
+
+
+class CompressionGate:
+    """Снимает Accept-Encoding с запросов к бинарным ответам.
+
+    Порядок важен: гейт добавляется последним, поэтому он внешний по
+    отношению к GZipMiddleware и видит запрос раньше него. Ответ без
+    Accept-Encoding middleware отдаёт как есть - без повторного gzip.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] == 'http' and _compression_skipped(scope):
+            scope = dict(scope, headers=[
+                (name, value) for name, value in scope['headers']
+                if name.lower() != b'accept-encoding'])
+        await self.app(scope, receive, send)
+
+
+class _GzipResponder:
+    """Потоковый gzip через zlib (заголовок gzip без mtime)."""
+
+    def __init__(self, app, minimum_size, compresslevel):
+        self.app = app
+        self.minimum_size = minimum_size
+        self.compresslevel = compresslevel
+        self.send = None
+        self.start = None
+        self.started = False
+        self.skip = False
+        self.passthrough = False
+        self.compressor = None
+
+    async def __call__(self, scope, receive, send):
+        self.send = send
+        await self.app(scope, receive, self.send_with_compression)
+
+    async def send_with_compression(self, message):
+        kind = message['type']
+        if kind == 'http.response.start':
+            headers = Headers(raw=message['headers'])
+            # Уже сжатое, поток событий и «пустые» статусы не трогаем.
+            self.skip = ('content-encoding' in headers
+                         or headers.get('content-type', '').startswith('text/event-stream')
+                         or message['status'] in (204, 304))
+            self.start = message
+            return
+        if kind != 'http.response.body':
+            await self.send(message)
+            return
+        if self.passthrough:
+            await self.send(message)
+            return
+        if self.started:
+            await self.send_body(message)
+            return
+        self.started = True
+        body = message.get('body', b'')
+        more = message.get('more_body', False)
+        if self.skip or (not more and len(body) < self.minimum_size):
+            self.passthrough = True
+            await self.send(self.start)
+            await self.send(message)
+            return
+        self.start_stream()
+        await self.send(self.start)
+        await self.send_body(message)
+
+    def start_stream(self):
+        headers = MutableHeaders(raw=self.start['headers'])
+        headers.add_vary_header('Accept-Encoding')
+        headers['Content-Encoding'] = 'gzip'
+        if 'content-length' in headers:
+            del headers['Content-Length']
+        # wbits=31 — gzip-обёртка zlib: заголовок с mtime=0, без обращения
+        # к системным часам (stock GZipMiddleware падает, если часы сдвинуты).
+        self.compressor = zlib.compressobj(
+            self.compresslevel, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
+
+    async def send_body(self, message):
+        body = message.get('body', b'')
+        more = message.get('more_body', False)
+        out = self.compressor.compress(body) if body else b''
+        if not more:
+            out += self.compressor.flush()
+        await self.send({'type': 'http.response.body', 'body': out,
+                         'more_body': more})
+
+
+class TextGZipMiddleware:
+    """gzip для текстовых ответов без зависимости от системных часов.
+
+    Starlette'овский GZipMiddleware пишет в gzip-заголовок текущее время
+    (gzip.GzipFile по умолчанию), поэтому запрос при сдвинутых часах —
+    например, в тестах с `mock.patch(time.time)` — падает на struct.pack.
+    """
+
+    def __init__(self, app, minimum_size=1024, compresslevel=6):
+        self.app = app
+        self.minimum_size = minimum_size
+        self.compresslevel = compresslevel
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] != 'http':
+            await self.app(scope, receive, send)
+            return
+        headers = Headers(scope=scope)
+        if 'gzip' not in headers.get('accept-encoding', '').lower():
+            await self.app(scope, receive, send)
+            return
+        responder = _GzipResponder(self.app, self.minimum_size, self.compresslevel)
+        await responder(scope, receive, send)
+
+
+app.add_middleware(TextGZipMiddleware, minimum_size=1024, compresslevel=6)
+app.add_middleware(CompressionGate)
 
 class CachedStaticFiles(StaticFiles):
     """Static assets that carry ?v=<static mtime> (see static_version()) change
@@ -2770,6 +2910,19 @@ def cheburcheck_enabled(data=None):
     return bool((data.get('settings') or {}).get('cheburcheck', {}).get('enabled'))
 
 
+def _script_json(value):
+    """JSON для вставки в <script> как готовый JS-объект.
+
+    ensure_ascii=False почти вдвое уменьшает русскую и персидскую локаль
+    (escaped JSON: 290 КБ против 128 КБ). `</` экранируется, иначе перевод
+    с `</script>` закрыл бы тег раньше времени; U+2028/U+2029 в JS-строках
+    недопустимы, хотя в JSON валидны.
+    """
+    return (json.dumps(value, ensure_ascii=False)
+            .replace('</', '<\\/')
+            .replace('\u2028', '\\u2028')
+            .replace('\u2029', '\\u2029'))
+
 def tpl(request, template, **kwargs):
     data = load_data()
     lang = request.cookies.get('lang', 'en')
@@ -2788,24 +2941,22 @@ def tpl(request, template, **kwargs):
         'bot_running': tg_bot.is_running(),
         'lang': lang,
         '_': lambda text_id: _t(text_id, lang),
-        'translations_json': json.dumps(TRANSLATIONS.get(lang, TRANSLATIONS.get('en', {}))),
+        'translations_json': _script_json(TRANSLATIONS.get(lang, TRANSLATIONS.get('en', {}))),
         # The login page is the only public page; it must not dump the whole
         # UI dictionary (a feature showcase of the panel) into view-source.
-        'login_translations_json': json.dumps({
+        'login_translations_json': _script_json({
             k: _t(k, lang) for k in ('login', 'logging_in', 'login_error',
                                      'setup_submit', 'setup_creating', 'setup_error',
                                      'telegram_webapp_auth_invalid',
                                      'telegram_webapp_account_not_found',
                                      'telegram_webapp_auth_unavailable')
         }),
-        'all_translations_json': json.dumps(TRANSLATIONS),
         'cheburcheck_enabled': cheburcheck_enabled(data),
         'telegram_webapp_auth_enabled': bool(
             data.get('users')
             and (data.get('settings', {}).get('telegram') or {}).get('webapp_initdata_auth')
             and (data.get('settings', {}).get('telegram') or {}).get('token')
         ),
-        'all_translations_json': json.dumps(TRANSLATIONS)
     }
     ctx.update(kwargs)
     return templates.TemplateResponse(template, ctx)
@@ -7336,6 +7487,32 @@ async def _rkn_migration_finish(pending):
         save_data(data)
 
 
+# Последний ответ /check - чтобы первая отрисовка не ждала SSH. Страница
+# просит его с ?boot=1 и получает снимок сразу, а свежую проверку запускает
+# фоном. Мутации кэш не сбрасывают: снимок живёт только до ответа фоновой
+# проверки, а ручная проверка кнопкой идёт без boot и всегда свежая.
+_CHECK_CACHE = {}
+_CHECK_CACHE_LOCK = threading.Lock()
+_CHECK_CACHE_MAX_AGE = 900.0
+
+
+def _check_cache_get(server_uid):
+    with _CHECK_CACHE_LOCK:
+        entry = _CHECK_CACHE.get(server_uid)
+    if not entry:
+        return None
+    stamp, payload = entry
+    if time.time() - stamp > _CHECK_CACHE_MAX_AGE:
+        return None
+    return stamp, payload
+
+
+def _check_cache_put(server_uid, payload):
+    if not server_uid:
+        return
+    with _CHECK_CACHE_LOCK:
+        _CHECK_CACHE[server_uid] = (time.time(), payload)
+
 # --- one-shot ICMP echo-unblock migration -----------------------------------
 # Older panels added `-p icmp --icmp-type echo-request -j DROP` to INPUT in
 # setup_firewall(). The host itself stopped answering ping, and ICMP that
@@ -7421,6 +7598,16 @@ def api_check_server(request: Request, server_id: int):
         if server_id >= len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
+        server_uid = server.get('uid') or f'#{server_id}'
+        boot = str(request.query_params.get('boot') or '').lower() in ('1', 'true', 'yes')
+        if boot:
+            cached = _check_cache_get(server_uid)
+            if cached is not None:
+                stamp, payload = cached
+                snapshot = dict(payload)
+                snapshot['cached'] = True
+                snapshot['cached_age'] = round(time.time() - stamp, 1)
+                return snapshot
         ssh = get_ssh(server)
         ssh.connect()
         # Just use awg's docker checker since it uses the same command
@@ -7518,6 +7705,19 @@ def api_check_server(request: Request, server_id: int):
                 return proto, merge_saved_protocol_status(proto, {}, str(e)), str(e)
 
         protocols_to_check = list(dict.fromkeys(BASE_PROTOCOLS + list(server.get('protocols', {}).keys())))
+        # Снимок docker ps -a: если контейнера протокола нет ни в снимке, ни в
+        # data.json, отдельная SSH-команда всё равно вернёт "не установлен".
+        # Раньше на каждый такой протокол уходил круг SSH, и /check держал
+        # первую отрисовку несколько секунд. Команду берём только когда есть
+        # что пропускать: на полностью укомплектованном сервере она лишняя.
+        docker_snapshot = None
+        if any(p not in server.get('protocols', {}) for p in protocols_to_check):
+            try:
+                docker_snapshot = ssh.docker_ps_snapshot()
+            except Exception:
+                docker_snapshot = None
+            if not isinstance(docker_snapshot, dict):
+                docker_snapshot = None
         # One batched round trip for all AWG containers (ps snapshot + configs
         # + clientsTables) instead of 3-5 SSH commands per instance - this is
         # what made /check take seconds on high-latency servers.
@@ -7531,6 +7731,14 @@ def api_check_server(request: Request, server_id: int):
         # checking them in parallel through one SSH object can produce false
         # negatives and previously caused dynamic AWG instances to be removed.
         for proto in protocols_to_check:
+            container_name = protocol_container_name(proto)
+            if (docker_snapshot is not None
+                    and container_name
+                    and container_name not in docker_snapshot
+                    and proto not in server.get('protocols', {})):
+                status['protocols'][proto] = merge_saved_protocol_status(
+                    proto, {'container_exists': False, 'container_running': False})
+                continue
             proto, result, err = check_proto(proto)
             status['protocols'][proto] = result
             if err:
@@ -7596,7 +7804,8 @@ def api_check_server(request: Request, server_id: int):
                 
         if changed:
             save_data(data)
-            
+
+        _check_cache_put(server_uid, status)
         ssh.disconnect()
         return status
     except (peer_lifecycle_lock.PeerLifecycleBusy,
@@ -7686,10 +7895,12 @@ def _docker_networks(ssh, container):
 
 
 def _selfsteal_dest(xray_networks, nginx_networks, nginx_container):
-    """Container-to-container Reality target. On a shared docker network
-    the NGINX name resolves via embedded DNS and survives container
-    re-creation; otherwise fall back to the current bridge IP."""
-    if set(xray_networks) & set(nginx_networks):
+    """Container-to-container Reality target. On a shared user-defined
+    docker network the NGINX name resolves via embedded DNS and survives
+    container re-creation. The default bridge has no embedded DNS —
+    there the current IP is the only working target, so fall back to it."""
+    resolvable = (set(xray_networks) & set(nginx_networks)) - {'bridge'}
+    if resolvable:
         return f"{nginx_container}:443"
     for networks in (nginx_networks, xray_networks):
         for info in networks.values():
@@ -7699,12 +7910,19 @@ def _selfsteal_dest(xray_networks, nginx_networks, nginx_container):
     return None
 
 
-def _selfsteal_site_ok(ssh, domain, port):
+def _selfsteal_site_ok(ssh, xray_container, domain, dest):
     """The mask only holds while the site answers with a valid
-    certificate for the domain — verified from the host itself. DNS may
+    certificate for the domain. Probe from inside the Xray container
+    against the exact dest that will be written — the container-to-
+    container hop is the path Reality actually uses, so host-side port
+    publishing, proxy env and CA bundles cannot skew the result. DNS may
     point anywhere (relays included); --resolve forces the local hop."""
-    out, _, code = ssh.run_command(
-        f"curl -s 2>/dev/null --resolve {shlex.quote(f'{domain}:{port}:127.0.0.1')} "
+    dest_host, _, dest_port = str(dest).rpartition(':')
+    if not dest_host:
+        return False
+    out, _, code = ssh.run_sudo_command(
+        f"docker exec {shlex.quote(str(xray_container))} "
+        f"curl -s 2>/dev/null --resolve {shlex.quote(f'{domain}:{dest_port or 443}:{dest_host}')} "
         f"{shlex.quote('https://' + domain + '/')} -o /dev/null "
         f"-w '%{{http_code}}' --max-time 8")
     return code == 0 and bool(re.fullmatch(r'\d{3}', out.strip()))
@@ -7750,7 +7968,7 @@ def api_xray_selfsteal_plan(request: Request, server_id: int, protocol: str = 'x
                 'port': int(status.get('port') or 443),
                 'dest': dest,
                 'site_ok': bool(dest) and _selfsteal_site_ok(
-                    ssh, status['domain'], int(status.get('port') or 443)),
+                    ssh, xray_container, status['domain'], dest),
             })
         return {
             'xray_running': xray_running,
@@ -7790,17 +8008,16 @@ def api_xray_selfsteal_apply(request: Request, server_id: int, req: XraySelfstea
         if not domain or not status.get('container_running'):
             return JSONResponse({'error': 'The NGINX site is not ready'},
                                 status_code=409)
-        port = int(status.get('port') or 443)
+        xray_container = (protocols.get(req.protocol) or {}).get('container_name') \
+            or manager.container_name
         dest = _selfsteal_dest(
-            _docker_networks(
-                ssh, (protocols.get(req.protocol) or {}).get('container_name')
-                or manager.container_name),
+            _docker_networks(ssh, xray_container),
             _docker_networks(ssh, status['container_name']),
             status['container_name'])
         if not dest:
             return JSONResponse({'error': 'No route from the Xray container to NGINX'},
                                 status_code=409)
-        if not _selfsteal_site_ok(ssh, domain, port):
+        if not _selfsteal_site_ok(ssh, xray_container, domain, dest):
             return JSONResponse(
                 {'error': 'The site does not answer with a valid certificate '
                           'for the domain yet — issue the certificate first'},
@@ -8237,7 +8454,13 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
         if (will_link_default or carries_exit_link) and ipv6_pref is not False:
             ipv6_pref = False
             forced_ipv6_off = True
-        if ipv6_pref is True and env_pref != 'off':
+        # IPv6 is an AWG-only instance property: the preference never reaches
+        # the install call of any other protocol, and only AWGManager knows how
+        # to probe Docker for it. Probing unconditionally crashed installs of
+        # telemt / socks5 / xray / exit nodes with
+        # "'<Manager>' object has no attribute '_docker_ipv6_info'" whenever the
+        # server preference was "on" or AWG_IPV6=on.
+        if ipv6_pref is True and env_pref != 'off' and install_base in AWG_PROTOCOLS:
             docker_info = await asyncio.to_thread(manager._docker_ipv6_info)
             if not docker_info.get('ipv6_enabled'):
                 ssh.disconnect()
@@ -9640,7 +9863,17 @@ def _ip_status_cache_put(server_uid, payload):
 
 
 def _invalidate_ip_status(server_uid=None):
-    """Drop one cached status, or all of them after a global change."""
+    """Drop one cached status, or all of them after a global change.
+
+    Снимок /check (?boot=1) инвалидируется вместе с ip-status: после
+    установки, удаления или переключения протокола страница не должна
+    показывать состояние до мутации.
+    """
+    with _CHECK_CACHE_LOCK:
+        if server_uid is None:
+            _CHECK_CACHE.clear()
+        else:
+            _CHECK_CACHE.pop(server_uid, None)
     if server_uid is None:
         _IP_STATUS_CACHE.clear()
     else:
@@ -10215,11 +10448,8 @@ def api_protocol_backup_download(request: Request, server_id: int, req: BackupDo
             return JSONResponse({'error': err or 'Backup not found'}, status_code=404)
         fd, tmp_path = tempfile.mkstemp(prefix='amnezia-backup-', suffix='.tar.gz')
         os.close(fd)
-        sftp = ssh.client.open_sftp()
-        try:
+        with ssh.sftp_transfer() as sftp:
             sftp.get(tmp_remote, tmp_path)
-        finally:
-            sftp.close()
         return FileResponse(
             tmp_path,
             media_type='application/gzip',
@@ -13331,6 +13561,8 @@ def settings_page(request: Request):
         return RedirectResponse('/login')
     data = load_data()
     backup_csrf = request.session.setdefault('backup_csrf', secrets.token_urlsafe(32)) if user['role'] == 'admin' else ''
+    # Bucket and endpoint details are admin-only, like backups: support never gets them.
+    storage_status = panel_storage.status() if user['role'] == 'admin' else {}
     return tpl(
         request,
         'settings.html',
@@ -13338,6 +13570,7 @@ def settings_page(request: Request):
         servers=data.get('servers', []),
         current_version=CURRENT_VERSION,
         backup_csrf=backup_csrf,
+        storage_status=storage_status,
         self_service_protocol_choices=self_service_protocol_choices(),
         cheburcheck_targets=_cheburcheck_targets_context(data),
     )
@@ -13910,6 +14143,30 @@ def _backup_admin(request):
     return actor
 
 
+# Optional S3 mirror of the data directory (docs/S3_STORAGE.md); every hook is a
+# no-op unless PANEL_STORAGE=s3. Registered after startup(), so the sync thread
+# starts only once PanelLease is held and the migrations have been saved.
+@app.on_event('startup')
+async def start_panel_storage():
+    panel_storage.start()
+
+
+@app.on_event('shutdown')
+async def stop_panel_storage():
+    # Requests the final flush at once and polls for it: the default executor may be
+    # full of slow SSH calls, and a queued stop() could miss the pod's grace period.
+    await panel_storage.stop_async()
+
+
+@app.get('/api/settings/storage', tags=["Settings"])
+def api_storage_status(request: Request):
+    # Bucket, endpoint and lease owner: same audience as backups (admin only).
+    if not _backup_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403,
+                            headers=PRIVATE_HEADERS)
+    return JSONResponse(panel_storage.status(), headers=PRIVATE_HEADERS)
+
+
 @app.get('/api/integration/inventory', tags=["Servers"])
 async def api_integration_inventory(request: Request):
     if not _check_admin(request):
@@ -14115,22 +14372,60 @@ def api_recovery_status(request: Request):
 def _probe_blocking_peer(server, conn):
     """Return (observed_bytes, quiescent) for a leftover accounting row.
 
-    ``quiescent`` is True only when the peer is absent from the live protocol
-    instance or is explicitly disabled there.  Unknown state is NOT quiescent.
+    ``quiescent`` is True only when the peer cannot carry traffic on the
+    live instance: absent from it, explicitly disabled there, or — for
+    xray — gone from the runtime config while only lingering in the
+    clientsTable (a hand-edited config carries no traffic).  Unknown
+    state is NOT quiescent.
     """
     ssh = get_ssh(server)
     try:
         ssh.connect()
         manager = get_protocol_manager(ssh, conn['protocol'])
+        runtime_ids = None
         if protocol_base(conn['protocol']) == 'xray':
             try:
-                clients = manager.get_clients(conn['protocol'], strict=True)
+                runtime_ids = manager.get_runtime_client_ids()
             except RuntimeError as error:
                 raise RecoveryError('incomplete_peer_state') from error
+            if conn.get('client_id') not in runtime_ids:
+                # Absent from the live config: nothing can flow through it,
+                # whatever the clientsTable says. The table may still hold
+                # final counters worth archiving.
+                try:
+                    clients = manager.get_clients(conn['protocol'], strict=True)
+                except RuntimeError as error:
+                    clients = None
+                peers = [c for c in (clients or [])
+                         if isinstance(c, dict) and c.get('clientId') == conn.get('client_id')]
+                observed = None
+                if len(peers) == 1:
+                    ud = peers[0].get('userData') or {}
+                    rx, tx = ud.get('dataReceivedBytes'), ud.get('dataSentBytes')
+                    if type(rx) is int and type(tx) is int and rx >= 0 and tx >= 0:
+                        observed = rx + tx
+                return observed, True
         else:
             clients = _manager_call(manager, 'get_clients', conn['protocol'])
-        if not isinstance(clients, list):
-            raise RecoveryError('incomplete_peer_state')
+            if not isinstance(clients, list):
+                raise RecoveryError('incomplete_peer_state')
+            peers = [c for c in clients
+                     if isinstance(c, dict) and c.get('clientId') == conn.get('client_id')]
+            if len(peers) > 1:
+                raise RecoveryError('peer_identity_ambiguous')
+            if not peers:
+                return None, True
+            ud = peers[0].get('userData') or {}
+            rx, tx = ud.get('dataReceivedBytes'), ud.get('dataSentBytes')
+            observed = (rx + tx if type(rx) is int and type(tx) is int
+                        and rx >= 0 and tx >= 0 else None)
+            return observed, not bool(ud.get('enabled', True))
+        # Xray peer present in the live config: traffic can flow through it —
+        # the clientsTable enabled flag does not gate the core.
+        try:
+            clients = manager.get_clients(conn['protocol'], strict=True)
+        except RuntimeError as error:
+            raise RecoveryError('incomplete_peer_state') from error
         peers = [c for c in clients
                  if isinstance(c, dict) and c.get('clientId') == conn.get('client_id')]
         if len(peers) > 1:
@@ -14141,7 +14436,7 @@ def _probe_blocking_peer(server, conn):
         rx, tx = ud.get('dataReceivedBytes'), ud.get('dataSentBytes')
         observed = (rx + tx if type(rx) is int and type(tx) is int
                     and rx >= 0 and tx >= 0 else None)
-        return observed, not bool(ud.get('enabled', True))
+        return observed, False
     finally:
         ssh.disconnect()
 
@@ -14271,6 +14566,9 @@ def pathlib_read_data_bytes():
 
 
 if __name__ == '__main__':
+    # PANEL_STORAGE=s3: restore the data directory from the bucket before anything
+    # reads it (the main thread is required for the SIGTERM handler). No-op by default.
+    panel_storage.bootstrap(DATA_FILE, app_dir=application_path, panel_version=CURRENT_VERSION)
     data = load_data()
     ssl_conf = data.get('settings', {}).get('ssl', {})
     
@@ -14306,6 +14604,8 @@ if __name__ == '__main__':
         # public front answers like an empty nginx instead.
         "server_header": False,
     }
+    # s3 mode bounds uvicorn's graceful shutdown so the final S3 flush fits the pod's grace period.
+    uvicorn_kwargs.update(panel_storage.uvicorn_overrides())
 
     if ssl_conf.get('enabled') and cert_file and key_file:
         if os.path.exists(cert_file) and os.path.exists(key_file):

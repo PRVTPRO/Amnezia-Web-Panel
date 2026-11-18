@@ -153,5 +153,72 @@ class InstallGateTests(InstallGateBase):
         self.assertEqual(ip_status.json()['preference']['env_override'], 'off')
 
 
+class NonAwgInstallGateTests(InstallGateBase):
+    """Гейт Docker-IPv6 — свойство AWG-инстанса, остальных он не касается.
+
+    Регрессия из #357: при включённой для сервера настройке «IPv6 для новых
+    инстансов» (или AWG_IPV6=on) установка telemt/socks5 падала с
+    "'TelemtManager' object has no attribute '_docker_ipv6_info'".
+    """
+
+    class _ManagerWithoutIpv6Probe:
+        """Так выглядит любой не-AWG менеджер: метода просто нет."""
+
+        def __init__(self):
+            self.calls = []
+
+        def install_protocol(self, *args, **kwargs):
+            self.calls.append(kwargs)
+            return {'status': 'success', 'log': []}
+
+    def setUp(self):
+        super().setUp()
+        # Журнал установок — глобальное состояние панели: без изоляции
+        # завершённая операция из этого теста видна соседним тестам
+        # (test_public_endpoint ждёт 404 на неизвестную операцию xray).
+        self._ops = dict(panel._INSTALL_OPS)
+        self._active = dict(panel._INSTALL_ACTIVE)
+        self._loaded = dict(panel._INSTALL_OPS_LOADED)
+        panel._INSTALL_OPS.clear()
+        panel._INSTALL_ACTIVE.clear()
+        panel._INSTALL_OPS_LOADED['done'] = False
+        self.addCleanup(self._restore_install_ops)
+
+    def _restore_install_ops(self):
+        panel._INSTALL_OPS.clear()
+        panel._INSTALL_OPS.update(self._ops)
+        panel._INSTALL_ACTIVE.clear()
+        panel._INSTALL_ACTIVE.update(self._active)
+        panel._INSTALL_OPS_LOADED.clear()
+        panel._INSTALL_OPS_LOADED.update(self._loaded)
+
+    def _patches_without_probe(self):
+        manager = self._ManagerWithoutIpv6Probe()
+        patches = [
+            mock.patch.object(panel, 'get_ssh', return_value=mock.Mock()),
+            mock.patch.object(panel, 'get_used_ports', return_value={}),
+            mock.patch.object(panel, 'ensure_docker_installed', return_value=''),
+            mock.patch.object(panel, 'get_protocol_manager', return_value=manager),
+            mock.patch.object(panel.exit_link_svc, 'relink_entries_for_exit',
+                              new=mock.AsyncMock(return_value=[])),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        return manager
+
+    def test_ipv6_preference_does_not_break_non_awg_installs(self):
+        manager = self._patches_without_probe()
+        for protocol in ('telemt', 'socks5', 'xray', 'exit'):
+            with self.subTest(protocol=protocol):
+                self.write_server(base_server(ipv6_new_instances=True))
+                manager.calls.clear()
+                res = self.install(self.admin(), protocol)
+                self.assertEqual(res.status_code, 200, res.text)
+                self.assertEqual(len(manager.calls), 1, res.text)
+                # Никакого ipv6_preference в чужой установщик не уходит.
+                self.assertNotIn('ipv6_preference', manager.calls[0])
+
+
 if __name__ == '__main__':
     unittest.main()

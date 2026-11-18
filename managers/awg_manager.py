@@ -35,6 +35,25 @@ from managers.awg_junk import (
     pool_for,
 )
 
+def _parse_marked_output(out, marker):
+    """Разбор вывода, размеченного терминаторами `<marker>!ИМЯ rc`.
+
+    Секция — это всё, что накопилось после предыдущего терминатора; rc
+    печатает сама оболочка сразу после своей секции. Усечённый вывод (обрыв
+    канала) не создаёт фантомную секцию с rc=0: её просто не будет в словаре.
+    """
+    sections, codes, buffer = {}, {}, []
+    for line in (out or '').splitlines():
+        if line.startswith(marker + '!'):
+            name, _, raw_code = line[len(marker) + 1:].partition(' ')
+            name = name.strip()
+            sections[name] = '\n'.join(buffer)
+            codes[name] = int(raw_code) if raw_code.strip().lstrip('-').isdigit() else 1
+            buffer = []
+        elif not line.startswith(marker):
+            buffer.append(line)
+    return sections, codes
+
 def _awg_batch_lock_of(obj):
     """Return a usable context manager for the AWG batch lock,
     tolerating objects (Mock-based fakes) that expose a truthy but
@@ -1041,30 +1060,43 @@ class AWGManager:
     # --- IPv6 status and control -----------------------------------------
 
     def _host_ipv6_info(self):
-        """Global addresses, default route and the system IPv6 switch."""
-        out, _, _ = self.ssh.run_sudo_command(
-            "ip -6 route get 2606:4700::1111 2>/dev/null")
-        match = re.search(r'src\s+([0-9a-fA-F:]+)', out or '')
+        """Global addresses, default route and the system IPv6 switch.
+
+        Все пять host-проб идут одним SSH-вызовом: на MAMKAM каждая лишняя
+        команда стоила ~0.2-0.4 с, а /ip-status вызывается на каждой загрузке
+        страницы и раз в минуту поллингом.
+        """
+        marker = '@@HOST6_' + uuid.uuid4().hex + '@@'
+        script = (
+            'p="' + marker + '"; '
+            'ip -6 route get 2606:4700::1111 2>/dev/null; echo "$p!V6ROUTE $?"; '
+            'ip -6 route show default 2>/dev/null; echo "$p!V6DEF $?"; '
+            'ip route get 1.1.1.1 2>/dev/null | head -1; echo "$p!V4ROUTE $?"; '
+            'cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null; echo "$p!SYSCTL $?"; '
+            'grep -q ipv6.disable=1 /proc/cmdline 2>/dev/null && echo yes; echo "$p!CMDLINE $?"'
+        )
+        out, _err, code = self._run_script(script, timeout=30)
+        sections, codes = _parse_marked_output(out, marker)
+        v6route = sections.get('V6ROUTE', '')
+        match = re.search(r'src\s+([0-9a-fA-F:]+)', v6route)
         address = match.group(1) if match else ''
         if address.lower().startswith(('fc', 'fd', 'fe80')):
             address = ''
-        dev = re.search(r'dev\s+(\S+)', out or '')
+        dev = re.search(r'dev\s+(\S+)', v6route)
         if dev and re.match(r'^(docker|br-|veth|tun|awg|amn0)', dev.group(1)):
             # A container bridge address is not the host's own IPv6.
             address = ''
-        route, _, route_code = self.ssh.run_sudo_command(
-            "ip -6 route show default 2>/dev/null")
-        ipv4, _, ipv4_code = self.ssh.run_sudo_command(
-            "ip route get 1.1.1.1 2>/dev/null | head -1")
+        route = sections.get('V6DEF', '')
+        ipv4 = sections.get('V4ROUTE', '')
+        sysctl = sections.get('SYSCTL', '')
+        cmdline = sections.get('CMDLINE', '')
         # A host without IPv6 still answers `ip -6 route show default` with
-        # exit code 0 and empty output. A non-zero code on both probes means
-        # the SSH command itself failed, so the status is unknown, not absent.
-        readable = (route_code == 0 or ipv4_code == 0)
+        # exit code 0 and empty output. A failed composite command means the
+        # SSH command itself failed, so the status is unknown, not absent.
+        readable = (code == 0
+                    or codes.get('V6DEF') == 0
+                    or codes.get('V4ROUTE') == 0)
         m4 = re.search(r'src\s+(\d+\.\d+\.\d+\.\d+)', ipv4 or '')
-        sysctl, _, _ = self.ssh.run_sudo_command(
-            "cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null")
-        cmdline, _, _ = self.ssh.run_sudo_command(
-            "grep -q 'ipv6.disable=1' /proc/cmdline 2>/dev/null && echo yes")
         disabled = ((sysctl or '').strip() == '1'
                     or (cmdline or '').strip() == 'yes')
         return {'address': address, 'ipv4': m4.group(1) if m4 else '',
@@ -1078,36 +1110,54 @@ class AWGManager:
                 'bridge_ipv6': False, 'daemon_json_present': False,
                 'restart_required': False, 'ip6tables_ok': True,
                 'flags_conflict': False, 'version_ok': False}
+        # `command` is a shell builtin and sudo would try to exec it directly,
+        # so the availability probe stays its own `sh -c` command.
         out, _, _ = self.ssh.run_sudo_command(
             "sh -c 'command -v docker' >/dev/null 2>&1 && echo yes")
         info['installed'] = (out or '').strip() == 'yes'
         if not info['installed']:
             return info
-        out, _, _ = self.ssh.run_sudo_command(
-            "test -f /etc/docker/daemon.json && echo yes")
-        info['daemon_json_present'] = (out or '').strip() == 'yes'
-        out, _, _ = self.ssh.run_sudo_command(
-            "docker network inspect bridge -f '{{.EnableIPv6}}' 2>/dev/null")
-        info['bridge_ipv6'] = (out or '').strip().lower() == 'true'
+        # Остальные шесть проб — одним вызовом: раньше это были шесть
+        # отдельных SSH-кругов на каждый /ip-status.
+        marker = '@@DOCKER6_' + uuid.uuid4().hex + '@@'
+        script = (
+            'p="' + marker + '"; '
+            'test -f /etc/docker/daemon.json && echo yes; echo "$p!DAEMON $?"; '
+            'docker network inspect bridge -f "{{.EnableIPv6}}" 2>/dev/null; echo "$p!BRIDGE $?"; '
+            'cat /etc/docker/daemon.json 2>/dev/null; echo "$p!DAEMONJSON $?"; '
+            'ip6tables -t nat -L -n >/dev/null 2>&1 && echo yes; echo "$p!IP6T $?"; '
+            'docker version >/dev/null 2>&1; echo "$p!VERSION $?"; '
+            'systemctl cat docker 2>/dev/null | grep -E -- "--ipv6|--ip6tables" || true; '
+            'echo "$p!FLAGS $?"'
+        )
+        out, _err, _code = self._run_script(script, timeout=30)
+        sections, codes = _parse_marked_output(out, marker)
+        if not sections:
+            # Композитный вызов не ответил: установленный Docker остаётся
+            # установленным, остальное неизвестно — значения по умолчанию.
+            return info
+        info['daemon_json_present'] = sections.get('DAEMON', '').strip() == 'yes'
+        info['bridge_ipv6'] = sections.get('BRIDGE', '').strip().lower() == 'true'
         info['ipv6_enabled'] = info['bridge_ipv6']
+        # daemon.json читается целиком и разбирается здесь: grep по
+        # `"ipv6": true` ломался на экранировании кавычек в композитной
+        # команде, а JSON и так обязан быть валидным для Docker.
+        wants_ipv6 = False
+        raw_daemon = sections.get('DAEMONJSON', '')
+        try:
+            daemon_conf = json.loads(raw_daemon) if raw_daemon.strip() else {}
+        except ValueError:
+            daemon_conf = None
+        if isinstance(daemon_conf, dict):
+            wants_ipv6 = daemon_conf.get('ipv6') is True
+        elif raw_daemon:
+            wants_ipv6 = bool(re.search(r'"ipv6"\s*:\s*true', raw_daemon, re.I))
         # Restart is pending only when daemon.json asks for IPv6 and the
-        # running daemon does not have it yet. Matching the key alone raised
-        # the chip for an explicit "ipv6": false too: Docker had already
-        # applied that state, yet the card kept saying a restart was needed.
-        out, _, _ = self.ssh.run_sudo_command(
-            "grep -o '\"ipv6\"[[:space:]]*:[[:space:]]*[a-z]*' "
-            "/etc/docker/daemon.json 2>/dev/null")
-        wants_ipv6 = 'true' in (out or '').lower()
+        # running daemon does not have it yet.
         info['restart_required'] = wants_ipv6 and not info['bridge_ipv6']
-        out, _, _ = self.ssh.run_sudo_command(
-            "ip6tables -t nat -L -n >/dev/null 2>&1 && echo yes")
-        info['ip6tables_ok'] = (out or '').strip() == 'yes'
-        _out, _err, code = self.ssh.run_sudo_command(
-            "docker version >/dev/null 2>&1")
-        info['version_ok'] = code == 0
-        out, _, _ = self.ssh.run_sudo_command(
-            "systemctl cat docker 2>/dev/null | grep -E -- '--ipv6|--ip6tables' || true")
-        info['flags_conflict'] = bool((out or '').strip())
+        info['ip6tables_ok'] = sections.get('IP6T', '').strip() == 'yes'
+        info['version_ok'] = codes.get('VERSION') == 0
+        info['flags_conflict'] = bool(sections.get('FLAGS', '').strip())
         return info
 
     @staticmethod
@@ -1189,12 +1239,19 @@ class AWGManager:
         if host_info is None:
             host_info = self._host_ipv6_info()
         running, container = self._container_state(protocol_type)
+        # Батч после prefetch_ip_status: disable_ipv6 и exit0.conf уже сняты
+        # одним вызовом, отдельных SSH-кругов здесь больше нет.
+        entry = self._batch_entry(container)
         capable = False
         if running:
-            out, _, _ = self.ssh.run_sudo_command(
-                f"docker exec {container} cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null")
-            capable = (out or '').strip() == '0'
-        exit_linked = bool(self.exit_link_info(protocol_type))
+            batched_disable = entry.get('disable_ipv6') if entry else None
+            if batched_disable:
+                capable = batched_disable.strip() == '0'
+            else:
+                out, _, _ = self.ssh.run_sudo_command(
+                    f"docker exec {container} cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null")
+                capable = (out or '').strip() == '0'
+        exit_linked = self._exit_linked(protocol_type, entry)
         env_mode = os.environ.get(AWG_IPV6_ENV, 'auto').strip().lower()
         disabled_by_sysctl = bool((host_info or {}).get('disabled_by_sysctl'))
 
@@ -1312,6 +1369,11 @@ class AWGManager:
         A running port instance uses the host IPv4 just like an AWG subnet
         does, and its clients join the IPv4 chip counts.
         """
+        try:
+            self.prefetch_ip_status(protocols)
+        except Exception as exc:
+            logger.warning("IPv6 status prefetch failed, falling back to "
+                           "per-instance reads: %s", exc)
         host = self._host_ipv6_info()
         docker = self._docker_ipv6_info()
         instances = []
@@ -2106,7 +2168,7 @@ docker --version
             'cat /opt/amnezia/awg/clientsTable 2>/dev/null; echo\'; '
             'done'
         )
-        out, err, code = self.ssh.run_sudo_command(cmd, timeout=60)
+        out, err, code = self._run_script(cmd, timeout=60)
         if code != 0:
             logger.warning(
                 "prefetch_awg_state composite command failed "
@@ -2137,15 +2199,156 @@ docker --version
                 },
             }
 
+    @staticmethod
+    def _parse_exit_link_output(out):
+        """Разбор вывода grep по exit0.conf в тот же словарь, что отдаёт
+        exit_link_info. Общий для прямой команды и для батча."""
+        info = {}
+        for line in (out or '').split('\n'):
+            stripped = line.strip().lstrip('#').strip()
+            if '=' not in stripped:
+                continue
+            key, _, value = stripped.partition('=')
+            info[key.strip()] = value.strip()
+        return {
+            'exit_uid': info.get('ExitUid', ''),
+            'exit_name': info.get('ExitName', ''),
+            'obfuscation': info.get('Obfuscation') == 'on',
+            'dns_via_exit': info.get('DnsViaExit') == 'on',
+            'address': info.get('Address', ''),
+            'endpoint': info.get('Endpoint', ''),
+        }
+
+    def _exit_linked(self, protocol_type, entry=None):
+        """Есть ли у инстанса связь с выходной нодой.
+
+        Если батч prefetch_ip_status уже снял exit0.conf - отвечаем по нему,
+        иначе читаем напрямую. Тот же контракт, что у bool(exit_link_info()).
+        """
+        if entry is not None and 'exit_rc' in entry:
+            if entry.get('exit_rc') != 0:
+                return False
+            return bool(self._parse_exit_link_output(entry.get('exit') or ''))
+        return bool(self.exit_link_info(protocol_type))
+
+    def _run_script(self, script, timeout=30):
+        """Композитный скрипт на удалённом хосте.
+
+        run_sudo_command для не-root подставляет `sudo` перед первым словом
+        строки, а `p="..."` или `for ...; do` под sudo не запускаются, и вся
+        цепочка молча уходит в непривилегированный шелл. Поэтому на не-root
+        подключении скрипт уходит как `sudo sh -c '<base64> | base64 -d | sh'`:
+        привилегирован весь конвейер, а base64 сохраняет кавычки внутри.
+        На root-подключении команда идёт как есть.
+        """
+        if getattr(self.ssh, '_is_root', True):
+            return self.ssh.run_sudo_command(script, timeout=timeout)
+        encoded = b64encode(script.encode('utf-8')).decode('ascii')
+        return self.ssh.run_sudo_command(
+            "sh -c 'echo " + encoded + " | base64 -d | sh'", timeout=timeout)
+
+    def prefetch_ip_status(self, protocol_types):
+        """Один SSH-вызов на весь IPv6-статус всех запущенных инстансов.
+
+        get_ip_status раньше тратил 2-4 команды на инстанс (disable_ipv6,
+        exit0.conf, конфиг, clientsTable): на MAMKAM это 30 команд и ~7.7 с
+        на каждой загрузке страницы и раз в минуту поллингом. Здесь всё это
+        снимается одним композитным вызовом и кладётся в тот же ssh._awg_batch,
+        который читают _get_server_config/_get_clients_table, поэтому
+        per-instance SSH-команд после prefetch не остаётся.
+        """
+        containers = []
+        for proto in protocol_types:
+            cname = self._container_name(proto)
+            state = self._snapshot_state(cname)
+            if state is None:
+                try:
+                    state = self.ssh.docker_container_state(cname)
+                except Exception:
+                    state = None
+            if state and state[1]:
+                containers.append(cname)
+        if not containers:
+            with _awg_batch_lock_of(self.ssh):
+                self.ssh._awg_batch = {'_ts': time.time(), 'containers': {}}
+            return
+        clients_marker = '@@CLIENTS_' + uuid.uuid4().hex + '@@'
+        disable_marker = '@@DISABLE_' + uuid.uuid4().hex + '@@'
+        exit_marker = '@@EXIT_' + uuid.uuid4().hex + '@@'
+        container_marker = '@@CONTAINER_' + uuid.uuid4().hex + '@@'
+        # Всё по одному контейнеру снимается ОДНИМ `docker exec`: на MAMKAM
+        # сам exec стоит ~0.25 с, и четыре отдельных exec на инстанс (28 на
+        # сервер) съедали больше, чем экономили убранные SSH-круги.
+        # `rc=$?` снимается сразу после команды, перевод строки добавляется
+        # после него: `cat` без завершающего \n иначе склеил бы свою последнюю
+        # строку с маркером (та же ловушка, что в prefetch_awg_state).
+        # Конфиг: у legacy-инстанса он в wg0.conf, у остальных - в awg0.conf.
+        cmd = (
+            'for c in ' + ' '.join(containers) + '; do '
+            'echo "' + container_marker + ' $c"; '
+            'docker exec "$c" sh -c \''
+            'cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null; rc=$?; '
+            'echo; echo "' + disable_marker + ' $rc"; '
+            'if [ -f ' + EXIT_CONF + ' ]; then '
+            'grep -E "^# (ExitUid|ExitName|Obfuscation|DnsViaExit) =|^Address|^Endpoint" '
+            + EXIT_CONF + '; echo "' + exit_marker + ' 0"; '
+            'else echo "' + exit_marker + ' 9"; fi; '
+            'if [ -s /opt/amnezia/awg/awg0.conf ]; then '
+            'cat /opt/amnezia/awg/awg0.conf; '
+            'else cat /opt/amnezia/awg/wg0.conf 2>/dev/null; fi; echo; '
+            'echo "' + clients_marker + '"; '
+            'cat /opt/amnezia/awg/clientsTable 2>/dev/null; echo'
+            '\'; '
+            'done'
+        )
+        out, err, code = self._run_script(cmd, timeout=60)
+        if code != 0:
+            logger.warning(
+                "IPv6 status prefetch composite command failed (exit %s): %s"
+                % (code, err))
+            with _awg_batch_lock_of(self.ssh):
+                self.ssh._awg_batch = None
+            return
+        batch = {}
+        parts = re.split('(' + re.escape(container_marker) + r' [^\n]+)', out or '')
+        for index in range(1, len(parts), 2):
+            name = parts[index].split(' ', 1)[1].strip()
+            remainder = parts[index + 1] if index + 1 < len(parts) else ''
+            sections = {}
+            # Порядок секций задаёт сама команда: disable -> exit -> конфиг.
+            for key, marker in (('disable', disable_marker), ('exit', exit_marker)):
+                match = re.search(re.escape(marker) + r' (-?\d+)', remainder)
+                if not match:
+                    sections[key] = ('', 1)
+                    continue
+                sections[key] = (remainder[:match.start()], int(match.group(1)))
+                remainder = remainder[match.end():]
+            config_part, _, clients_part = remainder.partition(clients_marker)
+            batch[name] = {
+                'config': config_part.strip('\n'),
+                'clients': clients_part.strip('\n'),
+                'disable_ipv6': sections['disable'][0].strip(),
+                'exit': sections['exit'][0].strip(),
+                'exit_rc': sections['exit'][1],
+            }
+        with _awg_batch_lock_of(self.ssh):
+            self.ssh._awg_batch = {'_ts': time.time(), 'containers': batch}
+
     def _batch_entry(self, container_name):
         with _awg_batch_lock_of(self.ssh):
             batch = getattr(self.ssh, '_awg_batch', None)
-            if batch is None or time.time() - batch.get('_ts', 0) > 15:
+            # Mock-based fakes expose every attribute: without the isinstance
+            # guard the timestamp arithmetic below raises on them.
+            if not isinstance(batch, dict):
                 return None
-            entry = batch['containers'].get(container_name)
-            if entry is None:
+            stamp = batch.get('_ts', 0)
+            if not isinstance(stamp, (int, float)) or time.time() - stamp > 15:
                 return None
-            return entry
+            containers = batch.get('containers')
+            if not isinstance(containers, dict):
+                return None
+            entry = containers.get(container_name)
+        return entry if isinstance(entry, dict) else None
 
     def prepare_host(self, protocol_type, allow_ipv6=True):
         """Prepare host for container (mirrors prepare_host.sh).
@@ -3569,21 +3772,7 @@ x_warp_up() {
         )
         if code != 0:
             return None
-        info = {}
-        for line in out.split('\n'):
-            stripped = line.strip().lstrip('#').strip()
-            if '=' not in stripped:
-                continue
-            key, _, value = stripped.partition('=')
-            info[key.strip()] = value.strip()
-        return {
-            'exit_uid': info.get('ExitUid', ''),
-            'exit_name': info.get('ExitName', ''),
-            'obfuscation': info.get('Obfuscation') == 'on',
-            'dns_via_exit': info.get('DnsViaExit') == 'on',
-            'address': info.get('Address', ''),
-            'endpoint': info.get('Endpoint', ''),
-        }
+        return self._parse_exit_link_output(out)
 
     @staticmethod
     def _parse_wg_peer_lists(text):
@@ -4001,7 +4190,7 @@ done < "$BW"
             return cached[1]
         container_name = self._container_name(protocol_type)
         batch = self._batch_entry(container_name)
-        if batch is not None:
+        if batch is not None and (batch.get('config') or '').strip():
             config = batch['config']
             self._server_config_cache[protocol_type] = (time.time(), config)
             return config
