@@ -5641,6 +5641,9 @@
                     const selfstealBtn = protoBase(proto) === 'xray'
                         ? `<button class="btn btn-secondary btn-sm" onclick="openSelfstealModal('${proto}')" title="${_('xray_selfsteal_title')}">🎭 ${_('xray_selfsteal')}</button>`
                         : '';
+                    const vlessEncBtn = protoBase(proto) === 'xray'
+                        ? `<button class="btn btn-secondary btn-sm" onclick="openVlessEncModal('${proto}')" title="${_('vless_enc_subtitle')}">🔒 ${_('vless_enc_btn')}</button>`
+                        : '';
                     const fingerprintBtn = protoBase(proto) === 'xray'
                         ? `<button class="btn btn-secondary btn-sm" onclick="openXrayFingerprint('${proto}')" title="${_('xray_fingerprint_hint')}">${_('xray_fingerprint_btn')}</button>`
                         : '';
