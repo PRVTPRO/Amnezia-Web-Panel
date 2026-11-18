@@ -35,7 +35,8 @@ XHTTP_CONFIG = {
 TCP_CONFIG = {
     'inbounds': [{
         'protocol': 'vless',
-        'settings': {'clients': []},
+        'settings': {'clients': [{'id': 'UUID-1',
+                                  'flow': 'xtls-rprx-vision'}]},
         'streamSettings': {
             'network': 'tcp',
             'security': 'reality',
@@ -160,15 +161,19 @@ class XhttpLinkTests(unittest.TestCase):
             'vless://UUID-1@203.0.113.9:443?type=tcp&security=reality&pbk=PBK'
             '&sni=yahoo.com&fp=chrome&sid=SID&spx=%2F&flow=xtls-rprx-vision#phone')
 
-    def test_hand_edited_non_tcp_transport_drops_the_vision_flow(self):
+    def test_hand_edited_transport_keeps_the_runtime_flow(self):
+        # The runtime client entry is authoritative: if the admin hand-wired
+        # a Vision flow onto another transport, the link must carry it.
         config = json.loads(json.dumps(TCP_CONFIG))
         config['inbounds'][0]['streamSettings']['network'] = 'grpc'
+        config['inbounds'][0]['settings']['clients'] = [
+            {'id': 'UUID-1', 'flow': 'xtls-rprx-vision'}]
         manager = make_link_manager(config)
         parts = urllib.parse.urlsplit(
             manager.get_client_config('xray', 'UUID-1', '203.0.113.9', 443))
         query = dict(urllib.parse.parse_qsl(parts.query, keep_blank_values=True))
         self.assertEqual(query['type'], 'grpc')
-        self.assertNotIn('flow', query)
+        self.assertEqual(query['flow'], 'xtls-rprx-vision')
 
 
 class XhttpClientFlowTests(unittest.TestCase):

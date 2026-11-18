@@ -83,6 +83,9 @@ def _serialized_table_write(method):
 XRAY_FINGERPRINTS = ('chrome', 'firefox', 'safari', 'ios', 'android', 'edge',
                      '360', 'qq', 'random', 'randomized')
 XRAY_DEFAULT_FINGERPRINT = 'chrome'
+# Key pair minted by `xray vlessenc` for the VLESS Encryption layer:
+# server-side decryption string + client-side encryption string.
+VLESS_ENC_KEY_FILE = 'xray_vlessenc.key'
 
 class XrayManager:
     """Manages Xray (VLESS-Reality) protocol installation and client management."""
@@ -764,12 +767,14 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
                 sid = sids[0] if sids else ''
             if not pub:
                 pub = self._derive_pubkey_from_priv(priv)
+            pair = self._read_vlessenc_pair()
             return {
                 'private_key': priv,
                 'public_key': pub,
                 'short_id': sid,
                 'port': port,
                 'site_name': site_name or 'yahoo.com',
+                'vless_client_encryption': pair.get('encryption', ''),
             }
 
         # Panel (legacy) layout
@@ -792,7 +797,26 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
                 meta['short_id'] = sids[0]
         if not meta.get('public_key') and meta.get('private_key'):
             meta['public_key'] = self._derive_pubkey_from_priv(meta['private_key'])
+        pair = self._read_vlessenc_pair()
+        meta.setdefault('vless_client_encryption', pair.get('encryption', ''))
         return meta
+
+    def _read_vlessenc_pair(self):
+        """The matched decryption/encryption strings minted by vlessenc."""
+        raw = self._read_remote_file(f"{self._config_dir()}/{VLESS_ENC_KEY_FILE}")
+        if not (raw or '').strip():
+            return {}
+        try:
+            pair = json.loads(raw)
+        except ValueError:
+            return {}
+        return pair if isinstance(pair, dict) else {}
+
+    def _write_vlessenc_pair(self, decryption, encryption):
+        self.ssh.upload_file_sudo(
+            json.dumps({'decryption': decryption,
+                        'encryption': encryption}, indent=2),
+            f"{self._config_dir()}/{VLESS_ENC_KEY_FILE}")
 
     def _get_clients_table(self, strict=False):
         """Read clientsTable, trying both layout filenames.
@@ -1054,16 +1078,23 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         config = self._get_server_json()
         sni = meta.get('site_name', 'yahoo.com')
         stream = {}
+        settings_node = {}
+        runtime_flow = ''
         if config:
             try:
-                stream = config['inbounds'][0].get('streamSettings', {}) or {}
+                inbound = config['inbounds'][0]
+                stream = inbound.get('streamSettings', {}) or {}
                 sni = stream['realitySettings']['serverNames'][0]
-            except Exception:
+                settings_node = inbound.get('settings', {}) or {}
+                runtime_flow = next((c.get('flow', '') for c in settings_node.get('clients', [])
+                                     if c.get('id') == client_id), '')
+            except (StopIteration, KeyError, TypeError, IndexError):
                 pass
 
         # The link is derived from the live server.json streamSettings, so a
         # transport the panel did not install (hand-edited config) still
-        # produces a usable link. vision only exists on raw TCP.
+        # produces a usable link. The flow comes from the runtime client
+        # entry: with the VLESS Encryption layer Vision rides XHTTP too.
         network = stream.get('network', 'tcp')
         # The instance-level fingerprint chosen in the panel beats the default;
         # an unknown value (hand-edited data.json) falls back instead of
@@ -1092,8 +1123,17 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
                     json.dumps(extra, separators=(',', ':')), safe=''))
         else:
             params.insert(0, "type=" + urllib.parse.quote(str(network), safe=''))
-            if network == 'tcp':
-                params.append("flow=xtls-rprx-vision")
+        # The runtime client entry is authoritative for the flow: it carries
+        # xtls-rprx-vision on raw TCP presets and, with the VLESS Encryption
+        # layer enabled, on XHTTP as well. An empty flow means none.
+        if runtime_flow:
+            params.append("flow=" + urllib.parse.quote(runtime_flow, safe=''))
+        client_encryption = meta.get('vless_client_encryption')
+        decryption = settings_node.get('decryption')
+        if (client_encryption and isinstance(decryption, str)
+                and decryption not in ('', 'none')):
+            # The second encryption layer rides every link of this inbound.
+            params.append("encryption=" + urllib.parse.quote(client_encryption, safe=''))
         # Format URL
         # vless://{id}@{host}:{port}?type=tcp&security=reality&pbk={public_key}&sni={sni}&fp=chrome&sid={short_id}&spx=%2F&flow=xtls-rprx-vision#{name}
 
@@ -1124,6 +1164,77 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
             'dest': reality.get('dest'),
             'sni': names[0] if names else None,
         }
+
+    def get_vless_encryption_state(self):
+        """Whether the VLESS Encryption layer is on, and the transport it
+        rides (the toggle applies to XHTTP only)."""
+        config = self._get_server_json()
+        if not config:
+            raise RuntimeError('Xray live config is unavailable')
+        inbound = self._get_vless_inbound(config)
+        if not inbound:
+            raise RuntimeError('Xray VLESS inbound not found')
+        stream = inbound.get('streamSettings', {}) or {}
+        decryption = inbound.get('settings', {}).get('decryption')
+        enabled = isinstance(decryption, str) and decryption not in ('', 'none')
+        return {'enabled': enabled,
+                'transport': stream.get('network', 'tcp'),
+                'decryption': decryption if isinstance(decryption, str) else ''}
+
+    def _generate_vlessenc_pair(self):
+        """Run `xray vlessenc` and return (decryption, encryption) - the
+        matched server/client strings it prints."""
+        out, err, code = self.ssh.run_sudo_command(
+            f"docker exec {self.container_name} /usr/bin/xray vlessenc")
+        if code != 0 or not (out or '').strip():
+            raise RuntimeError(f'vlessenc failed: {err or out}')
+        try:
+            data = json.loads(out)
+        except ValueError:
+            data = None
+        if isinstance(data, dict) and data.get('decryption') and data.get('encryption'):
+            return str(data['decryption']), str(data['encryption'])
+        decryption = re.search(r'decryption["\s:]+([^\s"]+)', out)
+        encryption = re.search(r'encryption["\s:]+([^\s"]+)', out)
+        if decryption and encryption:
+            return decryption.group(1), encryption.group(1)
+        raise RuntimeError('could not parse the vlessenc output')
+
+    def set_vless_encryption(self, enable):
+        """Toggle the VLESS Encryption layer (Vision over XHTTP).
+
+        Enabling mints a matched decryption/encryption pair with
+        `xray vlessenc`, stores it in the key file, points the inbound's
+        decryption at the server string, sets every client's flow to
+        Vision and restarts. Disabling reverts to decryption 'none' and
+        empty flows. Existing client configs are invalidated: every user
+        must re-import the subscription, and only up-to-date Xray-core
+        clients carry the layer."""
+        config = self._get_server_json()
+        if not config:
+            raise RuntimeError('Xray live config is unavailable')
+        inbound = self._get_vless_inbound(config)
+        if not inbound:
+            raise RuntimeError('Xray VLESS inbound not found')
+        stream = inbound.get('streamSettings', {}) or {}
+        if stream.get('network') != 'xhttp':
+            raise RuntimeError(
+                'VLESS Encryption requires the XHTTP transport')
+        settings = inbound.setdefault('settings', {})
+        clients = settings.setdefault('clients', [])
+        if enable:
+            decryption, encryption = self._generate_vlessenc_pair()
+            settings['decryption'] = decryption
+            self._write_vlessenc_pair(decryption, encryption)
+            for client in clients:
+                client['flow'] = 'xtls-rprx-vision'
+        else:
+            settings['decryption'] = 'none'
+            for client in clients:
+                client['flow'] = ''
+            self.ssh.run_sudo_command(
+                f"rm -f {shlex.quote(self._config_dir() + '/' + VLESS_ENC_KEY_FILE)}")
+        self._write_server_json(config, restart=True)
 
     def apply_selfsteal(self, domain, dest):
         """Point Reality at the local NGINX site (self-steal SNI).

@@ -9403,6 +9403,70 @@ def api_xray_fingerprint_save(request: Request, server_id: int, req: XrayFingerp
                             status_code=500)
 
 
+class XrayEncryptionRequest(BaseModel):
+    protocol: str = 'xray'
+    enable: bool
+
+
+@app.get('/api/servers/{server_id}/xray/encryption', tags=["Protocols"])
+def api_xray_encryption_state(request: Request, server_id: int,
+                              protocol: str = 'xray'):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if server_id < 0 or server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        ssh = get_ssh(data['servers'][server_id])
+        ssh.connect()
+        try:
+            manager = get_protocol_manager(ssh, protocol)
+            state = manager.get_vless_encryption_state()
+        finally:
+            ssh.disconnect()
+        return state
+    except RuntimeError as e:
+        return JSONResponse({'error': str(e)}, status_code=409)
+    except Exception as e:
+        logger.exception("Error reading the xray encryption state")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/xray/encryption', tags=["Protocols"])
+async def api_xray_encryption_toggle(request: Request, server_id: int,
+                                     req: XrayEncryptionRequest):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if server_id < 0 or server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        ssh = get_ssh(data['servers'][server_id])
+        ssh.connect()
+        try:
+            manager = get_protocol_manager(ssh, req.protocol)
+            state = await asyncio.to_thread(manager.set_vless_encryption,
+                                            req.enable)
+        finally:
+            ssh.disconnect()
+        # The issued links changed (encryption parameter + flow): refresh
+        # the subscription files of the users on this protocol.
+        try:
+            user_ids = [c['user_id'] for c in data.get('user_connections', [])
+                        if c.get('server_id') == server_id
+                        and protocol_base(c.get('protocol')) == protocol_base(req.protocol)]
+            await asyncio.to_thread(auto_push_subscriptions, data, user_ids)
+        except Exception:
+            logger.warning("subscription auto-push failed after the vless "
+                           "encryption toggle", exc_info=True)
+        return {'status': 'success', **state}
+    except RuntimeError as e:
+        return JSONResponse({'error': str(e)}, status_code=409)
+    except Exception as e:
+        logger.exception("Error toggling the xray encryption layer")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
 @app.get('/api/servers/{server_id}/xray/core', tags=["Protocols"])
 async def api_xray_core_version(request: Request, server_id: int,
                                 protocol: str = 'xray'):

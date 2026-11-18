@@ -2801,6 +2801,26 @@
 </div>
 
 <!-- ===== Xray Self-steal Modal ===== -->
+<!-- ===== VLESS Encryption Modal ===== -->
+<div class="modal-backdrop" id="vlessEncModal">
+    <div class="modal" style="max-width: 540px;">
+        <div class="modal-header">
+            <div>
+                <h2 class="modal-title">🔒 {{ _('vless_enc_title') }}</h2>
+                <div class="text-muted text-sm">{{ _('vless_enc_subtitle') }}</div>
+            </div>
+            <button class="modal-close" onclick="closeModal('vlessEncModal')">×</button>
+        </div>
+        <div class="modal-body" id="vlessEncBody">
+            <div class="text-muted text-sm">…</div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="closeModal('vlessEncModal')">{{ _('cancel') }}</button>
+            <button class="btn btn-primary" id="vlessEncApply" disabled>{{ _('vless_enc_apply') }}</button>
+        </div>
+    </div>
+</div>
+
 <div class="modal-backdrop" id="xraySelfstealModal">
     <div class="modal" style="max-width: 520px;">
         <div class="modal-header">
@@ -5601,6 +5621,9 @@
                     const selfstealBtn = protoBase(proto) === 'xray'
                         ? `<button class="btn btn-secondary btn-sm" onclick="openSelfstealModal('${proto}')" title="${_('xray_selfsteal_title')}">🎭 ${_('xray_selfsteal')}</button>`
                         : '';
+                    const vlessEncBtn = protoBase(proto) === 'xray'
+                        ? `<button class="btn btn-secondary btn-sm" onclick="openVlessEncModal('${proto}')" title="${_('vless_enc_subtitle')}">🔒 ${_('vless_enc_btn')}</button>`
+                        : '';
                     const copyBtn = COPYABLE_PROTOCOLS.includes(protoBase(proto))
                         ? `<button class="btn btn-secondary btn-sm" onclick="openCopyInstance('${proto}')" title="${_('copy_instance_title')}">${_('copy_instance_btn')}</button>`
                         : '';
@@ -5609,6 +5632,7 @@
                         ${exitBtn}
                         ${endpointBtn}
                         ${selfstealBtn}
+                        ${vlessEncBtn}
                         ${copyBtn}
                         <button class="btn btn-secondary btn-sm" onclick="showServerConfig('${proto}')" title="${_('server_config')}">${_('config_btn')}</button>
                         <button class="btn btn-danger btn-sm" onclick="toggleContainer('${proto}', true)" title="${_('stop_container_confirm').replace('{}', '')}">${_('stop_btn')}</button>
@@ -6200,6 +6224,55 @@
             document.getElementById('selfstealBody').innerHTML =
                 `<div class="text-muted text-sm">❌ ${escapeHtml(selfstealErrorText(err))}</div>`;
         });
+    }
+
+    // ===== VLESS Encryption (Vision over XHTTP) =====
+    async function openVlessEncModal(proto) {
+        openModal('vlessEncModal');
+        const body = document.getElementById('vlessEncBody');
+        const apply = document.getElementById('vlessEncApply');
+        body.innerHTML = '<div class="text-muted text-sm">…</div>';
+        apply.disabled = true;
+        try {
+            const state = await apiCall(`/api/servers/${SERVER_ID}/xray/encryption?protocol=${encodeURIComponent(proto)}`);
+            renderVlessEnc(proto, state);
+        } catch (err) {
+            body.innerHTML = `<div class="text-muted text-sm">❌ ${escapeHtml((err && err.message) || '')}</div>`;
+        }
+    }
+
+    function renderVlessEnc(proto, state) {
+        const body = document.getElementById('vlessEncBody');
+        const apply = document.getElementById('vlessEncApply');
+        if (state.transport !== 'xhttp') {
+            body.innerHTML = `<div class="text-muted text-sm">${_('vless_enc_xhttp_required')}</div>`;
+            return;
+        }
+        body.innerHTML = `
+            <div class="form-group">
+                <label style="display:flex; align-items:center; gap:var(--space-sm); cursor:pointer;">
+                    <input type="checkbox" id="vlessEncEnabled" ${state.enabled ? 'checked' : ''}>
+                    <span><strong>${state.enabled ? _('vless_enc_state_on') : _('vless_enc_enable')}</strong></span>
+                </label>
+                <div class="form-hint" style="margin-top: var(--space-sm);">⚠️ ${_('vless_enc_warning')}</div>
+            </div>`;
+        apply.disabled = false;
+        apply.textContent = state.enabled ? _('vless_enc_disable') : _('vless_enc_enable');
+        apply.onclick = () => applyVlessEnc(proto, !state.enabled);
+    }
+
+    async function applyVlessEnc(proto, enable) {
+        const apply = document.getElementById('vlessEncApply');
+        apply.disabled = true;
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/xray/encryption`, 'POST',
+                { protocol: proto, enable: enable });
+            showToast(_('saved') || 'OK', 'success');
+            setTimeout(() => window.location.reload(), 800);
+        } catch (err) {
+            showToast((_('error') || 'Error') + ': ' + err.message, 'error');
+            apply.disabled = false;
+        }
     }
 
     // ========== Protocol Installation ==========
