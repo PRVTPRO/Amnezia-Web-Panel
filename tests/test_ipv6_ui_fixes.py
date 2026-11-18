@@ -226,6 +226,15 @@ RELEASE_1811_KEYS = {
 }
 
 
+# Lifecycle fence banner (#341): a later addition, declared here so the frozen
+# catalogue hash keeps guarding the original keys.
+LIFECYCLE_FENCE_KEYS = {
+    'lifecycle_fence_title', 'lifecycle_fence_how', 'lifecycle_fence_steps',
+    'lifecycle_fence_scope_global', 'lifecycle_fence_server',
+    'lifecycle_fence_operation', 'lifecycle_fence_reason',
+    'lifecycle_fence_since',
+}
+
 SECURITY_SETUP_KEYS = {
     'setup_title', 'setup_password_confirm', 'setup_submit', 'setup_creating',
     'setup_error', 'setup_username_invalid', 'setup_password_short',
@@ -436,7 +445,7 @@ class TestC6Translations(unittest.TestCase):
                                     - AWG_I1_KEYS - SRV_WARP_NO_AWG_KEYS
                                     - COPY_INSTANCE_KEYS - LATER_FEATURE_KEYS
                                     - RELEASE_1811_KEYS - USER_LIMIT_KEYS - TELEGRAM_ACCOUNT_KEYS
-                                    - STORAGE_KEYS))
+                                    - LIFECYCLE_FENCE_KEYS - STORAGE_KEYS))
         self.assertEqual(hashlib.sha256(previous.encode('utf-8')).hexdigest(),
                          PRE_PANEL_ACCESS_KEYS_SHA256,
                          'Existing catalogue changed outside the declared additions')
@@ -445,7 +454,8 @@ class TestC6Translations(unittest.TestCase):
         for locale in LOCALES:
             data = translation(locale)
             for key in (NEW_KEYS | PANEL_ACCESS_KEYS | PROTOCOL_UNINSTALL_KEYS
-                        | TORRENT_GUARD_KEYS | AWG_I1_KEYS | USER_LIMIT_KEYS | TELEGRAM_ACCOUNT_KEYS):
+                        | TORRENT_GUARD_KEYS | AWG_I1_KEYS | USER_LIMIT_KEYS | TELEGRAM_ACCOUNT_KEYS
+                        | LIFECYCLE_FENCE_KEYS):
                 self.assertIn(key, data)
                 self.assertTrue(str(data[key]).strip(), "%s empty in %s" % (key, locale))
 
