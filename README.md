@@ -206,7 +206,9 @@ docker pull ghcr.io/prvtpro/amnezia-panel:latest-warp
 
 The bundled `docker-compose.yml` sets `DATA_FILE=/app/data/data.json` so panel state lands on the
 `amnezia_data` volume and survives container rebuilds — see [Environment Variables](#-environment-variables)
-for the full list of knobs.
+for the full list of knobs. Where no persistent volume is available (for example Kubernetes with an
+`emptyDir`), `PANEL_STORAGE=s3` restores the folder holding `DATA_FILE` from an S3-compatible bucket at
+startup and keeps mirroring it back as encrypted snapshots — see [docs/S3_STORAGE.md](docs/S3_STORAGE.md).
 
 
 
@@ -236,6 +238,8 @@ next to `app.py`, or next to the executable in the standalone builds from *Insta
 | `TUNNEL_STATE_FILE` | `<app dir>/tunnels_state.json` | Path where Cloudflare/ngrok tunnel runtime state (PID, public URL) is persisted between restarts. |
 | `TUNNEL_BIN_DIR` | `<app dir>/bin` | Directory holding the panel-managed `cloudflared` / `ngrok` binaries downloaded from the **Settings** page. |
 | `AWG_IPV6` | `auto` | Dual-stack policy for AWG tunnels: `auto` probes the host and the protocol container, `off` keeps every tunnel IPv4-only, `on` forces dual-stack. |
+| `PANEL_STORAGE` | `local` | Where the state directory (the folder holding `DATA_FILE`) is kept. `local` uses the disk only. `s3` restores the directory from an S3-compatible bucket before the panel reads it and mirrors it back as encrypted snapshots, for deployments without a persistent volume; it requires `DATA_FILE` to be set explicitly and the `PANEL_S3_*` variables below, and is not available in the standalone builds from *Installation Method 2*. |
+| `PANEL_S3_*` | unset | Bucket, endpoint, region, access keys, encryption key and sync timing for `PANEL_STORAGE=s3`. They are ignored in `local` mode and are documented in [docs/S3_STORAGE.md](docs/S3_STORAGE.md). |
 
 Two things that are deliberately *not* environment variables: the port the panel listens on and its SSL
 certificates, both configured in **Settings → SSL** and stored in the state file. For ngrok, the authtoken
@@ -318,7 +322,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 ### Technology Stack
 *   **Backend**: FastAPI (Python), `asyncio` for concurrent SSH/probe work
 *   **Frontend**: Vanilla JS, Jinja2, Custom CSS (Glassmorphism, full set of CSS animations for promo blocks)
-*   **Database**: Local JSON storage (`data.json`, path overridable via the `DATA_FILE` environment variable) with an `asyncio.Lock` for thread-safe writes
+*   **Database**: Local JSON storage (`data.json`, path overridable via the `DATA_FILE` environment variable) with an `asyncio.Lock` for thread-safe writes; optionally mirrored to S3-compatible object storage via botocore with client-side AES-256-GCM (`PANEL_STORAGE=s3`)
 *   **SSH Engine**: Paramiko
 
 ### Project Structure
@@ -330,6 +334,7 @@ web-panel/
 ├── exit_failover.py          # Health, thresholds and failback policy (no SSH)
 ├── telegram_bot.py           # Optional Telegram bot integration
 ├── mail_service.py           # SMTP delivery of configs/links (single and bulk)
+├── panel_storage.py          # Optional S3 mirror of the state directory (PANEL_STORAGE=s3) + CLI
 ├── managers/                 # Protocol & service managers (one file per protocol)
 │   ├── ssh_manager.py        # SSH abstraction (Paramiko wrapper)
 │   ├── awg_manager.py        # AmneziaWG / AWG 2.0 / AWG Legacy

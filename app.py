@@ -131,6 +131,7 @@ from connection_service import (
     sanitize_allowed_protocols,
     self_service_protocol_choices,
 )
+import panel_storage
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -13267,6 +13268,8 @@ def settings_page(request: Request):
         return RedirectResponse('/login')
     data = load_data()
     backup_csrf = request.session.setdefault('backup_csrf', secrets.token_urlsafe(32)) if user['role'] == 'admin' else ''
+    # Bucket and endpoint details are admin-only, like backups: support never gets them.
+    storage_status = panel_storage.status() if user['role'] == 'admin' else {}
     return tpl(
         request,
         'settings.html',
@@ -13274,6 +13277,7 @@ def settings_page(request: Request):
         servers=data.get('servers', []),
         current_version=CURRENT_VERSION,
         backup_csrf=backup_csrf,
+        storage_status=storage_status,
         self_service_protocol_choices=self_service_protocol_choices(),
         cheburcheck_targets=_cheburcheck_targets_context(data),
     )
@@ -13846,6 +13850,30 @@ def _backup_admin(request):
     return actor
 
 
+# Optional S3 mirror of the data directory (docs/S3_STORAGE.md); every hook is a
+# no-op unless PANEL_STORAGE=s3. Registered after startup(), so the sync thread
+# starts only once PanelLease is held and the migrations have been saved.
+@app.on_event('startup')
+async def start_panel_storage():
+    panel_storage.start()
+
+
+@app.on_event('shutdown')
+async def stop_panel_storage():
+    # Requests the final flush at once and polls for it: the default executor may be
+    # full of slow SSH calls, and a queued stop() could miss the pod's grace period.
+    await panel_storage.stop_async()
+
+
+@app.get('/api/settings/storage', tags=["Settings"])
+def api_storage_status(request: Request):
+    # Bucket, endpoint and lease owner: same audience as backups (admin only).
+    if not _backup_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403,
+                            headers=PRIVATE_HEADERS)
+    return JSONResponse(panel_storage.status(), headers=PRIVATE_HEADERS)
+
+
 @app.get('/api/integration/inventory', tags=["Servers"])
 async def api_integration_inventory(request: Request):
     if not _check_admin(request):
@@ -14207,6 +14235,9 @@ def pathlib_read_data_bytes():
 
 
 if __name__ == '__main__':
+    # PANEL_STORAGE=s3: restore the data directory from the bucket before anything
+    # reads it (the main thread is required for the SIGTERM handler). No-op by default.
+    panel_storage.bootstrap(DATA_FILE, app_dir=application_path, panel_version=CURRENT_VERSION)
     data = load_data()
     ssl_conf = data.get('settings', {}).get('ssl', {})
     
@@ -14242,6 +14273,8 @@ if __name__ == '__main__':
         # public front answers like an empty nginx instead.
         "server_header": False,
     }
+    # s3 mode bounds uvicorn's graceful shutdown so the final S3 flush fits the pod's grace period.
+    uvicorn_kwargs.update(panel_storage.uvicorn_overrides())
 
     if ssl_conf.get('enabled') and cert_file and key_file:
         if os.path.exists(cert_file) and os.path.exists(key_file):
