@@ -37,7 +37,7 @@ class XrayVersionTests(unittest.TestCase):
 
     def test_version_not_older_than_mptcp_fix(self):
         parsed = tuple(int(p) for p in XRAY_CORE_VERSION.lstrip('v').split('.'))
-        self.assertGreaterEqual(parsed, (26, 10, 31))
+        self.assertGreaterEqual(parsed, (26, 11, 9))
 
     def test_dockerfile_uses_arg_and_latest_pin(self):
         mgr = XrayManager.__new__(XrayManager)
@@ -47,7 +47,7 @@ class XrayVersionTests(unittest.TestCase):
         mgr.container_name = 'amnezia-xray'
         mgr.image_name = 'amneziavpn/amnezia-xray'
         text = mgr._dockerfile_content()
-        self.assertIn('ARG XRAY_RELEASE="v26.10.31"', text)
+        self.assertIn('ARG XRAY_RELEASE="v26.11.9"', text)
         self.assertIn('ARG XRAY_ARCH="64"', text)
         self.assertIn('releases/download/${XRAY_RELEASE}/Xray-linux-${XRAY_ARCH}.zip', text)
         self.assertNotIn('v26.3.27', text)
@@ -62,7 +62,7 @@ class XrayVersionTests(unittest.TestCase):
         text = mgr._dockerfile_content(release='v99.9.9', arch='arm64-v8a')
         self.assertIn('ARG XRAY_RELEASE="v99.9.9"', text)
         self.assertIn('ARG XRAY_ARCH="arm64-v8a"', text)
-        self.assertNotIn('v26.10.31', text)
+        self.assertNotIn('v26.11.9', text)
 
     def test_install_uploads_dockerfile_with_new_version(self):
         ssh = FakeSSH()
