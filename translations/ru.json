@@ -1562,5 +1562,6 @@
   "tp_err_container_stopped": "Контейнер инстанса остановлен — запустите его на странице сервера, тогда правила встанут",
   "tp_err_no_iptables_modules": "В контейнере нет модулей iptables (xt_string/xt_connbytes) — фильтр там не может работать",
   "tp_err_unreachable": "Сервер недоступен по SSH — правила не применены",
-  "tp_state_needs_start": "Нужно запустить контейнер"
+  "tp_state_needs_start": "Нужно запустить контейнер",
+  "close": "Закрыть"
 }

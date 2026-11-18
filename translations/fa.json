@@ -1562,5 +1562,6 @@
   "tp_err_container_stopped": "کانتینر نمونه متوقف است — آن را در صفحهٔ سرور اجرا کنید تا قواعد اعمال شوند",
   "tp_err_no_iptables_modules": "کانتینر ماژول‌های iptables (xt_string/xt_connbytes) را ندارد؛ فیلتر در آن کار نمی‌کند",
   "tp_err_unreachable": "سرور از طریق SSH در دسترس نیست — قواعد اعمال نشد",
-  "tp_state_needs_start": "ابتدا کانتینر را اجرا کنید"
+  "tp_state_needs_start": "ابتدا کانتینر را اجرا کنید",
+  "close": "بستن"
 }

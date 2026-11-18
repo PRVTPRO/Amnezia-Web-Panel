@@ -1562,5 +1562,6 @@
   "tp_err_container_stopped": "实例容器已停止——请在服务器页面启动它，规则就会生效",
   "tp_err_no_iptables_modules": "容器缺少 iptables 模块（xt_string/xt_connbytes），过滤器无法工作",
   "tp_err_unreachable": "服务器 SSH 不可达——规则未应用",
-  "tp_state_needs_start": "请先启动容器"
+  "tp_state_needs_start": "请先启动容器",
+  "close": "关闭"
 }

@@ -1562,5 +1562,6 @@
   "tp_err_container_stopped": "Le conteneur de l'instance est arrêté - démarrez-le sur la page du serveur et les règles s'appliqueront",
   "tp_err_no_iptables_modules": "Le conteneur n'a pas les modules iptables (xt_string/xt_connbytes), le filtre ne peut pas y fonctionner",
   "tp_err_unreachable": "Le serveur est injoignable en SSH - les règles ne sont pas appliquées",
-  "tp_state_needs_start": "Démarrez le conteneur"
+  "tp_state_needs_start": "Démarrez le conteneur",
+  "close": "Fermer"
 }

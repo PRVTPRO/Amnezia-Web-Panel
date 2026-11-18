@@ -1562,5 +1562,6 @@
   "tp_err_container_stopped": "The instance container is stopped - start it on the server page and the rules will apply",
   "tp_err_no_iptables_modules": "The container lacks iptables modules (xt_string/xt_connbytes), so the filter cannot work there",
   "tp_err_unreachable": "The server is unreachable over SSH - the rules were not applied",
-  "tp_state_needs_start": "Start the container first"
+  "tp_state_needs_start": "Start the container first",
+  "close": "Close"
 }
