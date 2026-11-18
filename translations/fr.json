@@ -1505,7 +1505,7 @@
   "storage_no_error": "Aucune",
   "storage_fenced_warning": "Un autre processus du panneau a écrit dans ce préfixe S3. Ce panneau a arrêté la synchronisation et s’arrête ; vérifiez qu’un seul panneau utilise ce préfixe.",
   "storage_env_hint": "Lecture seule : ces paramètres proviennent des variables d’environnement PANEL_STORAGE et PANEL_S3_* et ne peuvent pas être modifiés ici. Voir docs/S3_STORAGE.md.",
-  "tp_name": "Protection torrent",
+  "tp_name": "TorrentGuard",
   "tp_short": "Torrents",
   "tp_desc": "Bloque le trafic torrent sur les interfaces tunnel du serveur. S'installe serveur par serveur.",
   "tp_install": "Installer",

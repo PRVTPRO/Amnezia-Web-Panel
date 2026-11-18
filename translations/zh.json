@@ -1505,7 +1505,7 @@
   "storage_no_error": "无",
   "storage_fenced_warning": "另一个面板进程已写入此 S3 前缀。本面板已停止同步并正在退出；请确保只有一个面板使用该前缀。",
   "storage_env_hint": "只读：这些设置来自 PANEL_STORAGE 和 PANEL_S3_* 环境变量，无法在此修改。参见 docs/S3_STORAGE.md。",
-  "tp_name": "种子下载防护",
+  "tp_name": "TorrentGuard",
   "tp_short": "种子流量",
   "tp_desc": "在服务器隧道接口上拦截种子流量。按服务器单独安装。",
   "tp_install": "安装",
