@@ -7646,6 +7646,24 @@ def _docker_networks(ssh, container):
     return networks if isinstance(networks, dict) else {}
 
 
+SELFSTEAL_NET = 'amnezia-selfsteal-net'
+
+
+def _ensure_selfsteal_network(ssh, containers):
+    """Attach the containers to a dedicated user-defined network: docker's
+    embedded DNS then resolves the NGINX name, which survives container
+    re-creation (default-bridge IPs do not). Idempotent and live - no
+    container restart needed."""
+    out, _, code = ssh.run_sudo_command("docker network ls --format '{{.Name}}'")
+    existing = set((out or '').split())
+    if SELFSTEAL_NET not in existing:
+        ssh.run_sudo_command(f"docker network create {SELFSTEAL_NET}")
+    for container in containers:
+        if container and SELFSTEAL_NET not in _docker_networks(ssh, container):
+            ssh.run_sudo_command(
+                f"docker network connect {SELFSTEAL_NET} {shlex.quote(str(container))}")
+
+
 def _selfsteal_dest(xray_networks, nginx_networks, nginx_container):
     """Container-to-container Reality target. On a shared docker network
     the NGINX name resolves via embedded DNS and survives container
@@ -7660,12 +7678,19 @@ def _selfsteal_dest(xray_networks, nginx_networks, nginx_container):
     return None
 
 
-def _selfsteal_site_ok(ssh, domain, port):
+def _selfsteal_site_ok(ssh, xray_container, domain, dest):
     """The mask only holds while the site answers with a valid
-    certificate for the domain — verified from the host itself. DNS may
+    certificate for the domain. Probe from inside the Xray container
+    against the exact dest that will be written - the container-to-
+    container hop is the path Reality actually uses, so host-side port
+    publishing, proxy env and CA bundles cannot skew the result. DNS may
     point anywhere (relays included); --resolve forces the local hop."""
-    out, _, code = ssh.run_command(
-        f"curl -s 2>/dev/null --resolve {shlex.quote(f'{domain}:{port}:127.0.0.1')} "
+    dest_host, _, dest_port = str(dest).rpartition(':')
+    if not dest_host:
+        return False
+    out, _, code = ssh.run_sudo_command(
+        f"docker exec {shlex.quote(str(xray_container))} "
+        f"curl -s 2>/dev/null --resolve {shlex.quote(f'{domain}:{dest_port or 443}:{dest_host}')} "
         f"{shlex.quote('https://' + domain + '/')} -o /dev/null "
         f"-w '%{{http_code}}' --max-time 8")
     return code == 0 and bool(re.fullmatch(r'\d{3}', out.strip()))
@@ -7691,8 +7716,7 @@ def api_xray_selfsteal_plan(request: Request, server_id: int, protocol: str = 'x
 
         xray_container = (protocols.get(protocol) or {}).get('container_name') \
             or manager.container_name
-        xray_networks = _docker_networks(ssh, xray_container) if xray_running else {}
-        options = []
+        nginx_statuses = []
         for key in protocols:
             if protocol_base(key) != 'nginx':
                 continue
@@ -7700,6 +7724,16 @@ def api_xray_selfsteal_plan(request: Request, server_id: int, protocol: str = 'x
             status = nginx.get_server_status(key)
             if not status.get('domain') or not status.get('container_running'):
                 continue
+            nginx_statuses.append((key, status))
+        # The apply provisions a shared user-defined network before it
+        # writes anything; preview the dests it will produce.
+        if nginx_statuses and xray_running:
+            _ensure_selfsteal_network(
+                ssh, [xray_container] + [status['container_name']
+                                         for _, status in nginx_statuses])
+        xray_networks = _docker_networks(ssh, xray_container) if xray_running else {}
+        options = []
+        for key, status in nginx_statuses:
             dest = _selfsteal_dest(
                 xray_networks,
                 _docker_networks(ssh, status['container_name']),
@@ -7711,7 +7745,7 @@ def api_xray_selfsteal_plan(request: Request, server_id: int, protocol: str = 'x
                 'port': int(status.get('port') or 443),
                 'dest': dest,
                 'site_ok': bool(dest) and _selfsteal_site_ok(
-                    ssh, status['domain'], int(status.get('port') or 443)),
+                    ssh, xray_container, status['domain'], dest),
             })
         return {
             'xray_running': xray_running,
@@ -7751,17 +7785,18 @@ def api_xray_selfsteal_apply(request: Request, server_id: int, req: XraySelfstea
         if not domain or not status.get('container_running'):
             return JSONResponse({'error': 'The NGINX site is not ready'},
                                 status_code=409)
-        port = int(status.get('port') or 443)
+        xray_container = (protocols.get(req.protocol) or {}).get('container_name') \
+            or manager.container_name
+        _ensure_selfsteal_network(
+            ssh, [xray_container, status['container_name']])
         dest = _selfsteal_dest(
-            _docker_networks(
-                ssh, (protocols.get(req.protocol) or {}).get('container_name')
-                or manager.container_name),
+            _docker_networks(ssh, xray_container),
             _docker_networks(ssh, status['container_name']),
             status['container_name'])
         if not dest:
             return JSONResponse({'error': 'No route from the Xray container to NGINX'},
                                 status_code=409)
-        if not _selfsteal_site_ok(ssh, domain, port):
+        if not _selfsteal_site_ok(ssh, xray_container, domain, dest):
             return JSONResponse(
                 {'error': 'The site does not answer with a valid certificate '
                           'for the domain yet — issue the certificate first'},

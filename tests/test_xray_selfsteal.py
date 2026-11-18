@@ -1,6 +1,6 @@
 """Self-steal: point Reality at the local NGINX site (own domain, real cert)."""
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import app as panel
 
@@ -122,14 +122,67 @@ class SelfstealHelpersTests(unittest.TestCase):
     def test_no_networks_yields_no_dest(self):
         self.assertIsNone(panel._selfsteal_dest({}, {}, 'amnezia-nginx'))
 
-    def test_site_check_demands_a_three_digit_curl_answer(self):
+    def test_site_check_probes_the_dest_from_inside_the_xray_container(self):
         ssh = Mock()
-        ssh.run_command.return_value = ('200', '', 0)
-        self.assertTrue(panel._selfsteal_site_ok(ssh, 'own.example', 443))
-        ssh.run_command.return_value = ('', '', 1)
-        self.assertFalse(panel._selfsteal_site_ok(ssh, 'own.example', 443))
-        ssh.run_command.return_value = ('', '', 0)
-        self.assertFalse(panel._selfsteal_site_ok(ssh, 'own.example', 443))
+        ssh.run_sudo_command.return_value = ('200', '', 0)
+        self.assertTrue(panel._selfsteal_site_ok(
+            ssh, 'amnezia-xray', 'own.example', 'amnezia-nginx:443'))
+        command = ssh.run_sudo_command.call_args[0][0]
+        self.assertIn('docker exec amnezia-xray', command)
+        self.assertIn('--resolve', command)
+        self.assertIn('own.example:443:amnezia-nginx', command)
+        ssh.run_sudo_command.return_value = ('', '', 1)
+        self.assertFalse(panel._selfsteal_site_ok(
+            ssh, 'amnezia-xray', 'own.example', 'amnezia-nginx:443'))
+        ssh.run_sudo_command.return_value = ('', '', 0)
+        self.assertFalse(panel._selfsteal_site_ok(
+            ssh, 'amnezia-xray', 'own.example', 'amnezia-nginx:443'))
+        self.assertFalse(panel._selfsteal_site_ok(
+            ssh, 'amnezia-xray', 'own.example', 'amnezia-nginx'))
+
+
+class SelfstealNetworkProvisioningTests(unittest.TestCase):
+    def test_provisioning_creates_the_network_and_attaches_both_containers(self):
+        ssh = Mock()
+        nets = {'amnezia-xray': {'bridge': {}}, 'amnezia-nginx': {'bridge': {}}}
+        sudo = []
+
+        def run_sudo(command, **kwargs):
+            sudo.append(command)
+            parts = command.split()
+            if parts[:3] == ['docker', 'network', 'connect']:
+                nets.setdefault(parts[-1], {}).setdefault(parts[-2], {})
+            return ('', '', 0)
+
+        ssh.run_sudo_command = run_sudo
+        with patch.object(panel, '_docker_networks',
+                          side_effect=lambda ssh_, c: nets.get(c, {})):
+            panel._ensure_selfsteal_network(ssh, ['amnezia-xray', 'amnezia-nginx'])
+
+        self.assertTrue(any('network create amnezia-selfsteal-net' in cmd
+                            for cmd in sudo))
+        connects = [cmd for cmd in sudo if 'network connect' in cmd]
+        self.assertEqual(len(connects), 2, connects)
+        self.assertTrue(all('amnezia-selfsteal-net' in cmd for cmd in connects))
+
+    def test_provisioning_is_idempotent(self):
+        ssh = Mock()
+        nets = {'amnezia-xray': {'amnezia-selfsteal-net': {}},
+                'amnezia-nginx': {'amnezia-selfsteal-net': {}}}
+        sudo = []
+
+        def run_sudo(command, **kwargs):
+            sudo.append(command)
+            return ('amnezia-selfsteal-net', '', 0)
+
+        ssh.run_sudo_command = run_sudo
+        with patch.object(panel, '_docker_networks',
+                          side_effect=lambda ssh_, c: nets.get(c, {})):
+            panel._ensure_selfsteal_network(ssh, ['amnezia-xray', 'amnezia-nginx'])
+            panel._ensure_selfsteal_network(ssh, ['amnezia-xray', 'amnezia-nginx'])
+
+        self.assertEqual(len([cmd for cmd in sudo if 'network create' in cmd]), 0)
+        self.assertEqual(len([cmd for cmd in sudo if 'network connect' in cmd]), 0)
 
 
 if __name__ == '__main__':
