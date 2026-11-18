@@ -167,6 +167,9 @@ SUBSCRIPTION_KEYS = {
     'subscription_server_label', 'subscription_server_hint',
     'subscription_path_label', 'subscription_path_hint', 'subscription_push',
     'subscription_name_label', 'subscription_name_hint', 'subscription_copy',
+    'vless_enc_btn', 'vless_enc_title', 'vless_enc_subtitle',
+    'vless_enc_enable', 'vless_enc_disable', 'vless_enc_state_on',
+    'vless_enc_warning', 'vless_enc_xhttp_required', 'vless_enc_apply',
 }
 
 # I1 masking block (per-instance special-junk packet): install and settings.

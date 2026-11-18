@@ -7919,6 +7919,24 @@ def _docker_networks(ssh, container):
     return networks if isinstance(networks, dict) else {}
 
 
+SELFSTEAL_NET = 'amnezia-selfsteal-net'
+
+
+def _ensure_selfsteal_network(ssh, containers):
+    """Attach the containers to a dedicated user-defined network: docker's
+    embedded DNS then resolves the NGINX name, which survives container
+    re-creation (default-bridge IPs do not). Idempotent and live - no
+    container restart needed."""
+    out, _, code = ssh.run_sudo_command("docker network ls --format '{{.Name}}'")
+    existing = set((out or '').split())
+    if SELFSTEAL_NET not in existing:
+        ssh.run_sudo_command(f"docker network create {SELFSTEAL_NET}")
+    for container in containers:
+        if container and SELFSTEAL_NET not in _docker_networks(ssh, container):
+            ssh.run_sudo_command(
+                f"docker network connect {SELFSTEAL_NET} {shlex.quote(str(container))}")
+
+
 def _selfsteal_dest(xray_networks, nginx_networks, nginx_container):
     """Container-to-container Reality target. On a shared user-defined
     docker network the NGINX name resolves via embedded DNS and survives
@@ -7973,8 +7991,7 @@ def api_xray_selfsteal_plan(request: Request, server_id: int, protocol: str = 'x
 
         xray_container = (protocols.get(protocol) or {}).get('container_name') \
             or manager.container_name
-        xray_networks = _docker_networks(ssh, xray_container) if xray_running else {}
-        options = []
+        nginx_statuses = []
         for key in protocols:
             if protocol_base(key) != 'nginx':
                 continue
@@ -7982,6 +7999,16 @@ def api_xray_selfsteal_plan(request: Request, server_id: int, protocol: str = 'x
             status = nginx.get_server_status(key)
             if not status.get('domain') or not status.get('container_running'):
                 continue
+            nginx_statuses.append((key, status))
+        # The apply provisions a shared user-defined network before it
+        # writes anything; preview the dests it will produce.
+        if nginx_statuses and xray_running:
+            _ensure_selfsteal_network(
+                ssh, [xray_container] + [status['container_name']
+                                         for _, status in nginx_statuses])
+        xray_networks = _docker_networks(ssh, xray_container) if xray_running else {}
+        options = []
+        for key, status in nginx_statuses:
             dest = _selfsteal_dest(
                 xray_networks,
                 _docker_networks(ssh, status['container_name']),
@@ -9726,6 +9753,70 @@ def api_xray_fingerprint_save(request: Request, server_id: int, req: XrayFingerp
         logger.exception("Error saving Xray fingerprint")
         return JSONResponse({'error': 'internal_error', 'code': 'internal_error'},
                             status_code=500)
+
+
+class XrayEncryptionRequest(BaseModel):
+    protocol: str = 'xray'
+    enable: bool
+
+
+@app.get('/api/servers/{server_id}/xray/encryption', tags=["Protocols"])
+def api_xray_encryption_state(request: Request, server_id: int,
+                              protocol: str = 'xray'):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if server_id < 0 or server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        ssh = get_ssh(data['servers'][server_id])
+        ssh.connect()
+        try:
+            manager = get_protocol_manager(ssh, protocol)
+            state = manager.get_vless_encryption_state()
+        finally:
+            ssh.disconnect()
+        return state
+    except RuntimeError as e:
+        return JSONResponse({'error': str(e)}, status_code=409)
+    except Exception as e:
+        logger.exception("Error reading the xray encryption state")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/xray/encryption', tags=["Protocols"])
+async def api_xray_encryption_toggle(request: Request, server_id: int,
+                                     req: XrayEncryptionRequest):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if server_id < 0 or server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        ssh = get_ssh(data['servers'][server_id])
+        ssh.connect()
+        try:
+            manager = get_protocol_manager(ssh, req.protocol)
+            state = await asyncio.to_thread(manager.set_vless_encryption,
+                                            req.enable)
+        finally:
+            ssh.disconnect()
+        # The issued links changed (encryption parameter + flow): refresh
+        # the subscription files of the users on this protocol.
+        try:
+            user_ids = [c['user_id'] for c in data.get('user_connections', [])
+                        if c.get('server_id') == server_id
+                        and protocol_base(c.get('protocol')) == protocol_base(req.protocol)]
+            await asyncio.to_thread(auto_push_subscriptions, data, user_ids)
+        except Exception:
+            logger.warning("subscription auto-push failed after the vless "
+                           "encryption toggle", exc_info=True)
+        return {'status': 'success', **state}
+    except RuntimeError as e:
+        return JSONResponse({'error': str(e)}, status_code=409)
+    except Exception as e:
+        logger.exception("Error toggling the xray encryption layer")
+        return JSONResponse({'error': str(e)}, status_code=500)
 
 
 @app.get('/api/servers/{server_id}/xray/core', tags=["Protocols"])
