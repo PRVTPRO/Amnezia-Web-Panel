@@ -1458,7 +1458,7 @@
   "last_seen": "Dernière activité",
   "xray_fingerprint_title": "Empreinte Xray",
   "xray_fingerprint_label": "Empreinte uTLS",
-  "xray_fingerprint_hint": "Utilisée dans tous les liens VLESS émis pour cette instance. Reality accepte n’importe quelle empreinte — si chrome est bloqué sur votre réseau, choisissez-en une autre. Les liens déjà émis conservent leur empreinte.",
+  "xray_fingerprint_hint": "Utilisée dans tous les liens VLESS émis pour cette instance. firefox est le défaut recommandé : les empreintes uTLS-chrome sont activement filtrées. Les liens déjà émis conservent leur empreinte.",
   "xray_fingerprint_btn": "Empreinte",
   "xray_fingerprint_saved": "Empreinte enregistrée",
   "sort": "Trier",

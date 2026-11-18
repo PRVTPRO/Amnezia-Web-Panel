@@ -1458,7 +1458,7 @@
   "last_seen": "Last activity",
   "xray_fingerprint_title": "Xray fingerprint",
   "xray_fingerprint_label": "uTLS fingerprint",
-  "xray_fingerprint_hint": "Used in every VLESS link issued for this instance. Reality accepts any fingerprint, so if the default chrome is blocked on your network, pick another one. Links already issued keep the fingerprint they were created with.",
+  "xray_fingerprint_hint": "Used in every VLESS link issued for this instance. firefox is the recommended default: uTLS-chrome fingerprints are actively filtered by censors. Links already issued keep the fingerprint they were created with.",
   "xray_fingerprint_btn": "Fingerprint",
   "xray_fingerprint_saved": "Fingerprint saved",
   "sort": "Sort",

@@ -82,7 +82,10 @@ def _serialized_table_write(method):
 # setting; chrome stays the historical default.
 XRAY_FINGERPRINTS = ('chrome', 'firefox', 'safari', 'ios', 'android', 'edge',
                      '360', 'qq', 'random', 'randomized')
-XRAY_DEFAULT_FINGERPRINT = 'chrome'
+# firefox over chrome: since October 2026 uTLS-chrome handshakes are
+# actively filtered by Russian censors, while firefox stays lenient
+# (field-tested; see the 2026 censorship-research synthesis).
+XRAY_DEFAULT_FINGERPRINT = 'firefox'
 
 class XrayManager:
     """Manages Xray (VLESS-Reality) protocol installation and client management."""
