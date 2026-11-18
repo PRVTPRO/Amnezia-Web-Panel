@@ -274,6 +274,30 @@ async function run() {
     check('удаление отправляет uninstall',
         env.calls.some(c => c.url.endsWith('/uninstall')));
 
+    // 7b. Кнопки плитки: Старт/Стоп и Удалить.
+    const envBtn = createEnv();
+    envBtn.sandbox.TorrentPlugin.open();
+    await flush();
+    await envBtn.sandbox.TorrentPlugin.setEnabled(true);
+    await flush();
+    const startCall = envBtn.calls.find(c => c.url.endsWith('/enabled'));
+    check('Старт отправляет POST', !!startCall);
+    eq('тело Старт', startCall && startCall.body, { enabled: true });
+
+    await envBtn.sandbox.TorrentPlugin.setEnabled(false);
+    await flush();
+    const stopCall = envBtn.calls.filter(c => c.url.endsWith('/enabled')).pop();
+    eq('Стоп отправляет enabled=false', stopCall && stopCall.body, { enabled: false });
+
+    await envBtn.sandbox.TorrentPlugin.uninstall();
+    await flush();
+    check('Удалить отправляет uninstall',
+        envBtn.calls.some(c => c.url.endsWith('/uninstall')));
+
+    // 7c. SERVER_ID читается лениво: на верхнем уровне его нет.
+    check('нет верхнеуровневого SERVER_ID', !/const BASE = .*SERVER_ID/.test(SOURCE));
+    check('ленивый apiBase', SOURCE.includes('function apiBase()'));
+
     // 8. Метки в строках подключений: ядро передаёт готовый список.
     const env2 = createEnv();
     env2.sandbox.TorrentPlugin.open();

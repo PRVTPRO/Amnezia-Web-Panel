@@ -1557,5 +1557,6 @@
   "tp_no_instances": "没有可用的实例",
   "tp_no_instances_hint": "插件可以保持安装，但没有可过滤的对象：此服务器没有 AWG/WireGuard。",
   "torrent_sig_unknown": "未知特征",
-  "tp_control_off_hint": "控制已关闭——服务器上没有规则。"
+  "tp_control_off_hint": "控制已关闭——服务器上没有规则。",
+  "tp_degraded_title": "不可用实例：{failed} / {total}"
 }

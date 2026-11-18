@@ -2385,30 +2385,6 @@
         </div>
     </div>
 
-    {% if torrent_plugin and torrent_plugin.installed %}
-    <!-- Плагин «Защита от торрентов»: установлен на этом сервере, поэтому у
-         него есть собственная плитка в сетке инстансов. Пока контроль
-         выключен, правил на сервере нет. -->
-    <div class="card card-hover protocol-card tp-grid-card" id="torrent-plugin-card"
-        role="button" tabindex="0" onclick="TorrentPlugin.open()"
-        onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); TorrentPlugin.open(); }">
-        <div class="protocol-card-head">
-            <div class="protocol-icon">{{ ui_icon('shield', 18) }}</div>
-            <div class="protocol-name">{{ _('tp_name') }}</div>
-        </div>
-        <div class="protocol-desc">{{ _('tp_desc') }}</div>
-        <div class="protocol-status" id="torrentPluginCardStatus">
-            <span class="badge {% if torrent_plugin.state in ('on',) %}badge-success{% elif torrent_plugin.state in ('count',) %}badge-info{% elif torrent_plugin.state in ('degraded',) %}badge-danger{% elif torrent_plugin.state in ('unknown', 'unsupported', 'off') %}badge-secondary{% else %}badge-warn{% endif %}"><span class="badge-dot"></span> {{ _('tp_state_' ~ (torrent_plugin.state or 'not_installed')) }}</span>
-        </div>
-        <div class="flex gap-sm">
-            <button class="btn btn-secondary btn-sm tp-grid-card__open"
-                onclick="event.stopPropagation(); TorrentPlugin.open()">
-                {{ _('tp_open') }}
-            </button>
-        </div>
-    </div>
-    {% endif %}
-
     <!-- RKN Block Card (host-level app, C24Be lists) -->
     <div class="card card-hover protocol-card protocol-rknblock" id="proto-rknblock">
         <div class="protocol-card-head">
@@ -2619,6 +2595,35 @@
             </button>
         </div>
     </div>
+
+    {% if torrent_plugin and torrent_plugin.installed %}
+    <!-- Плагин «Защита от торрентов»: установлен на этом сервере, поэтому у
+         него есть собственная плитка в сетке инстансов. Пока контроль
+         выключен, правил на сервере нет. -->
+    <div class="card card-hover protocol-card tp-grid-card" id="torrent-plugin-card"
+        role="button" tabindex="0" onclick="TorrentPlugin.open()"
+        onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); TorrentPlugin.open(); }">
+        <div class="protocol-card-head">
+            <div class="protocol-icon">{{ ui_icon('shield', 18) }}</div>
+            <div class="protocol-name">{{ _('tp_name') }}</div>
+        </div>
+        <div class="protocol-desc">{{ _('tp_desc') }}</div>
+        <div class="protocol-status" id="torrentPluginCardStatus">
+            <span class="badge {% if torrent_plugin.state in ('on',) %}badge-success{% elif torrent_plugin.state in ('count',) %}badge-info{% elif torrent_plugin.state in ('degraded',) %}badge-danger{% elif torrent_plugin.state in ('unknown', 'unsupported', 'off') %}badge-secondary{% else %}badge-warn{% endif %}" id="torrentPluginBadge"><span class="badge-dot"></span> {{ _('tp_state_' ~ (torrent_plugin.state or 'not_installed')) }}</span>
+        </div>
+        <div class="flex gap-sm tp-grid-card__actions">
+            <button class="btn btn-secondary btn-sm" id="torrentPluginOpen"
+                onclick="event.stopPropagation(); TorrentPlugin.open()">{{ _('tp_open') }}</button>
+            <button class="btn btn-primary btn-sm" id="torrentPluginStart" hidden
+                onclick="event.stopPropagation(); TorrentPlugin.setEnabled(true)">{{ _('start_btn') }}</button>
+            <button class="btn btn-danger btn-sm" id="torrentPluginStop" hidden
+                onclick="event.stopPropagation(); TorrentPlugin.setEnabled(false)">{{ _('stop_btn') }}</button>
+            <button class="btn btn-danger btn-sm" id="torrentPluginUninstall"
+                onclick="event.stopPropagation(); TorrentPlugin.uninstall()">{{ _('delete') }}</button>
+        </div>
+    </div>
+    {% endif %}
+
 
     <!-- ===== Reverse Proxy teaser (locked, full grid width) ===== -->
     <div class="promo-block promo-revproxy" aria-disabled="true" role="article">
@@ -4446,12 +4451,43 @@
     // Плитка плагина в сетке инстансов: состояние берётся из того же
     // TORRENT_PLUGIN, что и карточка магазина. Панель плагина зовёт эту
     // функцию после каждого изменения.
+    function tpPluginState() {
+        const fresh = window.TORRENT_PLUGIN_STATE || {};
+        const initial = TORRENT_PLUGIN || {};
+        return Object.assign({}, initial, fresh);
+    }
+
+    function tpEscapeAttr(value) {
+        return String(value == null ? '' : value)
+            .replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+            .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    // Причина бейджа «Требует внимания»: какие инстансы недоступны и почему.
+    function tpAttentionText() {
+        const health = tpPluginState().health || {};
+        const entries = Object.entries(health.protocols || {});
+        const failed = entries.filter(([, item]) => item && item.error);
+        if (!failed.length) return '';
+        const text = _('tp_degraded_title')
+            .replace('{failed}', failed.length)
+            .replace('{total}', entries.length);
+        return text + ': ' + failed[0][0] + ' — ' + failed[0][1].error;
+    }
+
     function renderTorrentPluginCard() {
         const el = document.getElementById('torrentPluginCardStatus');
         if (!el) return;
-        const state = (TORRENT_PLUGIN && TORRENT_PLUGIN.state) || 'off';
-        el.innerHTML = '<span class="badge ' + tpStateClass(state) +
-            '"><span class="badge-dot"></span> ' + tpStateLabel(state) + '</span>';
+        const state = tpPluginState().state || 'off';
+        const attention = tpAttentionText();
+        el.innerHTML = '<span class="badge ' + tpStateClass(state) + '" id="torrentPluginBadge"' +
+            (attention ? ' title="' + tpEscapeAttr(attention) + '"' : '') + '>' +
+            '<span class="badge-dot"></span> ' + tpStateLabel(state) + '</span>';
+        const enabled = !!tpPluginState().enabled;
+        const start = document.getElementById('torrentPluginStart');
+        const stop = document.getElementById('torrentPluginStop');
+        if (start) start.hidden = enabled;
+        if (stop) stop.hidden = !enabled;
     }
 
     renderTorrentPluginCard();
@@ -4613,6 +4649,12 @@
                     return protoInstance(ap) - protoInstance(bp);
                 })
                 .forEach(card => grid.appendChild(card));
+        }
+        // Плитка плагина — всегда последняя: сортировка выше двигает только
+        // карточки proto-*, а эта карточка живёт вне их порядка.
+        if (grid) {
+            const pluginCard = document.getElementById('torrent-plugin-card');
+            if (pluginCard) grid.appendChild(pluginCard);
         }
 
         const empty = document.getElementById('installedAppsEmpty');

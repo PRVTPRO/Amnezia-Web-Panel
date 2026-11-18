@@ -3803,3 +3803,6 @@ body,
 /* Плитка плагина «Защита от торрентов» в сетке инстансов сервера. */
 .tp-grid-card { cursor: pointer; }
 .tp-grid-card__open { align-self: flex-start; }
+
+/* Кнопки Старт/Стоп скрываются атрибутом hidden, а .btn задаёт display. */
+.tp-grid-card__actions [hidden] { display: none !important; }

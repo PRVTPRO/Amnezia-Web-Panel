@@ -528,6 +528,25 @@ class TemplateTests(unittest.TestCase):
         css = self.read('static/css/style.css')
         self.assertNotIn('.tp-header', css)
 
+    def test_tile_is_last_and_has_controls(self):
+        page = self.read('templates/server.html')
+        # Плитка плагина — после последнего инстанса (HAProxy) в сетке.
+        self.assertLess(page.index('id="proto-haproxy"'), page.index('id="torrent-plugin-card"'))
+        self.assertIn("const pluginCard = document.getElementById('torrent-plugin-card');", page)
+        for marker in ('id="torrentPluginOpen"', 'id="torrentPluginStart"',
+                       'id="torrentPluginStop"', 'id="torrentPluginUninstall"'):
+            self.assertIn(marker, page)
+        self.assertIn("TorrentPlugin.setEnabled(true)", page)
+        self.assertIn("TorrentPlugin.setEnabled(false)", page)
+        self.assertIn("TorrentPlugin.uninstall()", page)
+
+    def test_plugin_script_reads_server_id_lazily(self):
+        js = self.read('static/js/torrent-plugin.js')
+        self.assertIn('function apiBase()', js)
+        self.assertNotIn("const BASE = '/api/servers/' + SERVER_ID", js)
+        self.assertIn("_('tp_degraded_title')", self.read('templates/server.html'))
+        self.assertIn('setEnabled, uninstall', js)
+
     def test_dashboard_renders_alerts_only_when_installed(self):
         page = self.read('templates/index.html')
         self.assertIn('{% if torrent_plugin_servers and torrent_plugin_servers[loop.index0] %}', page)

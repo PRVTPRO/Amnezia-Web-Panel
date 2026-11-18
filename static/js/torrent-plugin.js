@@ -11,7 +11,11 @@
 (function () {
     'use strict';
 
-    const BASE = '/api/servers/' + SERVER_ID + '/plugins/torrent_guard';
+    // SERVER_ID объявляется ниже по странице (в inline-скрипте), поэтому
+    // читаем его лениво: на верхнем уровне он ещё в TDZ и ронял весь модуль.
+    function apiBase() {
+        return '/api/servers/' + SERVER_ID + '/plugins/torrent_guard';
+    }
     const ICONS = window.TORRENT_PLUGIN_ICONS || {};
     const POLL_STEPS = [0, 5, 15, 30, 60, 300];
     const MODES = ['on', 'count', 'off'];
@@ -27,7 +31,7 @@
     }
 
     function call(path, method, body) {
-        return apiCall(BASE + (path || ''), method || 'GET', body);
+        return apiCall(apiBase() + (path || ''), method || 'GET', body);
     }
 
     function toast(message, kind) {
@@ -215,6 +219,11 @@
         if (payload && typeof payload === 'object') {
             state = Object.assign({}, state, payload);
             window.TORRENT_PLUGIN_STATE = state;
+            // Плитка в сетке инстансов читает TORRENT_PLUGIN из шаблона;
+            // без синхронизации бейдж и кнопки Старт/Стоп отставали.
+            if (typeof TORRENT_PLUGIN !== 'undefined') {
+                Object.assign(TORRENT_PLUGIN, state);
+            }
         }
         render();
         restartPolling();
@@ -237,6 +246,25 @@
         const seconds = Number((state.settings || {}).poll_seconds) || 0;
         if (!seconds || !document.getElementById('torrentPluginModal').classList.contains('active')) return;
         pollTimer = setInterval(refreshState, seconds * 1000);
+    }
+
+    async function setEnabled(enabled) {
+        const startBtn = document.getElementById('torrentPluginStart');
+        const stopBtn = document.getElementById('torrentPluginStop');
+        if (startBtn) startBtn.disabled = true;
+        if (stopBtn) stopBtn.disabled = true;
+        setBusy(true);
+        try {
+            const res = await call('/enabled', 'POST', {enabled: !!enabled});
+            applyState(res);
+            toast(enabled ? _('tp_enabled_toast') : _('tp_disabled_toast'), 'success');
+        } catch (err) {
+            toast(_('error') + ': ' + err.message, 'error');
+        } finally {
+            if (startBtn) startBtn.disabled = false;
+            if (stopBtn) stopBtn.disabled = false;
+            setBusy(false);
+        }
     }
 
     async function toggleEnabled(box) {
@@ -462,5 +490,6 @@
             (document.getElementById('connProtoSelect') || {}).value || '';
     }
 
-    window.TorrentPlugin = { open, close, onRowsRendered, refresh: refreshState };
+    window.TorrentPlugin = { open, close, onRowsRendered, refresh: refreshState,
+        setEnabled, uninstall };
 }());

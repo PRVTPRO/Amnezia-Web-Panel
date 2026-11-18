@@ -1557,5 +1557,6 @@
   "tp_no_instances": "Aucune instance compatible",
   "tp_no_instances_hint": "Le plugin peut rester installé, mais il n'y a rien à filtrer : ce serveur n'a pas d'AWG/WireGuard.",
   "torrent_sig_unknown": "signature inconnue",
-  "tp_control_off_hint": "Contrôle désactivé — aucune règle sur le serveur."
+  "tp_control_off_hint": "Contrôle désactivé — aucune règle sur le serveur.",
+  "tp_degraded_title": "Instances indisponibles : {failed} sur {total}"
 }

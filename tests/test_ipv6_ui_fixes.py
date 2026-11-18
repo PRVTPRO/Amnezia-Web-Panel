@@ -113,6 +113,7 @@ TORRENT_PLUGIN_KEYS = {
     'tp_control_off_hint',
     'tp_days',
     'tp_default_mode',
+    'tp_degraded_title',
     'tp_default_mode_hint',
     'tp_desc',
     'tp_disabled_toast',

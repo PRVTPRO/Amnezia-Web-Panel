@@ -1557,5 +1557,6 @@
   "tp_no_instances": "نمونهٔ مناسبی نیست",
   "tp_no_instances_hint": "افزونه می‌تواند نصب بماند، اما چیزی برای فیلتر کردن نیست: این سرور AWG/WireGuard ندارد.",
   "torrent_sig_unknown": "امضای ناشناخته",
-  "tp_control_off_hint": "کنترل خاموش است — هیچ قاعده‌ای روی سرور نیست."
+  "tp_control_off_hint": "کنترل خاموش است — هیچ قاعده‌ای روی سرور نیست.",
+  "tp_degraded_title": "نمونه‌های در دسترس نیست: {failed} از {total}"
 }
