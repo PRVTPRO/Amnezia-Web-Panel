@@ -170,6 +170,53 @@ class AwgI1PersistTests(unittest.TestCase):
             protocols = json.load(handle)['servers'][0]['protocols']
         self.assertEqual(protocols, {})
 
+    def test_whitespace_only_packet_clears_the_key(self):
+        packet = generate_i1('web.telegram.org')
+        self.save(self.settings(i1=packet))
+        response = self.save(self.settings(i1='   '))
+        self.assertEqual(response.status_code, 200, response.text)
+
+        self.assertNotIn('i1', self.read_proto()['awg_params'])
+
+    def test_all_five_packets_are_written_back(self):
+        packets = {
+            'i1': generate_i1('cloudflare.com'),
+            'i2': '<r 2><b 0x00>',
+            'i3': '<r 3>',
+            'i4': '<t>',
+            'i5': '<r 4><t>',
+        }
+        response = self.save(self.settings(**packets))
+        self.assertEqual(response.status_code, 200, response.text)
+
+        params = self.read_proto()['awg_params']
+        for key, packet in packets.items():
+            with self.subTest(key=key):
+                self.assertEqual(params[key], packet)
+
+    def test_damaged_awg_params_is_left_untouched(self):
+        # A hand-edited record must not be silently replaced by a mapping.
+        damaged = 'not-a-mapping'
+        self.write_data(protocols={'awg3': {
+            'installed': True, 'port': 51111, 'awg_params': damaged}})
+        packet = generate_i1('github.com')
+        response = self.save(self.settings(i1=packet))
+        self.assertEqual(response.status_code, 200, response.text)
+
+        self.assertEqual(self.read_proto()['awg_params'], damaged)
+
+    def test_legacy_ignores_a_packet_reported_by_the_manager(self):
+        self.write_data(protocols={'awg_legacy': {'installed': True, 'port': 51000}})
+        response = self.save(self.settings(i1=generate_i1('yandex.ru'),
+                                          supports_special_junk=False),
+                             protocol='awg_legacy',
+                             payload={'protocol': 'awg_legacy'})
+        self.assertEqual(response.status_code, 200, response.text)
+
+        with open(panel.DATA_FILE, encoding='utf-8') as handle:
+            legacy = json.load(handle)['servers'][0]['protocols']['awg_legacy']
+        self.assertNotIn('awg_params', legacy)
+
 
 if __name__ == '__main__':
     unittest.main()

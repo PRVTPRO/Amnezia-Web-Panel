@@ -9318,15 +9318,27 @@ def api_awg_settings_save(request: Request, server_id: int, req: AwgSettingsRequ
             # so the key is dropped instead of stored as ''.
             if settings.get('supports_special_junk'):
                 params = proto_record.get('awg_params')
-                if not isinstance(params, dict):
+                if params is None or params == '':
+                    # Instances installed before PR #346 carry no mapping.
                     params = {}
-                for key in ('i1', 'i2', 'i3', 'i4', 'i5'):
-                    value = (settings.get(key) or '').strip()
-                    if value:
-                        params[key] = value
-                    else:
-                        params.pop(key, None)
-                proto_record['awg_params'] = params
+                elif not isinstance(params, dict):
+                    # A hand-edited or damaged record: do not overwrite what
+                    # the admin may still want to recover by hand.
+                    logger.warning(
+                        "awg_params for %s is %s, not a mapping; "
+                        "skipping the I1-I5 write-back", req.protocol,
+                        type(params).__name__)
+                    params = None
+                if params is not None:
+                    for key in ('i1', 'i2', 'i3', 'i4', 'i5'):
+                        raw = settings.get(key)
+                        value = raw.strip() if isinstance(raw, str) else ''
+                        if value:
+                            params[key] = value
+                        else:
+                            params.pop(key, None)
+                    if params or 'awg_params' in proto_record:
+                        proto_record['awg_params'] = params
             save_data(data)
         settings['dns1'], settings['dns2'] = split_dns(settings.get('dns'))
         settings['status'] = 'success'
