@@ -463,7 +463,8 @@ class PanelMergeTests(unittest.TestCase):
                     'container_name': 'amnezia-awg3',
                     'instance': 1,
                     'port': '55424',
-                    'awg_params': {'port': '55424', 'junk_packet_count': '2'},
+                    'awg_params': {'port': '55424', 'junk_packet_count': '2',
+                                   'i1': '<r 2><b 0xDEADBEEF>'},
                     'public_host': 'old.example.org',
                     'public_port': '60001',
                     'display_name': 'AmneziaWG 3.1',
@@ -505,6 +506,10 @@ class PanelMergeTests(unittest.TestCase):
         self.assertEqual(entry['port'], '6000')
         self.assertEqual(entry['awg_params']['port'], '6000')
         self.assertEqual(entry['awg_params']['junk_packet_count'], '2')
+        # The masking packet travels with the record: a copy must not fall back
+        # to the install-time default after I1 was edited (see
+        # tests/test_awg_i1_persist.py for the write-back itself).
+        self.assertEqual(entry['awg_params']['i1'], '<r 2><b 0xDEADBEEF>')
         self.assertIsNone(entry['public_host'])
         self.assertIsNone(entry['public_port'])
         self.assertEqual(entry['display_name'], 'AmneziaWG 3.1 #2')

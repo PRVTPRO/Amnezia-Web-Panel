@@ -33,6 +33,47 @@
         [dir="ltr"] .lang-check {
             margin-left: auto;
         }
+
+        /* Lifecycle fence (#341): an unknown SSH outcome blocks managed
+           operations. The banner names the server and the operation instead
+           of leaving the panel looking like a random outage. */
+        .lifecycle-fence {
+            display: flex;
+            gap: var(--space-sm);
+            align-items: flex-start;
+            flex-wrap: wrap;
+            margin: var(--space-md) auto 0;
+            max-width: 1440px;
+            padding: 12px 16px;
+            border: 1px solid var(--danger-border);
+            border-radius: var(--radius-md);
+            background: var(--danger-bg);
+            color: var(--text-primary);
+            font-size: var(--text-sm);
+            line-height: 1.5;
+        }
+        .lifecycle-fence[hidden] { display: none; }
+        .lifecycle-fence__icon { flex: 0 0 auto; }
+        .lifecycle-fence__body { flex: 1 1 320px; min-width: 0; }
+        .lifecycle-fence__title { font-weight: 700; margin-bottom: 2px; }
+        .lifecycle-fence__meta { color: var(--text-secondary); overflow-wrap: anywhere; }
+        .lifecycle-fence__steps {
+            margin-top: 8px;
+            padding-top: 8px;
+            border-top: 1px dashed var(--danger-border);
+            white-space: pre-line;
+        }
+        .lifecycle-fence__steps[hidden] { display: none; }
+        .lifecycle-fence__toggle {
+            background: none;
+            border: 1px solid var(--danger-border);
+            border-radius: var(--radius-sm);
+            color: inherit;
+            cursor: pointer;
+            font: inherit;
+            padding: 4px 10px;
+        }
+        .lifecycle-fence__toggle:hover { background: rgba(0, 0, 0, .12); }
     </style>
 </head>
 
@@ -99,6 +140,19 @@
             </div>
             {% endif %}
         </header>
+
+        <div class="lifecycle-fence" id="lifecycleFence" hidden role="alert">
+            <span class="lifecycle-fence__icon" aria-hidden="true">⛔</span>
+            <div class="lifecycle-fence__body">
+                <div class="lifecycle-fence__title">{{ _('lifecycle_fence_title') }}</div>
+                <div class="lifecycle-fence__meta" id="lifecycleFenceMeta"></div>
+                <div class="lifecycle-fence__steps" id="lifecycleFenceSteps" hidden>
+                    {{ _('lifecycle_fence_steps') }}
+                </div>
+            </div>
+            <button class="lifecycle-fence__toggle" type="button" id="lifecycleFenceToggle"
+                    aria-expanded="false">{{ _('lifecycle_fence_how') }}</button>
+        </div>
 
         <main class="{% block page_class %}{% endblock %}">
             {% block content %}{% endblock %}
@@ -381,6 +435,59 @@
             a.click();
             URL.revokeObjectURL(url);
         }
+
+        /* ===== Lifecycle fence banner (#341) =====
+           An unknown SSH outcome leaves managed operations blocked on one
+           server (or panel-wide for a legacy marker). Show the operator which
+           server and operation are affected and how to recover, instead of
+           letting every page look like a random outage. */
+        (function () {
+            const box = document.getElementById('lifecycleFence');
+            if (!box) return;
+            const meta = document.getElementById('lifecycleFenceMeta');
+            const steps = document.getElementById('lifecycleFenceSteps');
+            const toggle = document.getElementById('lifecycleFenceToggle');
+
+            function when(seconds) {
+                if (!seconds) return '';
+                const minutes = Math.round(seconds / 60);
+                if (minutes < 60) return minutes + ' min';
+                const hours = Math.round(minutes / 60);
+                return hours < 48 ? hours + ' h' : Math.round(hours / 24) + ' d';
+            }
+
+            function render(state) {
+                if (!state || !state.blocked) { box.hidden = true; return; }
+                const scope = state.scope || null;
+                const parts = [];
+                const server = scope
+                    ? [scope.host, scope.ssh_port && scope.ssh_port !== 22 ? ':' + scope.ssh_port : ''].join('')
+                    : _('lifecycle_fence_scope_global');
+                parts.push(_('lifecycle_fence_server') + ': ' + server);
+                if (state.operation && state.operation.label) {
+                    parts.push(_('lifecycle_fence_operation') + ': ' + state.operation.label);
+                }
+                parts.push(_('lifecycle_fence_reason') + ': ' + (state.reason || '?'));
+                if (state.age_seconds) {
+                    parts.push(_('lifecycle_fence_since') + ' ' + when(state.age_seconds));
+                }
+                meta.textContent = parts.join(' · ');
+                box.hidden = false;
+            }
+
+            if (toggle) {
+                toggle.addEventListener('click', function () {
+                    const open = steps.hidden;
+                    steps.hidden = !open;
+                    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+                });
+            }
+
+            fetch('/api/recovery/status', { headers: { 'Content-Type': 'application/json' } })
+                .then(function (res) { return res.ok ? res.json() : null; })
+                .then(render)
+                .catch(function () { /* 403 for non-admins, offline, etc. */ });
+        })();
     </script>
 
     {% block scripts %}{% endblock %}

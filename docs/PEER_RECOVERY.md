@@ -172,16 +172,48 @@ queued requests never execute. Started workers keep the interlock until their
 network work and commit finish, without holding `DATA_LOCK` over SSH.
 
 `GET /api/recovery/status` gives admins operation names/age and fence status,
-without commands, credentials or internal paths. A response deadline returns
-503 `peer_lifecycle_still_running`; it is not a success or automatic retry.
-Unexpected detached errors log a traceback with exception values, locals and
-source lines omitted (these may contain secrets).
+without commands, credentials or internal paths. When the marker exists it also
+reports `reason`, `created_at`, `age_seconds`, `marker_version`, `scope` and
+`operation`; `scope` is `null` for legacy markers that carry no server identity,
+and an unreadable marker is reported as `reason: marker_unreadable` (the fence
+stays closed). A response deadline returns 503 `peer_lifecycle_still_running`;
+it is not a success or automatic retry. Unexpected detached errors log a
+traceback with exception values, locals and source lines omitted (these may
+contain secrets).
 
-A lost command reply persists `DATA_FILE.lifecycle-uncertain.json`; it is a
-logical admission fence even after the local worker exits/restarts. Subsequent
-lifecycle/SSH work fails closed. Do not clear it on a timer or HTTP disconnect.
-An administrator must independently establish remote quiescence, stop the panel,
-retain this marker as incident evidence, and only then archive it before restart.
-If the marker could not be persisted, keep the panel offline after shutdown.
+Fence conditions reach the browser as their registered handlers, never as a
+generic 500: `/api/servers/{id}/check`, `/api/servers/{id}/smartroute/status`
+and `/api/servers/{id}/awg-plugin/status` return 503 with `code`
+`peer_lifecycle_uncertain` / `peer_lifecycle_busy`, so the UI can tell "an SSH
+outcome is unknown, an administrator must recover" from "the server is down".
+
+A command whose reply was lost is never replayed while the interlock is active:
+the single dead-transport retry in `SSHManager` applies only outside a lifecycle
+operation, because re-sending a mutation with an unknown outcome would execute
+it twice. The fence is what protects that case.
+
+A lost command reply persists `DATA_FILE.lifecycle-uncertain.json`. Since marker
+version 2 it records the affected server's identity (`server_uid`, `host`,
+`ssh_port`, `username`) and the operation label when the SSH layer knows them,
+so the fence covers that server and the servers whose lifecycle operations
+touch it (exit-link pairs) instead of the whole panel. Unrelated healthy servers
+keep answering checks and accepting their own operations. The marker never
+stores credentials, commands or tracebacks.
+
+The fence is still a logical admission fence even after the local worker
+exits/restarts. Do not clear it on a timer or HTTP disconnect. An administrator
+must independently establish remote quiescence, stop the panel, retain this
+marker as incident evidence, and only then archive it before restart. If the
+marker could not be persisted, keep the panel offline after shutdown.
 Transport timeouts cannot guarantee when a remote shell actually stops; no
 automatic finalization/unlock or accurate final-counter claim is made.
+
+Legacy markers (version 1, or anything without a readable identity) stay
+global: the panel never guesses which server they belong to. A second incident
+on another server, or an incident where the target cannot be named, widens the
+fence to global as well — the fence never narrows itself.
+
+While a fence is closed, every panel page shows a banner naming the affected
+server, the recorded operation and how long the fence has been in place, plus
+the recovery steps below. The banner is informational on purpose: there is no
+in-panel button that lifts a fence.

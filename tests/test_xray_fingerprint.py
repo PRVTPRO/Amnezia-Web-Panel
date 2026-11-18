@@ -112,8 +112,8 @@ class FingerprintLinkTests(unittest.TestCase):
     def link(self, **kwargs):
         return self.mgr.get_client_config('xray', CLIENT_ID, '1.2.3.4', 443, **kwargs)
 
-    def test_link_defaults_to_chrome(self):
-        self.assertIn('fp=chrome', self.link())
+    def test_link_defaults_to_firefox(self):
+        self.assertIn('fp=firefox', self.link())
 
     def test_link_uses_stored_fingerprint(self):
         link = self.link(fingerprint='firefox')
@@ -121,7 +121,7 @@ class FingerprintLinkTests(unittest.TestCase):
         self.assertNotIn('fp=chrome', link)
 
     def test_link_falls_back_on_unknown_fingerprint(self):
-        self.assertIn('fp=chrome', self.link(fingerprint='nordvpn-hello'))
+        self.assertIn('fp=firefox', self.link(fingerprint='nordvpn-hello'))
 
     def test_fingerprint_stays_in_query_part(self):
         # The value must not leak into the URL fragment (the client name).
@@ -143,12 +143,12 @@ class AddClientFingerprintTests(unittest.TestCase):
 
     def test_add_client_without_fingerprint_keeps_default(self):
         result = self.mgr.add_client('xray', 'Laptop', '1.2.3.4', 443)
-        self.assertIn('fp=chrome', result['config'])
+        self.assertIn('fp=firefox', result['config'])
 
 
 class FingerprintWhitelistTests(unittest.TestCase):
     def test_chrome_is_the_default(self):
-        self.assertEqual(XRAY_DEFAULT_FINGERPRINT, 'chrome')
+        self.assertEqual(XRAY_DEFAULT_FINGERPRINT, 'firefox')
 
     def test_whitelist_covers_xtls_fingerprints(self):
         self.assertEqual(

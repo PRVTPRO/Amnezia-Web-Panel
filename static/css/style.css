@@ -1091,6 +1091,84 @@ a:hover {
     border-top: 1px solid var(--border-color);
 }
 
+/* ===== Server management modal (shared: dashboard + server page) =====
+   Layout and colours live here, not in inline styles inside the markup.
+   The markup is built by static/js/server-management.js and
+   templates/_server_management_modal.html. */
+.sm-stack {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+}
+
+/* Action rows read as a vertical menu: content on the left, not centred. */
+.sm-action {
+    justify-content: flex-start;
+    padding: 12px 20px;
+}
+
+.sm-section {
+    margin-top: var(--space-md);
+    padding-top: var(--space-md);
+    border-top: 1px solid var(--border-color);
+}
+
+.sm-field-label {
+    display: block;
+    font-size: 0.85rem;
+    margin-bottom: 6px;
+}
+
+.sm-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.sm-number {
+    max-width: 120px;
+}
+
+.sm-select {
+    max-width: 160px;
+}
+
+.sm-hint {
+    font-size: 0.78rem;
+    margin-top: 6px;
+}
+
+.sm-state {
+    font-size: 0.78rem;
+    margin-top: 4px;
+}
+
+/* Degraded guard: rules are not confirmed on the server. */
+.sm-state.is-error {
+    color: var(--danger);
+}
+
+.sm-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.9rem;
+    cursor: pointer;
+}
+
+.sm-toggle input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    flex: 0 0 auto;
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+
+.sm-toggle input[type="checkbox"]:disabled {
+    cursor: not-allowed;
+}
+
+
 /* ===== Protocol Card ===== */
 .protocol-cards {
     display: grid;

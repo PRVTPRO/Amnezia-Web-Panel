@@ -87,7 +87,7 @@ class FingerprintSaveTests(XrayFingerprintApiBase):
         self.post_fp(client)
         res = self.post_fp(client, fingerprint='')
         self.assertEqual(res.status_code, 200, res.text)
-        self.assertEqual(res.json()['fingerprint'], 'chrome')
+        self.assertEqual(res.json()['fingerprint'], 'firefox')
         self.assertNotIn('fingerprint', self.read_data()['servers'][0]['protocols']['xray'])
 
     def test_unknown_fingerprint_value_is_400(self):

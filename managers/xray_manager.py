@@ -86,6 +86,10 @@ XRAY_DEFAULT_FINGERPRINT = 'chrome'
 # Key pair minted by `xray vlessenc` for the VLESS Encryption layer:
 # server-side decryption string + client-side encryption string.
 VLESS_ENC_KEY_FILE = 'xray_vlessenc.key'
+# firefox over chrome: since October 2026 uTLS-chrome handshakes are
+# actively filtered by Russian censors, while firefox stays lenient
+# (field-tested; see the 2026 censorship-research synthesis).
+XRAY_DEFAULT_FINGERPRINT = 'firefox'
 
 class XrayManager:
     """Manages Xray (VLESS-Reality) protocol installation and client management."""
@@ -1147,6 +1151,19 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
             f"?{'&'.join(params)}#{encoded_name}"
         )
         return url
+
+    def get_runtime_client_ids(self):
+        """UUIDs registered in the live server.json vless inbounds.
+
+        The authoritative "can this peer carry traffic" state: the
+        clientsTable view can lag a hand-edited config and may keep a row
+        enabled long after the peer left the runtime."""
+        config = self._get_server_json()
+        if not config:
+            raise RuntimeError('Xray live config is unavailable')
+        return [c.get('id')
+                for ib in config.get('inbounds', []) if ib.get('protocol') == 'vless'
+                for c in ib.get('settings', {}).get('clients', [])]
 
     def get_reality_state(self):
         """Current transport and Reality target of the VLESS inbound."""

@@ -159,7 +159,7 @@ class XhttpLinkTests(unittest.TestCase):
         self.assertEqual(
             link,
             'vless://UUID-1@203.0.113.9:443?type=tcp&security=reality&pbk=PBK'
-            '&sni=yahoo.com&fp=chrome&sid=SID&spx=%2F&flow=xtls-rprx-vision#phone')
+            '&sni=yahoo.com&fp=firefox&sid=SID&spx=%2F&flow=xtls-rprx-vision#phone')
 
     def test_hand_edited_transport_keeps_the_runtime_flow(self):
         # The runtime client entry is authoritative: if the admin hand-wired

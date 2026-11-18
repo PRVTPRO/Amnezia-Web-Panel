@@ -1,10 +1,13 @@
 import json
+import logging
 import os
 import re
 import shlex
 import tarfile
 import tempfile
 import time
+
+logger = logging.getLogger(__name__)
 
 
 class BackupManager:
@@ -301,21 +304,23 @@ printf '%s\n' "$archive"
         fd, local_path = tempfile.mkstemp(prefix='amnezia-backup-validate-', suffix='.tar.gz')
         os.close(fd)
         try:
-            self.ssh.ensure_connected()
-            sftp = self.ssh.client.open_sftp()
-            try:
+            with self.ssh.sftp_transfer() as sftp:
                 sftp.get(tmp_remote, local_path)
-            finally:
-                sftp.close()
-                self.ssh.run_sudo_command(f"rm -f {quoted_tmp}")
             return local_path, None
         except Exception as exc:
             try:
                 os.remove(local_path)
             except OSError:
                 pass
-            self.ssh.run_sudo_command(f"rm -f {quoted_tmp}")
             return None, str(exc) or 'Failed to read backup archive'
+        finally:
+            # The cleanup must never mask the result above: after the transport
+            # was dropped, run_sudo_command can raise (cooldown breaker) and the
+            # caller would get an exception instead of (None, reason).
+            try:
+                self.ssh.run_sudo_command(f"rm -f {quoted_tmp}")
+            except Exception as exc:
+                logger.warning(f"Failed to remove remote backup staging: {exc}")
 
     def upload_backup(self, protocol, filename, local_path):
         inspected = self.inspect_archive(local_path)
@@ -341,12 +346,8 @@ printf '%s\n' "$archive"
             dest_q = shlex.quote(dest)
         tmp_remote = f'/tmp/_amnz_upload_{safe_name}'
         tmp_q = shlex.quote(tmp_remote)
-        self.ssh.ensure_connected()
-        sftp = self.ssh.client.open_sftp()
-        try:
+        with self.ssh.sftp_transfer() as sftp:
             sftp.put(local_path, tmp_remote)
-        finally:
-            sftp.close()
         backup_dir_q = shlex.quote(backup_dir)
         inner = (
             f'mkdir -p {backup_dir_q} && '
