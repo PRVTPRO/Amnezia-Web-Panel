@@ -14330,13 +14330,13 @@ async def api_warp_disconnect(request: Request):
 
 @app.post('/api/settings/save', tags=["Settings"])
 async def save_settings(request: Request, payload: SaveSettingsRequest):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
     async with DATA_LOCK:
         return await _save_settings(request, payload)
 
 
 async def _save_settings(request: Request, payload: SaveSettingsRequest):
-    if not _check_admin(request):
-        return JSONResponse({'error': 'Forbidden'}, status_code=403)
     data = load_data()
     settings = data.setdefault('settings', {})
     settings['appearance'] = payload.appearance.dict()
