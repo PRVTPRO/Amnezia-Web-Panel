@@ -68,6 +68,65 @@ class SubscriptionPathTests(unittest.TestCase):
         self.assertEqual(panel.subscription_settings(data)['server_uid'], 'mask')
 
 
+class UserinfoTests(unittest.TestCase):
+    def test_userinfo_fields(self):
+        user = {'traffic_used': 450, 'traffic_limit': 700,
+                'expiration_date': '2027-01-01T00:00:00'}
+        value = panel._subscription_userinfo(user)
+        self.assertIn('upload=0', value)
+        self.assertIn('download=450', value)
+        self.assertIn('total=700', value)
+        self.assertIn('expire=', value)
+        # expire is a unix timestamp parsed back to the same date
+        expire = int(value.split('expire=')[1])
+        import datetime as dt
+        self.assertEqual(dt.datetime.fromtimestamp(expire).year, 2027)
+
+    def test_userinfo_omits_missing_fields(self):
+        self.assertEqual(panel._subscription_userinfo({}), 'upload=0')
+        self.assertEqual(panel._subscription_userinfo({'traffic_used': 5}),
+                         'upload=0; download=5')
+        # limit 0 means unlimited: no total
+        self.assertEqual(
+            panel._subscription_userinfo({'traffic_used': 5, 'traffic_limit': 0}),
+            'upload=0; download=5')
+        # unparsable expiry is skipped
+        self.assertEqual(
+            panel._subscription_userinfo({'traffic_used': 5,
+                                          'expiration_date': 'garbage'}),
+            'upload=0; download=5')
+
+    def test_nginx_quote_escapes_config_breakers(self):
+        self.assertEqual(panel._nginx_quote('say "hi"'),
+                         'say ' + chr(92) + '"hi' + chr(92) + '"')
+        self.assertEqual(panel._nginx_quote('a' + chr(92) + 'b'),
+                         'a' + chr(92) * 2 + 'b')
+
+    def test_config_block_carries_per_token_userinfo(self):
+        entries = [('t' * 32, 'upload=0; download=450; total=700')]
+        block = panel._subscription_config_block('sub', 'My VPN', entries)
+        self.assertIn('location = /sub/' + 't' * 32, block)
+        self.assertIn('subscription-userinfo "upload=0; download=450; total=700"',
+                      block)
+        self.assertIn('profile-title "My VPN"', block)
+        # generic fallback location still present for unknown tokens
+        self.assertIn('location /sub/', block)
+        # exactly one exact-match location per entry
+        self.assertEqual(block.count('location = /sub/'), 1)
+
+    def test_config_entries_cover_users_with_tokens_and_targets(self):
+        data = state()
+        data['users'][0]['sub_token'] = 't' * 32
+        data['users'][0]['traffic_used'] = 450
+        entries = panel._subscription_config_entries(data)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0][0], 't' * 32)
+        self.assertIn('download=450', entries[0][1])
+        # a user without xray targets is not listed even with a token
+        data['user_connections'] = []
+        self.assertEqual(panel._subscription_config_entries(data), [])
+
+
 class SubscriptionTokenTests(unittest.TestCase):
     def test_token_is_minted_once_and_replaced_when_invalid(self):
         user = {'id': 'u1'}
