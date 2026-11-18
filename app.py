@@ -7751,6 +7751,12 @@ def api_check_server(request: Request, server_id: int):
         _check_cache_put(server_uid, status)
         ssh.disconnect()
         return status
+    except (peer_lifecycle_lock.PeerLifecycleBusy,
+            peer_lifecycle_lock.PeerLifecycleUncertain):
+        # Штатные обработчики этих двух состояний отдают 503 с машинным кодом.
+        # Перехватывать их общим except нельзя: пользователь увидит «сервер
+        # недоступен» вместо «требуется восстановление администратором».
+        raise
     except Exception as e:
         logger.exception("Error checking server")
         return JSONResponse({'error': str(e), 'connection': 'failed'}, status_code=500)
@@ -9141,6 +9147,11 @@ async def api_smartroute_status(request: Request, server_id: int):
         return await smartroute_svc.status(server_id)
     except SmartRouteError as e:
         return _smartroute_error(e)
+    except (peer_lifecycle_lock.PeerLifecycleBusy,
+            peer_lifecycle_lock.PeerLifecycleUncertain):
+        # Не маскировать жизненный цикл в generic 500: штатный обработчик
+        # отдаёт 503 + code, и UI показывает реальную причину.
+        raise
     except Exception as e:
         logger.exception("Error reading Smart Route status")
         return JSONResponse({'error': str(e)}, status_code=500)
@@ -9255,6 +9266,10 @@ async def api_awg_plugin_status(request: Request, server_id: int):
         return result
     except PluginUpdateError as e:
         return _awg_plugin_error(e, 502)
+    except (peer_lifecycle_lock.PeerLifecycleBusy,
+            peer_lifecycle_lock.PeerLifecycleUncertain):
+        # См. /smartroute/status: штатный 503 + code вместо generic 500.
+        raise
     except Exception as e:
         logger.exception("Error reading AWG plugin status")
         return JSONResponse({'error': str(e), 'code': 'internal_error'}, status_code=500)

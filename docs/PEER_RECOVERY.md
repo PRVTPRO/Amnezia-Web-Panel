@@ -172,10 +172,25 @@ queued requests never execute. Started workers keep the interlock until their
 network work and commit finish, without holding `DATA_LOCK` over SSH.
 
 `GET /api/recovery/status` gives admins operation names/age and fence status,
-without commands, credentials or internal paths. A response deadline returns
-503 `peer_lifecycle_still_running`; it is not a success or automatic retry.
-Unexpected detached errors log a traceback with exception values, locals and
-source lines omitted (these may contain secrets).
+without commands, credentials or internal paths. When the marker exists it also
+reports `reason`, `created_at`, `age_seconds`, `marker_version`, `scope` and
+`operation`; `scope` is `null` for legacy markers that carry no server identity,
+and an unreadable marker is reported as `reason: marker_unreadable` (the fence
+stays closed). A response deadline returns 503 `peer_lifecycle_still_running`;
+it is not a success or automatic retry. Unexpected detached errors log a
+traceback with exception values, locals and source lines omitted (these may
+contain secrets).
+
+Fence conditions reach the browser as their registered handlers, never as a
+generic 500: `/api/servers/{id}/check`, `/api/servers/{id}/smartroute/status`
+and `/api/servers/{id}/awg-plugin/status` return 503 with `code`
+`peer_lifecycle_uncertain` / `peer_lifecycle_busy`, so the UI can tell "an SSH
+outcome is unknown, an administrator must recover" from "the server is down".
+
+A command whose reply was lost is never replayed while the interlock is active:
+the single dead-transport retry in `SSHManager` applies only outside a lifecycle
+operation, because re-sending a mutation with an unknown outcome would execute
+it twice. The fence is what protects that case.
 
 A lost command reply persists `DATA_FILE.lifecycle-uncertain.json`; it is a
 logical admission fence even after the local worker exits/restarts. Subsequent
