@@ -23,7 +23,15 @@ def _q(value):
 class NginxManager:
     PROTOCOL = 'nginx'
     CONTAINER_NAME = 'amnezia-nginx'
-    IMAGE_NAME = 'nginx:alpine'
+    # Pinned: CVE-2026-123633 (HTTP/2 use-after-free, affects >= 1.19.7) and
+    # CVE-2026-123007 (HTTP/2 send_window underflow, affects >= 1.9.5) are both
+    # fixed in 1.30.7 stable / 1.31.9 mainline. The floating ``nginx:alpine``
+    # tag resolved to an affected mainline build (up to 1.31.8).
+    IMAGE_NAME = 'nginx:1.30.7-alpine'
+    # Both CVEs require HTTP/2, so the panel never enables it (defence in depth).
+    HTTP2_FIXED_STABLE = (1, 30, 7)
+    HTTP2_FIXED_MAINLINE = (1, 31, 9)
+    HTTP2_FIRST_AFFECTED_VERSION = (1, 19, 7)
     CERTBOT_IMAGE = 'certbot/certbot:latest'
     CERTBOT_CONTAINER_NAME = 'amnezia-nginx-certbot'
     BASE_DIR = '/opt/amnezia/nginx'
@@ -86,6 +94,8 @@ class NginxManager:
         config = self._get_server_config(protocol_type) if exists else ''
         domain = meta.get('domain') or self._parse_domain(config)
         port = int(meta.get('port') or self.DEFAULT_PORT)
+        security = self.security_state(
+            config, self.get_nginx_version() if running else None) if exists else {}
         return {
             'container_exists': exists,
             'container_running': running,
@@ -99,6 +109,7 @@ class NginxManager:
             'container_name': self.CONTAINER_NAME,
             'certbot_container_name': self.CERTBOT_CONTAINER_NAME,
             'certbot_running': self.check_certbot_running() if exists else False,
+            'security': security,
         }
 
     # ===================== CONFIG BUILDERS =====================
@@ -156,7 +167,7 @@ class NginxManager:
 }}
 
 server {{
-    listen 443 ssl http2;
+    listen 443 ssl;
     server_name {domain};
 
     ssl_certificate /etc/letsencrypt/live/{domain}/fullchain.pem;
@@ -202,6 +213,101 @@ server {{
         m = re.search(r'^\s*server_name\s+([^;\s]+)', config_text or '', re.MULTILINE)
         return m.group(1) if m else None
 
+    # ===================== HTTP/2 HARDENING =====================
+    # CVE-2026-123633 and CVE-2026-123007 are unauthenticated RCEs reachable
+    # only when HTTP/2 is enabled. NGINX 1.30.7 stable / 1.31.9 mainline fix
+    # both; until an operator upgrades, HTTP/2 must stay off.
+
+    @staticmethod
+    def strip_http2(config_text):
+        """Remove every HTTP/2 switch from a config; returns (text, changed)."""
+        lines = []
+        changed = False
+        for line in (config_text or '').splitlines():
+            stripped = line.strip()
+            if stripped.startswith('#'):
+                lines.append(line)
+                continue
+            if re.match(r'^http2\s+(on|off)\s*;?', stripped):
+                changed = True
+                continue
+            if re.search(r'\bhttp2\b', line):
+                line = re.sub(r'\s*\bhttp2\b', '', line)
+                changed = True
+            lines.append(line)
+        text = '\n'.join(lines)
+        if config_text and config_text.endswith('\n'):
+            text += '\n'
+        return text, changed
+
+    @staticmethod
+    def http2_enabled(config_text):
+        """True when a config turns HTTP/2 on (``http2 on`` or listen token)."""
+        for line in (config_text or '').splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith('#'):
+                continue
+            if stripped.startswith('http2 off'):
+                continue
+            if re.search(r'\bhttp2\b', line):
+                return True
+        return False
+
+    def get_nginx_version(self):
+        """Version of the binary inside the container, as a tuple."""
+        out, _, code = self.ssh.run_sudo_command(
+            f"docker exec {self.CONTAINER_NAME} nginx -v 2>&1")
+        m = re.search(r'nginx/(\d+)\.(\d+)\.(\d+)', out or '')
+        if code != 0 or not m:
+            return None
+        return tuple(int(part) for part in m.groups())
+
+    @classmethod
+    def is_http2_fixed(cls, version):
+        """True only for builds that already carry both HTTP/2 fixes.
+
+        Fixes landed in 1.30.7 (stable branch) and 1.31.9 (mainline), so
+        1.31.8 is still vulnerable while 1.30.7 is not.
+        """
+        if not version:
+            return False
+        if tuple(version) >= cls.HTTP2_FIXED_MAINLINE:
+            return True
+        return cls.HTTP2_FIXED_STABLE <= tuple(version) < (1, 31, 0)
+
+    def security_state(self, config_text, version=None):
+        """Report HTTP/2 exposure and whether the binary predates the fixes."""
+        http2 = self.http2_enabled(config_text)
+        fixed = self.is_http2_fixed(version)
+        warnings = []
+        if http2:
+            warnings.append('http2_enabled')
+        if version and tuple(version) >= self.HTTP2_FIRST_AFFECTED_VERSION and not fixed:
+            warnings.append('http2_vulnerable_version')
+        return {
+            'http2_enabled': http2,
+            'nginx_version': '.'.join(str(p) for p in version) if version else None,
+            'http2_fixed': fixed,
+            'security_warnings': warnings,
+        }
+
+    def harden_http2(self, protocol_type='nginx'):
+        """Disable HTTP/2 in the live config and reload the container."""
+        config = self._get_server_config(protocol_type)
+        sanitized, changed = self.strip_http2(config)
+        if not changed:
+            return {'status': 'ok', 'changed': False}
+        self._write_file(self.NGINX_CONF_PATH, sanitized)
+        if self.check_container_running(protocol_type):
+            _, err, code = self.ssh.run_sudo_command(
+                f"docker exec {self.CONTAINER_NAME} nginx -t", timeout=30)
+            if code != 0:
+                self._write_file(self.NGINX_CONF_PATH, config)
+                return {'status': 'error', 'message': f'Invalid NGINX config: {err}'}
+            self.ssh.run_sudo_command(
+                f"docker exec {self.CONTAINER_NAME} nginx -s reload")
+        return {'status': 'ok', 'changed': True}
+
     # ===================== FILE I/O =====================
 
     def _read_file(self, path):
@@ -236,7 +342,12 @@ server {{
 
     def save_server_config(self, protocol_type='nginx', config_text=''):
         old_config = self._get_server_config(protocol_type)
-        self._write_file(self.NGINX_CONF_PATH, config_text or '')
+        sanitized, stripped = self.strip_http2(config_text or '')
+        if stripped:
+            logger.warning(
+                'NGINX config for %s had HTTP/2 enabled; it was disabled '
+                '(CVE-2026-123633, CVE-2026-123007)', self.CONTAINER_NAME)
+        self._write_file(self.NGINX_CONF_PATH, sanitized)
         if self.check_container_running(protocol_type):
             _, err, code = self.ssh.run_sudo_command(f"docker exec {self.CONTAINER_NAME} nginx -t", timeout=30)
             if code != 0:
