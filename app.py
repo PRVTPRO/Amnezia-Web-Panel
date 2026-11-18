@@ -13761,8 +13761,8 @@ def settings_page(request: Request):
         cheburcheck_targets=_cheburcheck_targets_context(data),
         subscription_settings=subscription_settings(data),
         subscription_servers=[
-            {'id': index, 'label': server.get('name') or server.get('host')}
-            for index, server in enumerate(data.get('servers', []))
+            {'uid': server.get('uid'), 'label': server.get('name') or server.get('host')}
+            for server in data.get('servers', [])
             if any(protocol_base(key) == 'nginx'
                    for key in (server.get('protocols') or {}))
         ],
@@ -13780,8 +13780,16 @@ def subscription_settings(data):
         path = normalize_subscription_path(settings.get('path'))
     except ValueError:
         path = 'sub'
+    # server_uid is the stable reference (indexes shift when servers are
+    # deleted or reordered). Legacy settings stored a list index - resolve
+    # it once here; the next settings save persists the uid.
+    server_uid = settings.get('server_uid')
+    if not server_uid:
+        legacy = settings.get('server_id')
+        if isinstance(legacy, int) and 0 <= legacy < len(data.get('servers', [])):
+            server_uid = data['servers'][legacy].get('uid')
     return {'enabled': bool(settings.get('enabled')),
-            'server_id': settings.get('server_id'),
+            'server_uid': server_uid,
             'path': path,
             'name': normalize_subscription_name(settings.get('name'))}
 
@@ -13855,14 +13863,15 @@ def _apply_subscription_config(nginx_server, nginx_protocol, sub_settings,
 
 def subscription_nginx_server(data, sub_settings):
     """The NGINX server chosen as the subscription file host, or None."""
-    server_id = sub_settings.get('server_id')
-    if not isinstance(server_id, int) or not 0 <= server_id < len(data.get('servers', [])):
+    server_uid = sub_settings.get('server_uid')
+    if not server_uid:
         return None
-    server = data['servers'][server_id]
-    if not any(protocol_base(key) == 'nginx'
-               for key in (server.get('protocols') or {})):
-        return None
-    return server
+    for server in data.get('servers', []):
+        if (server.get('uid') == server_uid
+                and any(protocol_base(key) == 'nginx'
+                        for key in (server.get('protocols') or {}))):
+            return server
+    return None
 
 
 def ensure_subscription_token(user):
@@ -14060,7 +14069,7 @@ def _subscription_prune_stale_files(data, nginx_server, sub_settings,
 
 class SubscriptionSettingsRequest(BaseModel):
     enabled: bool = False
-    server_id: Optional[int] = None
+    server_uid: Optional[str] = None
     path: Optional[str] = None
     name: Optional[str] = None
 
@@ -14096,13 +14105,14 @@ def api_subscription_settings_save(request: Request, req: SubscriptionSettingsRe
         old = subscription_settings(data)
         if req.enabled:
             probe = subscription_nginx_server(
-                data, {'enabled': True, 'server_id': req.server_id})
+                data, {'enabled': True, 'server_uid': req.server_uid})
             if probe is None:
                 return JSONResponse(
                     {'error': 'Select a server with NGINX installed'}, status_code=400)
         settings = data.setdefault('settings', {}).setdefault('subscription', {})
         settings['enabled'] = req.enabled
-        settings['server_id'] = req.server_id
+        settings['server_uid'] = req.server_uid
+        settings.pop('server_id', None)  # legacy index format
         settings['path'] = sub_path
         settings['name'] = sub_name
         save_data(data)
@@ -14119,7 +14129,7 @@ def api_subscription_settings_save(request: Request, req: SubscriptionSettingsRe
             result['errors'] = outcome['errors']
             result['domain'] = outcome.get('domain')
         elif old['enabled']:
-            old_server = subscription_nginx_server(data, {'server_id': old['server_id']})
+            old_server = subscription_nginx_server(data, {'server_uid': old['server_uid']})
             nginx_key = next((key for key in (old_server.get('protocols') or {})
                               if protocol_base(key) == 'nginx'), None) \
                 if old_server is not None else None
