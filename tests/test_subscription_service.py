@@ -1,5 +1,6 @@
 """Subscription files: path/token handling and the push into the NGINX
 mask html root."""
+import asyncio
 import base64
 import urllib.parse
 import json
@@ -284,10 +285,58 @@ class SubscriptionEndpointsTests(unittest.TestCase):
         data['settings'] = {'subscription': {
             'enabled': True, 'server_id': 0, 'path': 'sub'}}
         data['users'][0]['sub_url'] = 'https://mask.example/sub/tok'
-        with patch.object(panel, 'load_data', return_value=data),              patch.object(panel, '_check_admin', lambda request: True):
+        with patch.object(panel, 'load_data', return_value=data), \
+             patch.object(panel, '_check_admin', lambda request: True):
             result = panel.api_list_users(self.request(), search='', page=1, size=10)
         self.assertEqual(result['users'][0]['sub_url'],
                          'https://mask.example/sub/tok')
+
+    def test_server_scope_add_triggers_the_subscription_push(self):
+        # Adding a connection from the server card
+        # (/api/servers/{id}/connections/add) must refresh the owner's
+        # subscription file just like the users-page endpoint does.
+        data = state()
+        data['settings'] = {'subscription': {
+            'enabled': True, 'server_id': 0, 'path': 'sub'}}
+        data['users'][0]['sub_url'] = 'https://mask.example/sub/tok'
+        pushed = []
+        manager = Mock()
+        manager.add_client.return_value = {'client_id': 'peer-new',
+                                           'config': 'vless://peer-new'}
+        with patch.object(panel, 'load_data', return_value=data), \
+             patch.object(panel, '_check_admin', lambda request: True), \
+             patch.object(panel, 'get_ssh', return_value=Mock()), \
+             patch.object(panel, 'get_protocol_manager', return_value=manager), \
+             patch.object(panel, 'save_data', Mock()), \
+             patch.object(panel, 'auto_push_subscriptions',
+                          Mock(side_effect=lambda d, ids: pushed.append(list(ids)))):
+            result = asyncio.run(panel.api_add_connection(
+                self.request(), 1,
+                panel.AddConnectionRequest(protocol='xray', name='phone',
+                                           user_id='u1')))
+        self.assertIn('config', result)
+        self.assertEqual(pushed, [['u1']])
+
+    def test_server_scope_add_without_a_user_does_not_push(self):
+        # An unowned connection has no subscription to refresh.
+        data = state()
+        data['settings'] = {'subscription': {
+            'enabled': True, 'server_id': 0, 'path': 'sub'}}
+        pushed = []
+        manager = Mock()
+        manager.add_client.return_value = {'client_id': 'peer-new',
+                                           'config': 'vless://peer-new'}
+        with patch.object(panel, 'load_data', return_value=data), \
+             patch.object(panel, '_check_admin', lambda request: True), \
+             patch.object(panel, 'get_ssh', return_value=Mock()), \
+             patch.object(panel, 'get_protocol_manager', return_value=manager), \
+             patch.object(panel, 'save_data', Mock()), \
+             patch.object(panel, 'auto_push_subscriptions',
+                          Mock(side_effect=lambda d, ids: pushed.append(list(ids)))):
+            asyncio.run(panel.api_add_connection(
+                self.request(), 1,
+                panel.AddConnectionRequest(protocol='xray', name='phone')))
+        self.assertEqual(pushed, [])
 
     def test_endpoints_require_admin(self):
         data = state()

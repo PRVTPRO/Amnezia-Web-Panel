@@ -12165,6 +12165,13 @@ def api_add_connection(request: Request, server_id: int, req: AddConnectionReque
             }
             data['user_connections'].append(conn)
             save_data(data)
+            if protocol_base(req.protocol) == 'xray':
+                # Refresh the owner's subscription file right away; the
+                # periodic monitor covers every other change source.
+                try:
+                    auto_push_subscriptions(data, [req.user_id])
+                except Exception:
+                    logger.warning("subscription auto-push failed", exc_info=True)
 
         _invalidate_ip_status(server.get('uid'))
         return result
@@ -13976,9 +13983,12 @@ def auto_push_subscriptions(data, user_ids=None):
     tokens and cached sub URLs via save_data."""
     sub_settings = subscription_settings(data)
     if not sub_settings['enabled']:
+        logger.debug("subscription auto-push skipped: disabled")
         return
     nginx_server = subscription_nginx_server(data, sub_settings)
     if nginx_server is None:
+        logger.warning("subscription auto-push skipped: no NGINX host "
+                       "selected or the selected server has no NGINX")
         return
     domain = _subscription_mask_domain(nginx_server)
     users_by_id = {u.get('id'): u for u in data.get('users', [])}
@@ -13987,6 +13997,7 @@ def auto_push_subscriptions(data, user_ids=None):
                    if _subscription_user_targets(data, u)]
     else:
         targets = [users_by_id[uid] for uid in user_ids if uid in users_by_id]
+    updated = 0
     for user in targets:
         if not _subscription_user_targets(data, user):
             user.pop('sub_url', None)  # all xray connections are gone
@@ -13997,9 +14008,13 @@ def auto_push_subscriptions(data, user_ids=None):
             if domain:
                 user['sub_url'] = (f"https://{domain}/{sub_settings['path']}/"
                                    f"{token}")
+            if not unchanged:
+                updated += 1
         except Exception as e:
             logger.warning("subscription auto-push failed for %s: %s",
                            user.get('username'), e)
+    if updated:
+        logger.info("subscription auto-push: %d file(s) updated", updated)
     save_data(data)
 
 
