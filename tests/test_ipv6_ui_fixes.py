@@ -162,6 +162,13 @@ PROTOCOL_UNINSTALL_KEYS = {
     'blocked_peer_still_active',
 }
 
+SUBSCRIPTION_KEYS = {
+    'subscription_title', 'subscription_desc', 'subscription_enable',
+    'subscription_server_label', 'subscription_server_hint',
+    'subscription_path_label', 'subscription_path_hint', 'subscription_push',
+    'subscription_name_label', 'subscription_name_hint', 'subscription_copy',
+}
+
 # I1 masking block (per-instance special-junk packet): install and settings.
 AWG_I1_KEYS = {
     'awg_i1_ascii_only', 'awg_i1_auto_badge', 'awg_i1_bad_tag',

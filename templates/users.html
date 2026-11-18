@@ -506,6 +506,22 @@
         }[ch]));
     }
 
+    function copySubscriptionUrl(el) {
+        const url = el.dataset.suburl;
+        if (!url) return;
+        const done = () => {
+            const old = el.textContent;
+            el.textContent = '✓ ' + (_('copied') || 'Copied');
+            setTimeout(() => { el.textContent = old; }, 1500);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(url).then(done)
+                .catch(() => window.prompt(_('subscription_copy'), url));
+        } else {
+            window.prompt(_('subscription_copy'), url);
+        }
+    }
+
 
     /* ===== Send configs and links by email ===== */
     let mailMode = 'single';
@@ -701,6 +717,7 @@
                                 ${u.telegramId ? `<span>💬 ${u.telegramId}</span>` : ''}
                                 ${u.email ? `<span>📧 ${u.email}</span>` : ''}
                                 ${u.expiration_date ? `<span style="color: ${new Date(u.expiration_date) < new Date() ? 'var(--danger)' : 'var(--text-muted)'}">⌛ ${_('expiration_date_label')}: ${new Date(u.expiration_date).toLocaleString()}</span>` : ''}
+                                ${u.sub_url ? `<span style="cursor:pointer; color:var(--primary); text-decoration: underline;" title="${escapeHtml(u.sub_url)}" data-suburl="${escapeHtml(u.sub_url)}" onclick="copySubscriptionUrl(this)">📋 ${_('subscription_copy')}</span>` : ''}
                             </div>
                             ${u.description ? `<div class="client-meta" style="font-size: 0.75rem; opacity: 0.8; margin-top: 2px;">📝 ${u.description}</div>` : ''}
                             ${(() => {
