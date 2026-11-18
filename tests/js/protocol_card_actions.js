@@ -110,6 +110,8 @@ const sandbox = {
     setEditorValue() {},
     refreshConfigEditor() {},
     structuredClone: (value) => value,
+    addEventListener() {},
+    removeEventListener() {},
     URL, URLSearchParams, JSON, Date, Math, Promise, Set, Map, Number, String, Boolean, Array, Object, RegExp, Error,
 };
 sandbox.window = sandbox;

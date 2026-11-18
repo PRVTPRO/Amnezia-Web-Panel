@@ -476,7 +476,7 @@ class SSHManager:
         eviction) cannot tear down the transport mid-command.
         """
         from peer_lifecycle_lock import check_remote_fence
-        check_remote_fence()
+        check_remote_fence(self.server_scope)
         with self._exec_slot(timeout) as slot:
             if not slot:
                 logger.error(
@@ -695,8 +695,6 @@ class SSHManager:
         """Upload text content to a remote file via SFTP."""
         from peer_lifecycle_lock import check_remote_fence
         check_remote_fence(self.server_scope)
-        with self._exec_lock, _conn_lock_of(self):
-            return self._upload_file_locked(content, remote_path)
         return self._sftp_call(
             _SFTP_TIMEOUT, lambda: self._upload_file_locked(content, remote_path))
 
@@ -803,8 +801,6 @@ class SSHManager:
         """Download text content from a remote file."""
         from peer_lifecycle_lock import check_remote_fence
         check_remote_fence(self.server_scope)
-        with self._exec_lock, _conn_lock_of(self):
-            return self._download_file_locked(remote_path)
         return self._sftp_call(
             _SFTP_TIMEOUT, lambda: self._download_file_locked(remote_path))
 
@@ -823,8 +819,6 @@ class SSHManager:
         """Check if a remote file exists."""
         from peer_lifecycle_lock import check_remote_fence
         check_remote_fence(self.server_scope)
-        with self._exec_lock, _conn_lock_of(self):
-            return self._file_exists_locked(remote_path)
         return self._sftp_call(
             _SFTP_TIMEOUT, lambda: self._file_exists_locked(remote_path))
 

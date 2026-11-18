@@ -223,6 +223,14 @@ LATER_FEATURE_KEYS = {
     'xray_update_stage_host', 'xray_update_stage_start',
     'xray_update_stage_swap', 'xray_update_stage_verify',
     'xray_update_stage_version',
+    'subscription_copy', 'subscription_desc', 'subscription_enable',
+    'subscription_name_hint', 'subscription_name_label',
+    'subscription_path_hint', 'subscription_path_label', 'subscription_push',
+    'subscription_server_hint', 'subscription_server_label',
+    'subscription_title', 'vless_enc_apply', 'vless_enc_btn',
+    'vless_enc_disable', 'vless_enc_enable', 'vless_enc_state_on',
+    'vless_enc_subtitle', 'vless_enc_title', 'vless_enc_warning',
+    'vless_enc_xhttp_required',
 }
 # Added by the v1.8.11 release (max connections per user + Telegram WebApp auth).
 # Registered here so the frozen catalogue hash keeps checking the older keys.
