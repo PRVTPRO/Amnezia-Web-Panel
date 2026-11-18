@@ -1558,5 +1558,9 @@
   "tp_no_instances_hint": "Le plugin peut rester installé, mais il n'y a rien à filtrer : ce serveur n'a pas d'AWG/WireGuard.",
   "torrent_sig_unknown": "signature inconnue",
   "tp_control_off_hint": "Contrôle désactivé — aucune règle sur le serveur.",
-  "tp_degraded_title": "Instances indisponibles : {failed} sur {total}"
+  "tp_degraded_title": "Instances indisponibles : {failed} sur {total}",
+  "tp_err_container_stopped": "Le conteneur de l'instance est arrêté - démarrez-le sur la page du serveur et les règles s'appliqueront",
+  "tp_err_no_iptables_modules": "Le conteneur n'a pas les modules iptables (xt_string/xt_connbytes), le filtre ne peut pas y fonctionner",
+  "tp_err_unreachable": "Le serveur est injoignable en SSH - les règles ne sont pas appliquées",
+  "tp_state_needs_start": "Démarrez le conteneur"
 }

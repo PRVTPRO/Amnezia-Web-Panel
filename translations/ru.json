@@ -1558,5 +1558,9 @@
   "tp_no_instances_hint": "Плагин можно держать установленным, но фильтровать нечего: на сервере нет AWG/WireGuard.",
   "torrent_sig_unknown": "неизвестная сигнатура",
   "tp_control_off_hint": "Контроль выключен — правил на сервере нет.",
-  "tp_degraded_title": "Недоступны инстансы: {failed} из {total}"
+  "tp_degraded_title": "Недоступны инстансы: {failed} из {total}",
+  "tp_err_container_stopped": "Контейнер инстанса остановлен — запустите его на странице сервера, тогда правила встанут",
+  "tp_err_no_iptables_modules": "В контейнере нет модулей iptables (xt_string/xt_connbytes) — фильтр там не может работать",
+  "tp_err_unreachable": "Сервер недоступен по SSH — правила не применены",
+  "tp_state_needs_start": "Нужно запустить контейнер"
 }

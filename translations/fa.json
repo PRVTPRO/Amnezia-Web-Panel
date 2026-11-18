@@ -1558,5 +1558,9 @@
   "tp_no_instances_hint": "افزونه می‌تواند نصب بماند، اما چیزی برای فیلتر کردن نیست: این سرور AWG/WireGuard ندارد.",
   "torrent_sig_unknown": "امضای ناشناخته",
   "tp_control_off_hint": "کنترل خاموش است — هیچ قاعده‌ای روی سرور نیست.",
-  "tp_degraded_title": "نمونه‌های در دسترس نیست: {failed} از {total}"
+  "tp_degraded_title": "نمونه‌های در دسترس نیست: {failed} از {total}",
+  "tp_err_container_stopped": "کانتینر نمونه متوقف است — آن را در صفحهٔ سرور اجرا کنید تا قواعد اعمال شوند",
+  "tp_err_no_iptables_modules": "کانتینر ماژول‌های iptables (xt_string/xt_connbytes) را ندارد؛ فیلتر در آن کار نمی‌کند",
+  "tp_err_unreachable": "سرور از طریق SSH در دسترس نیست — قواعد اعمال نشد",
+  "tp_state_needs_start": "ابتدا کانتینر را اجرا کنید"
 }

@@ -4463,6 +4463,12 @@
             .replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
 
+    function tpStoppedInstances() {
+        const entries = Object.entries((tpPluginState().health || {}).protocols || {});
+        return entries.filter(([, item]) => item && /is not running|No such container/i
+            .test(String(item.error || ''))).length;
+    }
+
     // Причина бейджа «Требует внимания»: какие инстансы недоступны и почему.
     function tpAttentionText() {
         const health = tpPluginState().health || {};
@@ -4480,9 +4486,15 @@
         if (!el) return;
         const state = tpPluginState().state || 'off';
         const attention = tpAttentionText();
+        // Вместо абстрактного «Требует внимания» показываем причину действия:
+        // если контейнер остановлен, правила ставить некуда — его надо
+        // запустить; в остальных случаях причина в title.
+        const stopped = tpStoppedInstances() > 0;
+        const label = (state === 'degraded' && stopped)
+            ? _('tp_state_needs_start') : tpStateLabel(state);
         el.innerHTML = '<span class="badge ' + tpStateClass(state) + '" id="torrentPluginBadge"' +
             (attention ? ' title="' + tpEscapeAttr(attention) + '"' : '') + '>' +
-            '<span class="badge-dot"></span> ' + tpStateLabel(state) + '</span>';
+            '<span class="badge-dot"></span> ' + label + '</span>';
         const enabled = !!tpPluginState().enabled;
         const start = document.getElementById('torrentPluginStart');
         const stop = document.getElementById('torrentPluginStop');

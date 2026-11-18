@@ -67,13 +67,28 @@
         return _('tp_mode_' + mode);
     }
 
+    // Ошибки движка приходят текстом iptables/docker. Админу нужно действие,
+    // а не ответ демона: переводим типовые случаи в понятную фразу.
+    function humanError(raw) {
+        const text = String(raw || '');
+        if (/is not running/i.test(text) || /No such container/i.test(text)) {
+            return _('tp_err_container_stopped');
+        }
+        if (/xt_string|xt_connbytes|does not exist|No chain\/target/i.test(text)) {
+            return _('tp_err_no_iptables_modules');
+        }
+        if (/timed out|timeout|Connection refused|No route to host/i.test(text)) {
+            return _('tp_err_unreachable');
+        }
+        return text;
+    }
+
     function healthText(proto) {
         const health = (state.health && state.health.protocols) || {};
         const item = health[proto];
         if (!item) return { text: _('tp_health_unknown'), cls: 'tp-health--unknown' };
         if (item.error) {
-            return { text: _('tp_health_degraded') + ': ' + item.error,
-                     cls: 'tp-health--error' };
+            return { text: humanError(item.error), cls: 'tp-health--error' };
         }
         return { text: _('tp_health_ok') + ' \u00b7 ' + when(item.ts),
                  cls: 'tp-health--ok' };
@@ -234,7 +249,7 @@
         try {
             applyState(await call('', 'GET'));
         } catch (err) {
-            toast(_('error') + ': ' + err.message, 'error');
+            toast(_('error') + ': ' + humanError(err.message), 'error');
         }
     }
 
@@ -259,7 +274,7 @@
             applyState(res);
             toast(enabled ? _('tp_enabled_toast') : _('tp_disabled_toast'), 'success');
         } catch (err) {
-            toast(_('error') + ': ' + err.message, 'error');
+            toast(_('error') + ': ' + humanError(err.message), 'error');
         } finally {
             if (startBtn) startBtn.disabled = false;
             if (stopBtn) stopBtn.disabled = false;
@@ -276,7 +291,7 @@
             toast(wanted ? _('tp_enabled_toast') : _('tp_disabled_toast'), 'success');
         } catch (err) {
             box.checked = !wanted;
-            toast(_('error') + ': ' + err.message, 'error');
+            toast(_('error') + ': ' + humanError(err.message), 'error');
         } finally {
             box.disabled = false;
             setBusy(false);
@@ -292,12 +307,12 @@
             const res = await call('/mode', 'POST', {protocol: proto, mode: select.value});
             applyState(res);
             if (res && res.errors && res.errors.length) {
-                toast(_('error') + ': ' + res.errors.join('; '), 'error');
+                toast(_('error') + ': ' + humanError(res.errors.join('; ')), 'error');
             } else {
                 toast(_('tp_saved'), 'success');
             }
         } catch (err) {
-            toast(_('error') + ': ' + err.message, 'error');
+            toast(_('error') + ': ' + humanError(err.message), 'error');
             refreshState();
         } finally {
             if (select) select.disabled = false;
@@ -322,12 +337,12 @@
             const res = await call('/settings', 'POST', payload);
             applyState(res);
             if (res && res.errors && res.errors.length) {
-                toast(_('error') + ': ' + res.errors.join('; '), 'error');
+                toast(_('error') + ': ' + humanError(res.errors.join('; ')), 'error');
             } else {
                 toast(_('tp_saved'), 'success');
             }
         } catch (err) {
-            toast(_('error') + ': ' + err.message, 'error');
+            toast(_('error') + ': ' + humanError(err.message), 'error');
         } finally {
             if (btn) btn.disabled = false;
             setBusy(false);
@@ -340,12 +355,12 @@
             const res = await call('/refresh', 'POST', {});
             applyState(res);
             if (res && res.errors && res.errors.length) {
-                toast(_('error') + ': ' + res.errors.join('; '), 'error');
+                toast(_('error') + ': ' + humanError(res.errors.join('; ')), 'error');
             } else {
                 toast(_('tp_refreshed'), 'success');
             }
         } catch (err) {
-            toast(_('error') + ': ' + err.message, 'error');
+            toast(_('error') + ': ' + humanError(err.message), 'error');
         } finally {
             setBusy(false);
         }
@@ -357,12 +372,12 @@
             const res = await call('/install', 'POST', {reapply: true});
             applyState(res);
             if (res && res.errors && res.errors.length) {
-                toast(_('error') + ': ' + res.errors.join('; '), 'error');
+                toast(_('error') + ': ' + humanError(res.errors.join('; ')), 'error');
             } else {
                 toast(_('tp_reapplied'), 'success');
             }
         } catch (err) {
-            toast(_('error') + ': ' + err.message, 'error');
+            toast(_('error') + ': ' + humanError(err.message), 'error');
         } finally {
             setBusy(false);
         }
@@ -376,7 +391,7 @@
             applyState(await call('', 'GET'));
             toast(_('tp_marks_cleared').replace('{count}', res.removed || 0), 'success');
         } catch (err) {
-            toast(_('error') + ': ' + err.message, 'error');
+            toast(_('error') + ': ' + humanError(err.message), 'error');
         } finally {
             setBusy(false);
         }
@@ -390,7 +405,7 @@
             toast(_('tp_uninstall_done'), 'success');
             setTimeout(() => window.location.reload(), 600);
         } catch (err) {
-            toast(_('error') + ': ' + err.message, 'error');
+            toast(_('error') + ': ' + humanError(err.message), 'error');
             setBusy(false);
         }
     }
@@ -480,7 +495,7 @@
             })
             .catch(err => {
                 button.disabled = false;
-                toast(_('error') + ': ' + err.message, 'error');
+                toast(_('error') + ': ' + humanError(err.message), 'error');
             });
     });
 
