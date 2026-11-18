@@ -54,6 +54,25 @@ class ReviewReproduction(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Traceback', '\n'.join(logs.output))
         self.assertNotIn('synthetic-sensitive-value', '\n'.join(logs.output))
 
+    async def test_a_busy_ssh_refusal_does_not_fence_the_panel(self):
+        # A refusal to start means nothing ran: it must not latch the durable
+        # lifecycle fence, or the panel wedges itself until an offline restore.
+        from managers.ssh_manager import SSHBackoff, SSHBusy
+        tmp = pathlib.Path(tempfile.mkdtemp())
+        interlock.configure(tmp / 'data.json')
+        self.addCleanup(interlock.configure, tmp / 'unused.json')
+        fence = tmp / 'data.json.lifecycle-uncertain.json'
+
+        for refusal in (SSHBusy('busy with another operation'),
+                        SSHBackoff('recently failed, backing off 30s')):
+            @interlock.serialize_peer_lifecycle
+            def worker(error=refusal):
+                raise error
+
+            with self.assertRaises(type(refusal)):
+                await worker()
+            self.assertFalse(fence.exists(), refusal)
+
     async def test_queued_wait_has_a_bound(self):
         entered, release = asyncio.Event(), asyncio.Event()
         @interlock.serialize_peer_lifecycle

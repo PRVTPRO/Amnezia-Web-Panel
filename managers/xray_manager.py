@@ -1108,6 +1108,19 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         )
         return url
 
+    def get_runtime_client_ids(self):
+        """UUIDs registered in the live server.json vless inbounds.
+
+        The authoritative "can this peer carry traffic" state: the
+        clientsTable view can lag a hand-edited config and may keep a row
+        enabled long after the peer left the runtime."""
+        config = self._get_server_json()
+        if not config:
+            raise RuntimeError('Xray live config is unavailable')
+        return [c.get('id')
+                for ib in config.get('inbounds', []) if ib.get('protocol') == 'vless'
+                for c in ib.get('settings', {}).get('clients', [])]
+
     def get_reality_state(self):
         """Current transport and Reality target of the VLESS inbound."""
         config = self._get_server_json()

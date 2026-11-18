@@ -373,9 +373,14 @@ def serialize_peer_lifecycle(function):
                     if _uncertain.get()['unknown']:
                         raise PeerLifecycleUncertain('peer_lifecycle_uncertain')
                     return result
-                except (TimeoutError, ConnectionError):
-                    context = _uncertain.get() or {}
-                    note_ssh_uncertainty(context.get('scope'))
+                except (TimeoutError, ConnectionError) as exc:
+                    if getattr(exc, 'nothing_executed', False):
+                        # Nothing was executed: the server refused to start the
+                        # operation (busy lock, open breaker). That is a known
+                        # outcome, not uncertainty, so it must not latch the
+                        # durable fence.
+                        raise
+                    note_ssh_uncertainty()
                     raise PeerLifecycleUncertain('peer_lifecycle_uncertain') from None
                 finally:
                     _running.pop(loop, None)
