@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 
 import app as panel
 from managers.xray_manager import XrayManager
+from managers.awg_manager import AWGManager
 
 
 def state():
@@ -127,12 +128,26 @@ class EgressHelpersTests(unittest.TestCase):
         ssh2 = make_ssh({**BRIDGE_SCRIPT, 'docker exec': ('', '', 1)})
         self.assertIsNone(panel._egress_container_probe(ssh2, ['amnezia-xray']))
 
+    def test_container_probe_falls_back_to_nsenter(self):
+        # an image without curl: the host's curl runs inside the
+        # container's network namespace
+        ssh = make_ssh({**BRIDGE_SCRIPT,
+                        'docker exec': ('', '', 127),
+                        'State.Pid': ('12345\n', '', 0),
+                        'nsenter': ('198.51.100.7', '', 0)})
+        self.assertEqual(
+            panel._egress_container_probe(ssh, ['amnezia-awg']),
+            '198.51.100.7')
+
     def test_probe_containers_lists_the_vpn_protocols(self):
         server = {'protocols': {'xray': {'container_name': 'amnezia-xray'},
                                 'nginx': {'container_name': 'amnezia-nginx'},
-                                'awg': {'container_name': 'amnezia-awg'}}}
+                                'awg': {'container_name': 'amnezia-awg'},
+                                'awg2__1': {'container_name': 'amnezia-awg2'},
+                                'wireguard': {'container_name': 'amnezia-wireguard'}}}
         self.assertEqual(panel._egress_probe_containers(server),
-                         ['amnezia-xray', 'amnezia-awg'])
+                         ['amnezia-xray', 'amnezia-awg', 'amnezia-awg2',
+                          'amnezia-wireguard'])
 
     def test_snat_rules_own_everything_inside_docker_subnets(self):
         ssh = make_ssh(BRIDGE_SCRIPT)
@@ -401,6 +416,73 @@ class IngressTests(unittest.TestCase):
                 panel.api_ipv4_ingress_recreate(self.request(), 0))
         self.assertEqual(result.status_code, 409)
         manager.recreate_container.assert_not_called()
+
+    def test_recreate_covers_awg_instances(self):
+        data = state()
+        data['servers'][0]['protocols'] = {
+            'xray': {'container_name': 'amnezia-xray'},
+            'awg': {'container_name': 'amnezia-awg', 'port': 44337}}
+        data['servers'][0]['ingress_ip'] = '192.0.2.1'
+        xray_manager, awg_manager = Mock(), Mock()
+        provisioned = []
+
+        def pick_manager(ssh_, key):
+            return xray_manager if key == 'xray' else awg_manager
+
+        with patch.object(panel, 'load_data', return_value=data), \
+             patch.object(panel, '_check_admin', lambda request: True), \
+             patch.object(panel, '_install_ops_load', Mock()), \
+             patch.object(panel, '_install_running', Mock(return_value=False)), \
+             patch.object(panel, 'get_ssh', return_value=make_ssh(BRIDGE_SCRIPT)), \
+             patch.object(panel, 'get_protocol_manager',
+                          side_effect=pick_manager), \
+             patch.object(panel, '_ensure_selfsteal_network',
+                          Mock(side_effect=lambda ssh_, c: provisioned.append(c))):
+            result = asyncio.run(
+                panel.api_ipv4_ingress_recreate(self.request(), 0))
+        self.assertEqual(result['recreated'], ['xray', 'awg'])
+        xray_manager.recreate_container.assert_called_once_with(
+            ingress_ip='192.0.2.1')
+        awg_manager.recreate_container.assert_called_once_with(
+            protocol_type='awg', ingress_ip='192.0.2.1')
+        # the shared self-steal network is xray's concern only
+        self.assertEqual(provisioned, [['amnezia-xray']])
+
+
+class RunCmdBindingTests(unittest.TestCase):
+    def _info(self, host_ip=''):
+        return {'HostConfig': {'RestartPolicy': {'Name': 'always'},
+                               'Privileged': True,
+                               'PortBindings': {'44337/udp': [
+                                   {'HostIp': host_ip, 'HostPort': '44337'}]}},
+                'Config': {}}
+
+    def test_without_override_the_bindings_are_kept(self):
+        cmd = AWGManager._run_cmd_from_inspect(
+            self._info(''), 'amnezia-awg', 'img')
+        self.assertIn('-p 44337:44337/udp', cmd)
+        cmd2 = AWGManager._run_cmd_from_inspect(
+            self._info('198.51.100.1'), 'amnezia-awg', 'img')
+        self.assertIn('-p 198.51.100.1:44337:44337/udp', cmd2)
+
+    def test_host_ip_override_pins_every_binding(self):
+        cmd = AWGManager._run_cmd_from_inspect(
+            self._info(''), 'amnezia-awg', 'img', host_ip_override='192.0.2.1')
+        self.assertIn('-p 192.0.2.1:44337:44337/udp', cmd)
+
+    def test_empty_override_restores_all_address_publishing(self):
+        cmd = AWGManager._run_cmd_from_inspect(
+            self._info('198.51.100.1'), 'amnezia-awg', 'img',
+            host_ip_override='')
+        self.assertIn('-p 44337:44337/udp', cmd)
+        self.assertNotIn('198.51.100.1', cmd)
+
+    def test_docker_run_cmd_supports_the_binding(self):
+        cmd = AWGManager._docker_run_cmd('amnezia-awg', 'img', '44337',
+                                         False, host_ip='192.0.2.1')
+        self.assertIn('-p 192.0.2.1:44337:44337/udp', cmd)
+        plain = AWGManager._docker_run_cmd('amnezia-awg', 'img', '44337', False)
+        self.assertIn('-p 44337:44337/udp', plain)
 
 
 class RecreateContainerTests(unittest.TestCase):

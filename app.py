@@ -8005,9 +8005,10 @@ def _docker_subnets(ssh):
 
 def _egress_probe_containers(server):
     """VPN containers whose traffic the egress IP must serve."""
+    vpn_bases = ('xray', 'awg', 'awg2', 'awg3', 'awg_legacy', 'wireguard')
     names = []
     for key, info in (server.get('protocols') or {}).items():
-        if protocol_base(key) in ('xray', 'awg', 'wg') \
+        if protocol_base(key) in vpn_bases \
                 and isinstance(info, dict) and info.get('container_name'):
             names.append(info['container_name'])
     return names
@@ -8016,12 +8017,26 @@ def _egress_probe_containers(server):
 def _egress_container_probe(ssh, containers):
     """The only honest egress check: plain curl from inside a VPN
     container. With the SNAT rule in place it reports the egress
-    address; without it, the main one. Returns the observed IP or
-    None when no container answers (probe impossible)."""
+    address; without it, the main one. Images without curl are probed
+    via nsenter (the host's curl inside the container's network
+    namespace). Returns the observed IP or None when no container
+    answers (probe impossible)."""
     for container in containers:
         out, _, code = ssh.run_sudo_command(
             f"docker exec {shlex.quote(str(container))} "
             f"curl -4 -s --max-time 8 https://api.ipify.org")
+        observed = (out or '').strip()
+        if code == 0 and observed:
+            return observed
+        pid_out, _, pid_code = ssh.run_sudo_command(
+            f"docker inspect -f '{{{{.State.Pid}}}}' "
+            f"{shlex.quote(str(container))} 2>/dev/null")
+        pid = (pid_out or '').strip()
+        if pid_code != 0 or not pid.isdigit():
+            continue
+        out, _, code = ssh.run_sudo_command(
+            f"nsenter -n -t {pid} curl -4 -s --max-time 8 "
+            f"https://api.ipify.org")
         observed = (out or '').strip()
         if code == 0 and observed:
             return observed
@@ -8322,24 +8337,34 @@ async def api_ipv4_ingress_recreate(request: Request, server_id: int):
                           'first'}, status_code=409)
         recreated = []
         try:
+            awg_bases = ('awg', 'awg2', 'awg3', 'awg_legacy')
             for key in (server.get('protocols') or {}):
-                if protocol_base(key) != 'xray':
-                    continue
-                manager = get_protocol_manager(ssh, key)
-                await asyncio.to_thread(manager.recreate_container,
-                                        ingress_ip=ingress_ip)
-                recreated.append(key)
+                base = protocol_base(key)
+                if base == 'xray':
+                    manager = get_protocol_manager(ssh, key)
+                    await asyncio.to_thread(manager.recreate_container,
+                                            ingress_ip=ingress_ip)
+                    recreated.append(key)
+                elif base in awg_bases:
+                    manager = get_protocol_manager(ssh, key)
+                    await asyncio.to_thread(manager.recreate_container,
+                                            protocol_type=key,
+                                            ingress_ip=ingress_ip)
+                    recreated.append(key)
             if recreated:
-                # A fresh container loses the panel-managed network
+                # A fresh xray container loses the panel-managed network
                 # attachments - restore them (self-steal dest depends on
-                # the shared network).
+                # the shared network). AWG has no self-steal attachment.
                 xray_containers = []
                 for key in recreated:
+                    if protocol_base(key) != 'xray':
+                        continue
                     record = (server.get('protocols') or {}).get(key, {})
                     xray_containers.append(record.get('container_name')
                                            or get_protocol_manager(
                                                ssh, key).container_name)
-                _ensure_selfsteal_network(ssh, xray_containers)
+                if xray_containers:
+                    _ensure_selfsteal_network(ssh, xray_containers)
         finally:
             ssh.disconnect()
         return {'status': 'success', 'recreated': recreated,
