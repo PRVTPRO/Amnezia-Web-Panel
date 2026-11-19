@@ -1563,5 +1563,11 @@
   "tp_err_no_iptables_modules": "کانتینر ماژول‌های iptables (xt_string/xt_connbytes) را ندارد؛ فیلتر در آن کار نمی‌کند",
   "tp_err_unreachable": "سرور از طریق SSH در دسترس نیست — قواعد اعمال نشد",
   "tp_state_needs_start": "ابتدا کانتینر را اجرا کنید",
-  "close": "بستن"
+  "close": "بستن",
+  "smartroute_timer_warn": "تایمر به‌روزرسانی فهرست فعال نیست — پیشوندها به‌روز نمی‌شوند",
+  "smartroute_timer_age": "آخرین به‌روزرسانی فهرست",
+  "smartroute_timer_never": "هنوز اجرا نشده",
+  "smartroute_timer_stale": "فهرست پیشوندها مدت زیادی به‌روزرسانی نشده است",
+  "smartroute_timer_armed": "تایمر فعال است",
+  "smartroute_card_warn": "هشدار"
 }

@@ -1563,5 +1563,11 @@
   "tp_err_no_iptables_modules": "容器缺少 iptables 模块（xt_string/xt_connbytes），过滤器无法工作",
   "tp_err_unreachable": "服务器 SSH 不可达——规则未应用",
   "tp_state_needs_start": "请先启动容器",
-  "close": "关闭"
+  "close": "关闭",
+  "smartroute_timer_warn": "列表更新定时器未启用 — 前缀不会刷新",
+  "smartroute_timer_age": "上次列表更新时间",
+  "smartroute_timer_never": "尚未运行",
+  "smartroute_timer_stale": "前缀列表已长时间未更新",
+  "smartroute_timer_armed": "定时器已启用",
+  "smartroute_card_warn": "注意"
 }

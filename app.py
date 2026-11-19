@@ -3792,6 +3792,13 @@ async def startup():
     asyncio.create_task(restore_public_port_forwards())
     # ... and keep re-applying: a VPS can reboot while the panel keeps running.
     asyncio.create_task(restore_public_port_forwards_loop())
+    # Smart Route lives in the container network namespace and is wiped by any
+    # container restart; the panel re-applies it instead of trusting the host
+    # timer to catch up "within an hour" (or never, if that timer is stuck).
+    asyncio.create_task(smartroute_reconcile_loop())
+    # One-shot: the timer unit of every existing installation carries the old
+    # monotonic schedule; rewrite it so the hourly re-apply stays armed.
+    asyncio.create_task(smartroute_timer_migration())
     # One-shot: old RKN installs have no [Install] in the unit and lose their
     # rules at reboot. Runs in the background, never blocks startup.
     asyncio.create_task(rkn_boot_restore_migration())
@@ -9341,6 +9348,19 @@ async def _run_awg_plugin_update(op_id, server_id, component, target, allow_inte
         op['finished_ts'] = datetime.now().timestamp()
         _awg_plugin_active.pop((server_id, component), None)
         _awg_plugin_save()
+        # A plugin update recreates the AWG containers, which wipes Smart
+        # Route's table 200 and its accounting chains. Re-apply now instead of
+        # waiting for the next periodic pass: until then RU traffic leaves
+        # through the exit node. Never let this delay the operation result.
+        if op.get('state') in ('success', 'manual_step_required'):
+            asyncio.create_task(_smartroute_reconcile_after(server_id))
+
+
+async def _smartroute_reconcile_after(server_id):
+    try:
+        await smartroute_svc.reconcile(server_id)
+    except Exception as e:
+        logger.warning("Smart Route reconcile after plugin update failed: %s", e)
 
 
 @app.post('/api/servers/{server_id}/awg-plugin/update/{op_id}/cancel', tags=["Protocols"])
@@ -11343,6 +11363,97 @@ RESTORE_FORWARD_DELAY = 10
 # address Docker has replaced. The interval is short enough to repair a
 # recreated container before clients notice.
 RESTORE_FORWARD_INTERVAL = 60
+
+# Smart Route self-heal. Recreating an AWG container (kernel/plugin upgrade,
+# docker restart, host reboot) wipes table 200 and the split accounting chains,
+# and the panel keeps believing the instance is split: Russian traffic silently
+# goes through the exit node until the host-side hourly timer re-applies the
+# list - and if that timer is stuck, never. The panel therefore reads the throw
+# count itself and re-applies a lost split right away. The startup pass covers
+# a panel restart; the loop covers container work done while the panel runs.
+SMARTR_RECONCILE_DELAY = 25
+SMARTR_RECONCILE_INTERVAL = 300
+
+# One-shot rewrite of the host timer installed by panels up to v1.8.14: they
+# wrote OnUnitActiveSec, a monotonic schedule that silently stops arming when
+# the service's activation stamp goes stale (ZK and MAMKAM, 2026-11-19: the
+# timer stayed "active" for 9 days without a single run). The unit is written
+# only at install time, so existing installations keep the broken timer forever
+# without this pass. Off switch for tests and for admins who manage the unit
+# themselves.
+SMARTR_TIMER_MIGRATION = os.environ.get(
+    'AWP_SMARTR_TIMER_MIGRATION', '1').lower() not in ('0', 'false', 'no', 'off')
+SMARTR_TIMER_MIGRATION_DELAY = 40      # after the reconcile pass and the boot probes
+SMARTR_TIMER_MIGRATION_KEY = 'smartroute_timer_v1'
+
+
+async def smartroute_timer_migration():
+    """Rewrite legacy Smart Route timers once, per host, fail-soft."""
+    if not SMARTR_TIMER_MIGRATION:
+        logger.info("Smart Route timer migration disabled by AWP_SMARTR_TIMER_MIGRATION")
+        return
+    await asyncio.sleep(SMARTR_TIMER_MIGRATION_DELAY)
+    try:
+        data = load_data()
+    except Exception as e:
+        logger.warning(f"Smart Route timer migration: cannot read data: {e}")
+        return
+    rec = (data.get('panel_migrations') or {}).get(SMARTR_TIMER_MIGRATION_KEY) or {}
+    if rec.get('done_at'):
+        return
+    try:
+        report = await smartroute_svc.migrate_timer()
+    except Exception as e:
+        logger.warning(f"Smart Route timer migration failed: {e}")
+        return
+    migrated = [r['server'] for r in report if r.get('state') == 'migrated']
+    failed = [r['server'] for r in report if str(r.get('state', '')).startswith('failed')]
+    if migrated:
+        logger.warning("Smart Route timer rewritten on: " + ', '.join(migrated))
+    if failed:
+        logger.warning("Smart Route timer migration still pending on: " + ', '.join(failed))
+    await _smartroute_timer_migration_finish(bool(failed), len(failed))
+
+
+async def _smartroute_timer_migration_finish(pending, count):
+    try:
+        async with DATA_LOCK:
+            data = load_data()
+            rec = (data.setdefault('panel_migrations', {})
+                   .setdefault(SMARTR_TIMER_MIGRATION_KEY, {}))
+            rec['last_attempt_at'] = datetime.now(timezone.utc).isoformat()
+            rec['pending'] = count
+            if not pending:
+                rec['done_at'] = rec['last_attempt_at']
+            save_data(data)
+    except Exception as e:
+        logger.warning(f"Smart Route timer migration: cannot record the result: {e}")
+
+
+async def smartroute_reconcile_pass():
+    """One self-heal round over every server with Smart Route installed."""
+    try:
+        report = await smartroute_svc.reconcile()
+    except Exception as e:
+        logger.warning(f"Smart Route reconcile pass failed: {e}")
+        return []
+    repaired = [r for r in report if r.get('repaired')]
+    for item in report:
+        if item.get('error'):
+            logger.warning(f"Smart Route reconcile: {item['server']}/"
+                           f"{item['protocol']}: {item['error']}")
+    if repaired:
+        logger.warning("Smart Route re-applied after container recreation: " +
+                       ', '.join(f"{r['server']}/{r['protocol']}" for r in repaired))
+    return report
+
+
+async def smartroute_reconcile_loop():
+    """Periodic self-heal. Never raises - the next round retries."""
+    await asyncio.sleep(SMARTR_RECONCILE_DELAY)
+    while True:
+        await smartroute_reconcile_pass()
+        await asyncio.sleep(SMARTR_RECONCILE_INTERVAL)
 
 
 async def restore_public_port_forwards():

@@ -68,6 +68,11 @@ class FakeSRM:
     # log must survive across instances within one test.
     calls = []
     last = None
+    # What a container reports for its throw routes. Set to 0 to simulate a
+    # recreated container; enable_instance() puts it back to repaired_to.
+    throw_routes = 37
+    repaired_to = 37
+    fail_enable = False
 
     def __init__(self, ssh):
         FakeSRM.last = self
@@ -86,16 +91,38 @@ class FakeSRM:
         FakeSRM.calls.append(('run_update',))
         return 'updated 8000 prefixes'
 
+    prefixes_v4 = 8000
+    list_error = None
+    migrate_state = 'unchanged'
+    migrate_fail = False
+
     def host_status(self):
-        return {'installed': True, 'prefixes_v4': 8000, 'prefixes_v6': 300,
+        return {'installed': True, 'prefixes_v4': FakeSRM.prefixes_v4,
+                'prefixes_v6': 300,
                 'source_v4': 'ipdeny', 'updated_at': '2026-10-14T10:00:00',
-                'next_update': 'in 1h', 'error': None, 'instances': ['amnezia-awg2']}
+                'next_update': 'in 1h', 'error': FakeSRM.list_error,
+                'status': {'prefixes_v4': FakeSRM.prefixes_v4,
+                           'error': FakeSRM.list_error},
+                'instances': ['amnezia-awg2']}
+
+    def is_installed(self):
+        return True
+
+    def migrate_timer(self):
+        FakeSRM.calls.append(('migrate_timer',))
+        if FakeSRM.migrate_fail:
+            raise SmartRouteError('ssh_failed', 'ssh failed')
+        detail = '' if FakeSRM.migrate_state == 'unchanged' else 'backup=/x'
+        return {'state': FakeSRM.migrate_state, 'detail': detail, 'log': 'x'}
 
     def set_own_subnets(self, cidrs):
         FakeSRM.calls.append(('set_own_subnets', tuple(cidrs)))
 
     def enable_instance(self, container, config_path, subnet_default):
         FakeSRM.calls.append(('enable_instance', container, config_path, subnet_default))
+        if FakeSRM.fail_enable:
+            raise SmartRouteError('ssh_failed', 'ssh failed')
+        FakeSRM.throw_routes = FakeSRM.repaired_to
         return 'enabled'
 
     def disable_instance(self, container, config_path, subnet_default):
@@ -112,13 +139,20 @@ class FakeSRM:
                 'direct_out': {'pkts': 5, 'bytes': 500},
                 'via_exit_in': {'pkts': 3, 'bytes': 300},
                 'direct_in': {'pkts': 2, 'bytes': 200},
-                'throw_routes': 37}
+                'throw_routes': FakeSRM.throw_routes}
 
 
 class SmartRouteServiceTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         FakeSRM.calls = []
         FakeSRM.last = None
+        FakeSRM.throw_routes = 37
+        FakeSRM.repaired_to = 37
+        FakeSRM.fail_enable = False
+        FakeSRM.prefixes_v4 = 8000
+        FakeSRM.list_error = None
+        FakeSRM.migrate_state = 'unchanged'
+        FakeSRM.migrate_fail = False
         self.store = {'data': make_data()}
         self.awg = FakeAWG()
         self.dns_calls = []
@@ -548,6 +582,135 @@ class SmartRouteServiceTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(SmartRouteError) as ctx:
             await self.svc.set_dns_servers(0, '77.88.8.8', '1.1.1.1')
         self.assertEqual(ctx.exception.code, 'app_not_installed')
+
+
+    # ----- self-heal after container recreation -----
+
+    async def test_reconcile_leaves_healthy_instance_alone(self):
+        report = await self.svc.reconcile()
+        self.assertEqual([r['protocol'] for r in report], ['awg2'])
+        self.assertEqual(report[0]['throw_routes'], 37)
+        self.assertNotIn('repaired', report[0])
+        self.assertFalse([c for c in FakeSRM.calls if c[0] == 'enable_instance'])
+
+    async def test_reconcile_reapplies_lost_split_routes(self):
+        # Simulates the ZK case: container recreated, table 200 empty, panel
+        # still records the instance as split.
+        FakeSRM.throw_routes = 0
+        report = await self.svc.reconcile()
+        self.assertTrue(report[0]['repaired'])
+        self.assertEqual(report[0]['throw_routes'], 0)
+        self.assertEqual(report[0]['throw_routes_after'], 37)
+        self.assertIn(('enable_instance', 'amnezia-awg2',
+                       '/opt/amnezia/awg/awg2/wg0.conf', SUBNET_DEFAULT),
+                      FakeSRM.calls)
+        link = self.store['data']['servers'][0]['protocols']['awg2']['exit_link']
+        self.assertFalse(link.get('smart_route_lost'))
+
+    async def test_reconcile_marks_lost_when_reapply_restores_nothing(self):
+        FakeSRM.throw_routes = 0
+        FakeSRM.repaired_to = 0
+        report = await self.svc.reconcile()
+        self.assertTrue(report[0]['repaired'])
+        self.assertIn('error', report[0])
+        link = self.store['data']['servers'][0]['protocols']['awg2']['exit_link']
+        self.assertTrue(link['smart_route_lost'])
+
+    async def test_reconcile_survives_a_failing_container(self):
+        FakeSRM.throw_routes = 0
+        FakeSRM.fail_enable = True
+        report = await self.svc.reconcile()
+        self.assertIn('error', report[0])
+        self.assertNotIn('repaired', report[0])
+
+    async def test_reconcile_skips_paused_server(self):
+        self.store['data']['servers'][0]['smartroute']['enabled'] = False
+        self.assertEqual(await self.svc.reconcile(), [])
+        self.assertEqual(FakeSRM.calls, [])
+
+    async def test_reconcile_skips_uninstalled_server(self):
+        self.store['data']['servers'][0]['smartroute']['installed'] = False
+        self.assertEqual(await self.svc.reconcile(), [])
+
+    async def test_reconcile_single_server_by_id(self):
+        report = await self.svc.reconcile(0)
+        self.assertEqual([r['protocol'] for r in report], ['awg2'])
+        with self.assertRaises(SmartRouteError) as ctx:
+            await self.svc.reconcile(9)
+        self.assertEqual(ctx.exception.code, 'server_not_found')
+
+    async def test_reconcile_clears_a_stale_lost_badge(self):
+        link = self.store['data']['servers'][0]['protocols']['awg2']['exit_link']
+        link['smart_route_lost'] = True
+        await self.svc.reconcile()
+        self.assertFalse(link.get('smart_route_lost'))
+
+
+    async def test_reconcile_skips_an_empty_prefix_list(self):
+        # Re-applying with no list would "succeed" with zero routes and be
+        # retried every round; the pass must stand down until the host has a
+        # usable list again.
+        FakeSRM.throw_routes = 0
+        FakeSRM.prefixes_v4 = 0
+        report = await self.svc.reconcile()
+        self.assertEqual(report[0]['skipped'], 'prefix-list')
+        self.assertNotIn('repaired', report[0])
+        self.assertFalse([c for c in FakeSRM.calls if c[0] == 'enable_instance'])
+
+    async def test_reconcile_skips_when_the_list_reports_an_error(self):
+        FakeSRM.throw_routes = 0
+        FakeSRM.list_error = 'no v4 source gave >= 100 prefixes; old list kept'
+        report = await self.svc.reconcile()
+        self.assertEqual(report[0]['skipped'], 'prefix-list')
+
+    async def test_reconcile_without_splits_does_not_touch_the_host(self):
+        for proto in ('awg', 'awg2'):
+            self.store['data']['servers'][0]['protocols'][proto]['exit_link']['smart_route'] = False
+        self.assertEqual(await self.svc.reconcile(), [])
+        self.assertEqual(FakeSRM.calls, [])
+
+    # ----- timer migration -----
+
+    async def test_migrate_timer_reports_each_host(self):
+        FakeSRM.migrate_state = 'migrated'
+        report = await self.svc.migrate_timer()
+        self.assertEqual(report[0]['server'], 'MAMKAM')
+        self.assertEqual(report[0]['state'], 'migrated')
+        self.assertIn(('migrate_timer',), FakeSRM.calls)
+
+    async def test_migrate_timer_noop_is_recorded_as_done(self):
+        report = await self.svc.migrate_timer()
+        self.assertEqual(report[0]['state'], 'unchanged')
+        rec = self.store['data']['panel_migrations']['smartroute_timer_v1']
+        self.assertNotIn('pending', rec['hosts']['srv-entry'])
+
+    async def test_migrate_timer_failure_stays_pending(self):
+        FakeSRM.migrate_state = 'failed-not-armed'
+        report = await self.svc.migrate_timer()
+        self.assertEqual(report[0]['state'], 'failed-not-armed')
+        rec = self.store['data']['panel_migrations']['smartroute_timer_v1']
+        self.assertTrue(rec['hosts']['srv-entry']['pending'])
+
+    async def test_migrate_timer_ssh_exception_does_not_abort_the_pass(self):
+        FakeSRM.migrate_fail = True
+        report = await self.svc.migrate_timer()
+        self.assertEqual(report[0]['state'], 'failed-exception')
+
+    async def test_migrate_timer_skips_uninstalled_server(self):
+        self.store['data']['servers'][0]['smartroute']['installed'] = False
+        self.assertEqual(await self.svc.migrate_timer(), [])
+        self.assertEqual(FakeSRM.calls, [])
+
+    async def test_migrate_timer_skips_host_without_the_script(self):
+        # A record that says "installed" but a host with no updater: nothing to
+        # migrate, and it must not become a permanent pending retry.
+        class NoScript(FakeSRM):
+            def is_installed(self):
+                return False
+
+        with mock.patch.object(smartroute_service, 'SmartRouteManager', NoScript):
+            report = await self.svc.migrate_timer()
+        self.assertEqual(report[0]['state'], 'not-installed')
 
 
 class StatusJsonSSH:

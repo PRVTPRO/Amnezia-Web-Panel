@@ -1563,5 +1563,11 @@
   "tp_err_no_iptables_modules": "Le conteneur n'a pas les modules iptables (xt_string/xt_connbytes), le filtre ne peut pas y fonctionner",
   "tp_err_unreachable": "Le serveur est injoignable en SSH - les règles ne sont pas appliquées",
   "tp_state_needs_start": "Démarrez le conteneur",
-  "close": "Fermer"
+  "close": "Fermer",
+  "smartroute_timer_warn": "Le minuteur de mise à jour n'est pas armé — les préfixes ne se rafraîchissent pas",
+  "smartroute_timer_age": "Dernière mise à jour de la liste",
+  "smartroute_timer_never": "pas encore exécuté",
+  "smartroute_timer_stale": "La liste de préfixes n'a pas été actualisée depuis trop longtemps",
+  "smartroute_timer_armed": "Minuteur armé",
+  "smartroute_card_warn": "attention"
 }

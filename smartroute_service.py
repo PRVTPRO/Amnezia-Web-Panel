@@ -13,11 +13,19 @@ import asyncio
 import logging
 import threading
 from collections import defaultdict
+from datetime import datetime, timezone
 
 from managers.awg_manager import AWG_DEFAULTS
-from managers.smartroute_manager import SmartRouteManager, normalize_cidrs
+from managers.smartroute_manager import (
+    SMARTR_MIN_PREFIXES,
+    SmartRouteManager,
+    normalize_cidrs,
+)
 
 logger = logging.getLogger(__name__)
+
+# data.panel_migrations key for the one-shot host timer rewrite.
+SMARTR_TIMER_MIGRATION_KEY = 'smartroute_timer_v1'
 
 
 class SmartRouteError(Exception):
@@ -533,6 +541,198 @@ class SmartRouteService:
                     logger.warning("dns_via_exit for %s failed: %s", proto, err)
                     results.append({'protocol': proto, 'status': 'error', 'error': str(err)})
         return {'status': 'success', 'dns_via_exit': bool(enabled), 'results': results}
+
+    # ----- self-healing after container restarts -----
+
+    async def migrate_timer(self, server_id=None):
+        """Re-install the host timer with an absolute schedule, once per host.
+
+        Panels up to v1.8.14 wrote ``OnUnitActiveSec=1h``: a monotonic timer
+        that silently stops arming when the service's activation stamp goes
+        stale (ZK and MAMKAM, 2026-11-19: "active" but no next run for days).
+        The unit is rewritten only on install, so existing installations would
+        keep the broken timer forever without this pass.
+
+        Skips servers that do not run Smart Route, hosts without systemd, and
+        units the panel does not own. Never raises for one host: the report
+        says what happened and a failing host stays pending for the next start.
+        """
+        data = self.load_data()
+        servers = data.get('servers') or []
+        if server_id is None:
+            targets = list(enumerate(servers))
+        else:
+            targets = [(server_id, self._server(data, server_id))]
+        report = []
+        for idx, server in targets:
+            if not (server.get('smartroute') or {}).get('installed'):
+                continue
+            label = server.get('name') or server.get('uid') or idx
+            entry = {'server': label, 'uid': server.get('uid')}
+            report.append(entry)
+            try:
+                smartr = await self._smartr(server)
+                if not await asyncio.to_thread(smartr.is_installed):
+                    entry['state'] = 'not-installed'
+                    continue
+                result = await asyncio.to_thread(smartr.migrate_timer)
+                entry.update(result)
+                if result['state'] == 'migrated':
+                    logger.warning(
+                        "smartroute: timer unit of %s was legacy (OnUnitActiveSec) "
+                        "and has been rewritten to an absolute schedule (%s)",
+                        label, result.get('detail') or 'no backup')
+                elif result['state'].startswith('failed'):
+                    logger.warning("smartroute: timer migration failed on %s: %s",
+                                   label, result.get('detail') or result['state'])
+                await self._set_timer_migration(entry['uid'],
+                                                ok=not result['state'].startswith('failed'),
+                                                state=result['state'])
+            except Exception as err:
+                logger.warning("smartroute timer migration on %s failed: %s", label, err)
+                entry['state'] = 'failed-exception'
+                entry['detail'] = str(err)
+        return report
+
+    async def _set_timer_migration(self, uid, *, ok, state):
+        """Record the per-host outcome in data.json (best effort)."""
+        if not uid:
+            return
+        try:
+            async with self.data_lock:
+                data = self.load_data()
+                rec = (data.setdefault('panel_migrations', {})
+                       .setdefault(SMARTR_TIMER_MIGRATION_KEY, {}))
+                hosts = rec.setdefault('hosts', {})
+                hosts[uid] = {'state': state,
+                              'at': datetime.now(timezone.utc).isoformat(timespec='seconds')}
+                if ok:
+                    hosts[uid].pop('pending', None)
+                else:
+                    hosts[uid]['pending'] = True
+                self.save_data(data)
+        except Exception as err:
+            logger.warning("smartroute: could not record timer migration of %s: %s",
+                           uid, err)
+
+    async def _prefix_list_health(self):
+        """(error, v4_count) of the host side list, best effort.
+
+        Shared by every server: the lists live on the panel-managed host, so a
+        broken download is a fleet-wide condition, not a per-instance one.
+        """
+        data = self.load_data()
+        for server in data.get('servers') or []:
+            if not (server.get('smartroute') or {}).get('installed'):
+                continue
+            try:
+                smartr = await self._smartr(server)
+                status = await asyncio.to_thread(smartr.host_status)
+            except Exception as err:
+                return str(err), 0
+            # host_status merges status.json both flat and under 'status';
+            # accept either shape so the guard never depends on the manager
+            # version that produced it.
+            counts = status.get('status') if isinstance(status.get('status'), dict) else status
+            try:
+                return (status.get('error'), int(counts.get('prefixes_v4') or 0))
+            except (TypeError, ValueError):
+                return 'invalid prefix count', 0
+        return None, 0
+
+    async def reconcile(self, server_id=None):
+        """Re-apply split routing to instances whose in-container state is gone.
+
+        Every path that recreates an AWG container (kernel/plugin upgrade,
+        ``docker restart``, host reboot, image change) wipes table 200 and the
+        mangle accounting chains, while the panel still records the instance
+        as split. Until now only the hourly host timer put the throw routes
+        back - and if that timer was stuck, RU traffic silently went through
+        the exit node with no error anywhere (ZK, 2026-11-19).
+
+        This pass asks the container for its throw count and re-applies the
+        host-side enable when it is zero. Idempotent: a healthy instance is
+        only read. Never raises for a single container - the report says what
+        failed, and the next round retries.
+        """
+        data = self.load_data()
+        servers = data.get('servers') or []
+        if server_id is None:
+            targets = list(enumerate(servers))
+        else:
+            targets = [(server_id, self._server(data, server_id))]
+        targets = [(idx, server) for idx, server in targets
+                   if (server.get('smartroute') or {}).get('installed')
+                   and (server.get('smartroute') or {}).get('enabled', True)
+                   and self._split_instances_of(server)]
+        if not targets:
+            return []
+        # Re-applying from an empty or failed list would "succeed" with zero
+        # throw routes and be retried every round: skip the whole pass and let
+        # the host timer fetch a fresh list first.
+        list_error, list_count = await self._prefix_list_health()
+        if list_error or list_count < SMARTR_MIN_PREFIXES:
+            logger.warning(
+                "smartroute: reconcile skipped - prefix list is not usable "
+                "(v4=%s error=%s)", list_count, list_error or 'none')
+            return [{'server': '-', 'protocol': '-', 'skipped': 'prefix-list',
+                     'prefixes_v4': list_count, 'error': list_error}]
+        report = []
+        for idx, server in targets:
+            identity = self._identity(server)
+            label = server.get('name') or server.get('uid') or idx
+            for proto, _link in self._split_instances_of(server):
+                entry = {'server': label, 'protocol': proto}
+                report.append(entry)
+                try:
+                    awg = await self._awg(server)
+                    container, config_path, subnet_default = await self._container_ctx(awg, proto)
+                    smartr = await self._smartr(server)
+                    before = await asyncio.to_thread(
+                        smartr.instance_counters, container, config_path, subnet_default)
+                    throws = int(before.get('throw_routes') or 0)
+                    entry['throw_routes'] = throws
+                    if throws:
+                        # Healthy. Clear a leftover "lost" badge so the UI does
+                        # not keep warning after the routes are back.
+                        await self._set_lost(identity, proto, False)
+                        continue
+                    # enable_instance restores both the throw routes and the
+                    # accounting chains, and is a plain re-apply when present.
+                    await asyncio.to_thread(smartr.enable_instance, container,
+                                            config_path, subnet_default)
+                    after = await asyncio.to_thread(
+                        smartr.instance_counters, container, config_path, subnet_default)
+                    restored = int(after.get('throw_routes') or 0)
+                    entry.update({'repaired': True, 'throw_routes_after': restored})
+                    logger.warning(
+                        "smartroute: %s/%s had no split routes (container was "
+                        "recreated?); re-applied, %s throw routes now",
+                        label, proto, restored)
+                    if not restored:
+                        entry['error'] = 'no throw routes after re-apply (empty prefix list?)'
+                    await self._set_lost(identity, proto, not restored)
+                except Exception as err:
+                    logger.warning("smartroute reconcile of %s/%s failed: %s",
+                                   label, proto, err)
+                    entry['error'] = str(err)
+        return report
+
+    async def _set_lost(self, identity, protocol, lost):
+        """Persist the UI badge flag; never fail the reconcile pass for it."""
+        try:
+            async with self.data_lock:
+                data = self.load_data()
+                server = self._resolve_identity(data, identity)
+                rec = (server.get('protocols') or {}).get(protocol) or {}
+                link = rec.get('exit_link')
+                if link is None or bool(link.get('smart_route_lost')) == bool(lost):
+                    return
+                link['smart_route_lost'] = bool(lost)
+                self.save_data(data)
+        except Exception as err:
+            logger.warning("smartroute: could not record smart_route_lost for %s: %s",
+                           protocol, err)
 
     # ----- counters (merged into the exit-link status payload) -----
 
