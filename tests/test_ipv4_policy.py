@@ -54,10 +54,14 @@ def make_ssh(script):
 BRIDGE_SCRIPT = {
     'network ls': ('bridge bridge\namnezia-selfsteal-net bridge\nhost host',
                    '', 0),
-    'inspect bridge': ('172.17.0.0/16||br-536bd8016c01', '', 0),
-    'inspect amnezia-selfsteal-net': ('172.18.0.0/16||br-2d95ecbe88ba', '', 0),
+    'inspect bridge': (
+        '172.17.0.0/16||536bd8016c01d2b2b125d577c537fa7db2367fef4d31a65262f86132d78a3c17',
+        '', 0),
+    'inspect amnezia-selfsteal-net': (
+        '172.18.0.0/16||2d95ecbe88baf79c8dce0f3ec8241d97d1265a3a54fdcfeadc21455cc451b579',
+        '', 0),
     'ip -4 addr show': ('inet 192.0.2.1/24 ens3\n    inet 198.51.100.7/24 secondary ens3', '', 0),
-    'iptables -t nat -S POSTROUTING': (
+    'nat -S POSTROUTING': (
         '-A POSTROUTING -s 172.17.0.0/24 -o ens3 -j SNAT --to-source 198.51.100.7\n'
         '-A POSTROUTING -s 172.18.0.0/16 ! -o br-2d95ecbe88ba -j MASQUERADE\n'
         '-A POSTROUTING -o ens3 -j SNAT --to-source 203.0.113.1\n'
@@ -65,6 +69,8 @@ BRIDGE_SCRIPT = {
     '--interface': ('198.51.100.7', '', 0),
     'docker exec': ('198.51.100.7', '', 0),
 }
+
+BOTH_BINS = '/usr/sbin/iptables-nft\n/usr/sbin/iptables-legacy'
 
 
 class EgressHelpersTests(unittest.TestCase):
@@ -81,6 +87,13 @@ class EgressHelpersTests(unittest.TestCase):
         ssh3 = make_ssh({'--interface': ('', 0, 1)})
         self.assertFalse(panel._egress_verify(ssh3, '198.51.100.7'))
 
+    def test_iptables_bins_fall_back_to_the_plain_name(self):
+        ssh = make_ssh({**BRIDGE_SCRIPT, 'command -v': (BOTH_BINS, '', 0)})
+        self.assertEqual(panel._iptables_bins(ssh),
+                         ['/usr/sbin/iptables-nft', '/usr/sbin/iptables-legacy'])
+        ssh2 = make_ssh(BRIDGE_SCRIPT)
+        self.assertEqual(panel._iptables_bins(ssh2), ['iptables'])
+
     def test_docker_subnets_enumerates_bridge_networks(self):
         ssh = make_ssh(BRIDGE_SCRIPT)
         self.assertEqual(panel._docker_subnets(ssh), [
@@ -89,8 +102,8 @@ class EgressHelpersTests(unittest.TestCase):
 
     def test_docker_subnets_skips_unusable_networks(self):
         ssh = make_ssh({**BRIDGE_SCRIPT,
-                        'inspect bridge': ('garbage||br-536bd8016c01', '', 0),
-                        'inspect amnezia-selfsteal-net': ('fd00::/8||br-2d', '', 0)})
+                        'inspect bridge': ('garbage||536bd8016c01', '', 0),
+                        'inspect amnezia-selfsteal-net': ('fd00::/8||2d95ecbe88ba', '', 0)})
         self.assertEqual(panel._docker_subnets(ssh), [])
         ssh2 = make_ssh({**BRIDGE_SCRIPT,
                          'network ls': ('bridge overlay\nawg bridge', '', 0)})
@@ -98,7 +111,10 @@ class EgressHelpersTests(unittest.TestCase):
 
     def test_docker_subnets_honors_the_custom_bridge_name(self):
         ssh = make_ssh({**BRIDGE_SCRIPT,
-                        'inspect bridge': ('172.17.0.0/16|eth9|br-536bd8016c01', '', 0)})
+                        'inspect bridge': (
+                            '172.17.0.0/16|eth9|'
+                            '536bd8016c01d2b2b125d577c537fa7db2367fef4d31a65262f86132d78a3c17',
+                            '', 0)})
         self.assertEqual(panel._docker_subnets(ssh), [
             ('172.17.0.0/16', 'eth9'),
             ('172.18.0.0/16', 'br-2d95ecbe88ba')])
@@ -122,7 +138,8 @@ class EgressHelpersTests(unittest.TestCase):
         ssh = make_ssh(BRIDGE_SCRIPT)
         rules = panel._snat_rules_for(ssh, panel._docker_subnets(ssh))
         # the stale manual /24 rule inside docker0's /16 is managed;
-        # the host-wide SNAT (no -s) and the masquerades are not
+        # the host-wide SNAT (no -s) and the masquerades are not; the
+        # readback is a union over backends and deduplicates
         self.assertEqual(len(rules), 1)
         self.assertIn('-s 172.17.0.0/24', rules[0])
         self.assertIn('--to-source 198.51.100.7', rules[0])
@@ -156,7 +173,7 @@ class EgressEndpointTests(unittest.TestCase):
 
         self.assertEqual(result['status'], 'success')
         inserts = [c for c in self.ssh.calls
-                   if 'iptables -t nat -I POSTROUTING' in c]
+                   if 'nat -I POSTROUTING' in c]
         self.assertEqual(len(inserts), 2)
         self.assertTrue(any('-s 172.17.0.0/16 ! -o docker0 ' in c
                             for c in inserts))
@@ -165,7 +182,7 @@ class EgressEndpointTests(unittest.TestCase):
         self.assertNotIn('-o ens3', ''.join(inserts))
         # the stale manual /24 rule was taken over and deleted
         deletes = [c for c in self.ssh.calls
-                   if 'iptables -t nat -D POSTROUTING' in c]
+                   if 'nat -D POSTROUTING' in c]
         self.assertTrue(any('-s 172.17.0.0/24' in c for c in deletes))
         # the end-to-end check went through a VPN container
         self.assertTrue(any('docker exec' in c for c in self.ssh.calls))
@@ -177,6 +194,57 @@ class EgressEndpointTests(unittest.TestCase):
         self.assertTrue(any('systemctl enable amnezia-egress-snat' in c
                             for c in self.ssh.calls))
 
+    def test_apply_writes_both_backends_when_present(self):
+        ssh = make_ssh({**BRIDGE_SCRIPT, 'command -v': (BOTH_BINS, '', 0)})
+        self.stack.enter_context(patch.object(panel, 'get_ssh', return_value=ssh))
+        result = asyncio.run(panel.api_ipv4_egress(
+            self.request(), 0, panel.Ipv4EgressRequest(ip='198.51.100.7')))
+
+        self.assertEqual(result['status'], 'success')
+        inserts = [c for c in ssh.calls if 'nat -I POSTROUTING' in c]
+        self.assertEqual(len(inserts), 4)
+        self.assertEqual(len([c for c in inserts if 'iptables-nft' in c]), 2)
+        self.assertEqual(len([c for c in inserts if 'iptables-legacy' in c]), 2)
+        # the stale rule is deleted once per backend, from the same spec
+        deletes = [c for c in ssh.calls if 'nat -D POSTROUTING' in c]
+        self.assertEqual(len(deletes), 2)
+
+    def test_apply_reports_a_failed_insert(self):
+        ssh = make_ssh(BRIDGE_SCRIPT)
+        base = ssh.run_sudo_command
+
+        def failing(command, **kwargs):
+            out, err, code = base(command, **kwargs)
+            if 'nat -I POSTROUTING' in command:
+                return ('', 'iptables: Bad rule (does a matching rule '
+                            'exist in that chain?)', 2)
+            return (out, err, code)
+
+        ssh.run_sudo_command = failing
+        self.stack.enter_context(patch.object(panel, 'get_ssh', return_value=ssh))
+        result = asyncio.run(panel.api_ipv4_egress(
+            self.request(), 0, panel.Ipv4EgressRequest(ip='198.51.100.7')))
+
+        self.assertEqual(result.status_code, 409)
+        error = json_error(result)
+        self.assertIn('Bad rule', error)
+        self.assertIn('172.17.0.0/16', error)
+        self.assertIsNone(self.data['servers'][0].get('egress_ip'))
+        self.assertEqual([p for _, p in ssh.uploads], [])
+
+    def test_apply_reports_when_the_rules_do_not_persist(self):
+        ssh = make_ssh({**BRIDGE_SCRIPT,
+                        'nat -S POSTROUTING': (
+                            '-A POSTROUTING -s 172.17.0.0/16 ! -o docker0 '
+                            '-j MASQUERADE', '', 0)})
+        self.stack.enter_context(patch.object(panel, 'get_ssh', return_value=ssh))
+        result = asyncio.run(panel.api_ipv4_egress(
+            self.request(), 0, panel.Ipv4EgressRequest(ip='198.51.100.7')))
+
+        self.assertEqual(result.status_code, 409)
+        self.assertIn('did not persist', json_error(result))
+        self.assertIsNone(self.data['servers'][0].get('egress_ip'))
+
     def test_apply_rolls_back_when_the_container_keeps_the_main_ip(self):
         ssh = make_ssh({**BRIDGE_SCRIPT, 'docker exec': ('192.0.2.1', '', 0)})
         self.stack.enter_context(patch.object(panel, 'get_ssh', return_value=ssh))
@@ -186,9 +254,9 @@ class EgressEndpointTests(unittest.TestCase):
         self.assertEqual(result.status_code, 409)
         self.assertIn('192.0.2.1', json_error(result))
         inserts = [c for c in ssh.calls
-                   if 'iptables -t nat -I POSTROUTING' in c]
+                   if 'nat -I POSTROUTING' in c]
         deletes = [c for c in ssh.calls
-                   if 'iptables -t nat -D POSTROUTING' in c]
+                   if 'nat -D POSTROUTING' in c]
         self.assertEqual(len(inserts), 2)
         self.assertGreaterEqual(len(deletes), 2)
         self.assertIsNone(self.data['servers'][0].get('egress_ip'))
@@ -219,7 +287,7 @@ class EgressEndpointTests(unittest.TestCase):
             self.request(), 0, panel.Ipv4EgressRequest(ip='198.51.100.7')))
 
         deletes = [c for c in self.ssh.calls
-                   if 'iptables -t nat -D POSTROUTING' in c]
+                   if 'nat -D POSTROUTING' in c]
         self.assertEqual(len(deletes), 1)
         self.assertIn('-s 172.17.0.0/24', deletes[0])
 
@@ -229,7 +297,7 @@ class EgressEndpointTests(unittest.TestCase):
         self.assertEqual(result.status_code, 409)
         self.assertIsNone(self.data['servers'][0].get('egress_ip'))
         self.assertEqual([c for c in self.ssh.calls
-                          if 'iptables -t nat -I' in c], [])
+                          if 'nat -I POSTROUTING' in c], [])
 
     def test_apply_refuses_a_non_egressing_ip(self):
         ssh = make_ssh({**BRIDGE_SCRIPT, '--interface': ('192.0.2.1', '', 0)})
@@ -247,7 +315,7 @@ class EgressEndpointTests(unittest.TestCase):
         self.assertEqual(result['status'], 'success')
         self.assertIsNone(self.data['servers'][0].get('egress_ip'))
         deletes = [c for c in self.ssh.calls
-                   if 'iptables -t nat -D POSTROUTING' in c]
+                   if 'nat -D POSTROUTING' in c]
         # the static fake always re-reports the stale rule; assert every
         # delete targets a docker-subnet SNAT and at least one happened
         self.assertGreaterEqual(len(deletes), 1)

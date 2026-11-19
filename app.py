@@ -7944,6 +7944,9 @@ def api_xray_selfsteal_apply(request: Request, server_id: int, req: XraySelfstea
 # end up on any attached network, e.g. the self-steal one. sendThrough
 # cannot do this from a bridge container - the public IP is not visible
 # in its network namespace.
+# The rules are written to every installed iptables backend (nft and
+# legacy) - a plain `iptables` lookup may resolve differently for the
+# panel's non-login SSH shell than for a root shell.
 # The apply is verified end-to-end: a curl from inside the VPN container
 # must report the egress address, otherwise the rules are rolled back.
 # Ingress: pins the published ports to one host address at container
@@ -7982,18 +7985,20 @@ def _docker_subnets(ssh):
         out, _, code = ssh.run_sudo_command(
             "docker network inspect " + shlex.quote(name)
             + " --format '{{(index .IPAM.Config 0).Subnet}}|"
-            "{{index .Options \"com.docker.network.bridge.name\"}}|"
-            "{{printf \"br-%.12s\" .Id}}'")
+            "{{index .Options \"com.docker.network.bridge.name\"}}|{{.Id}}'")
         if code != 0 or '|' not in (out or ''):
             continue
-        subnet, opt, br_id = out.strip().split('|', 2)
+        subnet, opt, net_id = out.strip().split('|', 2)
+        if opt in ('<no value>', 'nil'):
+            opt = ''
         try:
             net = ipaddress.ip_network(subnet, strict=False)
         except ValueError:
             continue
         if net.version != 4:
             continue
-        iface = opt or ('docker0' if name == 'bridge' else br_id)
+        iface = opt or ('docker0' if name == 'bridge'
+                        else 'br-' + net_id[:12])
         subnets.append((subnet, iface))
     return subnets
 
@@ -8023,31 +8028,47 @@ def _egress_container_probe(ssh, containers):
     return None
 
 
+def _iptables_bins(ssh):
+    """Explicit iptables backend binaries. A plain `iptables` lookup can
+    resolve to a different backend for the panel's non-login SSH shell
+    than for an interactive root shell; naming the backends removes the
+    guesswork. Both are written when present - the kernel consults both
+    and the first NAT decision wins, so the rule works either way."""
+    out, _, code = ssh.run_command(
+        'command -v iptables-nft || true; command -v iptables-legacy || true')
+    bins = [line.strip() for line in (out or '').split('\n') if line.strip()]
+    return bins or ['iptables']
+
+
 def _snat_rules_for(ssh, subnets):
     """Managed POSTROUTING SNAT rules: those sourced from inside any
-    docker subnet. The panel owns the egress policy for container
-    traffic, so a stale manual rule like -s 172.17.0.0/24 inside
-    docker0's /16 is picked up too. Rules without -s (host-wide) are
-    never touched. Live spec strings, usable for -D deletion."""
-    out, _, code = ssh.run_sudo_command("iptables -t nat -S POSTROUTING")
-    if code != 0:
-        return []
+    docker subnet, across every installed iptables backend. The panel
+    owns the egress policy for container traffic, so a stale manual rule
+    like -s 172.17.0.0/24 inside docker0's /16 is picked up too. Rules
+    without -s (host-wide) are never touched. Live spec strings, usable
+    for -D deletion."""
     pools = [ipaddress.ip_network(s) for s, _ in subnets]
-    rules = []
-    for line in (out or '').split('\n'):
-        line = line.strip()
-        if not line.startswith('-A POSTROUTING') or '-j SNAT' not in line:
+    specs = set()
+    for bin_name in _iptables_bins(ssh):
+        out, _, code = ssh.run_sudo_command(
+            f'{bin_name} -t nat -S POSTROUTING')
+        if code != 0:
             continue
-        match = re.search(r'-s (\S+) ', line)
-        if not match:
-            continue
-        try:
-            src = ipaddress.ip_network(match.group(1), strict=False)
-        except ValueError:
-            continue
-        if any(src.subnet_of(pool) for pool in pools):
-            rules.append(line[len('-A POSTROUTING '):].strip())
-    return rules
+        for line in (out or '').split('\n'):
+            line = line.strip()
+            if not line.startswith('-A POSTROUTING') \
+                    or '-j SNAT' not in line:
+                continue
+            match = re.search(r'-s (\S+) ', line)
+            if not match:
+                continue
+            try:
+                src = ipaddress.ip_network(match.group(1), strict=False)
+            except ValueError:
+                continue
+            if any(src.subnet_of(pool) for pool in pools):
+                specs.add(line[len('-A POSTROUTING '):].strip())
+    return sorted(specs)
 
 
 def _persist_egress(ssh, subnets, ip):
@@ -8055,12 +8076,13 @@ def _persist_egress(ssh, subnets, ip):
     on the server (netfilter-persistent may only save one iptables
     backend; the script is deterministic)."""
     rules = []
-    for subnet, iface in subnets:
-        rules.append(
-            f'iptables -t nat -C POSTROUTING -s {subnet} ! -o {iface} '
-            f'-j SNAT --to-source {ip} 2>/dev/null || '
-            f'iptables -t nat -I POSTROUTING -s {subnet} ! -o {iface} '
-            f'-j SNAT --to-source {ip}')
+    for bin_name in _iptables_bins(ssh):
+        for subnet, iface in subnets:
+            rules.append(
+                f'{bin_name} -t nat -C POSTROUTING -s {subnet} ! -o {iface} '
+                f'-j SNAT --to-source {ip} 2>/dev/null || '
+                f'{bin_name} -t nat -I POSTROUTING -s {subnet} ! -o {iface} '
+                f'-j SNAT --to-source {ip}')
     script = ('#!/bin/sh' + chr(10)
               + '# Managed by Amnezia Web Panel: re-applies the egress SNAT'
               + chr(10) + (chr(10).join(rules) or 'true') + chr(10))
@@ -8084,8 +8106,11 @@ def _persist_egress(ssh, subnets, ip):
 
 def _clear_egress(ssh, subnets):
     """Remove the managed SNAT rules and the boot persistence."""
+    bins = _iptables_bins(ssh)
     for spec in _snat_rules_for(ssh, subnets):
-        ssh.run_sudo_command('iptables -t nat -D POSTROUTING ' + spec)
+        for bin_name in bins:
+            ssh.run_sudo_command(
+                f'{bin_name} -t nat -D POSTROUTING ' + spec)
     ssh.run_sudo_command(
         'systemctl disable --now amnezia-egress-snat 2>/dev/null || true')
     ssh.run_sudo_command('rm -f /opt/amnezia/egress-snat.sh '
@@ -8176,21 +8201,44 @@ async def api_ipv4_egress(request: Request, server_id: int,
                                   'did not report it back. Check with the '
                                   'provider that the address is routed'},
                         status_code=409)
+            bins = _iptables_bins(ssh)
             for spec in _snat_rules_for(ssh, subnets):
-                ssh.run_sudo_command('iptables -t nat -D POSTROUTING ' + spec)
-            if ip:
-                for subnet, iface in subnets:
+                for bin_name in bins:
                     ssh.run_sudo_command(
-                        f'iptables -t nat -I POSTROUTING -s {subnet} '
-                        f'! -o {iface} -j SNAT --to-source {ip}')
+                        f'{bin_name} -t nat -D POSTROUTING ' + spec)
+            if ip:
+                errors = []
+                for bin_name in bins:
+                    for subnet, iface in subnets:
+                        _, err, code = ssh.run_sudo_command(
+                            f'{bin_name} -t nat -I POSTROUTING -s {subnet} '
+                            f'! -o {iface} -j SNAT --to-source {ip}')
+                        if code != 0:
+                            errors.append(
+                                f'{bin_name} {subnet}: '
+                                f'{(err or "").strip() or "iptables failed"}')
+                landed = _snat_rules_for(ssh, subnets)
+                if errors or not landed:
+                    # A silently skipped rule would leave the exit policy
+                    # half-applied - undo whatever landed and say so.
+                    for spec in landed:
+                        for bin_name in bins:
+                            ssh.run_sudo_command(
+                                f'{bin_name} -t nat -D POSTROUTING ' + spec)
+                    return JSONResponse(
+                        {'error': 'Failed to insert the SNAT rules: '
+                                  + '; '.join(errors
+                                              or ['rules did not persist'])},
+                        status_code=409)
                 observed = _egress_container_probe(
                     ssh, _egress_probe_containers(server))
                 if observed is not None and observed != ip:
                     # The rules exist but the container path does not go
                     # through them - leave the server as it was.
                     for spec in _snat_rules_for(ssh, subnets):
-                        ssh.run_sudo_command(
-                            'iptables -t nat -D POSTROUTING ' + spec)
+                        for bin_name in bins:
+                            ssh.run_sudo_command(
+                                f'{bin_name} -t nat -D POSTROUTING ' + spec)
                     return JSONResponse(
                         {'error': f'The SNAT rules were inserted, but the '
                                   f'container still egresses as '
