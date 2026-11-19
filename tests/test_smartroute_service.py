@@ -701,6 +701,47 @@ class SmartRouteServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.svc.migrate_timer(), [])
         self.assertEqual(FakeSRM.calls, [])
 
+    async def test_migrate_timer_second_pass_skips_resolved_hosts(self):
+        # Review A5: an unavailable host must not make every later panel start
+        # pay a full SSH sweep again. A host recorded as done is not contacted.
+        self.store['data']['panel_migrations'] = {
+            'smartroute_timer_v1': {'hosts': {'srv-entry': {'state': 'unchanged'}}}}
+        self.assertEqual(await self.svc.migrate_timer(), [])
+        self.assertEqual(FakeSRM.calls, [])
+
+    async def test_migrate_timer_second_pass_retries_pending_hosts(self):
+        self.store['data']['panel_migrations'] = {
+            'smartroute_timer_v1': {'hosts': {'srv-entry': {'state': 'failed-not-armed',
+                                                            'pending': True}}}}
+        report = await self.svc.migrate_timer()
+        self.assertEqual(report[0]['state'], 'unchanged')
+        self.assertIn(('migrate_timer',), FakeSRM.calls)
+
+    async def test_migrate_timer_explicit_server_ignores_the_record(self):
+        # The manual repair path must always check the named host.
+        self.store['data']['panel_migrations'] = {
+            'smartroute_timer_v1': {'hosts': {'srv-entry': {'state': 'unchanged'}}}}
+        report = await self.svc.migrate_timer(0)
+        self.assertEqual(report[0]['state'], 'unchanged')
+        self.assertIn(('migrate_timer',), FakeSRM.calls)
+
+    async def test_prefix_list_uses_the_remembered_state_without_ssh(self):
+        # A remembered good list short-circuits the SSH probe, so a pass on a
+        # host that is briefly unreachable still runs from known state.
+        self.store['data']['servers'][0]['smartroute']['status'] = {'prefixes_v4': 8664}
+        error, count = await self.svc._prefix_list_health()
+        self.assertIsNone(error)
+        self.assertEqual(count, 8664)
+        self.assertEqual(FakeSRM.calls, [])
+
+    async def test_prefix_list_remembered_error_skips_the_ssh_probe(self):
+        self.store['data']['servers'][0]['smartroute']['status'] = {
+            'prefixes_v4': 0, 'error': 'no v4 source gave >= 100 prefixes'}
+        error, count = await self.svc._prefix_list_health()
+        self.assertIn('no v4 source', error)
+        self.assertEqual(count, 0)
+        self.assertEqual(FakeSRM.calls, [])
+
     async def test_migrate_timer_skips_host_without_the_script(self):
         # A record that says "installed" but a host with no updater: nothing to
         # migrate, and it must not become a permanent pending retry.
@@ -711,6 +752,90 @@ class SmartRouteServiceTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(smartroute_service, 'SmartRouteManager', NoScript):
             report = await self.svc.migrate_timer()
         self.assertEqual(report[0]['state'], 'not-installed')
+
+    async def test_migrate_timer_repeat_pass_skips_finished_hosts(self):
+        # A5: the first panel start finishes one host and fails the other; the
+        # next start must skip the finished host and retry only the pending one.
+        self.store['data']['servers'].append({
+            'uid': 'srv-second', 'name': 'ZK',
+            'smartroute': {'installed': True, 'own_subnets': [], 'dns_via_exit': False},
+            'protocols': {}})
+        self.svc.get_ssh = lambda server: server.get('uid')
+
+        class PerHost(FakeSRM):
+            attempts = {}
+
+            def __init__(self, ssh):
+                super().__init__(ssh)
+                self.uid = ssh
+
+            def migrate_timer(self):
+                FakeSRM.calls.append(('migrate_timer', self.uid))
+                tries = PerHost.attempts.get(self.uid, 0)
+                PerHost.attempts[self.uid] = tries + 1
+                if tries == 0 and self.uid == 'srv-second':
+                    return {'state': 'failed-not-armed', 'detail': 'no backup',
+                            'log': 'x'}
+                return {'state': 'unchanged', 'detail': '', 'log': 'x'}
+
+        with mock.patch.object(smartroute_service, 'SmartRouteManager', PerHost):
+            first = await self.svc.migrate_timer()
+            self.assertEqual([e['state'] for e in first],
+                             ['unchanged', 'failed-not-armed'])
+            self.assertEqual(FakeSRM.calls,
+                             [('migrate_timer', 'srv-entry'),
+                              ('migrate_timer', 'srv-second')])
+            rec = self.store['data']['panel_migrations']['smartroute_timer_v1']['hosts']
+            self.assertTrue(rec['srv-second']['pending'])
+            FakeSRM.calls = []
+            second = await self.svc.migrate_timer()
+        self.assertEqual([e['uid'] for e in second], ['srv-second'])
+        self.assertEqual(second[0]['state'], 'unchanged')
+        # The finished host was not contacted again at all.
+        self.assertEqual(FakeSRM.calls, [('migrate_timer', 'srv-second')])
+        self.assertNotIn('pending', rec['srv-second'])
+
+    async def test_migrate_timer_explicit_server_checks_finished_host(self):
+        # A record that says "done" must not stop a manual repair: an explicit
+        # server_id is checked even when the repeated pass would skip it.
+        await self.svc.migrate_timer()
+        rec = self.store['data']['panel_migrations']['smartroute_timer_v1']['hosts']
+        self.assertNotIn('pending', rec['srv-entry'])
+        FakeSRM.calls = []
+        FakeSRM.migrate_state = 'migrated'
+        report = await self.svc.migrate_timer(0)
+        self.assertEqual([e['uid'] for e in report], ['srv-entry'])
+        self.assertEqual(report[0]['state'], 'migrated')
+        self.assertEqual(FakeSRM.calls, [('migrate_timer',)])
+
+    async def test_prefix_list_health_reads_saved_values_without_ssh(self):
+        # B/F: values the panel already remembers in data.json are used
+        # as-is; SSH is only the fallback when nothing is saved.
+        def no_ssh(server):
+            raise AssertionError('must not open ssh when data remembers the list')
+
+        smartroute = self.store['data']['servers'][0]['smartroute']
+        original_get_ssh = self.svc.get_ssh
+        self.svc.get_ssh = no_ssh
+        try:
+            with self.subTest('saved status wins over ssh'):
+                smartroute['status'] = {'error': 'stale list', 'prefixes_v4': 12}
+                self.assertEqual(await self.svc._prefix_list_health(),
+                                 ('stale list', 12))
+            with self.subTest('saved count without error'):
+                smartroute['status'] = {'prefixes_v4': 7777}
+                self.assertEqual(await self.svc._prefix_list_health(),
+                                 (None, 7777))
+            with self.subTest('saved error without count'):
+                smartroute['status'] = {'error': 'download failed'}
+                self.assertEqual(await self.svc._prefix_list_health(),
+                                 ('download failed', 0))
+        finally:
+            self.svc.get_ssh = original_get_ssh
+        smartroute.pop('status')
+        FakeSRM.prefixes_v4 = 4242
+        with self.subTest('nothing saved falls back to ssh'):
+            self.assertEqual(await self.svc._prefix_list_health(), (None, 4242))
 
 
 class StatusJsonSSH:

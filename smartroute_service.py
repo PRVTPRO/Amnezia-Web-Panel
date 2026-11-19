@@ -556,6 +556,11 @@ class SmartRouteService:
         Skips servers that do not run Smart Route, hosts without systemd, and
         units the panel does not own. Never raises for one host: the report
         says what happened and a failing host stays pending for the next start.
+
+        Review A5: a repeated panel start re-enters only hosts whose record is
+        still pending; a host this very record marks done (or unsupported) is
+        not contacted again. An explicit server_id is a manual repair: it is
+        always checked, record notwithstanding.
         """
         data = self.load_data()
         servers = data.get('servers') or []
@@ -563,10 +568,15 @@ class SmartRouteService:
             targets = list(enumerate(servers))
         else:
             targets = [(server_id, self._server(data, server_id))]
+        known = self._timer_migration_hosts(data) if server_id is None else {}
         report = []
         for idx, server in targets:
             if not (server.get('smartroute') or {}).get('installed'):
                 continue
+            if server_id is None:
+                done = known.get(server.get('uid'))
+                if isinstance(done, dict) and done.get('pending') != True:
+                    continue
             label = server.get('name') or server.get('uid') or idx
             entry = {'server': label, 'uid': server.get('uid')}
             report.append(entry)
@@ -615,6 +625,36 @@ class SmartRouteService:
             logger.warning("smartroute: could not record timer migration of %s: %s",
                            uid, err)
 
+    @staticmethod
+    def _timer_migration_hosts(data):
+        """Per-host timer migration bookkeeping from data.json (read-only)."""
+        migrations = data.get('panel_migrations') or {}
+        rec = migrations.get(SMARTR_TIMER_MIGRATION_KEY) or {}
+        hosts = rec.get('hosts') or {}
+        return hosts if isinstance(hosts, dict) else {}
+
+    @staticmethod
+    def _saved_prefix_list(smartroute):
+        """(error, v4_count) the panel already remembers, or None.
+
+        Review B/F: data.json may carry the last known host result
+        (``smartroute.status`` written earlier); trust it instead of SSH, so a
+        pass survives an unreachable host with the remembered state rather
+        than inventing a fresh error. Read-only: nothing is cached back.
+        """
+        status = smartroute.get('status') if isinstance(smartroute.get('status'), dict) else {}
+        count = None
+        for source in (status, smartroute):
+            if source.get('prefixes_v4') is not None:
+                try:
+                    count = int(source['prefixes_v4'])
+                except (TypeError, ValueError):
+                    return 'invalid prefix count', 0
+                break
+        if count is None and status.get('error') is None:
+            return None
+        return (status.get('error'), count or 0)
+
     async def _prefix_list_health(self):
         """(error, v4_count) of the host side list, best effort.
 
@@ -623,8 +663,12 @@ class SmartRouteService:
         """
         data = self.load_data()
         for server in data.get('servers') or []:
-            if not (server.get('smartroute') or {}).get('installed'):
+            smartroute = server.get('smartroute') or {}
+            if not smartroute.get('installed'):
                 continue
+            saved = self._saved_prefix_list(smartroute)
+            if saved is not None:
+                return saved
             try:
                 smartr = await self._smartr(server)
                 status = await asyncio.to_thread(smartr.host_status)
