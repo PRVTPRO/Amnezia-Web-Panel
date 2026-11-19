@@ -1830,17 +1830,23 @@ class AWGManager:
             raise RuntimeError('env_off')
         # All AWG state (keys, clientsTable, bwlimits, config) lives in
         # /opt/amnezia/awg. Copying only the config file loses every peer and
-        # key, so the whole directory is copied.
+        # key, so the whole directory is copied. docker cp cannot copy
+        # container-to-container ("copying between containers is not
+        # supported"), so both hops go through a temp dir on the host - one
+        # atomic chain, cleaned up on any failure.
         awg_dir = path.rsplit('/', 1)[0]
-        _out, _err, code = self.ssh.run_sudo_command(
-            f"docker cp {backup}:{awg_dir}/. {container}:{awg_dir}/")
+        tmp_dir = f'/tmp/awg-recreate-{container}'
+        _out, copy_err, code = self.ssh.run_sudo_command(
+            f'rm -rf {tmp_dir} && mkdir -p {tmp_dir} && '
+            f'docker cp {backup}:{awg_dir}/. {tmp_dir}/ && '
+            f'docker cp {tmp_dir}/. {container}:{awg_dir}/ && '
+            f'docker cp {backup}:/opt/amnezia/start.sh {tmp_dir}/start.sh && '
+            f'docker cp {tmp_dir}/start.sh {container}:/opt/amnezia/start.sh && '
+            f'rm -rf {tmp_dir}')
         if code != 0:
-            if not restore():
-                raise RuntimeError('recreate_rollback_failed')
-            raise RuntimeError('state_unreadable')
-        _out, _err, code = self.ssh.run_sudo_command(
-            f"docker cp {backup}:/opt/amnezia/start.sh {container}:/opt/amnezia/start.sh")
-        if code != 0:
+            self.ssh.run_sudo_command(f'rm -rf {tmp_dir}')
+            logger.warning("State copy from %s to %s failed: %s",
+                           backup, container, copy_err)
             if not restore():
                 raise RuntimeError('recreate_rollback_failed')
             raise RuntimeError('state_unreadable')

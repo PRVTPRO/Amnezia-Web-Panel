@@ -5236,7 +5236,10 @@
             await apiCall(`/api/servers/${SERVER_ID}/ipv4/ingress/recreate`, 'POST', {});
             showToast(_('saved') || 'OK', 'success');
         } catch (err) {
-            showToast((_('error') || 'Error') + ': ' + err.message, 'error');
+            // the recreate dance reports known codes; show them translated
+            const key = IP_BLOCKED_KEYS[err.message];
+            showToast((_('error') || 'Error') + ': '
+                + (key ? _(key) : err.message), 'error');
         } finally {
             btn.disabled = false;
         }

@@ -1,5 +1,6 @@
 """Server IPv4 policy: egress SNAT pipeline and ingress port binding."""
 import asyncio
+import hashlib
 import unittest
 from types import SimpleNamespace
 from contextlib import ExitStack
@@ -447,6 +448,81 @@ class IngressTests(unittest.TestCase):
             protocol_type='awg', ingress_ip='192.0.2.1')
         # the shared self-steal network is xray's concern only
         self.assertEqual(provisioned, [['amnezia-xray']])
+
+
+class AwgRecreateDanceTests(unittest.TestCase):
+    """The shared AWG recreate dance (IPv6-enable and ingress binding):
+    the state copy must hop through a host temp dir - docker cp refuses
+    container-to-container."""
+
+    def _patched_manager(self, ssh):
+        manager = AWGManager(ssh)
+        source_sha = hashlib.sha256(b'ListenPort = 44337\n').hexdigest()
+
+        def sha(container, path):
+            return source_sha if path.endswith('.conf') else 'sha-other'
+
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(patch.object(
+            manager, '_container_name', return_value='amnezia-awg3'))
+        stack.enter_context(patch.object(
+            manager, '_resolve_config_path',
+            return_value='/opt/amnezia/awg/awg0.conf'))
+        stack.enter_context(patch.object(
+            manager, '_get_server_config', return_value='ListenPort = 44337\n'))
+        stack.enter_context(patch.object(
+            manager, '_container_run_image', return_value='img'))
+        stack.enter_context(patch.object(
+            manager, '_container_file_sha', side_effect=sha))
+        stack.enter_context(patch.object(
+            manager, '_container_file_json_ok', return_value=True))
+        stack.enter_context(patch.object(
+            manager, '_container_peer_count', return_value=1))
+        stack.enter_context(patch.object(manager, '_wait_container_running'))
+        stack.enter_context(patch.object(manager, '_invalidate_config_cache'))
+        return manager
+
+    def test_ingress_recreate_hops_the_copy_through_the_host(self):
+        ssh = make_ssh({'docker port ': ('44337/udp -> 192.0.2.1:44337\n', '', 0)})
+        manager = self._patched_manager(ssh)
+
+        result = manager.recreate_container('awg3', ingress_ip='192.0.2.1')
+
+        self.assertEqual(result, 'amnezia-awg3')
+        runs = [c for c in ssh.calls if 'docker run -d' in c]
+        self.assertEqual(len(runs), 1)
+        self.assertIn('-p 192.0.2.1:44337:44337/udp', runs[0])
+        hops = [c for c in ssh.calls if 'docker cp' in c]
+        self.assertEqual(len(hops), 1)
+        self.assertIn('docker cp amnezia-awg3-ingressbak:/opt/amnezia/awg/. '
+                      '/tmp/awg-recreate-amnezia-awg3/', hops[0])
+        self.assertIn('docker cp /tmp/awg-recreate-amnezia-awg3/. '
+                      'amnezia-awg3:/opt/amnezia/awg/', hops[0])
+        self.assertIn('docker cp amnezia-awg3-ingressbak:/opt/amnezia/start.sh',
+                      hops[0])
+        # no direct container-to-container cp anywhere
+        direct = [c for c in ssh.calls
+                  if 'docker cp amnezia-awg3-ingressbak:' in c
+                  and '/tmp/awg-recreate' not in c]
+        self.assertEqual(direct, [])
+
+    def test_a_failed_copy_hop_rolls_back(self):
+        ssh = make_ssh({'docker cp': ('copying between containers is not '
+                                      'supported', '', 1)})
+        manager = self._patched_manager(ssh)
+
+        with self.assertRaises(RuntimeError) as ctx:
+            manager.recreate_container('awg3', ingress_ip='192.0.2.1')
+
+        self.assertEqual(str(ctx.exception), 'state_unreadable')
+        self.assertTrue(any(
+            'docker rename amnezia-awg3-ingressbak amnezia-awg3' in c
+            for c in ssh.calls))
+        self.assertTrue(any('docker start amnezia-awg3' in c
+                            for c in ssh.calls))
+        self.assertTrue(any('rm -rf /tmp/awg-recreate-amnezia-awg3' in c
+                            for c in ssh.calls))
 
 
 class RunCmdBindingTests(unittest.TestCase):

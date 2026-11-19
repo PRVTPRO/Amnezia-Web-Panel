@@ -120,7 +120,7 @@ class RecreateContainerIpv6Tests(unittest.TestCase):
                 return ('', '', 0)
             if 'docker network connect amnezia-dns-net' in command:
                 return ('', '', 0)
-            if command.startswith('docker cp '):
+            if 'docker cp ' in command:
                 if fail_cp:
                     return ('', 'cp: error copying', 1)
                 return ('', '', 0)
