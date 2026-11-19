@@ -42,7 +42,7 @@ from fastapi.exception_handlers import request_validation_exception_handler
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.middleware.sessions import SessionMiddleware
 from pydantic import BaseModel, Field, StrictBool, constr, conint
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 import uvicorn
 import httpx
 import cheburcheck
@@ -80,11 +80,10 @@ from managers.xray_manager import (
 )
 from managers.wireguard_manager import WireGuardManager
 from managers.backup_manager import BackupManager
-from managers import torrent_events
-from managers.torrent_guard import (
-    DEFAULT_MODE as TORRENT_DEFAULT_MODE,
-    MODES as TORRENT_MODES,
-    normalize_mode as normalize_torrent_mode,
+from managers.torrent_guard import MODES as TORRENT_MODES
+from torrent_plugin_service import (
+    PluginError as TorrentPluginError,
+    TorrentPlugin,
 )
 from managers.instance_copy import (
     COPY_STEPS as INSTANCE_COPY_STEPS,
@@ -3264,18 +3263,6 @@ class ConnectionActionRequest(BaseModel):
     allow_unverified: bool = False
 
 
-class TorrentGuardRequest(BaseModel):
-    """Режим торрент-фильтра инстанса: on / count / off."""
-    protocol: str = 'awg'
-    mode: str = 'on'
-
-
-class TorrentClearRequest(BaseModel):
-    """Снятие метки торрент-активности: ключ (client_id) или адрес пира."""
-    protocol: str = ''
-    client_id: str = ''
-    ip: str = ''
-
 class RenameConnectionRequest(BaseModel):
     protocol: str = 'awg'
     client_id: str = ''
@@ -3565,153 +3552,21 @@ _subscription_monitor_started = False
 
 
 
-# Журнал торрент-событий живёт в панели, а не в контейнере: пересоздание
-# инстанса стирает правила, но не факт нарушения (нужен для разбора жалоб).
-TORRENT_EVENTS_FILE = os.path.join(os.path.dirname(DATA_FILE), 'torrent_events.json')
-_TORRENT_EVENTS_LOCK = threading.Lock()
-
-# Кэш журнала: читаем файл только когда он реально изменился (mtime+size).
-# Иначе каждый опрос плитки (раз в минуту на вкладку) и каждая страница
-# сервера заново читали и санитизировали весь JSON.
-_TORRENT_JOURNAL_CACHE = {'stamp': None, 'data': None}
-
-# Последнее состояние фильтра по (server_key, protocol) для UI: без него
-# админ видел «включено», даже когда правила не встали.
-_TORRENT_HEALTH = {}
-_TORRENT_HEALTH_LOCK = threading.Lock()
-
-# Протоколы, где трафик на интерфейсе уже расшифрован: сигнатуры видны.
-TORRENT_GUARD_PROTOCOLS = ('awg', 'awg2', 'awg3', 'awg_legacy', 'wireguard')
+# ===== Плагин «Защита от торрентов» =====
+# Фича живёт вне ядра: стор, настройки, статус и операции — в
+# torrent_plugin_service.py. Пока плагин не установлен на сервере, ядро не
+# рендерит его разметку, не отдаёт его роуты и не ходит на сервер по SSH.
+torrent_plugin = TorrentPlugin(lambda: DATA_FILE)
 
 
-def _torrent_mode_of(server, proto):
-    """Режим фильтра инстанса. По умолчанию — защита включена."""
-    entry = (server.get('protocols') or {}).get(proto) or {}
-    if not isinstance(entry, dict):
-        return TORRENT_DEFAULT_MODE
-    return normalize_torrent_mode(entry.get('torrent_guard') or TORRENT_DEFAULT_MODE)
-
-
-def _torrent_journal():
-    """Один снимок журнала на запрос; перечитываем только при изменении файла."""
-    with _TORRENT_EVENTS_LOCK:
-        try:
-            stat = os.stat(TORRENT_EVENTS_FILE)
-            stamp = (stat.st_mtime_ns, stat.st_size)
-        except OSError:
-            stamp = None
-        if stamp is not None and _TORRENT_JOURNAL_CACHE['stamp'] == stamp:
-            return _TORRENT_JOURNAL_CACHE['data']
-        data = torrent_events.load(TORRENT_EVENTS_FILE)
-        _TORRENT_JOURNAL_CACHE['stamp'] = stamp
-        _TORRENT_JOURNAL_CACHE['data'] = data
-        return data
-
-
-def _torrent_set_health(server, proto, result):
-    """Запоминает последний результат коллектора для UI (без SSH на GET)."""
-    key = torrent_events.server_key(server)
-    if not key:
-        return
-    error = (result or {}).get('error') or ''
-    with _TORRENT_HEALTH_LOCK:
-        bucket = _TORRENT_HEALTH.setdefault(key, {})
-        bucket[proto] = {'ok': not error, 'error': error,
-                         'ts': int(time.time())}
-
-
-def _torrent_health_for(server):
-    """Сводка здоровья фильтра по серверу для карточки и списка подключений."""
-    key = torrent_events.server_key(server)
-    if not key:
-        return {}
-    with _TORRENT_HEALTH_LOCK:
-        bucket = dict(_TORRENT_HEALTH.get(key) or {})
-    if not bucket:
-        return {}
-    errors = [item['error'] for item in bucket.values() if item.get('error')]
-    latest = max(int(item.get('ts') or 0) for item in bucket.values())
-    return {'ok': not errors, 'error': errors[0] if errors else '',
-            'ts': latest, 'protocols': bucket}
-
-
-def _torrent_summary_for(server, proto=None, journal=None):
-    """Сводка журнала по серверу (или по одному протоколу)."""
-    key = torrent_events.server_key(server)
-    if not key:
-        return {}
-    if journal is None:
-        journal = _torrent_journal()
-    summary = torrent_events.summary(journal, key)
-    if proto:
-        item = summary.get(proto)
-        return {proto: item} if item else {}
-    return summary
-
-
-def _torrent_peer_buckets(server, proto, journal=None):
-    """События по адресам пиров одного инстанса (для страницы сервера)."""
-    key = torrent_events.server_key(server)
-    if not key:
-        return {}
-    if journal is None:
-        journal = _torrent_journal()
-    return torrent_events.peer_buckets(journal, key, proto)
-
-
-def _torrent_record_events(server, proto, events, manager=None):
-    """Пишет события коллектора в журнал панели (TTL 30 дней, 20 на пира).
-
-    Событие приходит по tunnel-IP; чтобы плитка могла дать deep link сразу до
-    ключа, адрес переводится в client_id через clientsTable. Лишний SSH-заход
-    делается только когда события реально есть, то есть редко.
-    """
-    key = torrent_events.server_key(server)
-    events = list(events or ())
-    if not key or not events:
+def _torrent_prune_marks():
+    """Снимает просроченные метки; TTL и состав — по установленным серверам."""
+    try:
+        data = load_data()
+    except Exception as exc:                            # noqa: BLE001
+        logger.warning('torrent journal prune: %s', exc)
         return 0
-    ip_map = {}
-    if manager is not None:
-        try:
-            clients = _manager_call(manager, 'get_clients', proto) or []
-            for client in clients:
-                user_data = client.get('userData') or {}
-                ip = user_data.get('clientIp') or ''
-                if not ip:
-                    m = re.search(r'(\d+\.\d+\.\d+\.\d+)',
-                                  user_data.get('allowedIps') or '')
-                    ip = m.group(1) if m else ''
-                if ip:
-                    ip_map[ip] = client.get('clientId') or ''
-        except Exception as e:
-            logger.warning('torrent journal: client map failed: %s', e)
-    added = 0
-    with _TORRENT_EVENTS_LOCK:
-        journal = torrent_events.load(TORRENT_EVENTS_FILE)
-        torrent_events.prune(journal)
-        for event in events:
-            ip = event.get('ip')
-            added += torrent_events.record(
-                journal, key, proto, ip, [event], client_id=ip_map.get(ip, ''))
-        if added:
-            try:
-                torrent_events.save(TORRENT_EVENTS_FILE, journal)
-            except OSError as e:
-                logger.warning('torrent journal save failed: %s', e)
-    return added
-
-
-def _torrent_prune():
-    """Снимает просроченные события независимо от прихода новых."""
-    with _TORRENT_EVENTS_LOCK:
-        journal = torrent_events.load(TORRENT_EVENTS_FILE)
-        removed = torrent_events.prune(journal)
-        if removed:
-            try:
-                torrent_events.save(TORRENT_EVENTS_FILE, journal)
-            except OSError as e:
-                logger.warning('torrent journal prune save failed: %s', e)
-        return removed
+    return torrent_plugin.prune(data.get('servers', []))
 
 
 def _conn_monitor_once(data):
@@ -3720,41 +3575,50 @@ def _conn_monitor_once(data):
     Инстансы обходятся параллельно (4 потока): раньше зависшая нода съедала
     до 300 с на протокол и остальные ноды всё это время не восстанавливали
     правила после перезагрузки.
+
+    Flood-детект — ядровая функция и работает всегда. Торрент-ветка плагина
+    выполняется только для серверов, где плагин установлен: иначе панель
+    «без торрентов» всё равно ходила бы по SSH ради правил.
     """
     tasks = []
     for server in data.get('servers', []):
+        installed = torrent_plugin.installed(server)
         protocols = server.get('protocols') or {}
-        for proto, entry in protocols.items():
-            if protocol_base(proto) not in TORRENT_GUARD_PROTOCOLS:
-                continue
+        for proto in torrent_plugin.capable(server, True):
+            entry = protocols.get(proto)
             if not isinstance(entry, dict) or entry.get('installed') is False:
                 continue
-            tasks.append((server, proto))
+            tasks.append((server, proto, installed))
 
     def work(item):
-        server, proto = item
+        server, proto, guard_on = item
         try:
             manager = get_protocol_manager(get_ssh(server), proto)
             # Flood-мониторинг остаётся там же, где был: только AWG.
-            if protocol_base(proto) in ('awg', 'awg2', 'awg3'):
+            if proto.split('__', 1)[0] in ('awg', 'awg2', 'awg3'):
                 try:
                     manager.collect_conn_stats(proto)
                 except Exception as e:                  # noqa: BLE001
                     logger.warning(
                         f"conn monitor: {server.get('host')} {proto}: {e}")
+            if not guard_on:
+                return
             guard_factory = getattr(manager, 'torrent_guard', None)
             if not callable(guard_factory):
                 return
-            result = guard_factory(proto).collect(_torrent_mode_of(server, proto))
-            _torrent_set_health(server, proto, result)
+            result = torrent_plugin.collect(server, proto,
+                                            guard_factory(proto))
             if result.get('error'):
                 logger.warning(
                     f"torrent guard: {server.get('host')} {proto}: "
                     f"{result['error']}")
             elif result.get('events'):
-                _torrent_record_events(server, proto, result['events'], manager)
+                torrent_plugin.record_events(
+                    server, proto, result['events'],
+                    lambda: _manager_call(manager, 'get_clients', proto))
         except Exception as e:                          # noqa: BLE001
-            _torrent_set_health(server, proto, {'error': str(e)})
+            if guard_on:
+                torrent_plugin.set_health(server, proto, {'error': str(e)})
             logger.warning(
                 f"conn monitor: {server.get('host')} {proto}: {e}")
 
@@ -3791,7 +3655,7 @@ def _conn_monitor_loop():
         except Exception as e:
             logger.warning(f"conn monitor loop: {e}")
         try:
-            _torrent_prune()
+            _torrent_prune_marks()
         except Exception as e:
             logger.warning(f"torrent journal prune: {e}")
         time.sleep(CONN_MONITOR_INTERVAL)
@@ -4739,7 +4603,14 @@ def index(request: Request):
     if user['role'] not in ('admin', 'support'):
         return RedirectResponse(url='/my', status_code=302)
     data = load_data()
-    return tpl(request, 'index.html', servers=data['servers'])
+    servers = data['servers']
+    # Плагин «Защита от торрентов»: плитки и опрос флагов рендерятся только
+    # для серверов, где он установлен. Нет ни одного — на странице нет ни
+    # разметки плиток, ни JS опроса.
+    return tpl(request, 'index.html', servers=servers,
+               torrent_plugin_any=torrent_plugin.installed_any(servers),
+               torrent_plugin_servers=[torrent_plugin.installed(server)
+                                       for server in servers])
 
 
 @app.get('/servers/new', response_class=HTMLResponse, tags=["System Templates"])
@@ -4771,7 +4642,9 @@ async def server_detail(request: Request, server_id: int):
     server = data['servers'][server_id]
     users_list = data.get('users', [])
     return tpl(request, 'server.html', server=server, server_id=server_id,
-               users=users_list, copy_targets=_instance_copy_targets(data, server_id))
+               users=users_list,
+               copy_targets=_instance_copy_targets(data, server_id),
+               torrent_plugin=torrent_plugin.status(server))
 
 
 @app.get('/users', response_class=HTMLResponse, tags=["System Templates"])
@@ -12054,10 +11927,14 @@ def api_get_connections(request: Request, server_id: int, protocol: str = Query(
                         client['assigned_user'] = u['username']
                         client['assigned_user_id'] = uid
                     break
-        # Торрент-активность: события из журнала панели, привязка по tunnel-IP.
-        journal = _torrent_journal()
-        buckets = _torrent_peer_buckets(server, protocol, journal)
-        torrent_mode = _torrent_mode_of(server, protocol)
+        # Плагин «Защита от торрентов»: метки, режим и здоровье фильтра
+        # добавляются только когда он установлен на этом сервере. Иначе в
+        # ответе нет ни одного торрент-поля — ядро не отдаёт данные фичи,
+        # которой на сервере нет.
+        if not torrent_plugin.installed(server):
+            return {'clients': clients}
+        buckets = torrent_plugin.peer_buckets(server, protocol)
+        torrent_mode = torrent_plugin.mode_of(server, protocol)
         for client in clients:
             user_data = client.get('userData') or {}
             ip = user_data.get('clientIp') or ''
@@ -12078,7 +11955,7 @@ def api_get_connections(request: Request, server_id: int, protocol: str = Query(
                 client['torrentIp'] = ip
             client['torrentGuard'] = torrent_mode
         return {'clients': clients, 'torrent_guard': torrent_mode,
-                'torrent_guard_health': _torrent_health_for(server)}
+                'torrent_guard_health': torrent_plugin.health_for(server)}
     except Exception as e:
         logger.exception("Error getting connections")
         return JSONResponse({'error': str(e)}, status_code=500)
@@ -12292,226 +12169,312 @@ def api_clear_conn_warnings(request: Request, server_id: int, req: ConnectionAct
 
 
 
-class TorrentGuardServerRequest(BaseModel):
-    """Тумблер в карточке сервера: включить/выключить фильтр на всех инстансах."""
-    enabled: bool = True
+# ===== Плагин «Защита от торрентов»: API =====
+# Роуты плагина, а не ядра: без установки на сервере они отвечают 409, и
+# ядровых торрент-роутов в приложении больше нет.
 
-@app.get('/api/servers/torrent_flags', tags=["Servers"])
-def api_torrent_flags(request: Request):
-    """Метки торрент-активности по серверам — для плиток на главной.
+async def _torrent_plugin_body(request):
+    try:
+        payload = await request.json()
+    except Exception:                                   # noqa: BLE001
+        payload = None
+    return payload if isinstance(payload, dict) else {}
 
-    Синхронный (не async): чтение data.json и журнала блокировало бы event loop.
-    Отдаём только серверы, где есть события: пустые плитке не нужны.
+
+def _torrent_plugin_error(exc):
+    if isinstance(exc, TorrentPluginError):
+        return JSONResponse(exc.as_dict(), status_code=exc.status)
+    logger.exception('torrent plugin operation failed')
+    return JSONResponse({'error': str(exc) or 'operation failed',
+                         'code': 'internal_error'}, status_code=500)
+
+
+def _torrent_plugin_server(data, server_id):
+    if server_id < 0 or server_id >= len(data.get('servers', [])):
+        return None
+    return data['servers'][server_id]
+
+
+def _torrent_plugin_require_installed(server):
+    """409 до любого SSH: у неустановленного плагина нет ни правил, ни прав."""
+    if not torrent_plugin.installed(server):
+        raise TorrentPluginError('plugin_not_installed',
+                                 'Torrent guard plugin is not installed', 409)
+
+
+def _torrent_plugin_guards(server):
+    """Фабрика guard'ов и закрытие SSH. Без подходящих инстансов SSH не нужен.
+
+    Возвращает (factory, close). Фабрика вызывается только для инстансов,
+    которые сервис считает подходящими; всё остальное — явная ошибка.
     """
-    if not _check_admin(request):
-        return JSONResponse({'error': 'Forbidden'}, status_code=403)
-    data = load_data()
-    journal = _torrent_journal()
-    out = {}
-    for idx, server in enumerate(data.get('servers', [])):
-        summary = _torrent_summary_for(server, journal=journal)
-        if summary:
-            out[str(idx)] = summary
-    return {'flags': out}
+    if not torrent_plugin.capable(server, True):
+        def factory(proto):
+            raise TorrentPluginError(
+                'unsupported_protocol',
+                'Protocol %s does not support torrent guard' % proto, 400)
+        return factory, lambda: None
+    ssh = get_ssh(server)
+    ssh.connect()
 
+    def factory(proto):
+        manager = get_protocol_manager(ssh, proto)
+        make = getattr(manager, 'torrent_guard', None)
+        if not callable(make):
+            raise TorrentPluginError(
+                'unsupported_protocol',
+                'Protocol %s does not support torrent guard' % proto, 400)
+        return make(proto)
 
-@app.post('/api/servers/{server_id}/connections/torrent_guard', tags=["Connections"])
-def api_set_torrent_guard(request: Request, server_id: int, req: TorrentGuardRequest):
-    """Режим фильтра инстанса: on (считать+DROP) / count / off."""
-    if not _check_admin(request):
-        return JSONResponse({'error': 'Forbidden'}, status_code=403)
-    try:
-        data = load_data()
-        if server_id < 0 or server_id >= len(data['servers']):
-            return JSONResponse({'error': 'Server not found'}, status_code=404)
-        server = data['servers'][server_id]
-        proto = req.protocol or 'awg'
-        if protocol_base(proto) not in TORRENT_GUARD_PROTOCOLS:
-            return JSONResponse(
-                {'error': 'Protocol does not support torrent guard'},
-                status_code=400)
-        raw_mode = str(req.mode or '').strip().lower()
-        if raw_mode not in TORRENT_MODES:
-            # Иначе опечатка вроде "disable" молча включала бы блокировку.
-            return JSONResponse({'error': 'Unknown mode'}, status_code=400)
-        entry = (server.get('protocols') or {}).get(proto)
-        if not isinstance(entry, dict):
-            return JSONResponse({'error': 'Protocol not found'}, status_code=404)
-        mode = normalize_torrent_mode(raw_mode)
-        prev_mode = normalize_torrent_mode(
-            entry.get('torrent_guard') or TORRENT_DEFAULT_MODE)
-        entry['torrent_guard'] = mode
-        save_data(data)
-        apply_info = {'applied': False, 'error': ''}
-        ssh = None
+    def close():
         try:
-            ssh = get_ssh(server)
-            ssh.connect()
-            manager = get_protocol_manager(ssh, proto)
-            guard_factory = getattr(manager, 'torrent_guard', None)
-            if callable(guard_factory):
-                report = guard_factory(proto).apply(mode)
-                apply_info = {'applied': not report.get('error'),
-                              'error': report.get('error') or ''}
-            else:
-                apply_info['error'] = 'manager does not support torrent guard'
-        except Exception as e:                          # noqa: BLE001
-            # Исключение (нода недоступна, обрыв SFTP, sudo не принял пароль)
-            # не должно оставлять в data.json режим, которого нет в правилах.
-            logger.warning('torrent guard apply failed: %s', e)
-            apply_info = {'applied': False, 'error': str(e)}
-        finally:
-            if ssh is not None:
-                try:
-                    ssh.disconnect()
-                except Exception:                       # noqa: BLE001
-                    pass
-        if apply_info['error']:
-            # В data.json не должен остаться режим, который не применился:
-            # иначе селект показывает «включено», а правил нет.
-            fresh = load_data()
-            if server_id < len(fresh.get('servers', [])):
-                current = ((fresh['servers'][server_id].get('protocols')
-                            or {}).get(proto))
-                if isinstance(current, dict):
-                    current['torrent_guard'] = prev_mode
-                    save_data(fresh)
-            return {'status': 'error', 'mode': prev_mode, 'apply': apply_info}
-        return {'status': 'success', 'mode': mode, 'apply': apply_info}
-    except Exception as e:
-        logger.exception("Error setting torrent guard")
-        return JSONResponse({'error': str(e)}, status_code=500)
+            ssh.disconnect()
+        except Exception:                               # noqa: BLE001
+            pass
+
+    return factory, close
 
 
-@app.post('/api/servers/{server_id}/connections/torrent_clear', tags=["Connections"])
-def api_clear_torrent_events(request: Request, server_id: int,
-                             req: TorrentClearRequest):
-    """Снимает метку торрент-активности: по ключу, адресу или инстансу."""
-    if not _check_admin(request):
-        return JSONResponse({'error': 'Forbidden'}, status_code=403)
-    try:
-        data = load_data()
-        if server_id < 0 or server_id >= len(data['servers']):
-            return JSONResponse({'error': 'Server not found'}, status_code=404)
-        server = data['servers'][server_id]
-        key = torrent_events.server_key(server)
-        if not key:
-            return JSONResponse({'error': 'Server has no uid/host'},
-                                status_code=400)
-        with _TORRENT_EVENTS_LOCK:
-            journal = torrent_events.load(TORRENT_EVENTS_FILE)
-            removed = torrent_events.clear(
-                journal, key, req.protocol, ip=req.ip,
-                client_id=req.client_id)
-            if removed:
-                torrent_events.save(TORRENT_EVENTS_FILE, journal)
-        return {'status': 'success', 'removed': removed}
-    except Exception as e:
-        logger.exception("Error clearing torrent events")
-        return JSONResponse({'error': str(e)}, status_code=500)
-def _torrent_capable_protocols(server):
-    """Протоколы сервера, где фильтр вообще может работать (AWG/WG)."""
-    protocols = server.get('protocols') or {}
-    return [proto for proto, entry in protocols.items()
-            if protocol_base(proto) in TORRENT_GUARD_PROTOCOLS
-            and isinstance(entry, dict)]
-
-
-@app.get('/api/servers/{server_id}/torrent_guard', tags=["Servers"])
-def api_torrent_guard_state(request: Request, server_id: int):
-    """Состояние тумблера в карточке сервера (модалка управления)."""
+@app.get('/api/servers/{server_id}/plugins/torrent_guard', tags=["Servers"])
+def api_torrent_plugin_state(request: Request, server_id: int):
+    """Состояние плагина на сервере. Работает и без установки: 200 + installed=false."""
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     data = load_data()
-    if server_id < 0 or server_id >= len(data['servers']):
+    server = _torrent_plugin_server(data, server_id)
+    if server is None:
         return JSONResponse({'error': 'Server not found'}, status_code=404)
-    server = data['servers'][server_id]
-    protos = _torrent_capable_protocols(server)
-    modes = {proto: _torrent_mode_of(server, proto) for proto in protos}
-    enabled = (bool(server.get('torrent_guard_enabled', True))
-               and any(mode != 'off' for mode in modes.values()))
-    return {'server_id': server_id, 'supported': bool(protos),
-            'enabled': enabled, 'protocols': modes,
-            'health': _torrent_health_for(server)}
+    return torrent_plugin.status(server)
 
 
-@app.post('/api/servers/{server_id}/torrent_guard', tags=["Servers"])
-def api_torrent_guard_set(request: Request, server_id: int,
-                          req: TorrentGuardServerRequest):
-    """Включает/выключает фильтр на всех инстансах сервера одним тумблером.
+@app.get('/api/plugins/torrent_guard/flags', tags=["Servers"])
+def api_torrent_plugin_flags(request: Request):
+    """Метки торрент-активности для плиток — только по установленным серверам."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    data = load_data()
+    return {'flags': torrent_plugin.flags(data.get('servers', []))}
 
-    Выключение снимает правила (режим off) со всех AWG/WG-инстансов: метки
-    перестают появляться, DROP не работает. Включение возвращает режим on.
+
+async def _torrent_plugin_persist(server_id, changes, remove_mode_keys=False):
+    """Пишет только режимы плагина в СВЕЖИЙ data.json под DATA_LOCK.
+
+    SSH-операция длится секунды-минуты; держать всё это время снимок
+    data.json нельзя — параллельный писатель (пир, пользователь, другой
+    сервер) потерялся бы при сохранении старого снимка.
     """
+    if not changes and not remove_mode_keys:
+        return
+    async with DATA_LOCK:
+        data = load_data()
+        server = _torrent_plugin_server(data, server_id)
+        if server is None:
+            return
+        protocols = server.get('protocols') or {}
+        for proto, mode in (changes or {}).items():
+            entry = protocols.get(proto)
+            if not isinstance(entry, dict):
+                continue
+            if mode is None:
+                entry.pop('torrent_guard', None)
+            else:
+                entry['torrent_guard'] = mode
+        if remove_mode_keys:
+            server.pop('torrent_guard_enabled', None)
+        save_data(data)
+
+
+def _torrent_plugin_run(server, action):
+    """SSH-операция в отдельном потоке: sync-вызов из async роута вешает loop."""
+    factory, close = _torrent_plugin_guards(server)
+    try:
+        return action(factory)
+    finally:
+        close()
+
+
+async def _torrent_plugin_finish(server_id, result):
+    """Сохраняет изменения и отдаёт статус, посчитанный по свежим данным."""
+    await _torrent_plugin_persist(server_id,
+                                  result.get('changes') or {},
+                                  bool(result.get('remove_mode_keys')))
+    data = load_data()
+    server = _torrent_plugin_server(data, server_id)
+    status = torrent_plugin.status(server) if server is not None else result
+    status['errors'] = result.get('errors') or []
+    return status
+
+
+@app.post('/api/servers/{server_id}/plugins/torrent_guard/install', tags=["Servers"])
+async def api_torrent_plugin_install(request: Request, server_id: int):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    body = await _torrent_plugin_body(request)
+    settings = body.get('settings') if isinstance(body.get('settings'), dict) else {}
+    reapply = bool(body.get('reapply'))
+    try:
+        data = load_data()
+        server = _torrent_plugin_server(data, server_id)
+        if server is None:
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        # Валидация и «уже установлен» — до SSH.
+        if settings:
+            torrent_plugin.merge_settings(torrent_plugin.settings(server),
+                                          settings)
+        if torrent_plugin.installed(server) and not reapply:
+            status = torrent_plugin.status(server)
+            status['errors'] = []
+            return status
+        result = await asyncio.to_thread(
+            _torrent_plugin_run, server,
+            lambda factory: torrent_plugin.install(
+                server, factory, settings=settings, reapply=reapply))
+        return await _torrent_plugin_finish(server_id, result)
+    except Exception as exc:                            # noqa: BLE001
+        return _torrent_plugin_error(exc)
+
+
+@app.post('/api/servers/{server_id}/plugins/torrent_guard/uninstall', tags=["Servers"])
+async def api_torrent_plugin_uninstall(request: Request, server_id: int):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    body = await _torrent_plugin_body(request)
+    try:
+        data = load_data()
+        server = _torrent_plugin_server(data, server_id)
+        if server is None:
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        if not torrent_plugin.installed(server):
+            return torrent_plugin.status(server)
+        result = await asyncio.to_thread(
+            _torrent_plugin_run, server,
+            lambda factory: torrent_plugin.uninstall(
+                server, factory, force=bool(body.get('force'))))
+        result['remove_mode_keys'] = True
+        return await _torrent_plugin_finish(server_id, result)
+    except Exception as exc:                            # noqa: BLE001
+        return _torrent_plugin_error(exc)
+
+
+@app.post('/api/servers/{server_id}/plugins/torrent_guard/settings', tags=["Servers"])
+async def api_torrent_plugin_settings(request: Request, server_id: int):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    body = await _torrent_plugin_body(request)
+    patch = body.get('settings') if isinstance(body.get('settings'), dict) \
+        else {k: v for k, v in body.items() if k != 'settings'}
+    try:
+        data = load_data()
+        server = _torrent_plugin_server(data, server_id)
+        if server is None:
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        record = torrent_plugin.record(server)
+        if not record or not record.get('installed'):
+            raise TorrentPluginError('plugin_not_installed',
+                                     'Torrent guard plugin is not installed', 409)
+        # Валидация до SSH: кривая настройка не должна стоить коннекта.
+        torrent_plugin.merge_settings(record.get('settings') or {}, patch)
+        if torrent_plugin.excluded_wireguard(server, patch):
+            result = await asyncio.to_thread(
+                _torrent_plugin_run, server,
+                lambda factory: torrent_plugin.set_settings(server, factory, patch))
+        else:
+            result = await asyncio.to_thread(
+                torrent_plugin.set_settings, server, None, patch)
+        return await _torrent_plugin_finish(server_id, result)
+    except Exception as exc:                            # noqa: BLE001
+        return _torrent_plugin_error(exc)
+
+
+@app.post('/api/servers/{server_id}/plugins/torrent_guard/enabled', tags=["Servers"])
+async def api_torrent_plugin_enabled(request: Request, server_id: int):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    body = await _torrent_plugin_body(request)
+    try:
+        data = load_data()
+        server = _torrent_plugin_server(data, server_id)
+        if server is None:
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        _torrent_plugin_require_installed(server)
+        result = await asyncio.to_thread(
+            _torrent_plugin_run, server,
+            lambda factory: torrent_plugin.set_enabled(
+                server, factory, bool(body.get('enabled'))))
+        return await _torrent_plugin_finish(server_id, result)
+    except Exception as exc:                            # noqa: BLE001
+        return _torrent_plugin_error(exc)
+
+
+@app.post('/api/servers/{server_id}/plugins/torrent_guard/mode', tags=["Servers"])
+async def api_torrent_plugin_mode(request: Request, server_id: int):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    body = await _torrent_plugin_body(request)
+    proto = str(body.get('protocol') or '')
+    mode = str(body.get('mode') or '').strip().lower()
+    try:
+        data = load_data()
+        server = _torrent_plugin_server(data, server_id)
+        if server is None:
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        _torrent_plugin_require_installed(server)
+        # Параметры проверяем до SSH: неверный режим — это 400, а не 502.
+        if mode not in TORRENT_MODES:
+            raise TorrentPluginError('invalid_mode',
+                                     'Mode must be one of %s'
+                                     % ', '.join(TORRENT_MODES), 400)
+        if proto not in torrent_plugin.capable(server, True):
+            raise TorrentPluginError(
+                'unsupported_protocol',
+                'Protocol %s does not support torrent guard' % proto, 400)
+        result = await asyncio.to_thread(
+            _torrent_plugin_run, server,
+            lambda factory: torrent_plugin.set_mode(server, factory, proto, mode))
+        return await _torrent_plugin_finish(server_id, result)
+    except Exception as exc:                            # noqa: BLE001
+        return _torrent_plugin_error(exc)
+
+
+@app.post('/api/servers/{server_id}/plugins/torrent_guard/refresh', tags=["Servers"])
+def api_torrent_plugin_refresh(request: Request, server_id: int):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
         data = load_data()
-        if server_id < 0 or server_id >= len(data['servers']):
+        server = _torrent_plugin_server(data, server_id)
+        if server is None:
             return JSONResponse({'error': 'Server not found'}, status_code=404)
-        server = data['servers'][server_id]
-        protos = _torrent_capable_protocols(server)
-        if not protos:
-            return JSONResponse(
-                {'error': 'Server has no AWG/WireGuard instances'},
-                status_code=400)
-        mode = 'on' if req.enabled else 'off'
-        previous = {proto: _torrent_mode_of(server, proto) for proto in protos}
-        for proto in protos:
-            server['protocols'][proto]['torrent_guard'] = mode
-        server['torrent_guard_enabled'] = bool(req.enabled)
-        save_data(data)
-        applied = 0
-        errors = []
-        ssh = None
+        _torrent_plugin_require_installed(server)
+        factory, close = _torrent_plugin_guards(server)
         try:
-            ssh = get_ssh(server)
-            ssh.connect()
-            for proto in protos:
-                try:
-                    manager = get_protocol_manager(ssh, proto)
-                    factory = getattr(manager, 'torrent_guard', None)
-                    if not callable(factory):
-                        errors.append('%s: not supported' % proto)
-                        continue
-                    report = factory(proto).apply(mode)
-                    if report.get('error'):
-                        errors.append('%s: %s' % (proto, report['error']))
-                        _torrent_set_health(server, proto, report)
-                    else:
-                        applied += 1
-                except Exception as e:                  # noqa: BLE001
-                    errors.append('%s: %s' % (proto, e))
-        except Exception as e:                          # noqa: BLE001
-            errors.append(str(e))
+            result = torrent_plugin.refresh(server, factory)
         finally:
-            if ssh is not None:
-                try:
-                    ssh.disconnect()
-                except Exception:                       # noqa: BLE001
-                    pass
-        if errors and not applied:
-            # Ни один инстанс не принял режим — возвращаем прежнее состояние,
-            # чтобы карточка не показывала «выключено» без реального эффекта.
-            fresh = load_data()
-            if server_id < len(fresh.get('servers', [])):
-                target = fresh['servers'][server_id]
-                for proto, prev in previous.items():
-                    entry = (target.get('protocols') or {}).get(proto)
-                    if isinstance(entry, dict):
-                        entry['torrent_guard'] = prev
-                target['torrent_guard_enabled'] = bool(
-                    any(prev != 'off' for prev in previous.values()))
-                save_data(fresh)
-            return JSONResponse({'status': 'error', 'enabled': req.enabled,
-                                 'applied': 0, 'errors': errors},
-                                status_code=502)
-        return {'status': 'success', 'enabled': req.enabled,
-                'applied': applied, 'errors': errors,
-                'health': _torrent_health_for(server)}
-    except Exception as e:
-        logger.exception("Error toggling torrent guard for server")
-        return JSONResponse({'error': str(e)}, status_code=500)
+            close()
+        return result
+    except Exception as exc:                            # noqa: BLE001
+        return _torrent_plugin_error(exc)
+
+
+@app.post('/api/servers/{server_id}/plugins/torrent_guard/marks/clear', tags=["Servers"])
+async def api_torrent_plugin_marks_clear(request: Request, server_id: int):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    body = await _torrent_plugin_body(request)
+    try:
+        data = load_data()
+        server = _torrent_plugin_server(data, server_id)
+        if server is None:
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        _torrent_plugin_require_installed(server)
+        removed = torrent_plugin.clear_marks(
+            server, str(body.get('protocol') or ''),
+            str(body.get('client_id') or ''), str(body.get('ip') or ''))
+        return {'status': 'success', 'removed': removed}
+    except Exception as exc:                            # noqa: BLE001
+        return _torrent_plugin_error(exc)
+
+
 @app.post('/api/servers/{server_id}/connections/rename', tags=["Connections"])
 @serialize_peer_lifecycle
 async def api_rename_connection(request: Request, server_id: int, req: RenameConnectionRequest):

@@ -2596,6 +2596,35 @@
         </div>
     </div>
 
+    {% if torrent_plugin and torrent_plugin.installed %}
+    <!-- Плагин «Защита от торрентов»: установлен на этом сервере, поэтому у
+         него есть собственная плитка в сетке инстансов. Пока контроль
+         выключен, правил на сервере нет. -->
+    <div class="card card-hover protocol-card tp-grid-card" id="torrent-plugin-card"
+        role="button" tabindex="0" onclick="TorrentPlugin.open()"
+        onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); TorrentPlugin.open(); }">
+        <div class="protocol-card-head">
+            <div class="protocol-icon">{{ ui_icon('shield', 18) }}</div>
+            <div class="protocol-name">{{ _('tp_name') }}</div>
+        </div>
+        <div class="protocol-desc">{{ _('tp_desc') }}</div>
+        <div class="protocol-status" id="torrentPluginCardStatus">
+            <span class="badge {% if torrent_plugin.state in ('on',) %}badge-success{% elif torrent_plugin.state in ('count',) %}badge-info{% elif torrent_plugin.state in ('degraded',) %}badge-danger{% elif torrent_plugin.state in ('unknown', 'unsupported', 'off') %}badge-secondary{% else %}badge-warn{% endif %}" id="torrentPluginBadge"><span class="badge-dot"></span> {{ _('tp_state_' ~ (torrent_plugin.state or 'not_installed')) }}</span>
+        </div>
+        <div class="flex gap-sm tp-grid-card__actions">
+            <button class="btn btn-secondary btn-sm" id="torrentPluginOpen"
+                onclick="event.stopPropagation(); TorrentPlugin.open()">{{ _('tp_open') }}</button>
+            <button class="btn btn-primary btn-sm" id="torrentPluginStart" hidden
+                onclick="event.stopPropagation(); TorrentPlugin.setEnabled(true)">{{ _('start_btn') }}</button>
+            <button class="btn btn-danger btn-sm" id="torrentPluginStop" hidden
+                onclick="event.stopPropagation(); TorrentPlugin.setEnabled(false)">{{ _('stop_btn') }}</button>
+            <button class="btn btn-danger btn-sm" id="torrentPluginUninstall"
+                onclick="event.stopPropagation(); TorrentPlugin.uninstall()">{{ _('delete') }}</button>
+        </div>
+    </div>
+    {% endif %}
+
+
     <!-- ===== Reverse Proxy teaser (locked, full grid width) ===== -->
     <div class="promo-block promo-revproxy" aria-disabled="true" role="article">
         <div class="promo-grid-bg" aria-hidden="true"></div>
@@ -2677,15 +2706,6 @@
                 <option value="telemt">Telemt</option>
                 <option value="wireguard">WireGuard</option>
             </select>
-            <select class="form-select" id="torrentGuardSelect" onchange="saveTorrentGuard(this)"
-                style="width:auto; display:none;" title="{{ _('torrent_guard_title') }}"
-                aria-label="{{ _('torrent_guard_title') }}">
-                <option value="on">{{ _('torrent_guard_on') }}</option>
-                <option value="count">{{ _('torrent_guard_count') }}</option>
-                <option value="off">{{ _('torrent_guard_off') }}</option>
-            </select>
-            <span id="torrentGuardHealth" class="text-muted"
-                style="font-size:0.72rem; color:#f87171; display:none;"></span>
             <button class="btn btn-primary btn-sm" onclick="openAddConnectionModal()">
                 <span>＋</span> {{ _('add') }}
             </button>
@@ -2853,6 +2873,9 @@
 </div>
 
 {% include '_server_management_modal.html' %}
+{% if torrent_plugin and torrent_plugin.installed %}
+{% include '_torrent_plugin_modal.html' %}
+{% endif %}
 
 <!-- ===== Install Protocol Modal ===== -->
 <div class="modal-backdrop" id="installModal">
@@ -3817,6 +3840,11 @@
     let SSH_COOLDOWN_BASE = {{ (server.get('ssh_cooldown_base') or 30) | tojson }};
     // Live peer-list refresh interval in seconds; 0 = off (opt-in per server).
     let PEER_POLL_INTERVAL = {{ (server.get('peer_poll_interval') or 0) | tojson }};
+    // Плагин «Защита от торрентов»: состояние приходит из ядра, но только
+    // когда плагин установлен. Нет установки — нет ни разметки, ни JS.
+    const TORRENT_PLUGIN = {{ (torrent_plugin or {}) | tojson }};
+    // Иконка плагина из общего реестра: эмодзи в новой вёрстке не используем.
+    const TP_ICON_SVG = {{ ui_icon('shield', 19) | tojson }};
     document.body.dataset.serverUid = {{ (server.uid or '') | tojson }};
     const SERVER_HOST = "{{ server.host }}";
     const CUSTOM_PROTO_NAMES = {
@@ -3853,6 +3881,7 @@
         { proto: 'smartroute', category: 'services', icon: '🧭', title: 'Smart Route', descKey: 'smartroute_desc', badge: 'NEW' },
         { proto: 'warp', category: 'services', icon: '☁️', title: 'Cloudflare WARP', descKey: 'srv_warp_card_desc' },
         { proto: 'rknblock', category: 'services', icon: '🌈', title: 'RKN Block (C24Be)', descKey: 'rknblock_desc' },
+        { kind: 'plugin', id: 'torrent_guard', category: 'services', icon: 'shield', titleKey: 'tp_name', descKey: 'tp_desc', badge: 'NEW' },
         { proto: 'nginx', category: 'web_servers', icon: '🌐', title: 'NGINX', descKey: 'nginx_desc' },
         { proto: 'haproxy', category: 'web_servers', icon: '⚖️', title: 'HAProxy', descKey: 'haproxy_desc' },
     ];
@@ -4324,6 +4353,9 @@
                     <div class="marketplace-category-title"><span>${cat.icon}</span> ${_(cat.titleKey)}</div>
                     <div class="marketplace-grid">
                         ${apps.map(app => {
+                            if (app.kind === 'plugin') {
+                                return renderMarketplacePluginCard(app);
+                            }
                             const isSmart = app.proto === 'smartroute';
                             const isRkn = app.proto === 'rknblock';
                             const isWarp = app.proto === 'warp';
@@ -4338,8 +4370,12 @@
                             // warp0.conf live inside an AmneziaWG container, so
                             // an exit-only host has nothing to install into.
                             const warpNoTarget = isWarp && !installed && !warpHasTargetInstance();
+                            // Установленное приложение не открывается из
+                            // магазина: у него есть своя плитка, а клик по
+                            // «Открыть» закрывал модалку и прокручивал страницу
+                            // наверх. Кнопка просто «Установлен».
                             const action = isSmart
-                                ? `onclick="openSmartRouteModal()"`
+                                ? (installed ? 'disabled' : `onclick="openSmartRouteModal()"`)
                                 : (isWarp
                                     ? (installed || warpNoTarget ? 'disabled' : `onclick="closeModal('marketplaceModal'); installWarp()"`)
                                     : (isRkn
@@ -4367,7 +4403,7 @@
                                     </div>
                                     <div class="marketplace-app-desc">${_(app.descKey)}</div>
                                     <button class="btn ${installed && !canInstallAnother ? 'btn-secondary' : 'btn-primary'} btn-sm" ${action}>
-                                        ${isSmart ? _('smartroute_open') : (warpNoTarget ? _('srv_warp_no_awg') : (canInstallAnother ? _('install_another') : (installed ? _('installed') : _('install'))))}
+                                        ${isSmart ? (installed ? _('installed') : _('smartroute_open')) : (warpNoTarget ? _('srv_warp_no_awg') : (canInstallAnother ? _('install_another') : (installed ? _('installed') : _('install'))))}
                                     </button>
                                 </div>
                             `;
@@ -4386,6 +4422,129 @@
     function installFromMarketplace(proto, installAnother = false) {
         closeModal('marketplaceModal');
         openInstallModal(proto, installAnother);
+    }
+
+    // ===== Плагин «Защита от торрентов» в магазине =====
+    // Состояние приходит из ядра (TORRENT_PLUGIN), а не из плагинного API:
+    // до установки JS плагина на странице нет вовсе.
+    function tpStateClass(state) {
+        return ({
+            on: 'badge-success',
+            count: 'badge-info',
+            off: 'badge-secondary',
+            degraded: 'badge-danger',
+            unknown: 'badge-secondary',
+            unsupported: 'badge-secondary',
+            not_installed: 'badge-warn',
+        })[state] || 'badge-secondary';
+    }
+
+    function tpStateLabel(state) {
+        return _('tp_state_' + (state || 'not_installed'));
+    }
+
+    // Плитка плагина в сетке инстансов: состояние берётся из того же
+    // TORRENT_PLUGIN, что и карточка магазина. Панель плагина зовёт эту
+    // функцию после каждого изменения.
+    function tpPluginState() {
+        const fresh = window.TORRENT_PLUGIN_STATE || {};
+        const initial = TORRENT_PLUGIN || {};
+        return Object.assign({}, initial, fresh);
+    }
+
+    function tpEscapeAttr(value) {
+        return String(value == null ? '' : value)
+            .replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+            .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function tpStoppedInstances() {
+        const entries = Object.entries((tpPluginState().health || {}).protocols || {});
+        return entries.filter(([, item]) => item && /is not running|No such container/i
+            .test(String(item.error || ''))).length;
+    }
+
+    // Причина бейджа «Требует внимания»: какие инстансы недоступны и почему.
+    function tpAttentionText() {
+        const health = tpPluginState().health || {};
+        const entries = Object.entries(health.protocols || {});
+        const failed = entries.filter(([, item]) => item && item.error);
+        if (!failed.length) return '';
+        const text = _('tp_degraded_title')
+            .replace('{failed}', failed.length)
+            .replace('{total}', entries.length);
+        return text + ': ' + failed[0][0] + ' — ' + failed[0][1].error;
+    }
+
+    function renderTorrentPluginCard() {
+        const el = document.getElementById('torrentPluginCardStatus');
+        if (!el) return;
+        const state = tpPluginState().state || 'off';
+        const attention = tpAttentionText();
+        // Вместо абстрактного «Требует внимания» показываем причину действия:
+        // если контейнер остановлен, правила ставить некуда — его надо
+        // запустить; в остальных случаях причина в title.
+        const stopped = tpStoppedInstances() > 0;
+        const label = (state === 'degraded' && stopped)
+            ? _('tp_state_needs_start') : tpStateLabel(state);
+        el.innerHTML = '<span class="badge ' + tpStateClass(state) + '" id="torrentPluginBadge"' +
+            (attention ? ' title="' + tpEscapeAttr(attention) + '"' : '') + '>' +
+            '<span class="badge-dot"></span> ' + label + '</span>';
+        const enabled = !!tpPluginState().enabled;
+        const start = document.getElementById('torrentPluginStart');
+        const stop = document.getElementById('torrentPluginStop');
+        if (start) start.hidden = enabled;
+        if (stop) stop.hidden = !enabled;
+    }
+
+    renderTorrentPluginCard();
+
+    // Плагин «Защита от торрентов»: плитка в сетке инстансов перерисовывается
+    // из ядра, чтобы состояние менялось сразу после «включить/выключить».
+    window.renderTorrentPluginCard = renderTorrentPluginCard;
+
+    function renderMarketplacePluginCard(app) {
+        const state = (TORRENT_PLUGIN && TORRENT_PLUGIN.id === app.id)
+            ? (TORRENT_PLUGIN.state || 'not_installed') : 'not_installed';
+        const installed = state !== 'not_installed';
+        const action = installed ? 'disabled' : 'onclick="installTorrentPlugin()"';
+        const buttonLabel = installed ? _('installed') : _('tp_install');
+        return `
+            <div class="marketplace-app-card tp-card">
+                <div class="marketplace-app-top">
+                    <div class="flex items-center gap-sm">
+                        <div class="protocol-icon tp-card__icon">${TP_ICON_SVG}</div>
+                        <div>
+                            <div class="marketplace-app-title">${_(app.titleKey)} <span class="badge badge-info tp-card__badge">${app.badge}</span></div>
+                            <span class="badge ${tpStateClass(state)}"><span class="badge-dot"></span> ${tpStateLabel(state)}</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="marketplace-app-desc">${_(app.descKey)}</div>
+                <button class="btn ${installed ? 'btn-secondary' : 'btn-primary'} btn-sm"
+                    id="torrentPluginActionBtn" ${action}>${buttonLabel}</button>
+            </div>
+        `;
+    }
+
+    function installTorrentPlugin() {
+        const btn = document.getElementById('torrentPluginActionBtn');
+        if (btn) btn.disabled = true;
+        apiCall(`/api/servers/${SERVER_ID}/plugins/torrent_guard/install`, 'POST', {settings: {}})
+            .then(res => {
+                // Частичный отказ SSH: плагин установлен, но правила встали не
+                // везде — молчать об этом нельзя.
+                if (res && res.errors && res.errors.length) {
+                    showToast(_('error') + ': ' + res.errors.join('; '), 'error');
+                } else {
+                    showToast(_('tp_install_done'), 'success');
+                }
+                setTimeout(() => window.location.reload(), 800);
+            })
+            .catch(err => {
+                if (btn) btn.disabled = false;
+                showToast(_('error') + ': ' + err.message, 'error');
+            });
     }
 
     function setInstalledAppsLoading(isLoading) {
@@ -4497,6 +4656,12 @@
                     return protoInstance(ap) - protoInstance(bp);
                 })
                 .forEach(card => grid.appendChild(card));
+        }
+        // Плитка плагина — всегда последняя: сортировка выше двигает только
+        // карточки proto-*, а эта карточка живёт вне их порядка.
+        if (grid) {
+            const pluginCard = document.getElementById('torrent-plugin-card');
+            if (pluginCard) grid.appendChild(pluginCard);
         }
 
         const empty = document.getElementById('installedAppsEmpty');
@@ -7838,27 +8003,6 @@
             // Stale response: the user switched protocol while we awaited —
             // drop it, the pending re-run below will fetch the right one.
             if (proto !== document.getElementById('connProtoSelect').value) return;
-            // Режим торрент-фильтра инстанса: только там, где трафик на
-            // интерфейсе расшифрован (AWG-семейство и WireGuard).
-            const guardSelect = document.getElementById('torrentGuardSelect');
-            if (guardSelect) {
-                const guardSupported = ['awg', 'awg2', 'awg3', 'awg_legacy', 'wireguard'].includes(protoBase(proto));
-                guardSelect.style.display = guardSupported ? '' : 'none';
-                if (guardSupported && data.torrent_guard) guardSelect.value = data.torrent_guard;
-                const healthEl = document.getElementById('torrentGuardHealth');
-                if (healthEl) {
-                    const health = data.torrent_guard_health || {};
-                    if (guardSupported && health.ok === false) {
-                        healthEl.textContent = _('torrent_guard_card_degraded');
-                        healthEl.title = health.error || '';
-                        healthEl.style.display = '';
-                    } else {
-                        healthEl.textContent = '';
-                        healthEl.title = '';
-                        healthEl.style.display = 'none';
-                    }
-                }
-            }
             // The rename editor may have opened while this poll was in flight —
             // re-rendering now would destroy it mid-typing.
             if (isPoll && !force && listEl.querySelector('.rename-editor')) return;
@@ -7866,6 +8010,14 @@
             if (!data.clients || data.clients.length === 0) {
                 listEl.innerHTML = '';
                 emptyEl.classList.remove('hidden');
+                if (window.TorrentPlugin
+                        && typeof window.TorrentPlugin.onRowsRendered === 'function') {
+                    try {
+                        window.TorrentPlugin.onRowsRendered(listEl, data, proto);
+                    } catch (e) {
+                        console.warn('torrent plugin rows:', e);
+                    }
+                }
                 return;
             }
             window.connectionsStore = {};
@@ -7913,25 +8065,8 @@
                     `<button class="btn btn-secondary btn-sm btn-icon conn-warning-clear" onclick="clearConnWarnings('${escapeJs(client.clientId)}')" title="${_('clear_warnings')}" style="margin-top:4px;">${ICON_TRASH}</button></div>`;
                 }
 
-                // Торрент-активность ключа: сигнатуры протокола на интерфейсе
-                // туннеля. Метка админская, клиент её не видит.
-                let torrentHtml = '';
-                const torrentEvents = Array.isArray(client.torrentEvents) ? client.torrentEvents : [];
-                if (torrentEvents.length) {
-                    const last = torrentEvents[torrentEvents.length - 1] || {};
-                    const t = new Date((last.ts || 0) * 1000);
-                    const when = String(t.getDate()).padStart(2, '0') + '.' +
-                        String(t.getMonth() + 1).padStart(2, '0') + ' ' +
-                        String(t.getHours()).padStart(2, '0') + ':' +
-                        String(t.getMinutes()).padStart(2, '0');
-                    const sigLabel = _('torrent_sig_' + (last.sig || 'handshake'));
-                    const text = _('torrent_activity_text')
-                        .replace('{when}', when)
-                        .replace('{sig}', sigLabel)
-                        .replace('{count}', last.count);
-                    torrentHtml = `<div class="conn-warning torrent-warning">${escapeHtml(text)}` +
-                        `<button class="btn btn-secondary btn-sm btn-icon conn-warning-clear" onclick="clearTorrentEvents(this, '${escapeJs(client.clientId)}', '${escapeJs(client.torrentIp || '')}')" title="${_('clear_warnings')}" style="margin-top:4px;">${ICON_TRASH}</button></div>`;
-                }
+                // Торрент-метки ключей рисует плагин «Защита от торрентов»:
+                // ядро лишь передаёт ему готовую строку (onRowsRendered).
                 // Per-peer bandwidth limit badge (AWG): ⚡∞ by default, 🐢 X Mbps when a limit is set
                 const maxSpeed = parseFloat(userData.maxSpeed || 0) || 0;
                 const createdTimestamp = Date.parse(created) || 0;
@@ -7987,7 +8122,7 @@
                             <div>
                                 <div class="client-name">${escapeHtml(name)}${ipHtml}${endpointHtml}</div>
                                 <div class="client-meta">${metaHtml || `<span class="text-muted">${_('no_data')}</span>`}</div>
-                                ${torrentHtml}                            </div>
+                            </div>
                         </div>
                         <div class="client-actions">
                             <button class="btn btn-secondary btn-sm btn-icon" onclick="startRenameConnection('${escapeJs(client.clientId)}', this)" title="${_('rename')}">${ICON_PENCIL}</button>
@@ -7999,6 +8134,17 @@
                     </div>
                 `;
             });
+            // Плагин «Защита от торрентов» дорисовывает свои метки поверх
+            // готовых строк. Без плагина переменной нет — ядро работает как
+            // раньше и ничего о нём не знает.
+            if (window.TorrentPlugin
+                    && typeof window.TorrentPlugin.onRowsRendered === 'function') {
+                try {
+                    window.TorrentPlugin.onRowsRendered(listEl, data, proto);
+                } catch (e) {
+                    console.warn('torrent plugin rows:', e);
+                }
+            }
         } catch (err) {
             loading.style.display = 'none';
             showToast(_('connections_load_error') + ': ' + err.message, 'error');
@@ -8189,48 +8335,6 @@
         }
     }
 
-    // Метка торрент-активности снимается отдельно от flood-предупреждений:
-    // вторая живёт в контейнере, эта — в журнале панели (30 дней).
-    async function clearTorrentEvents(btn, clientId, ip) {
-        const proto = document.getElementById('connProtoSelect').value;
-        if (!confirm(_('torrent_clear_confirm'))) return;
-        if (btn) btn.disabled = true;
-        try {
-            await apiCall(`/api/servers/${SERVER_ID}/connections/torrent_clear`, 'POST', {
-                protocol: proto, client_id: clientId, ip: ip || '',
-            });
-            showToast(_('warnings_cleared'), 'success');
-            loadConnections();
-        } catch (err) {
-            if (btn) btn.disabled = false;
-            showToast(_('error') + ': ' + err.message, 'error');
-        }
-    }
-
-    // Режим фильтра: on (считать + DROP), count (только счётчик), off.
-    async function saveTorrentGuard(select) {
-        const proto = document.getElementById('connProtoSelect').value;
-        select.disabled = true;
-        try {
-            const res = await apiCall(`/api/servers/${SERVER_ID}/connections/torrent_guard`, 'POST', {
-                protocol: proto, mode: select.value,
-            });
-            if (res && res.apply && res.apply.error) {
-                // Сервер откатил режим: селект не должен показывать то,
-                // чего нет в правилах.
-                if (res.mode) select.value = res.mode;
-                showToast(_('error') + ': ' + res.apply.error, 'error');
-            } else {
-                showToast(_('torrent_guard_saved'), 'success');
-            }
-        } catch (err) {
-            // 400/404/500 (протокол, сервер, сеть) — селект вернём к факту.
-            showToast(_('error') + ': ' + err.message, 'error');
-            loadConnections();
-        } finally {
-            select.disabled = false;
-        }
-    }
     function startRenameConnection(clientId, btn) {
         const item = btn.closest('.client-item');
         const nameEl = item.querySelector('.client-name');

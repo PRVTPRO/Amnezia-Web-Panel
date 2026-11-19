@@ -111,13 +111,17 @@ class DashboardServerManagementTests(unittest.TestCase):
         for emoji in ('🔄', '🔁', '🧹', '🛡', '💾', '⚙'):
             self.assertNotIn(emoji, MODAL, emoji)
             self.assertNotIn(emoji, SHARED, emoji)
-        for name in ('refresh', 'power', 'eraser', 'trash', 'save', 'shield'):
+        for name in ('refresh', 'power', 'eraser', 'trash', 'save'):
             self.assertIn("icon('%s'" % name, SHARED)
 
-    def test_torrent_guard_toggle_is_wired_on_open(self):
-        # Регресс сборки на SERVERA: без этого вызова чекбокс остаётся disabled
-        # навсегда и не нажимается ни при каком состоянии сервера.
-        self.assertIn('refreshTorrentGuard();', SHARED)
+    def test_modal_has_no_torrent_controls(self):
+        # Тумблер торрентов уехал в плагин «Защита от торрентов»: в общей
+        # модалке не должно остаться ни чекбокса, ни его запросов. Иначе
+        # фича продолжает жить в ядре вопреки правилу «не установлен —
+        # фичи нет».
+        self.assertNotIn('torrentGuardCardToggle', SHARED)
+        self.assertNotIn('/torrent_guard', SHARED)
+        self.assertNotIn('refreshTorrentGuard', SHARED)
         self.assertIn("data-server-management-action=\"check\"", SHARED)
 
     def test_layout_classes_exist_in_stylesheet(self):
@@ -143,8 +147,7 @@ class DashboardServerManagementTests(unittest.TestCase):
                      '/api/servers/{server_id}/clear',
                      '/api/servers/{server_id}/delete',
                      '/api/servers/{server_id}/ssh_cooldown',
-                     '/api/servers/{server_id}/peer_poll_interval',
-                     '/api/servers/{server_id}/torrent_guard'):
+                     '/api/servers/{server_id}/peer_poll_interval'):
             self.assertIn(path, paths, path)
 
     def test_modal_template_renders_without_inline_styles(self):

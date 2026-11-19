@@ -1,0 +1,29 @@
+{#- Панель плагина «Защита от торрентов».
+    Подключается только когда плагин установлен на этом сервере: без
+    установки в HTML нет ни этой разметки, ни torrent-plugin.js.
+    Вёрстка без inline-стилей и без эмодзи — правило проекта. -#}
+{% from "_ui_icons.html" import ui_icon %}
+<div class="modal-backdrop" id="torrentPluginModal">
+    <div class="modal tp-modal">
+        <div class="modal-header">
+            <div>
+                <h2 class="modal-title">
+                    <span class="btn-text-with-icon">{{ ui_icon('shield', 18) }} {{ _('tp_name') }}</span>
+                </h2>
+                <div class="text-muted text-sm">{{ _('tp_desc') }}</div>
+            </div>
+            <button class="modal-close" onclick="TorrentPlugin.close()" title="{{ _('close') }}">×</button>
+        </div>
+        <div id="torrentPluginContent"></div>
+    </div>
+</div>
+<script>
+    window.TORRENT_PLUGIN_STATE = {{ (torrent_plugin or {}) | tojson }};
+    window.TORRENT_PLUGIN_ICONS = {
+        trash: {{ ui_icon('trash', 14) | tojson }},
+        refresh: {{ ui_icon('refresh', 14) | tojson }},
+        save: {{ ui_icon('save', 14) | tojson }},
+        eraser: {{ ui_icon('eraser', 14) | tojson }}
+    };
+</script>
+<script src="/static/js/torrent-plugin.js?v={{ static_v }}"></script>

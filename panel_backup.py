@@ -127,6 +127,10 @@ def _entries(data_file, trust_file, system_trust):
                 'state/data.json.credential.key': Path(default_key_path(data_file)),
                 'state/data.json.lifecycle-uncertain.json': Path(str(data) + '.lifecycle-uncertain.json'),
                 'state/data.json.srv_warp_state.json': Path(str(data) + '.srv_warp_state.json'),
+                # Плагин «Защита от торрентов»: без записи установки восстановленный
+                # data.json даёт режимы инстансов, но невидимую в UI фичу.
+                'state/data.json.plugins_state.json': Path(str(data) + '.plugins_state.json'),
+                'state/torrent_events.json': data.with_name('torrent_events.json'),
                 'trust/ssh_known_hosts': _path(trust_file)}
     if system_trust is not None:
         optional['trust/system_known_hosts'] = _path(system_trust)
@@ -264,6 +268,8 @@ def _member(name):
              'state/data.json.credential.key',
              'state/data.json.lifecycle-uncertain.json',
              'state/data.json.srv_warp_state.json',
+             'state/data.json.plugins_state.json',
+             'state/torrent_events.json',
              'trust/ssh_known_hosts', 'trust/system_known_hosts'}
     if name not in fixed and not name.startswith('state/data.json.recovery/'):
         raise BackupError('unexpected_archive_member')

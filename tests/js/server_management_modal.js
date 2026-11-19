@@ -3,7 +3,7 @@
  * Исполняет НАСТОЯЩИЙ static/js/server-management.js в vm-контексте с
  * минимальными DOM-заглушками и проверяет то, что нельзя увидеть статическим
  * grep: разметку без inline-стилей, иконки вместо эмодзи, «оживление» тумблера
- * фильтра торрентов после refreshTorrentGuard() и адреса всех действий.
+ * и адреса всех действий. Тумблер торрентов уехал в плагин.
  *
  * Запуск: node tests/js/server_management_modal.js
  */
@@ -163,7 +163,6 @@ function createHarness(options) {
     let forcedError = null;
 
     const state = {
-        torrentGuard: settings.torrentGuard || { supported: true, enabled: true, health: {} },
     };
     const pending = [];
 
@@ -175,11 +174,6 @@ function createHarness(options) {
             }));
         }
         if (forcedError) throw forcedError;
-        if (url.endsWith('/torrent_guard')) {
-            if ((method || 'GET') === 'GET') return state.torrentGuard;
-            state.torrentGuard = Object.assign({}, state.torrentGuard, { enabled: !!body.enabled });
-            return { status: 'success', enabled: body.enabled, applied: 1, errors: [] };
-        }
         if (url.includes('/ssh_cooldown')) return { ok: true, ssh_cooldown_base: body.seconds };
         if (url.includes('/peer_poll_interval')) return { ok: true, peer_poll_interval: body.seconds };
         return { status: 'success' };
@@ -253,80 +247,10 @@ async function run() {
     check('в разметке нет inline-style', !/\sstyle="/.test(html), (html.match(/\sstyle="[^"]*"/g) || []).slice(0, 3).join(' | '));
     check('в разметке нет эмодзи', !/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(html));
     check('стек действий .sm-stack', html.includes('class="sm-stack"'));
-    check('секции .sm-section', (html.match(/class="sm-section"/g) || []).length === 3);
+    check('секции .sm-section', (html.match(/class="sm-section"/g) || []).length === 2);
     check('кнопки действий .sm-action', (html.match(/sm-action/g) || []).length === 4);
     check('шесть действий', (html.match(/data-server-management-action="/g) || []).length === 6);
-    check('иконки SVG в разметке', (html.match(/<svg class="ui-icon"/g) || []).length === 7);
-    check('тумблер в разметке', html.includes('id="torrentGuardCardToggle"'));
-    check('подпись тумблера с иконкой щита', html.includes(ICONS.shield));
-
-    // 2. Регресс: open() обязан запросить состояние тумблера, иначе галочка
-    //    навсегда остаётся disabled (именно это было в сборке на SERVERA).
-    const getCalls = page.calls.filter(call => call.method === 'GET' && call.url === '/api/servers/3/torrent_guard');
-    eq('open() запрашивает состояние тумблера', getCalls.length, 1);
-
-    const box = page.document.getElementById('torrentGuardCardToggle');
-    const stateNode = page.document.getElementById('torrentGuardCardState');
-    eq('тумблер ожил', box.disabled, false);
-    eq('тумблер показывает включённое состояние', box.checked, true);
-    eq('подсказка пуста для рабочего фильтра', stateNode.textContent, '');
-    eq('инлайновых стилей не осталось', Object.keys(stateNode.style).length, 0);
-
-    // 3. Некуда ставить правила — disabled + объяснение.
-    const unsupported = createHarness({ torrentGuard: { supported: false, enabled: false, health: {} } });
-    unsupported.open();
-    await unsupported.flush();
-    eq('unsupported: тумблер заблокирован', unsupported.document.getElementById('torrentGuardCardToggle').disabled, true);
-    eq('unsupported: причина показана', unsupported.document.getElementById('torrentGuardCardState').textContent, 'torrent_guard_card_unsupported');
-
-    // 4. Правила не подтверждены — красное состояние через класс, не inline.
-    const degraded = createHarness({ torrentGuard: { supported: true, enabled: true, health: { ok: false, error: 'iptables: denied' } } });
-    degraded.open();
-    await degraded.flush();
-    const degradedState = degraded.document.getElementById('torrentGuardCardState');
-    eq('degraded: текст', degradedState.textContent, 'torrent_guard_card_degraded');
-    eq('degraded: title с причиной', degradedState.title, 'iptables: denied');
-    eq('degraded: класс is-error', degradedState.classList.contains('is-error'), true);
-    eq('degraded: без inline-цвета', Object.keys(degradedState.style).length, 0);
-
-    // 5. Запрос состояния упал — тумблер не должен выглядеть рабочим.
-    const broken = createHarness();
-    broken.failWith(new Error('HTTP 500'));
-    broken.open();
-    await broken.flush();
-    eq('ошибка GET: тумблер заблокирован', broken.document.getElementById('torrentGuardCardToggle').disabled, true);
-    check('ошибка GET: причина показана',
-        broken.document.getElementById('torrentGuardCardState').textContent.includes('HTTP 500'));
-
-    // 6. Переключение: change -> POST с {enabled} -> перечитывание состояния.
-    const toggle = createHarness();
-    toggle.open();
-    await toggle.flush();
-    const toggleBox = toggle.document.getElementById('torrentGuardCardToggle');
-    toggleBox.checked = false;
-    toggle.fire('change', toggleBox);
-    await toggle.flush();
-    await toggle.flush();
-    const post = toggle.calls.filter(call => call.method === 'POST' && call.url === '/api/servers/3/torrent_guard');
-    eq('переключение отправляет POST', post.length, 1);
-    eq('тело POST', post[0].body, { enabled: false });
-    eq('после POST состояние перечитано',
-        toggle.calls.filter(call => call.method === 'GET' && call.url === '/api/servers/3/torrent_guard').length, 2);
-    eq('после POST тумблер выключен', toggleBox.checked, false);
-    eq('после POST тумблер снова активен', toggleBox.disabled, false);
-
-    // 7. POST упал — состояние откатывается к серверному и показывается ошибка.
-    const failed = createHarness();
-    failed.open();
-    await failed.flush();
-    const failedBox = failed.document.getElementById('torrentGuardCardToggle');
-    failed.failWith(new Error('HTTP 502'));
-    failedBox.checked = false;
-    failed.fire('change', failedBox);
-    await failed.flush();
-    await failed.flush();
-    eq('ошибка POST: галочка откаталась', failedBox.checked, true);
-    check('ошибка POST: тост с ошибкой', failed.toasts.some(toast => toast.kind === 'error' && String(toast.message).includes('HTTP 502')));
+    check('иконки SVG в разметке', (html.match(/<svg class="ui-icon"/g) || []).length === 6);
 
     // 8. Действия меню: адреса и параметры запросов.
     const actions = createHarness();
@@ -368,21 +292,6 @@ async function run() {
     await invalid.flush();
     eq('невалидные значения не отправляются', invalid.calls.length, before);
     eq('два тоста об ошибке', invalid.toasts.filter(toast => toast.kind === 'error').length, 2);
-
-    // 11. Поздний ответ по прошлому серверу не перезаписывает текущий экран.
-    const race = createHarness({ defer: true });
-    race.open({ serverId: 3 });
-    const firstRead = race.pending[0];
-    race.open({ serverId: 4 });
-    const secondRead = race.pending[1];
-    secondRead.resolve({ supported: true, enabled: false, health: {} });
-    await race.flush();
-    const raceBox = race.document.getElementById('torrentGuardCardToggle');
-    eq('второй сервер: состояние применилось', raceBox.checked, false);
-    firstRead.resolve({ supported: true, enabled: true, health: {} });
-    await race.flush();
-    eq('поздний ответ первого сервера проигнорирован', raceBox.checked, false);
-    eq('поздний ответ не разблокировал чужой тумблер', raceBox.disabled, false);
 
     // 12. Значение вне списка шагов не подменяется «выключено».
     const legacyPoll = createHarness();
