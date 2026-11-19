@@ -242,6 +242,10 @@ class RecreateContainerTests(unittest.TestCase):
                 return route, '', 0
             if command.startswith('docker run'):
                 return '', '', run_code
+            if 'sha256sum' in command:
+                # the copy-fidelity check reads the config sha from both
+                # containers; identical reads mean a faithful copy
+                return 'a' * 64 + '  /tmp/x\n', '', 0
             return '', '', 0
 
         manager.ssh.run_sudo_command.side_effect = sudo

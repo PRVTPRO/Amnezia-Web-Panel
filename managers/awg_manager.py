@@ -12,7 +12,6 @@ import json
 import os
 import secrets
 import struct
-import hashlib
 import ipaddress
 import logging
 import re
@@ -1775,7 +1774,6 @@ class AWGManager:
             raise RuntimeError('state_unreadable')
         image = self._container_run_image(container)
         port = self._container_udp_port(config_text)
-        source_sha = hashlib.sha256(config_text.encode('utf-8')).hexdigest()
         backup = f'{container}-ipv6bak' if ipv6 else f'{container}-ingressbak'
         self.ssh.run_sudo_command(f"docker rm -f {backup} >/dev/null 2>&1; true")
         _out, _err, code = self.ssh.run_sudo_command(f"docker stop {container}")
@@ -1858,10 +1856,15 @@ class AWGManager:
                 raise RuntimeError('recreate_rollback_failed')
             raise RuntimeError('state_unreadable')
 
-        # The config must be byte-identical to the source before start.
+        # The copy must be faithful: the new container's config has to be
+        # byte-identical to the backup's. The panel's config view is not a
+        # valid reference - it can differ from the file on disk.
+        old_config = self._container_file_sha(backup, path)
         copied_sha = self._container_file_sha(container, path)
-        if copied_sha and copied_sha != source_sha:
-            failed_verification(f'config sha {copied_sha} != {source_sha}')
+        if not old_config or not copied_sha:
+            failed_verification('config sha unreadable')
+        if old_config != copied_sha:
+            failed_verification(f'config sha {copied_sha} != backup {old_config}')
         # The keys must survive the copy: a new private key would invalidate
         # every issued client config.
         for key_name in ('wireguard_server_private_key.key',
