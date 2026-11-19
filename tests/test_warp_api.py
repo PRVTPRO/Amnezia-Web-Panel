@@ -95,7 +95,9 @@ class WarpApiTests(unittest.TestCase):
             record = ((state.get('servers') or {}).get('srv-uid') or {}) \
                 .get('protocols', {}).get('awg') or {}
             link = record.get('warp_link') or {}
-            if link.get('active'):
+            # The link is persisted before the worker writes/uploads scripts.
+            # Keep SSH mocks alive until the whole job has finished.
+            if link.get('active') and not panel._warp_job_active('srv-uid'):
                 return link
             time.sleep(0.02)
         self.fail('warp link job did not finish')

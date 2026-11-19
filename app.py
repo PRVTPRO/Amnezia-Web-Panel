@@ -713,6 +713,7 @@ SERVER_MUTATION_LOCK = asyncio.Lock()
 
 @app.on_event('shutdown')
 async def close_panel_lease():
+    await tg_bot.stop_bot()
     if _panel_lease is not None:
         _panel_lease.close()
 
@@ -3385,6 +3386,10 @@ class DuckDNSApplyRequest(BaseModel):
     domain: str = ''
     # Empty keeps the stored token: the settings page never echoes it back.
     token: str = ''
+
+class TelegramToggleRequest(BaseModel):
+    enabled: StrictBool
+
 
 class TelegramSettings(BaseModel):
     token: str = ''
@@ -14262,9 +14267,14 @@ async def api_warp_disconnect(request: Request):
 #     return {'status': 'success'}
 
 @app.post('/api/settings/save', tags=["Settings"])
-def save_settings(request: Request, payload: SaveSettingsRequest):
+async def save_settings(request: Request, payload: SaveSettingsRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    async with DATA_LOCK:
+        return await _save_settings(request, payload)
+
+
+async def _save_settings(request: Request, payload: SaveSettingsRequest):
     data = load_data()
     settings = data.setdefault('settings', {})
     settings['appearance'] = payload.appearance.dict()
@@ -14277,7 +14287,11 @@ def save_settings(request: Request, payload: SaveSettingsRequest):
                             status_code=400)
     previous_jump_uid = ((settings.get('ssh_jump') or {}).get('jump_host_uid') or '')
     settings['ssh_jump'] = {'jump_host_uid': jump_host_uid}
+    previous_telegram = dict(settings.get('telegram') or {})
     settings['telegram'] = payload.telegram.dict()
+    # Only the lifecycle endpoint changes intent. Old/stale settings pages may
+    # still submit enabled based on runtime state; never let that disable boot.
+    settings['telegram']['enabled'] = bool(previous_telegram.get('enabled'))
     settings['ssl'] = payload.ssl.dict()
     settings['mail'] = merge_mail_settings(settings.get('mail'), payload.mail.dict())
 
@@ -14356,18 +14370,15 @@ def save_settings(request: Request, payload: SaveSettingsRequest):
                 pass
     logger.info("Settings saved (including captcha, telegram and auto backup)")
 
-    # Handle bot start/stop based on new telegram settings
-    tg_cfg = payload.telegram
-    if tg_cfg.enabled and tg_cfg.token:
-        if not tg_bot.is_running():
-            logger.info("Starting Telegram bot (settings save)...")
-            tg_bot.launch_bot(tg_cfg.token, load_data, generate_vpn_link, save_data, self_service_svc=self_service_connections, credential_resolver=lambda server: _credential_store().resolve(server))
-    else:
-        if tg_bot.is_running():
-            logger.info("Stopping Telegram bot (settings save)...")
-            asyncio.create_task(tg_bot.stop_bot())
+    # This handler runs on the application loop: launch_bot uses create_task.
+    tg_cfg = settings['telegram']
+    if previous_telegram.get('token') != tg_cfg.get('token') or not tg_cfg.get('token') or not tg_cfg['enabled']:
+        await tg_bot.stop_bot()
+    if tg_cfg['enabled'] and tg_cfg.get('token') and not tg_bot.is_running():
+        tg_bot.launch_bot(tg_cfg['token'], load_data, generate_vpn_link, save_data, self_service_svc=self_service_connections, credential_resolver=lambda server: _credential_store().resolve(server))
 
-    return {"status": "success", "bot_running": tg_bot.is_running(), "warnings": warnings}
+    return {"status": "success", "bot_running": tg_bot.is_running(),
+            "bot_enabled": tg_cfg['enabled'], "warnings": warnings}
 
 
 # ----- DuckDNS: free domain + one-click auto-renewed Let's Encrypt cert -----
@@ -14528,28 +14539,30 @@ def _start_duckdns_monitor():
 
 
 @app.post('/api/settings/telegram/toggle', tags=["Settings"])
-async def api_telegram_toggle(request: Request):
-    """Quick enable/disable of the bot without a full settings save."""
+async def api_telegram_toggle(request: Request, payload: Optional[TelegramToggleRequest] = None):
+    """Persist explicit intent, independently of whether the task is alive.
+
+    An empty POST remains supported for older clients, toggling saved intent.
+    """
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
-    data = load_data()
-    tg_cfg = data.get('settings', {}).get('telegram', {})
-    token = tg_cfg.get('token', '')
-    if not token:
-        return JSONResponse({'error': 'Telegram token not set in settings'}, status_code=400)
+    async with DATA_LOCK:
+        data = load_data()
+        tg_cfg = data.setdefault('settings', {}).setdefault('telegram', {})
+        enabled = payload.enabled if payload is not None else not bool(tg_cfg.get('enabled'))
+        token = tg_cfg.get('token', '')
+        if enabled and not token:
+            return JSONResponse({'error': 'Telegram token not set in settings'}, status_code=400)
+        tg_cfg['enabled'] = enabled
+        save_data(data)
+        if enabled:
+            if not tg_bot.is_running():
+                tg_bot.launch_bot(token, load_data, generate_vpn_link, save_data, self_service_svc=self_service_connections, credential_resolver=lambda server: _credential_store().resolve(server))
+        else:
+            await tg_bot.stop_bot()
+        return {'status': 'started' if enabled else 'stopped',
+                'bot_enabled': enabled, 'bot_running': tg_bot.is_running()}
 
-    if tg_bot.is_running():
-        await tg_bot.stop_bot()
-        tg_cfg['enabled'] = False
-        data['settings']['telegram'] = tg_cfg
-        save_data(data)
-        return {'status': 'stopped', 'bot_running': False}
-    else:
-        tg_bot.launch_bot(token, load_data, generate_vpn_link, save_data, self_service_svc=self_service_connections, credential_resolver=lambda server: _credential_store().resolve(server))
-        tg_cfg['enabled'] = True
-        data['settings']['telegram'] = tg_cfg
-        save_data(data)
-        return {'status': 'started', 'bot_running': True}
 
 @app.post('/api/settings/sync_now', tags=["Settings"])
 async def api_sync_now(request: Request):
