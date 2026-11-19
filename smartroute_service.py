@@ -12,6 +12,7 @@ and uninstalling the app safely rolls every split instance back to
 import asyncio
 import logging
 import threading
+import time
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -26,6 +27,11 @@ logger = logging.getLogger(__name__)
 
 # data.panel_migrations key for the one-shot host timer rewrite.
 SMARTR_TIMER_MIGRATION_KEY = 'smartroute_timer_v1'
+
+# How long one host's prefix-list reading stays usable when a later
+# probe fails. The hourly timer refreshes the list, so a quarter of an
+# hour cannot hide a real outage for long.
+SMARTR_PREFIX_CACHE_TTL = 15 * 60
 
 
 class SmartRouteError(Exception):
@@ -65,6 +71,8 @@ class SmartRouteService:
         # ExitLinkService in app.py so DNS stays a single mechanism.
         self.apply_dns_via_exit = apply_dns_via_exit
         self._locks = defaultdict(asyncio.Lock)
+        # uid -> (monotonic_ts, error, v4_count); see _prefix_list_health.
+        self._prefix_cache = {}
 
     # ----- helpers -----
 
@@ -633,55 +641,63 @@ class SmartRouteService:
         hosts = rec.get('hosts') or {}
         return hosts if isinstance(hosts, dict) else {}
 
-    @staticmethod
-    def _saved_prefix_list(smartroute):
-        """(error, v4_count) the panel already remembers, or None.
+    def _remember_prefix_list(self, uid, error, count):
+        """Remember the last prefix-list reading for one host (in memory).
 
-        Review B/F: data.json may carry the last known host result
-        (``smartroute.status`` written earlier); trust it instead of SSH, so a
-        pass survives an unreachable host with the remembered state rather
-        than inventing a fresh error. Read-only: nothing is cached back.
+        A later pass reuses it when the host is briefly unreachable instead of
+        returning "0 prefixes" and standing down for the whole fleet. The panel
+        does not persist this anywhere: a restart re-reads the host, so a stale
+        cache cannot outlive the process.
         """
-        status = smartroute.get('status') if isinstance(smartroute.get('status'), dict) else {}
-        count = None
-        for source in (status, smartroute):
-            if source.get('prefixes_v4') is not None:
-                try:
-                    count = int(source['prefixes_v4'])
-                except (TypeError, ValueError):
-                    return 'invalid prefix count', 0
-                break
-        if count is None and status.get('error') is None:
+        if uid:
+            self._prefix_cache[uid] = (time.monotonic(), error, int(count))
+
+    def _cached_prefix_list(self, uid):
+        """(error, count) from the cache, or None when absent/expired."""
+        entry = self._prefix_cache.get(uid or '')
+        if not entry:
             return None
-        return (status.get('error'), count or 0)
+        stored_at, error, count = entry
+        if time.monotonic() - stored_at > SMARTR_PREFIX_CACHE_TTL:
+            return None
+        return (error, count)
 
     async def _prefix_list_health(self):
         """(error, v4_count) of the host side list, best effort.
 
         Shared by every server: the lists live on the panel-managed host, so a
         broken download is a fleet-wide condition, not a per-instance one.
+        The last reading is cached in memory: a single failed SSH probe must
+        not make the panel believe the list is empty and skip the whole fleet.
         """
         data = self.load_data()
         for server in data.get('servers') or []:
             smartroute = server.get('smartroute') or {}
             if not smartroute.get('installed'):
                 continue
-            saved = self._saved_prefix_list(smartroute)
-            if saved is not None:
-                return saved
+            uid = server.get('uid')
             try:
                 smartr = await self._smartr(server)
                 status = await asyncio.to_thread(smartr.host_status)
             except Exception as err:
+                cached = self._cached_prefix_list(uid)
+                if cached is not None:
+                    logger.warning(
+                        "smartroute: prefix list of %s is unreadable (%s); "
+                        "reusing the last known reading", server.get('name'), err)
+                    return cached
                 return str(err), 0
             # host_status merges status.json both flat and under 'status';
             # accept either shape so the guard never depends on the manager
             # version that produced it.
             counts = status.get('status') if isinstance(status.get('status'), dict) else status
             try:
-                return (status.get('error'), int(counts.get('prefixes_v4') or 0))
+                error = status.get('error')
+                count = int(counts.get('prefixes_v4') or 0)
             except (TypeError, ValueError):
                 return 'invalid prefix count', 0
+            self._remember_prefix_list(uid, error, count)
+            return error, count
         return None, 0
 
     async def reconcile(self, server_id=None):

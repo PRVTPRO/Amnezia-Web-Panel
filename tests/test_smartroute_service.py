@@ -96,7 +96,11 @@ class FakeSRM:
     migrate_state = 'unchanged'
     migrate_fail = False
 
+    fail_status = False
+
     def host_status(self):
+        if FakeSRM.fail_status:
+            raise SmartRouteError('ssh_failed', 'ssh failed')
         return {'installed': True, 'prefixes_v4': FakeSRM.prefixes_v4,
                 'prefixes_v6': 300,
                 'source_v4': 'ipdeny', 'updated_at': '2026-10-14T10:00:00',
@@ -153,6 +157,7 @@ class SmartRouteServiceTest(unittest.IsolatedAsyncioTestCase):
         FakeSRM.list_error = None
         FakeSRM.migrate_state = 'unchanged'
         FakeSRM.migrate_fail = False
+        FakeSRM.fail_status = False
         self.store = {'data': make_data()}
         self.awg = FakeAWG()
         self.dns_calls = []
@@ -725,22 +730,27 @@ class SmartRouteServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report[0]['state'], 'unchanged')
         self.assertIn(('migrate_timer',), FakeSRM.calls)
 
-    async def test_prefix_list_uses_the_remembered_state_without_ssh(self):
-        # A remembered good list short-circuits the SSH probe, so a pass on a
-        # host that is briefly unreachable still runs from known state.
-        self.store['data']['servers'][0]['smartroute']['status'] = {'prefixes_v4': 8664}
-        error, count = await self.svc._prefix_list_health()
-        self.assertIsNone(error)
-        self.assertEqual(count, 8664)
-        self.assertEqual(FakeSRM.calls, [])
+    async def test_prefix_list_caches_the_last_good_reading(self):
+        # First probe reads the host and remembers 8000; a later probe that
+        # fails must reuse it instead of reporting "0 prefixes" and standing
+        # the whole fleet down.
+        self.assertEqual(await self.svc._prefix_list_health(), (None, 8000))
+        FakeSRM.fail_status = True
+        self.assertEqual(await self.svc._prefix_list_health(), (None, 8000))
 
-    async def test_prefix_list_remembered_error_skips_the_ssh_probe(self):
-        self.store['data']['servers'][0]['smartroute']['status'] = {
-            'prefixes_v4': 0, 'error': 'no v4 source gave >= 100 prefixes'}
+    async def test_prefix_list_without_cache_reports_the_failure(self):
+        FakeSRM.fail_status = True
         error, count = await self.svc._prefix_list_health()
-        self.assertIn('no v4 source', error)
+        self.assertIn('ssh failed', error)
         self.assertEqual(count, 0)
-        self.assertEqual(FakeSRM.calls, [])
+
+    async def test_prefix_list_cache_expires(self):
+        await self.svc._prefix_list_health()
+        FakeSRM.fail_status = True
+        with mock.patch.object(smartroute_service, 'SMARTR_PREFIX_CACHE_TTL', -1):
+            error, count = await self.svc._prefix_list_health()
+        self.assertIn('ssh failed', error)
+        self.assertEqual(count, 0)
 
     async def test_migrate_timer_skips_host_without_the_script(self):
         # A record that says "installed" but a host with no updater: nothing to
@@ -807,36 +817,6 @@ class SmartRouteServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([e['uid'] for e in report], ['srv-entry'])
         self.assertEqual(report[0]['state'], 'migrated')
         self.assertEqual(FakeSRM.calls, [('migrate_timer',)])
-
-    async def test_prefix_list_health_reads_saved_values_without_ssh(self):
-        # B/F: values the panel already remembers in data.json are used
-        # as-is; SSH is only the fallback when nothing is saved.
-        def no_ssh(server):
-            raise AssertionError('must not open ssh when data remembers the list')
-
-        smartroute = self.store['data']['servers'][0]['smartroute']
-        original_get_ssh = self.svc.get_ssh
-        self.svc.get_ssh = no_ssh
-        try:
-            with self.subTest('saved status wins over ssh'):
-                smartroute['status'] = {'error': 'stale list', 'prefixes_v4': 12}
-                self.assertEqual(await self.svc._prefix_list_health(),
-                                 ('stale list', 12))
-            with self.subTest('saved count without error'):
-                smartroute['status'] = {'prefixes_v4': 7777}
-                self.assertEqual(await self.svc._prefix_list_health(),
-                                 (None, 7777))
-            with self.subTest('saved error without count'):
-                smartroute['status'] = {'error': 'download failed'}
-                self.assertEqual(await self.svc._prefix_list_health(),
-                                 ('download failed', 0))
-        finally:
-            self.svc.get_ssh = original_get_ssh
-        smartroute.pop('status')
-        FakeSRM.prefixes_v4 = 4242
-        with self.subTest('nothing saved falls back to ssh'):
-            self.assertEqual(await self.svc._prefix_list_health(), (None, 4242))
-
 
 class StatusJsonSSH:
     """Minimal host stub whose `status.json` is the JSON we hand it."""
