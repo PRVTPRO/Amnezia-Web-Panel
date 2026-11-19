@@ -346,16 +346,25 @@ class IngressTests(unittest.TestCase):
 
     def test_save_persists_and_validates(self):
         data = state()
+        ssh = make_ssh(BRIDGE_SCRIPT)
         with patch.object(panel, 'load_data', return_value=data), \
              patch.object(panel, '_check_admin', lambda request: True), \
-             patch.object(panel, 'save_data', Mock()):
+             patch.object(panel, 'save_data', Mock()), \
+             patch.object(panel, 'get_ssh', return_value=ssh):
             result = asyncio.run(panel.api_ipv4_ingress(
                 self.request(), 0, panel.Ipv4IngressRequest(ip='192.0.2.1')))
             self.assertEqual(result['status'], 'success')
             self.assertEqual(data['servers'][0]['ingress_ip'], '192.0.2.1')
+            unassigned = asyncio.run(panel.api_ipv4_ingress(
+                self.request(), 0, panel.Ipv4IngressRequest(ip='203.0.113.9')))
+            self.assertEqual(unassigned.status_code, 409)
             bad = asyncio.run(panel.api_ipv4_ingress(
                 self.request(), 0, panel.Ipv4IngressRequest(ip='not-an-ip')))
             self.assertEqual(bad.status_code, 400)
+            cleared = asyncio.run(panel.api_ipv4_ingress(
+                self.request(), 0, panel.Ipv4IngressRequest(ip='')))
+            self.assertEqual(cleared['status'], 'success')
+            self.assertIsNone(data['servers'][0]['ingress_ip'])
 
     def test_recreate_binds_and_restores_the_shared_network(self):
         data = state()
@@ -367,7 +376,7 @@ class IngressTests(unittest.TestCase):
              patch.object(panel, '_check_admin', lambda request: True), \
              patch.object(panel, '_install_ops_load', Mock()), \
              patch.object(panel, '_install_running', Mock(return_value=False)), \
-             patch.object(panel, 'get_ssh', return_value=Mock()), \
+             patch.object(panel, 'get_ssh', return_value=make_ssh(BRIDGE_SCRIPT)), \
              patch.object(panel, 'get_protocol_manager',
                           return_value=manager), \
              patch.object(panel, '_ensure_selfsteal_network',
@@ -376,6 +385,100 @@ class IngressTests(unittest.TestCase):
         self.assertEqual(result['recreated'], ['xray'])
         manager.recreate_container.assert_called_once_with(ingress_ip='192.0.2.1')
         self.assertEqual(provisioned, [['amnezia-xray']])
+
+    def test_recreate_refuses_an_unassigned_ingress_ip(self):
+        data = state()
+        data['servers'][0]['ingress_ip'] = '203.0.113.9'
+        manager = Mock()
+        with patch.object(panel, 'load_data', return_value=data), \
+             patch.object(panel, '_check_admin', lambda request: True), \
+             patch.object(panel, '_install_ops_load', Mock()), \
+             patch.object(panel, '_install_running', Mock(return_value=False)), \
+             patch.object(panel, 'get_ssh', return_value=make_ssh(BRIDGE_SCRIPT)), \
+             patch.object(panel, 'get_protocol_manager',
+                          return_value=manager):
+            result = asyncio.run(
+                panel.api_ipv4_ingress_recreate(self.request(), 0))
+        self.assertEqual(result.status_code, 409)
+        manager.recreate_container.assert_not_called()
+
+
+class RecreateContainerTests(unittest.TestCase):
+    def _manager(self, ssh):
+        manager = XrayManager.__new__(XrayManager)
+        manager.protocol = 'xray'
+        manager.instance = 1
+        manager.base_protocol = 'xray'
+        manager.container_name = 'amnezia-xray'
+        manager.image_name = 'amneziavpn/amnezia-xray'
+        manager.ssh = ssh
+        manager._config_dir = lambda: '/opt/amnezia/xray'
+        manager._get_meta_json = lambda: {'port': 443}
+        manager.check_container_running = lambda: True
+        return manager
+
+    def _ssh(self, bound_code=0):
+        ssh = Mock()
+        calls = []
+
+        def run(command, **kwargs):
+            calls.append(command)
+            if bound_code and '-p 192.0.2.1:' in command:
+                return ('', 'driver failed programming external '
+                            'connectivity: bind failed', bound_code)
+            return ('', '', 0)
+
+        ssh.run_sudo_command = run
+        ssh.calls = calls
+        return ssh
+
+    def test_a_failed_bound_run_restores_the_service_without_binding(self):
+        ssh = self._ssh(bound_code=1)
+        manager = self._manager(ssh)
+        with self.assertRaises(RuntimeError) as ctx:
+            manager.recreate_container(ingress_ip='192.0.2.1')
+
+        self.assertIn('restored', str(ctx.exception))
+        self.assertIn('192.0.2.1', str(ctx.exception))
+        runs = [c for c in ssh.calls if 'docker run -d' in c]
+        self.assertEqual(len(runs), 2)
+        self.assertTrue(any('-p 192.0.2.1:' in c for c in runs))
+        self.assertTrue(any('-p 443:443/tcp' in c for c in runs))
+        self.assertTrue(any('docker stop amnezia-xray' in c
+                            for c in ssh.calls))
+
+    def test_a_successful_bound_run_runs_once(self):
+        ssh = self._ssh()
+        manager = self._manager(ssh)
+        result = manager.recreate_container(ingress_ip='192.0.2.1')
+
+        self.assertEqual(result, {'port': 443})
+        runs = [c for c in ssh.calls if 'docker run -d' in c]
+        self.assertEqual(len(runs), 1)
+        self.assertIn('-p 192.0.2.1:443:443/tcp', runs[0])
+        self.assertTrue(any('amnezia-dns-net' in c for c in ssh.calls))
+
+    def test_a_failed_plain_run_stays_a_plain_failure(self):
+        ssh = Mock()
+        calls = []
+
+        def run(command, **kwargs):
+            calls.append(command)
+            if 'docker run -d' in command:
+                return ('', 'no space left on device', 1)
+            return ('', '', 0)
+
+        ssh.run_sudo_command = run
+        ssh.calls = calls
+        manager = self._manager(ssh)
+        with self.assertRaises(RuntimeError) as ctx:
+            manager.recreate_container(ingress_ip='192.0.2.1')
+
+        # the restore attempt happens even when it is hopeless; the
+        # raised message carries the original binding error
+        self.assertIn('Failed to run the container', str(ctx.exception))
+        self.assertIn('no space left', str(ctx.exception))
+        self.assertEqual(len([c for c in calls if 'docker run -d' in c]), 2)
 
 
 class ContainerRunCmdTests(unittest.TestCase):

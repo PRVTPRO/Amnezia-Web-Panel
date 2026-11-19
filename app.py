@@ -8276,6 +8276,16 @@ async def api_ipv4_ingress(request: Request, server_id: int,
             except ValueError:
                 return JSONResponse({'error': 'Invalid IPv4 address'},
                                     status_code=400)
+            ssh = get_ssh(server)
+            ssh.connect()
+            try:
+                if not _ipv4_assigned(ssh, ip):
+                    return JSONResponse(
+                        {'error': f'{ip} is not assigned to any interface '
+                                  'of this server - the provider must '
+                                  'deliver it first'}, status_code=409)
+            finally:
+                ssh.disconnect()
         server['ingress_ip'] = ip or None
         save_data(data)
         return {'status': 'success', 'ingress_ip': ip or None,
@@ -8304,6 +8314,12 @@ async def api_ipv4_ingress_recreate(request: Request, server_id: int):
         ingress_ip = (server.get('ingress_ip') or '').strip() or None
         ssh = get_ssh(server)
         ssh.connect()
+        if ingress_ip and not _ipv4_assigned(ssh, ingress_ip):
+            ssh.disconnect()
+            return JSONResponse(
+                {'error': f'{ingress_ip} is not assigned to any interface '
+                          'of this server - the provider must deliver it '
+                          'first'}, status_code=409)
         recreated = []
         try:
             for key in (server.get('protocols') or {}):

@@ -446,7 +446,10 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
     def recreate_container(self, ingress_ip=None):
         """Recreate the container in place (same image, config volume
         survives) - applies the ingress binding without a full core
-        update. Brief downtime."""
+        update. Brief downtime. If the bound run fails (e.g. the address
+        is not on the host), the container is restored without the
+        binding first, then the error is raised - the VPN must not stay
+        down because of a failed publish."""
         meta = self._get_meta_json() or {}
         port = meta.get('port')
         if not port:
@@ -455,6 +458,14 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         self.ssh.run_sudo_command(f"docker rm -fv {self.container_name}")
         _, err, code = self.ssh.run_sudo_command(
             self._container_run_cmd(port, ingress_ip))
+        if code != 0 and ingress_ip:
+            _, plain_err, plain_code = self.ssh.run_sudo_command(
+                self._container_run_cmd(port))
+            if plain_code != 0:
+                raise RuntimeError(f"Failed to run the container: {err}")
+            raise RuntimeError(
+                f"Failed to publish the ports on {ingress_ip} ({err}) - "
+                "the container was restored without the binding")
         if code != 0:
             raise RuntimeError(f"Failed to run the container: {err}")
         self.ssh.run_sudo_command(
