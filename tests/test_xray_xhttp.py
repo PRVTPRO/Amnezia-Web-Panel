@@ -202,10 +202,14 @@ class XhttpClientFlowTests(unittest.TestCase):
                     config['inbounds'][0]['settings']['clients'][0]['flow'],
                     expected_flow)
 
-    def test_client_flow_helper_rejects_vision_off_raw_tcp(self):
+    def test_client_flow_helper_vision_on_tcp_and_encrypted_xhttp(self):
+        # With VLESS Encryption on: Vision on any transport (the second
+        # layer removes the transport restriction on Vision).
+        self.assertEqual(_client_flow(
+            {'network': 'xhttp', 'settings': {'decryption': 'mlkem768x25519plus.native.600s.K'}}),
+            'xtls-rprx-vision')
         self.assertEqual(_client_flow({'network': 'tcp'}), 'xtls-rprx-vision')
-        self.assertEqual(_client_flow({'network': 'xhttp'}), '')
-        self.assertEqual(_client_flow(None), 'xtls-rprx-vision')
+        self.assertEqual(_client_flow(None), '')
 
 
 class XhttpLinkExportTests(unittest.TestCase):

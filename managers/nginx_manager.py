@@ -156,7 +156,7 @@ class NginxManager:
 }}
 
 server {{
-    listen 443 ssl http2;
+    listen 443 ssl;
     server_name {domain};
 
     ssl_certificate /etc/letsencrypt/live/{domain}/fullchain.pem;
