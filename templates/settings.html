@@ -959,7 +959,7 @@
                     <select class="form-input" id="subServer">
                         <option value="">—</option>
                         {% for server in subscription_servers %}
-                        <option value="{{ server.id }}" {% if subscription_settings.server_id == server.id %}selected{% endif %}>{{ server.label }}</option>
+                        <option value="{{ server.uid }}" {% if subscription_settings.server_uid == server.uid %}selected{% endif %}>{{ server.label }}</option>
                         {% endfor %}
                     </select>
                     <div class="form-hint">{{ _('subscription_server_hint') }}</div>
@@ -2283,8 +2283,7 @@ async function saveSubscription() {
     try {
             const res = await apiCall('/api/settings/subscription', 'POST', {
                 enabled: document.getElementById('sub_enabled').checked,
-                server_id: document.getElementById('subServer').value === ''
-                    ? null : parseInt(document.getElementById('subServer').value),
+                server_uid: document.getElementById('subServer').value || null,
                 path: document.getElementById('subPath').value.trim() || 'sub',
                 name: document.getElementById('subName').value.trim(),
             });

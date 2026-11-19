@@ -40,17 +40,32 @@ class SubscriptionPathTests(unittest.TestCase):
 
     def test_settings_defaults(self):
         self.assertEqual(panel.subscription_settings({'settings': {}}),
-                         {'enabled': False, 'server_id': None, 'path': 'sub',
+                         {'enabled': False, 'server_uid': None, 'path': 'sub',
                           'name': ''})
 
     def test_nginx_server_requires_an_nginx_protocol(self):
         data = state()
         self.assertIsNotNone(panel.subscription_nginx_server(
-            data, {'enabled': True, 'server_id': 0}))
+            data, {'enabled': True, 'server_uid': 'mask'}))
         self.assertIsNone(panel.subscription_nginx_server(
-            data, {'enabled': True, 'server_id': 1}))
+            data, {'enabled': True, 'server_uid': 'node'}))
         self.assertIsNone(panel.subscription_nginx_server(
-            data, {'enabled': True, 'server_id': 99}))
+            data, {'enabled': True, 'server_uid': 'gone'}))
+
+    def test_legacy_index_settings_migrate_to_uid(self):
+        # Pre-uid settings stored a list index: subscription_settings
+        # resolves it to the server uid in-memory.
+        data = state()
+        data['settings'] = {'subscription': {
+            'enabled': True, 'server_id': 0, 'path': 'sub'}}
+        self.assertEqual(panel.subscription_settings(data)['server_uid'], 'mask')
+        # An out-of-range legacy index resolves to None (no crash).
+        data['settings']['subscription']['server_id'] = 99
+        self.assertIsNone(panel.subscription_settings(data)['server_uid'])
+        # A saved uid takes precedence over any legacy index.
+        data['settings']['subscription']['server_uid'] = 'mask'
+        data['settings']['subscription']['server_id'] = 1
+        self.assertEqual(panel.subscription_settings(data)['server_uid'], 'mask')
 
 
 class SubscriptionTokenTests(unittest.TestCase):
@@ -92,7 +107,7 @@ class SubscriptionPushTests(unittest.TestCase):
              patch.object(panel, 'xray_fp_kwargs', return_value={}):
             token, links, errors, unchanged = panel.push_user_subscription(
                 self.data, user,
-                {'enabled': True, 'server_id': 0, 'path': 'sub'},
+                {'enabled': True, 'server_uid': 'mask', 'path': 'sub'},
                 self.data['servers'][0])
 
         self.assertEqual(links, 1)
@@ -120,7 +135,7 @@ class SubscriptionPushTests(unittest.TestCase):
                           return_value=('entry.example', None)),              patch.object(panel, 'xray_fp_kwargs', return_value={}):
             panel.push_user_subscription(
                 self.data, user,
-                {'enabled': True, 'server_id': 0, 'path': 'sub'},
+                {'enabled': True, 'server_uid': 'mask', 'path': 'sub'},
                 self.data['servers'][0])
         content, _ = self.uploads[0]
         base, _, fragment = base64.b64decode(content).decode().rpartition('#')
@@ -140,7 +155,7 @@ class SubscriptionPushTests(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 panel.push_user_subscription(
                     self.data, user,
-                    {'enabled': True, 'server_id': 0, 'path': 'sub'},
+                    {'enabled': True, 'server_uid': 'mask', 'path': 'sub'},
                     self.data['servers'][0])
         self.assertIn('198.51.100.1', str(ctx.exception))
         self.assertEqual(self.uploads, [])
@@ -196,7 +211,7 @@ class AutoPushTests(unittest.TestCase):
 
     def test_auto_push_writes_file_and_caches_the_url(self):
         self.data['settings'] = {'subscription': {
-            'enabled': True, 'server_id': 0, 'path': 'sub'}}
+            'enabled': True, 'server_uid': 'mask', 'path': 'sub'}}
         manager = Mock()
         manager.get_client_config = Mock(
             return_value='vless://peer-1@entry:443?type=tcp')
@@ -213,7 +228,7 @@ class AutoPushTests(unittest.TestCase):
 
     def test_auto_push_skips_identical_files_and_clears_dead_urls(self):
         self.data['settings'] = {'subscription': {
-            'enabled': True, 'server_id': 0, 'path': 'sub'}}
+            'enabled': True, 'server_uid': 'mask', 'path': 'sub'}}
         manager = Mock()
         manager.get_client_config = Mock(
             return_value='vless://peer-1@entry:443?type=tcp')
@@ -244,7 +259,7 @@ class AutoPushTests(unittest.TestCase):
 
     def test_auto_push_is_silent_when_disabled(self):
         self.data['settings'] = {'subscription': {
-            'enabled': False, 'server_id': 0, 'path': 'sub'}}
+            'enabled': False, 'server_uid': 'mask', 'path': 'sub'}}
         self.data['users'][0]['sub_url'] = 'https://mask.example/sub/keep'
         # Any SSH or data write attempt while disabled is a test failure.
         self.ssh.upload_file_sudo = Mock(side_effect=AssertionError('ssh write'))
@@ -267,7 +282,7 @@ class SubscriptionEndpointsTests(unittest.TestCase):
              patch.object(panel, '_check_admin', lambda request: True):
             result = panel.api_subscription_settings_save(
                 self.request(),
-                panel.SubscriptionSettingsRequest(enabled=True, server_id=1,
+                panel.SubscriptionSettingsRequest(enabled=True, server_uid='node',
                                                   path='sub'))
         self.assertEqual(result.status_code, 400)
         self.assertIn('NGINX', json.loads(result.body)['error'])
@@ -283,7 +298,7 @@ class SubscriptionEndpointsTests(unittest.TestCase):
     def test_users_list_carries_the_cached_sub_url(self):
         data = state()
         data['settings'] = {'subscription': {
-            'enabled': True, 'server_id': 0, 'path': 'sub'}}
+            'enabled': True, 'server_uid': 'mask', 'path': 'sub'}}
         data['users'][0]['sub_url'] = 'https://mask.example/sub/tok'
         with patch.object(panel, 'load_data', return_value=data), \
              patch.object(panel, '_check_admin', lambda request: True):
