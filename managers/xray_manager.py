@@ -19,7 +19,7 @@ from managers.clients_table import save_clients_table
 
 logger = logging.getLogger(__name__)
 
-XRAY_CORE_VERSION = "v26.10.31"
+XRAY_CORE_VERSION = "v26.11.9"
 
 
 def _random_range(low_min, low_max, span_min, span_max):
