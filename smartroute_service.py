@@ -603,9 +603,14 @@ class SmartRouteService:
                 elif result['state'].startswith('failed'):
                     logger.warning("smartroute: timer migration failed on %s: %s",
                                    label, result.get('detail') or result['state'])
-                await self._set_timer_migration(entry['uid'],
-                                                ok=not result['state'].startswith('failed'),
-                                                state=result['state'])
+                # An unrecognised answer (no marker in the script output) is
+                # not proof of success: keep the host pending instead of
+                # closing the one-shot migration on an empty read.
+                await self._set_timer_migration(
+                    entry['uid'],
+                    ok=not (result['state'].startswith('failed')
+                            or result['state'] == 'unknown'),
+                    state=result['state'])
             except Exception as err:
                 logger.warning("smartroute timer migration on %s failed: %s", label, err)
                 entry['state'] = 'failed-exception'
@@ -662,43 +667,35 @@ class SmartRouteService:
             return None
         return (error, count)
 
-    async def _prefix_list_health(self):
-        """(error, v4_count) of the host side list, best effort.
+    async def _prefix_list_health(self, server):
+        """(error, v4_count) of this host's prefix list, best effort.
 
-        Shared by every server: the lists live on the panel-managed host, so a
-        broken download is a fleet-wide condition, not a per-instance one.
-        The last reading is cached in memory: a single failed SSH probe must
-        not make the panel believe the list is empty and skip the whole fleet.
+        The list lives on the panel-managed host, and every host has its own:
+        a broken download on one server must not stop the self-heal of the
+        others, and an unreachable host must not decide the fate of a pass that
+        was started for a different one. The reading is cached per uid for a
+        short while so repeated passes do not re-probe every host.
         """
-        data = self.load_data()
-        for server in data.get('servers') or []:
-            smartroute = server.get('smartroute') or {}
-            if not smartroute.get('installed'):
-                continue
-            uid = server.get('uid')
-            try:
-                smartr = await self._smartr(server)
-                status = await asyncio.to_thread(smartr.host_status)
-            except Exception as err:
-                cached = self._cached_prefix_list(uid)
-                if cached is not None:
-                    logger.warning(
-                        "smartroute: prefix list of %s is unreadable (%s); "
-                        "reusing the last known reading", server.get('name'), err)
-                    return cached
-                return str(err), 0
-            # host_status merges status.json both flat and under 'status';
-            # accept either shape so the guard never depends on the manager
-            # version that produced it.
-            counts = status.get('status') if isinstance(status.get('status'), dict) else status
-            try:
-                error = status.get('error')
-                count = int(counts.get('prefixes_v4') or 0)
-            except (TypeError, ValueError):
-                return 'invalid prefix count', 0
-            self._remember_prefix_list(uid, error, count)
-            return error, count
-        return None, 0
+        uid = server.get('uid')
+        cached = self._cached_prefix_list(uid)
+        if cached is not None:
+            return cached
+        try:
+            smartr = await self._smartr(server)
+            status = await asyncio.to_thread(smartr.host_status)
+        except Exception as err:
+            return str(err), 0
+        # host_status merges status.json both flat and under 'status';
+        # accept either shape so the guard never depends on the manager
+        # version that produced it.
+        counts = status.get('status') if isinstance(status.get('status'), dict) else status
+        try:
+            error = status.get('error')
+            count = int(counts.get('prefixes_v4') or 0)
+        except (TypeError, ValueError):
+            return 'invalid prefix count', 0
+        self._remember_prefix_list(uid, error, count)
+        return error, count
 
     async def reconcile(self, server_id=None):
         """Re-apply split routing to instances whose in-container state is gone.
@@ -727,18 +724,28 @@ class SmartRouteService:
                    and self._split_instances_of(server)]
         if not targets:
             return []
-        # Re-applying from an empty or failed list would "succeed" with zero
-        # throw routes and be retried every round: skip the whole pass and let
-        # the host timer fetch a fresh list first.
-        list_error, list_count = await self._prefix_list_health()
-        if list_error or list_count < SMARTR_MIN_PREFIXES:
-            logger.warning(
-                "smartroute: reconcile skipped - prefix list is not usable "
-                "(v4=%s error=%s)", list_count, list_error or 'none')
-            return [{'server': '-', 'protocol': '-', 'skipped': 'prefix-list',
-                     'prefixes_v4': list_count, 'error': list_error}]
         report = []
         for idx, server in targets:
+            # The list is per host. A stale `error` from the last download does
+            # NOT make it unusable: the host script keeps the previous file on
+            # a failed fetch and reports its real count, so only the count
+            # decides. Skipping one host must not stop the others - an
+            # unreachable host previously cancelled the whole pass, including
+            # the reconcile started right after a plugin update.
+            list_error, list_count = await self._prefix_list_health(server)
+            if list_count < SMARTR_MIN_PREFIXES:
+                logger.warning(
+                    "smartroute: reconcile of %s skipped - prefix list is not "
+                    "usable (v4=%s error=%s)", server.get('name') or idx,
+                    list_count, list_error or 'none')
+                report.append({'server': server.get('name') or idx,
+                               'protocol': '-', 'skipped': 'prefix-list',
+                               'prefixes_v4': list_count, 'error': list_error})
+                continue
+            if list_error:
+                logger.info("smartroute: %s keeps its last good prefix list "
+                            "(download error: %s)",
+                            server.get('name') or idx, list_error)
             identity = self._identity(server)
             label = server.get('name') or server.get('uid') or idx
             for proto, _link in self._split_instances_of(server):

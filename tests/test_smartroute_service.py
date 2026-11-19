@@ -662,11 +662,69 @@ class SmartRouteServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('repaired', report[0])
         self.assertFalse([c for c in FakeSRM.calls if c[0] == 'enable_instance'])
 
-    async def test_reconcile_skips_when_the_list_reports_an_error(self):
+    async def test_reconcile_still_heals_when_the_last_download_failed(self):
+        # The host script keeps the previous list on a failed fetch and reports
+        # its real count. A stale `error` must not stand the heal down: that
+        # would disable it forever whenever the upstream source is down.
         FakeSRM.throw_routes = 0
         FakeSRM.list_error = 'no v4 source gave >= 100 prefixes; old list kept'
         report = await self.svc.reconcile()
-        self.assertEqual(report[0]['skipped'], 'prefix-list')
+        self.assertTrue(report[0]['repaired'])
+        self.assertEqual(report[0]['throw_routes_after'], 37)
+        self.assertIn(('enable_instance', 'amnezia-awg2',
+                       '/opt/amnezia/awg/awg2/wg0.conf', SUBNET_DEFAULT),
+                      FakeSRM.calls)
+
+    async def test_one_unreachable_host_does_not_cancel_the_others(self):
+        # The list is per host: a dead server must not stop the heal of the
+        # rest, especially right after a plugin update recreated containers.
+        self.store['data']['servers'].append({
+            'uid': 'srv-broken', 'name': 'BROKEN',
+            'smartroute': {'installed': True, 'enabled': True},
+            'protocols': {'awg2': {'exit_link': {'exit_uid': 'E', 'smart_route': True}}}})
+
+        class PerHost(FakeSRM):
+            def host_status(self):
+                if getattr(self, 'ssh', None) == 'srv-broken':
+                    raise SmartRouteError('ssh_failed', 'unreachable')
+                return super().host_status()
+
+            def __init__(self, ssh):
+                super().__init__(ssh)
+                self.ssh = ssh
+
+        self.svc.get_ssh = lambda server: server.get('uid')
+        FakeSRM.throw_routes = 0
+        with mock.patch.object(smartroute_service, 'SmartRouteManager', PerHost):
+            report = await self.svc.reconcile()
+        states = {e['server']: e for e in report}
+        self.assertTrue(states['MAMKAM']['repaired'])
+        self.assertEqual(states['BROKEN']['skipped'], 'prefix-list')
+
+    async def test_reconcile_of_one_server_ignores_other_hosts(self):
+        # reconcile(server_id) must read the prefix list of THAT host, not of
+        # whichever installed server happens to be first in the inventory.
+        self.store['data']['servers'].append({
+            'uid': 'srv-other', 'name': 'OTHER',
+            'smartroute': {'installed': True, 'enabled': True},
+            'protocols': {'awg2': {'exit_link': {'exit_uid': 'E', 'smart_route': True}}}})
+        self.svc.get_ssh = lambda server: server.get('uid')
+        probed = []
+
+        class PerHost(FakeSRM):
+            def host_status(self):
+                probed.append(getattr(self, 'ssh', None))
+                return super().host_status()
+
+            def __init__(self, ssh):
+                super().__init__(ssh)
+                self.ssh = ssh
+
+        FakeSRM.throw_routes = 0
+        with mock.patch.object(smartroute_service, 'SmartRouteManager', PerHost):
+            await self.svc.reconcile(1)
+        self.assertEqual(probed[:1], ['srv-other'])
+        self.assertNotIn('srv-entry', probed)
 
     async def test_reconcile_without_splits_does_not_touch_the_host(self):
         for proto in ('awg', 'awg2'):
@@ -734,21 +792,24 @@ class SmartRouteServiceTest(unittest.IsolatedAsyncioTestCase):
         # First probe reads the host and remembers 8000; a later probe that
         # fails must reuse it instead of reporting "0 prefixes" and standing
         # the whole fleet down.
-        self.assertEqual(await self.svc._prefix_list_health(), (None, 8000))
+        server = self.store['data']['servers'][0]
+        self.assertEqual(await self.svc._prefix_list_health(server), (None, 8000))
         FakeSRM.fail_status = True
-        self.assertEqual(await self.svc._prefix_list_health(), (None, 8000))
+        server = self.store['data']['servers'][0]
+        self.assertEqual(await self.svc._prefix_list_health(server), (None, 8000))
 
     async def test_prefix_list_without_cache_reports_the_failure(self):
         FakeSRM.fail_status = True
-        error, count = await self.svc._prefix_list_health()
+        error, count = await self.svc._prefix_list_health(self.store['data']['servers'][0])
         self.assertIn('ssh failed', error)
         self.assertEqual(count, 0)
 
     async def test_prefix_list_cache_expires(self):
-        await self.svc._prefix_list_health()
+        server = self.store['data']['servers'][0]
+        await self.svc._prefix_list_health(server)
         FakeSRM.fail_status = True
         with mock.patch.object(smartroute_service, 'SMARTR_PREFIX_CACHE_TTL', -1):
-            error, count = await self.svc._prefix_list_health()
+            error, count = await self.svc._prefix_list_health(self.store['data']['servers'][0])
         self.assertIn('ssh failed', error)
         self.assertEqual(count, 0)
 

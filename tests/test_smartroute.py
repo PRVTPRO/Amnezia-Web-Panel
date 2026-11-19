@@ -293,6 +293,35 @@ class InstallRemoveScriptTests(unittest.TestCase):
         self.assertIn('smartroute-timer: migrated', script)
         self.assertIn('smartroute-timer: failed', script)
 
+    def test_timer_migration_script_parses_in_bash(self):
+        # The migration runs once per host and is the hardest thing here to
+        # retry by hand: a quoting mistake must be caught before it reaches a
+        # production host, not after.
+        import shutil
+        import subprocess
+        import tempfile
+
+        bash = shutil.which('bash')
+        if not bash:
+            self.skipTest('bash is not installed on this host')
+        for name, script in (
+                ('install', build_install_script('all')),
+                ('remove', build_remove_script()),
+                ('migration', build_timer_migration_script())):
+            with self.subTest(name):
+                with tempfile.NamedTemporaryFile('w', suffix='.sh', delete=False,
+                                                 encoding='utf-8', newline='\n') as fh:
+                    fh.write(script)
+                    path = fh.name
+                try:
+                    res = subprocess.run([bash, '-n', path],
+                                         capture_output=True, text=True)
+                    self.assertEqual(res.returncode, 0,
+                                     f'{name}: {res.stderr[:800]}')
+                finally:
+                    import os
+                    os.unlink(path)
+
     def test_unknown_phase_is_rejected(self):
         with self.assertRaises(SmartRouteError):
             build_install_script('nope')
