@@ -127,6 +127,7 @@
   "ipv4_status_rule": "SNAT 规则",
   "ipv4_status_assigned": "IP 已绑定",
   "ipv4_status_verified": "出口正常",
+  "ipv4_status_container": "容器出口",
   "ipv4_ingress_title": "IPv4 入口地址（ingress）",
   "ipv4_ingress_label": "发布端口的入口 IP",
   "ipv4_ingress_hint": "容器（重）创建时发布的端口绑定到该地址 - 出口地址随之不再暴露 VPN 监听。留空 = 所有地址。在安装、内核更新或通过下方按钮时应用。",

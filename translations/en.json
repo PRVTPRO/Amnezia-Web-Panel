@@ -128,6 +128,7 @@
   "ipv4_status_rule": "SNAT rule",
   "ipv4_status_assigned": "IP assigned",
   "ipv4_status_verified": "egress works",
+  "ipv4_status_container": "container egress",
   "ipv4_ingress_title": "IPv4 ingress (incoming address)",
   "ipv4_ingress_label": "Ingress IP for published ports",
   "ipv4_ingress_hint": "Published ports bind to this address at container (re)creation - the egress address then stops exposing the VPN listener. Empty = all addresses. Applied on install, core update, or via the recreate button below.",

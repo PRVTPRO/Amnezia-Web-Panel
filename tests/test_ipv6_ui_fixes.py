@@ -234,9 +234,9 @@ CLOSE_KEYS = {'close'}
 IPV4_POLICY_KEYS = {
     'ipv4_egress_title', 'ipv4_egress_label', 'ipv4_egress_hint',
     'ipv4_status_none', 'ipv4_status_rule', 'ipv4_status_assigned',
-    'ipv4_status_verified', 'ipv4_ingress_title', 'ipv4_ingress_label',
-    'ipv4_ingress_hint', 'ipv4_recreate_btn', 'ipv4_recreate_confirm',
-    'ipv4_ingress_saved',
+    'ipv4_status_verified', 'ipv4_status_container', 'ipv4_ingress_title',
+    'ipv4_ingress_label', 'ipv4_ingress_hint', 'ipv4_recreate_btn',
+    'ipv4_recreate_confirm', 'ipv4_ingress_saved',
 }
 
 # I1 masking block (per-instance special-junk packet): install and settings.

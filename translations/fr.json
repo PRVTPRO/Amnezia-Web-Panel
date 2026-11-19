@@ -127,6 +127,7 @@
   "ipv4_status_rule": "Règle SNAT",
   "ipv4_status_assigned": "IP attribuée",
   "ipv4_status_verified": "egress fonctionne",
+  "ipv4_status_container": "egress du conteneur",
   "ipv4_ingress_title": "IPv4 : adresse entrante (ingress)",
   "ipv4_ingress_label": "IP entrant pour les ports publiés",
   "ipv4_ingress_hint": "Les ports publiés se lient à cette adresse à la (re)création du conteneur - l'adresse egress cesse alors d'exposer l'écoute VPN. Vide = toutes les adresses. Appliqué à l'installation, à la mise à jour du noyau ou via le bouton ci-dessous.",

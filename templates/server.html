@@ -5186,9 +5186,15 @@
                 return;
             }
             const rules = (data.snat_rules || []).length;
-            st.textContent = `${_('ipv4_status_rule')}: ${rules ? '✓' : '✗'} · `
+            let line = `${_('ipv4_status_rule')}: ${rules ? '✓' : '✗'} · `
                 + `${_('ipv4_status_assigned')}: ${data.assigned ? '✓' : '✗'} · `
-                + `${_('ipv4_status_verified')}: ${data.egress_verified ? '✓' : '✗'}`;
+                + `${_('ipv4_status_verified')}: ${data.egress_verified ? '✓' : '✗'} · `
+                + `${_('ipv4_status_container')}: ${data.container_ok ? '✓' : '✗'}`;
+            if (data.egress_ip && data.container_egress_ip
+                    && data.container_egress_ip !== data.egress_ip) {
+                line += ` (${data.container_egress_ip})`;
+            }
+            st.textContent = line;
         } catch (err) { /* the modal works without the status line */ }
     }
 

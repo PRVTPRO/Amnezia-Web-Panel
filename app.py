@@ -7938,8 +7938,12 @@ def api_xray_selfsteal_apply(request: Request, server_id: int, req: XraySelfstea
 # ===== server IPv4 policy: egress SNAT + ingress binding =====
 # Egress: a docker-bridge-subnet SNAT rule on the host sends all container
 # traffic out through a second public IP (entry != exit per the Reality
-# setup guidance). sendThrough cannot do this from a bridge container -
-# the public IP is not visible in its network namespace.
+# setup guidance). The rule mirrors docker's own masquerade shape
+# (-s <subnet> ! -o <bridge>) - no WAN-interface assumption, so it matches
+# however the host routes. sendThrough cannot do this from a bridge
+# container - the public IP is not visible in its network namespace.
+# The apply is verified end-to-end: a curl from inside the VPN container
+# must report the egress address, otherwise the rule is rolled back.
 # Ingress: pins the published ports to one host address at container
 # (re)creation, so the egress address stops exposing the VPN listener.
 
@@ -7959,15 +7963,39 @@ def _egress_verify(ssh, ip):
     return code == 0 and (out or '').strip() == ip
 
 
-def _egress_iface(ssh):
-    """The interface owning the default route (where egress happens)."""
-    out, _, code = ssh.run_sudo_command("ip route show default")
-    if code != 0:
-        return None
-    for line in (out or '').split('\n'):
-        parts = line.split()
-        if 'dev' in parts:
-            return parts[parts.index('dev') + 1]
+def _docker_bridge_iface(ssh):
+    """The host interface of the default bridge - the guard in the SNAT
+    rule. Container-to-container traffic on the bridge itself keeps its
+    source, exactly like docker's own masquerade (-s <subnet> ! -o <br>)."""
+    out, _, code = ssh.run_sudo_command(
+        "docker network inspect bridge "
+        "--format '{{index .Options \"com.docker.network.bridge.name\"}}'")
+    iface = (out or '').strip()
+    return iface if code == 0 and iface else 'docker0'
+
+
+def _egress_probe_containers(server):
+    """VPN containers whose traffic the egress IP must serve."""
+    names = []
+    for key, info in (server.get('protocols') or {}).items():
+        if protocol_base(key) in ('xray', 'awg', 'wg') \
+                and isinstance(info, dict) and info.get('container_name'):
+            names.append(info['container_name'])
+    return names
+
+
+def _egress_container_probe(ssh, containers):
+    """The only honest egress check: plain curl from inside a VPN
+    container. With the SNAT rule in place it reports the egress
+    address; without it, the main one. Returns the observed IP or
+    None when no container answers (probe impossible)."""
+    for container in containers:
+        out, _, code = ssh.run_sudo_command(
+            f"docker exec {shlex.quote(str(container))} "
+            f"curl -4 -s --max-time 8 https://api.ipify.org")
+        observed = (out or '').strip()
+        if code == 0 and observed:
+            return observed
     return None
 
 
@@ -8000,13 +8028,13 @@ def _snat_rules_for(ssh, subnet):
     return rules
 
 
-def _persist_egress(ssh, subnet, iface, ip):
+def _persist_egress(ssh, subnet, bridge_if, ip):
     """Boot-persistent re-application via a script + systemd oneshot unit
     on the server (netfilter-persistent may only save one iptables
     backend; the script is deterministic)."""
-    rule = (f'iptables -t nat -C POSTROUTING -s {subnet} -o {iface} '
+    rule = (f'iptables -t nat -C POSTROUTING -s {subnet} ! -o {bridge_if} '
             f'-j SNAT --to-source {ip} 2>/dev/null || '
-            f'iptables -t nat -I POSTROUTING -s {subnet} -o {iface} '
+            f'iptables -t nat -I POSTROUTING -s {subnet} ! -o {bridge_if} '
             f'-j SNAT --to-source {ip}')
     script = ('#!/bin/sh' + chr(10)
               + '# Managed by Amnezia Web Panel: re-applies the egress SNAT'
@@ -8062,6 +8090,8 @@ def api_ipv4_status(request: Request, server_id: int):
         try:
             subnet = _docker_bridge_subnet(ssh)
             egress_ip = server.get('egress_ip') or ''
+            probe_ip = _egress_container_probe(
+                ssh, _egress_probe_containers(server))
             state = {
                 'ingress_ip': server.get('ingress_ip') or '',
                 'egress_ip': egress_ip,
@@ -8069,6 +8099,8 @@ def api_ipv4_status(request: Request, server_id: int):
                 'snat_rules': _snat_rules_for(ssh, subnet) if subnet else [],
                 'assigned': bool(egress_ip) and _ipv4_assigned(ssh, egress_ip),
                 'egress_verified': bool(egress_ip) and _egress_verify(ssh, egress_ip),
+                'container_egress_ip': probe_ip,
+                'container_ok': bool(egress_ip) and probe_ip == egress_ip,
             }
         finally:
             ssh.disconnect()
@@ -8119,17 +8151,29 @@ async def api_ipv4_egress(request: Request, server_id: int,
                                   'did not report it back. Check with the '
                                   'provider that the address is routed'},
                         status_code=409)
-            iface = _egress_iface(ssh)
-            if not iface:
-                return JSONResponse({'error': 'No default route on this server'},
-                                    status_code=409)
+            bridge_if = _docker_bridge_iface(ssh)
             for spec in _snat_rules_for(ssh, subnet):
                 ssh.run_sudo_command('iptables -t nat -D POSTROUTING ' + spec)
             if ip:
                 ssh.run_sudo_command(
-                    f'iptables -t nat -I POSTROUTING -s {subnet} -o {iface} '
-                    f'-j SNAT --to-source {ip}')
-                _persist_egress(ssh, subnet, iface, ip)
+                    f'iptables -t nat -I POSTROUTING -s {subnet} '
+                    f'! -o {bridge_if} -j SNAT --to-source {ip}')
+                observed = _egress_container_probe(
+                    ssh, _egress_probe_containers(server))
+                if observed is not None and observed != ip:
+                    # The rule exists but the container path does not go
+                    # through it - leave the server as it was.
+                    for spec in _snat_rules_for(ssh, subnet):
+                        ssh.run_sudo_command(
+                            'iptables -t nat -D POSTROUTING ' + spec)
+                    return JSONResponse(
+                        {'error': f'The SNAT rule was inserted, but the '
+                                  f'container still egresses as '
+                                  f'{observed} instead of {ip} - rolled '
+                                  'back. Check the docker bridge subnet '
+                                  'and the host routing'},
+                        status_code=409)
+                _persist_egress(ssh, subnet, bridge_if, ip)
             else:
                 _clear_egress(ssh, subnet)
         finally:
