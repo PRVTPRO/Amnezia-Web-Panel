@@ -102,6 +102,7 @@ class A2RecreateCopyTests(unittest.TestCase):
         manager._container_run_image = mock.Mock(return_value=IMAGE)
         manager._wait_container_running = mock.Mock(return_value=True)
         manager._invalidate_config_cache = mock.Mock()
+        manager._tunnel_up = mock.Mock(return_value=True)
         return manager, ssh.commands
 
     def test_full_awg_directory_is_copied_and_verified(self):

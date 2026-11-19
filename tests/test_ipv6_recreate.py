@@ -137,6 +137,7 @@ class RecreateContainerIpv6Tests(unittest.TestCase):
 
         ssh.run_sudo_command.side_effect = sudo
         manager = AWGManager(ssh)
+        manager._tunnel_up = mock.Mock(return_value=True)
         return manager, commands
 
     @staticmethod

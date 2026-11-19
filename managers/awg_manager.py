@@ -1756,6 +1756,22 @@ class AWGManager:
 
     # Known failure codes raised by this path (and handled by callers):
     # server_off, env_off, state_unreadable, recreate_rollback_failed.
+    def _tunnel_up(self, container):
+        """Whether the tunnel interface itself is up. 'running' is not
+        enough: a freshly created container can boot before its extra
+        networks settle and come up without the tunnel."""
+        out, _, _ = self.ssh.run_sudo_command(
+            f"docker exec {container} sh -c "
+            f"'awg show 2>/dev/null || wg show 2>/dev/null'")
+        return bool((out or '').strip())
+
+    def _wait_tunnel(self, container, polls=8, pause=2):
+        for _ in range(polls):
+            if self._tunnel_up(container):
+                return True
+            time.sleep(pause)
+        return self._tunnel_up(container)
+
     def _recreate_awg_container(self, protocol_type, host_ip=None, ipv6=False):
         """The state-safe container recreate shared by the IPv6-enable and
         the ingress-binding flows: the running container is renamed to a
@@ -1896,6 +1912,21 @@ class AWGManager:
             if not restore():
                 raise RuntimeError('recreate_rollback_failed')
             raise RuntimeError('env_off')
+        # A container can boot before its extra networks settle and come up
+        # without the tunnel (awg show empty, bare iptables). Restart it
+        # once with the networks attached and require the interface itself.
+        if not self._wait_tunnel(container):
+            self.ssh.run_sudo_command(f"docker restart {container}")
+            try:
+                self._wait_container_running(container)
+            except RuntimeError:
+                if not restore():
+                    raise RuntimeError('recreate_rollback_failed')
+                raise RuntimeError('env_off')
+            if not self._wait_tunnel(container):
+                if not restore():
+                    raise RuntimeError('recreate_rollback_failed')
+                raise RuntimeError('env_off')
         if ipv6:
             out, _, _ = self.ssh.run_sudo_command(
                 f"docker exec {container} ip -6 route show default 2>/dev/null")

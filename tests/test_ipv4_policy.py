@@ -481,6 +481,9 @@ class AwgRecreateDanceTests(unittest.TestCase):
             manager, '_container_peer_count', return_value=1))
         stack.enter_context(patch.object(manager, '_wait_container_running'))
         stack.enter_context(patch.object(manager, '_invalidate_config_cache'))
+        stack.enter_context(patch.object(manager, '_tunnel_up',
+                                         return_value=True))
+        stack.enter_context(patch('managers.awg_manager.time.sleep'))
         return manager
 
     def test_ingress_recreate_hops_the_copy_through_the_host(self):
@@ -523,6 +526,36 @@ class AwgRecreateDanceTests(unittest.TestCase):
                             for c in ssh.calls))
         self.assertTrue(any('rm -rf /tmp/awg-recreate-amnezia-awg3' in c
                             for c in ssh.calls))
+
+    def test_a_silent_boot_gets_one_restart(self):
+        # the container can boot before its networks settle and come up
+        # without the tunnel; the dance restarts it once with the
+        # networks attached instead of rolling back
+        ssh = make_ssh({'docker port ': ('55424/udp -> 192.0.2.1:44337\n',
+                                         '', 0)})
+        manager = self._patched_manager(ssh)
+        manager._tunnel_up = Mock(
+            side_effect=[False] * 9 + [True])
+
+        result = manager.recreate_container('awg3', ingress_ip='192.0.2.1')
+
+        self.assertEqual(result, 'amnezia-awg3')
+        self.assertTrue(any(c.startswith('docker restart amnezia-awg3')
+                            for c in ssh.calls))
+
+    def test_a_tunnel_that_never_comes_up_rolls_back(self):
+        ssh = make_ssh({'docker port ': ('55424/udp -> 192.0.2.1:44337\n',
+                                         '', 0)})
+        manager = self._patched_manager(ssh)
+        manager._tunnel_up = Mock(return_value=False)
+
+        with self.assertRaises(RuntimeError) as ctx:
+            manager.recreate_container('awg3', ingress_ip='192.0.2.1')
+
+        self.assertEqual(str(ctx.exception), 'env_off')
+        self.assertTrue(any(
+            'docker rename amnezia-awg3-ingressbak amnezia-awg3' in c
+            for c in ssh.calls))
 
 
 class RunCmdBindingTests(unittest.TestCase):
