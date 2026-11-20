@@ -268,7 +268,7 @@ class XrayManager:
         out, _, _ = self.ssh.run_command("uname -m")
         return (out or '').strip() or 'x86_64'
 
-    def update_core(self, target_release, progress=None):
+    def update_core(self, target_release, progress=None, ingress_ip=None):
         """Rebuild the image with ``target_release`` and recreate the container.
 
         The config, keys and clientsTable live in the config_dir volume and
@@ -328,15 +328,7 @@ class XrayManager:
         if not port:
             raise RuntimeError("Xray port is unknown; cannot recreate the container")
         config_dir = self._config_dir()
-        run_cmd = f"""docker run -d \\
---restart always \\
---privileged \\
---cap-add=NET_ADMIN \\
--p {port}:{port}/tcp \\
--p {port}:{port}/udp \\
--v {config_dir}:{config_dir} \\
---name {self.container_name} \\
-{self.image_name}"""
+        run_cmd = self._container_run_cmd(port, ingress_ip)
 
         report('swap', f"recreating {self.container_name} (a few seconds of downtime)")
         self.ssh.run_sudo_command(f"docker stop {self.container_name}")
@@ -436,7 +428,55 @@ RUN echo '#!/bin/bash' > /opt/amnezia/start.sh && \\
 ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
 """
 
-    def install_protocol(self, port=443, site_name='yahoo.com', transport='tcp'):
+    def _container_run_cmd(self, port, ingress_ip=None):
+        """The docker run command for the xray container. ingress_ip pins
+        the published ports to one host address, so the egress address
+        stops exposing the VPN listener."""
+        bind = f"{ingress_ip}:" if ingress_ip else ""
+        return f"""docker run -d \\
+--restart always \\
+--privileged \\
+--cap-add=NET_ADMIN \\
+-p {bind}{port}:{port}/tcp \\
+-p {bind}{port}:{port}/udp \\
+-v {self._config_dir()}:{self._config_dir()} \\
+--name {self.container_name} \\
+{self.image_name}"""
+
+    def recreate_container(self, ingress_ip=None):
+        """Recreate the container in place (same image, config volume
+        survives) - applies the ingress binding without a full core
+        update. Brief downtime. If the bound run fails (e.g. the address
+        is not on the host), the container is restored without the
+        binding first, then the error is raised - the VPN must not stay
+        down because of a failed publish."""
+        meta = self._get_meta_json() or {}
+        port = meta.get('port')
+        if not port:
+            raise RuntimeError("Xray port is unknown; cannot recreate the container")
+        self.ssh.run_sudo_command(f"docker stop {self.container_name}")
+        self.ssh.run_sudo_command(f"docker rm -fv {self.container_name}")
+        _, err, code = self.ssh.run_sudo_command(
+            self._container_run_cmd(port, ingress_ip))
+        if code != 0 and ingress_ip:
+            _, plain_err, plain_code = self.ssh.run_sudo_command(
+                self._container_run_cmd(port))
+            if plain_code != 0:
+                raise RuntimeError(f"Failed to run the container: {err}")
+            raise RuntimeError(
+                f"Failed to publish the ports on {ingress_ip} ({err}) - "
+                "the container was restored without the binding")
+        if code != 0:
+            raise RuntimeError(f"Failed to run the container: {err}")
+        self.ssh.run_sudo_command(
+            f"docker network connect amnezia-dns-net {self.container_name} || true")
+        self.ssh.run_sudo_command("sleep 3")
+        if not self.check_container_running():
+            raise RuntimeError("the container did not start after the recreation")
+        return {'port': int(port)}
+
+    def install_protocol(self, port=443, site_name='yahoo.com', transport='tcp',
+                         ingress_ip=None):
         """Full installation of Xray.
 
         transport: 'tcp' keeps the legacy TCP+Vision preset, 'xhttp' moves
@@ -596,15 +636,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         results.append("Host network tuning applied")
 
         results.append("Starting container...")
-        run_cmd = f"""docker run -d \\
---restart always \\
---privileged \\
---cap-add=NET_ADMIN \\
--p {port}:{port}/tcp \\
--p {port}:{port}/udp \\
--v {config_dir}:{config_dir} \\
---name {self.container_name} \\
-{self.image_name}"""
+        run_cmd = self._container_run_cmd(port, ingress_ip)
 
         _, err, code = self.ssh.run_sudo_command(run_cmd)
         if code != 0: raise RuntimeError(f"Failed to run container: {err}")

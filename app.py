@@ -7935,6 +7935,445 @@ def api_xray_selfsteal_apply(request: Request, server_id: int, req: XraySelfstea
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
+# ===== server IPv4 policy: egress SNAT + ingress binding =====
+# Egress: one SNAT rule per docker bridge subnet on the host sends all
+# container traffic out through a second public IP (entry != exit per
+# the Reality setup guidance). Each rule mirrors docker's own masquerade
+# shape (-s <subnet> ! -o <that bridge>) and covers every subnet the
+# traffic can originate from - with docker 28+ the default gateway may
+# end up on any attached network, e.g. the self-steal one. sendThrough
+# cannot do this from a bridge container - the public IP is not visible
+# in its network namespace.
+# The rules are written to every installed iptables backend (nft and
+# legacy) - a plain `iptables` lookup may resolve differently for the
+# panel's non-login SSH shell than for a root shell.
+# The apply is verified end-to-end: a curl from inside the VPN container
+# must report the egress address, otherwise the rules are rolled back.
+# Ingress: pins the published ports to one host address at container
+# (re)creation, so the egress address stops exposing the VPN listener.
+
+def _ipv4_assigned(ssh, ip):
+    """Is the IPv4 address assigned to an interface of this server?"""
+    out, _, code = ssh.run_sudo_command("ip -4 addr show")
+    return code == 0 and f"{ip}/" in (out or '')
+
+
+def _egress_verify(ssh, ip):
+    """Does the address actually egress? A curl bound to it must report
+    it back - this catches providers that accept the assignment but
+    filter foreign sources, and revoked/undelivered addresses."""
+    out, _, code = ssh.run_command(
+        f"curl -4 -s --interface {shlex.quote(ip)} --max-time 8 "
+        f"https://api.ipify.org")
+    return code == 0 and (out or '').strip() == ip
+
+
+def _docker_subnets(ssh):
+    """(subnet, bridge iface) for every bridge network on the host. The
+    SNAT must cover each subnet container traffic can originate from -
+    with docker 28+ the default gateway (and so the source address) may
+    end up on any attached network, e.g. the self-steal one."""
+    out, _, code = ssh.run_sudo_command(
+        "docker network ls --format '{{.Name}} {{.Driver}}'")
+    if code != 0:
+        return []
+    names = [parts[0] for parts in
+             (p.split() for p in (out or '').split('\n'))
+             if len(parts) == 2 and parts[1] == 'bridge']
+    subnets = []
+    for name in names:
+        out, _, code = ssh.run_sudo_command(
+            "docker network inspect " + shlex.quote(name)
+            + " --format '{{(index .IPAM.Config 0).Subnet}}|"
+            "{{index .Options \"com.docker.network.bridge.name\"}}|{{.Id}}'")
+        if code != 0 or '|' not in (out or ''):
+            continue
+        subnet, opt, net_id = out.strip().split('|', 2)
+        if opt in ('<no value>', 'nil'):
+            opt = ''
+        try:
+            net = ipaddress.ip_network(subnet, strict=False)
+        except ValueError:
+            continue
+        if net.version != 4:
+            continue
+        iface = opt or ('docker0' if name == 'bridge'
+                        else 'br-' + net_id[:12])
+        subnets.append((subnet, iface))
+    return subnets
+
+
+def _egress_probe_containers(server):
+    """VPN containers whose traffic the egress IP must serve."""
+    vpn_bases = ('xray', 'awg', 'awg2', 'awg3', 'awg_legacy', 'wireguard')
+    names = []
+    for key, info in (server.get('protocols') or {}).items():
+        if protocol_base(key) in vpn_bases \
+                and isinstance(info, dict) and info.get('container_name'):
+            names.append(info['container_name'])
+    return names
+
+
+def _egress_container_probe(ssh, containers):
+    """The only honest egress check: plain curl from inside a VPN
+    container. With the SNAT rule in place it reports the egress
+    address; without it, the main one. Images without curl are probed
+    via nsenter (the host's curl inside the container's network
+    namespace). Returns the observed IP or None when no container
+    answers (probe impossible)."""
+    for container in containers:
+        out, _, code = ssh.run_sudo_command(
+            f"docker exec {shlex.quote(str(container))} "
+            f"curl -4 -s --max-time 8 https://api.ipify.org")
+        observed = (out or '').strip()
+        if code == 0 and observed:
+            return observed
+        pid_out, _, pid_code = ssh.run_sudo_command(
+            f"docker inspect -f '{{{{.State.Pid}}}}' "
+            f"{shlex.quote(str(container))} 2>/dev/null")
+        pid = (pid_out or '').strip()
+        if pid_code != 0 or not pid.isdigit():
+            continue
+        out, _, code = ssh.run_sudo_command(
+            f"nsenter -n -t {pid} curl -4 -s --max-time 8 "
+            f"https://api.ipify.org")
+        observed = (out or '').strip()
+        if code == 0 and observed:
+            return observed
+    return None
+
+
+def _iptables_bins(ssh):
+    """Explicit iptables backend binaries. A plain `iptables` lookup can
+    resolve to a different backend for the panel's non-login SSH shell
+    than for an interactive root shell; naming the backends removes the
+    guesswork. Both are written when present - the kernel consults both
+    and the first NAT decision wins, so the rule works either way."""
+    out, _, code = ssh.run_command(
+        'command -v iptables-nft || true; command -v iptables-legacy || true')
+    bins = [line.strip() for line in (out or '').split('\n') if line.strip()]
+    return bins or ['iptables']
+
+
+def _snat_rules_for(ssh, subnets):
+    """Managed POSTROUTING SNAT rules: those sourced from inside any
+    docker subnet, across every installed iptables backend. The panel
+    owns the egress policy for container traffic, so a stale manual rule
+    like -s 172.17.0.0/24 inside docker0's /16 is picked up too. Rules
+    without -s (host-wide) are never touched. Live spec strings, usable
+    for -D deletion."""
+    pools = [ipaddress.ip_network(s) for s, _ in subnets]
+    specs = set()
+    for bin_name in _iptables_bins(ssh):
+        out, _, code = ssh.run_sudo_command(
+            f'{bin_name} -t nat -S POSTROUTING')
+        if code != 0:
+            continue
+        for line in (out or '').split('\n'):
+            line = line.strip()
+            if not line.startswith('-A POSTROUTING') \
+                    or '-j SNAT' not in line:
+                continue
+            match = re.search(r'-s (\S+) ', line)
+            if not match:
+                continue
+            try:
+                src = ipaddress.ip_network(match.group(1), strict=False)
+            except ValueError:
+                continue
+            if any(src.subnet_of(pool) for pool in pools):
+                specs.add(line[len('-A POSTROUTING '):].strip())
+    return sorted(specs)
+
+
+def _persist_egress(ssh, subnets, ip):
+    """Boot-persistent re-application via a script + systemd oneshot unit
+    on the server (netfilter-persistent may only save one iptables
+    backend; the script is deterministic)."""
+    rules = []
+    for bin_name in _iptables_bins(ssh):
+        for subnet, iface in subnets:
+            rules.append(
+                f'{bin_name} -t nat -C POSTROUTING -s {subnet} ! -o {iface} '
+                f'-j SNAT --to-source {ip} 2>/dev/null || '
+                f'{bin_name} -t nat -I POSTROUTING -s {subnet} ! -o {iface} '
+                f'-j SNAT --to-source {ip}')
+    script = ('#!/bin/sh' + chr(10)
+              + '# Managed by Amnezia Web Panel: re-applies the egress SNAT'
+              + chr(10) + (chr(10).join(rules) or 'true') + chr(10))
+    unit = ('[Unit]' + chr(10)
+            + 'Description=Amnezia Web Panel egress SNAT' + chr(10)
+            + 'After=network-online.target' + chr(10)
+            + 'Wants=network-online.target' + chr(10)
+            + chr(10) + '[Service]' + chr(10)
+            + 'Type=oneshot' + chr(10)
+            + 'ExecStart=/opt/amnezia/egress-snat.sh' + chr(10)
+            + chr(10) + '[Install]' + chr(10)
+            + 'WantedBy=multi-user.target' + chr(10))
+    ssh.run_sudo_command(
+        'systemctl disable --now amnezia-egress-snat 2>/dev/null || true')
+    ssh.upload_file_sudo(script, '/opt/amnezia/egress-snat.sh')
+    ssh.run_sudo_command('chmod +x /opt/amnezia/egress-snat.sh')
+    ssh.upload_file_sudo(unit, '/etc/systemd/system/amnezia-egress-snat.service')
+    ssh.run_sudo_command('systemctl daemon-reload')
+    ssh.run_sudo_command('systemctl enable amnezia-egress-snat')
+
+
+def _clear_egress(ssh, subnets):
+    """Remove the managed SNAT rules and the boot persistence."""
+    bins = _iptables_bins(ssh)
+    for spec in _snat_rules_for(ssh, subnets):
+        for bin_name in bins:
+            ssh.run_sudo_command(
+                f'{bin_name} -t nat -D POSTROUTING ' + spec)
+    ssh.run_sudo_command(
+        'systemctl disable --now amnezia-egress-snat 2>/dev/null || true')
+    ssh.run_sudo_command('rm -f /opt/amnezia/egress-snat.sh '
+                         '/etc/systemd/system/amnezia-egress-snat.service')
+    ssh.run_sudo_command('systemctl daemon-reload 2>/dev/null || true')
+
+
+class Ipv4EgressRequest(BaseModel):
+    ip: str = ''
+
+
+class Ipv4IngressRequest(BaseModel):
+    ip: str = ''
+
+
+@app.get('/api/servers/{server_id}/ipv4/status', tags=["Servers"])
+def api_ipv4_status(request: Request, server_id: int):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        ssh = get_ssh(server)
+        ssh.connect()
+        try:
+            subnets = _docker_subnets(ssh)
+            egress_ip = server.get('egress_ip') or ''
+            probe_ip = _egress_container_probe(
+                ssh, _egress_probe_containers(server))
+            state = {
+                'ingress_ip': server.get('ingress_ip') or '',
+                'egress_ip': egress_ip,
+                'subnets': [s for s, _ in subnets],
+                'snat_rules': _snat_rules_for(ssh, subnets),
+                'assigned': bool(egress_ip) and _ipv4_assigned(ssh, egress_ip),
+                'egress_verified': bool(egress_ip) and _egress_verify(ssh, egress_ip),
+                'container_egress_ip': probe_ip,
+                'container_ok': bool(egress_ip) and probe_ip == egress_ip,
+            }
+        finally:
+            ssh.disconnect()
+        return state
+    except Exception as e:
+        logger.exception("Error reading the server IPv4 policy")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/ipv4/egress', tags=["Servers"])
+async def api_ipv4_egress(request: Request, server_id: int,
+                          req: Ipv4EgressRequest):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        _install_ops_load()
+        if _install_running(server_id):
+            return JSONResponse(
+                {'error': 'Another operation is running on this server',
+                 'code': 'operation_in_progress'}, status_code=409)
+        server = data['servers'][server_id]
+        ip = (req.ip or '').strip()
+        ssh = get_ssh(server)
+        ssh.connect()
+        try:
+            subnets = _docker_subnets(ssh)
+            if not subnets:
+                return JSONResponse(
+                    {'error': 'no docker bridge networks found on this '
+                              'server'}, status_code=409)
+            if ip:
+                try:
+                    ipaddress.IPv4Address(ip)
+                except ValueError:
+                    return JSONResponse({'error': 'Invalid IPv4 address'},
+                                        status_code=400)
+                if not _ipv4_assigned(ssh, ip):
+                    return JSONResponse(
+                        {'error': f'{ip} is not assigned to any interface '
+                                  'of this server - the provider must '
+                                  'deliver it first'}, status_code=409)
+                if not _egress_verify(ssh, ip):
+                    return JSONResponse(
+                        {'error': f'{ip} does not egress: a curl bound to it '
+                                  'did not report it back. Check with the '
+                                  'provider that the address is routed'},
+                        status_code=409)
+            bins = _iptables_bins(ssh)
+            for spec in _snat_rules_for(ssh, subnets):
+                for bin_name in bins:
+                    ssh.run_sudo_command(
+                        f'{bin_name} -t nat -D POSTROUTING ' + spec)
+            if ip:
+                errors = []
+                for bin_name in bins:
+                    for subnet, iface in subnets:
+                        _, err, code = ssh.run_sudo_command(
+                            f'{bin_name} -t nat -I POSTROUTING -s {subnet} '
+                            f'! -o {iface} -j SNAT --to-source {ip}')
+                        if code != 0:
+                            errors.append(
+                                f'{bin_name} {subnet}: '
+                                f'{(err or "").strip() or "iptables failed"}')
+                landed = _snat_rules_for(ssh, subnets)
+                if errors or not landed:
+                    # A silently skipped rule would leave the exit policy
+                    # half-applied - undo whatever landed and say so.
+                    for spec in landed:
+                        for bin_name in bins:
+                            ssh.run_sudo_command(
+                                f'{bin_name} -t nat -D POSTROUTING ' + spec)
+                    return JSONResponse(
+                        {'error': 'Failed to insert the SNAT rules: '
+                                  + '; '.join(errors
+                                              or ['rules did not persist'])},
+                        status_code=409)
+                observed = _egress_container_probe(
+                    ssh, _egress_probe_containers(server))
+                if observed is not None and observed != ip:
+                    # The rules exist but the container path does not go
+                    # through them - leave the server as it was.
+                    for spec in _snat_rules_for(ssh, subnets):
+                        for bin_name in bins:
+                            ssh.run_sudo_command(
+                                f'{bin_name} -t nat -D POSTROUTING ' + spec)
+                    return JSONResponse(
+                        {'error': f'The SNAT rules were inserted, but the '
+                                  f'container still egresses as '
+                                  f'{observed} instead of {ip} - rolled '
+                                  'back. Check the host routing and '
+                                  'docker networks'},
+                        status_code=409)
+                _persist_egress(ssh, subnets, ip)
+            else:
+                _clear_egress(ssh, subnets)
+        finally:
+            ssh.disconnect()
+        server['egress_ip'] = ip or None
+        save_data(data)
+        return {'status': 'success', 'egress_ip': ip or None}
+    except Exception as e:
+        logger.exception("Error applying the egress IP")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/ipv4/ingress', tags=["Servers"])
+async def api_ipv4_ingress(request: Request, server_id: int,
+                           req: Ipv4IngressRequest):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        ip = (req.ip or '').strip()
+        if ip:
+            try:
+                ipaddress.IPv4Address(ip)
+            except ValueError:
+                return JSONResponse({'error': 'Invalid IPv4 address'},
+                                    status_code=400)
+            ssh = get_ssh(server)
+            ssh.connect()
+            try:
+                if not _ipv4_assigned(ssh, ip):
+                    return JSONResponse(
+                        {'error': f'{ip} is not assigned to any interface '
+                                  'of this server - the provider must '
+                                  'deliver it first'}, status_code=409)
+            finally:
+                ssh.disconnect()
+        server['ingress_ip'] = ip or None
+        save_data(data)
+        return {'status': 'success', 'ingress_ip': ip or None,
+                'applied': False}
+    except Exception as e:
+        logger.exception("Error saving the ingress IP")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/ipv4/ingress/recreate', tags=["Servers"])
+async def api_ipv4_ingress_recreate(request: Request, server_id: int):
+    """Recreate the xray containers now, publishing their ports on the
+    saved ingress address. Brief downtime."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        _install_ops_load()
+        if _install_running(server_id):
+            return JSONResponse(
+                {'error': 'Another operation is running on this server',
+                 'code': 'operation_in_progress'}, status_code=409)
+        server = data['servers'][server_id]
+        ingress_ip = (server.get('ingress_ip') or '').strip() or None
+        ssh = get_ssh(server)
+        ssh.connect()
+        if ingress_ip and not _ipv4_assigned(ssh, ingress_ip):
+            ssh.disconnect()
+            return JSONResponse(
+                {'error': f'{ingress_ip} is not assigned to any interface '
+                          'of this server - the provider must deliver it '
+                          'first'}, status_code=409)
+        recreated = []
+        try:
+            awg_bases = ('awg', 'awg2', 'awg3', 'awg_legacy')
+            for key in (server.get('protocols') or {}):
+                base = protocol_base(key)
+                if base == 'xray':
+                    manager = get_protocol_manager(ssh, key)
+                    await asyncio.to_thread(manager.recreate_container,
+                                            ingress_ip=ingress_ip)
+                    recreated.append(key)
+                elif base in awg_bases:
+                    manager = get_protocol_manager(ssh, key)
+                    await asyncio.to_thread(manager.recreate_container,
+                                            protocol_type=key,
+                                            ingress_ip=ingress_ip)
+                    recreated.append(key)
+            if recreated:
+                # A fresh xray container loses the panel-managed network
+                # attachments - restore them (self-steal dest depends on
+                # the shared network). AWG has no self-steal attachment.
+                xray_containers = []
+                for key in recreated:
+                    if protocol_base(key) != 'xray':
+                        continue
+                    record = (server.get('protocols') or {}).get(key, {})
+                    xray_containers.append(record.get('container_name')
+                                           or get_protocol_manager(
+                                               ssh, key).container_name)
+                if xray_containers:
+                    _ensure_selfsteal_network(ssh, xray_containers)
+        finally:
+            ssh.disconnect()
+        return {'status': 'success', 'recreated': recreated,
+                'ingress_ip': ingress_ip}
+    except Exception as e:
+        logger.exception("Error recreating containers for the ingress IP")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
 # ===== staged install operations (marketplace apps and protocols) =====
 #
 # Every long install (protocol, Smart Route, RKN Block) runs as a background
@@ -8396,6 +8835,7 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
                 port=req.port,
                 transport=req.xray_transport or 'tcp',
                 site_name=(req.xray_domain or '').strip() or 'yahoo.com',
+                ingress_ip=(server.get('ingress_ip') or None),
             )
         elif install_base == 'wireguard':
             install_args = ()
@@ -9753,7 +10193,8 @@ async def _run_xray_update(op, server_id, protocol, target):
         if not target:
             raise RuntimeError("cannot resolve the latest Xray-core release")
         result = await asyncio.to_thread(
-            manager.update_core, target, progress)
+            manager.update_core, target, progress,
+            ingress_ip=(server.get('ingress_ip') or None))
         if result.get('status') != 'success':
             raise RuntimeError(result.get('message') or 'update failed')
         op_log(op, 'done', f"Xray-core is now {result.get('version')}")

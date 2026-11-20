@@ -242,10 +242,15 @@ class RecreateContainerTests(unittest.TestCase):
                 return route, '', 0
             if command.startswith('docker run'):
                 return '', '', run_code
+            if 'sha256sum' in command:
+                # the copy-fidelity check reads the config sha from both
+                # containers; identical reads mean a faithful copy
+                return 'a' * 64 + '  /tmp/x\n', '', 0
             return '', '', 0
 
         manager.ssh.run_sudo_command.side_effect = sudo
         manager.ssh.docker_ps_invalidate = Mock()
+        manager._tunnel_up = Mock(return_value=True)
         manager._resolve_config_path = Mock(return_value='/opt/amnezia/awg0.conf')
         manager._get_server_config = Mock(
             return_value='[Interface]\nAddress = 10.8.1.1/24\nListenPort = 55424\n')
