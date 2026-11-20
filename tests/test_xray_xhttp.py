@@ -78,7 +78,7 @@ class XhttpInstallTests(unittest.TestCase):
         settings = stream['xhttpSettings']
         self.assertTrue(settings['path'].startswith('/') and len(settings['path']) > 1)
         self.assertEqual(settings['host'], 'own.example')
-        self.assertEqual(settings['mode'], 'auto')
+        self.assertEqual(settings['mode'], 'stream-one')
 
         extra = settings['extra']
         low, high = extra['xPaddingBytes'].split('-')
@@ -86,11 +86,12 @@ class XhttpInstallTests(unittest.TestCase):
         low, high = extra['scStreamUpServerSecs'].split('-')
         self.assertLess(int(low), int(high))
         xmux = extra['xmux']
-        for field in ('maxConcurrency', 'hMaxRequestTimes', 'hMaxReusableSecs'):
+        for field in ('cMaxReuseTimes', 'hMaxRequestTimes', 'hMaxReusableSecs'):
             low, high = xmux[field].split('-')
             self.assertLess(int(low), int(high), field)
-        self.assertEqual(xmux['maxConnections'], 0)
-        self.assertEqual(xmux['cMaxReuseTimes'], 0)
+        # the classic anti-DPI profile: a single connection, no multiplexing
+        self.assertEqual(xmux['maxConnections'], 1)
+        self.assertEqual(xmux['maxConcurrency'], 0)
         self.assertEqual(xmux['hKeepAlivePeriod'], 0)
 
         reality = stream['realitySettings']
@@ -118,8 +119,8 @@ class XhttpInstallTests(unittest.TestCase):
         random.seed(2)
         second = _xhttp_extra()
         self.assertNotEqual(first['xPaddingBytes'], second['xPaddingBytes'])
-        self.assertNotEqual(first['xmux']['maxConcurrency'],
-                            second['xmux']['maxConcurrency'])
+        self.assertNotEqual(first['xmux']['hMaxRequestTimes'],
+                            second['xmux']['hMaxRequestTimes'])
 
 
 class XhttpLinkTests(unittest.TestCase):
