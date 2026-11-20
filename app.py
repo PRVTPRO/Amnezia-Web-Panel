@@ -5233,6 +5233,9 @@ def _classify_ssh_error(exc):
     the two host-key states Paramiko reports as generic SSHException.
     """
     import paramiko as _paramiko
+    # Imported here, not at module level, so this function stays usable when it
+    # is extracted on its own (tests exec it with a reduced globals namespace).
+    from managers import ssh_trust as _ssh_trust
 
     if isinstance(exc, _paramiko.AuthenticationException):
         return 'authentication_failed'
@@ -5241,11 +5244,11 @@ def _classify_ssh_error(exc):
     # Trust write refusals carry their own codes. They subclass
     # ValueError/PermissionError, so they must be checked before the generic
     # OSError branch turns a read-only trust file into "network_error".
-    if isinstance(exc, ssh_trust.SystemTrustConflict):
+    if isinstance(exc, _ssh_trust.SystemTrustConflict):
         return 'system_trust_conflict'
-    if isinstance(exc, ssh_trust.TrustFileReadOnly):
+    if isinstance(exc, _ssh_trust.TrustFileReadOnly):
         return 'trust_file_readonly'
-    if isinstance(exc, ssh_trust.TrustChanged):
+    if isinstance(exc, _ssh_trust.TrustChanged):
         return 'trust_changed'
     if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
         return 'network_error'
