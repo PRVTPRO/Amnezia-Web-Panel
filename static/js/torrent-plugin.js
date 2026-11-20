@@ -90,7 +90,12 @@
         if (item.error) {
             return { text: humanError(item.error), cls: 'tp-health--error' };
         }
-        return { text: _('tp_health_ok') + ' \u00b7 ' + when(item.ts),
+        // peers приходит из apply/collect: «правила на месте» без числа пиров
+        // не говорит, накрыт ли хоть один ключ.
+        const peers = (item.peers === undefined || item.peers === null)
+            ? '' : ' \u00b7 ' + _('tp_health_peers')
+                .replace('{count}', String(Number(item.peers) || 0));
+        return { text: _('tp_health_ok') + peers + ' \u00b7 ' + when(item.ts),
                  cls: 'tp-health--ok' };
     }
 
@@ -181,6 +186,7 @@
                     <span class="badge ${stateClass(value)}"><span class="badge-dot"></span> ${esc(stateLabel(value))}</span>
                     <span class="text-muted tp-status__health">${esc(_('tp_health_' + ((state.health && state.health.state) || 'unknown')))}</span>
                 </div>
+                <div class="text-muted sm-hint">${esc(_('tp_limits_hint'))}</div>
                 <label class="tp-check tp-check--master" for="tpEnabled">
                     <input type="checkbox" id="tpEnabled"${state.enabled ? ' checked' : ''}${state.supported ? '' : ' disabled'}>
                     <span>${esc(_('tp_master_title'))}</span>

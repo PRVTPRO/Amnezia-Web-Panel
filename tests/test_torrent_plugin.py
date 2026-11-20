@@ -301,6 +301,39 @@ class StoreAndInstallTests(Base):
         self.plugin.set_health(node, 'awg3', {'error': 'denied'})
         self.assertEqual(self.plugin.health_for(node)['state'], 'degraded')
 
+    def test_refresh_hides_peer_count_without_hooks(self):
+        node = self.data()['servers'][0]
+        self.plugin.install(node, lambda proto: FakeGuard())
+
+        class ReadGuard(FakeGuard):
+            def __init__(self, hook):
+                super().__init__()
+                self.hook = hook
+
+            def read(self):
+                return {'error': '', 'hook': self.hook,
+                        'peers': ['10.8.1.2', '10.8.1.3']}
+
+        self.plugin.refresh(node, lambda proto: ReadGuard(0))
+        entry = self.plugin.health_for(node)['protocols']['awg3']
+        self.assertNotIn('peers', entry)
+        self.plugin.refresh(node, lambda proto: ReadGuard(3))
+        entry = self.plugin.health_for(node)['protocols']['awg3']
+        self.assertEqual(entry['peers'], 2)
+
+    def test_health_keeps_peer_count(self):
+        node = self.data()['servers'][0]
+        self.plugin.set_health(node, 'awg3', {'error': '', 'peers': 4})
+        entry = self.plugin.health_for(node)['protocols']['awg3']
+        self.assertEqual(entry['peers'], 4)
+        self.plugin.set_health(node, 'awg3',
+                               {'error': '', 'peers': ['10.8.1.2', '10.8.1.3']})
+        entry = self.plugin.health_for(node)['protocols']['awg3']
+        self.assertEqual(entry['peers'], 2)
+        self.plugin.set_health(node, 'awg3', {'error': '', 'peers': True})
+        self.assertNotIn('peers',
+                         self.plugin.health_for(node)['protocols']['awg3'])
+
 
 class MarksTests(Base):
     def test_prune_uses_per_server_ttl_and_keeps_unknown_branches(self):
