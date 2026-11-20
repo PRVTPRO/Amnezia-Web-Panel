@@ -606,9 +606,10 @@ class TemplateTests(unittest.TestCase):
         self.assertIn('<g transform="translate(6 6.5) scale(0.5)" stroke-width="4">', registry)
         page = self.read('templates/server.html')
         self.assertIn("ui_icon('torrent-guard', 19)", page)
-        self.assertIn("id: 'torrent_guard', category: 'services', icon: 'torrent-guard'", page)
-        # Иконка уникальна для плагина: другие плитки её не берут.
-        self.assertEqual(page.count("icon: 'torrent-guard'"), 1)
+        # Карточка плагина в магазине берёт иконку из TP_ICON_SVG, а не из
+        # поля icon (для kind:'plugin' оно не рендерится как текст).
+        self.assertIn('return renderMarketplacePluginCard(app);', page)
+        self.assertIn('${TP_ICON_SVG}', page)
 
     def test_install_shim_reports_partial_errors(self):
         page = (ROOT / 'templates' / 'server.html').read_text(encoding='utf-8')
