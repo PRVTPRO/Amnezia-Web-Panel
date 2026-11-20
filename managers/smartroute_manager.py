@@ -20,6 +20,8 @@ import ipaddress
 import json
 import re
 import shlex
+import time
+from datetime import datetime, timezone
 
 # Host-side layout (all panel-managed, no docker on the host side)
 SMARTR_DIR = '/etc/smartroute'
@@ -30,6 +32,9 @@ SMARTR_OWN = f'{SMARTR_DIR}/own.cidr'
 SMARTR_STATUS = f'{SMARTR_DIR}/status.json'
 SMARTR_INSTANCES = f'{SMARTR_DIR}/instances'
 SMARTR_MIN_PREFIXES = 100
+# A healthy hourly timer must have run within this window; two hours catches a
+# single missed hour without flagging a normal jitter.
+SMARTR_TIMER_STALE_SEC = 2 * 60 * 60
 
 # Inside the container netns (mirrors managers.awg_manager EXIT_*)
 SMARTR_TABLE = 200          # == awg_manager.EXIT_TABLE
@@ -409,13 +414,20 @@ Type=oneshot
 ExecStart={bin}
 '''
 
+# NB: OnCalendar (not OnUnitActiveSec) on purpose. A monotonic
+# OnUnitActiveSec timer is derived from the *service's* last activation and
+# silently stops arming when that stamp is lost or stale (observed on ZK on
+# 2026-11-19: ActiveState=active, Trigger=n/a, last trigger 9 days back, so
+# the hourly re-apply never ran again). OnCalendar is absolute, and
+# Persistent=true actually applies to it: a run missed while the host was
+# down or the unit was rewritten is caught up instead of skipped.
 _SMARP_TIMER = '''[Unit]
 Description=Smart Route prefix updater timer
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=1h
-RandomizedDelaySec=900
+OnCalendar=*-*-* *:15:00
+RandomizedDelaySec=300
 Persistent=true
 Unit=smartroute.service
 
@@ -426,6 +438,85 @@ WantedBy=timers.target
 
 SMARTR_INSTALL_PHASES = ('prepare', 'script', 'units', 'activate',
                          'download', 'verify')
+
+SMARTR_TIMER_UNIT = '/etc/systemd/system/smartroute.timer'
+SMARTR_SERVICE_UNIT = '/etc/systemd/system/smartroute.service'
+
+# One-shot repair of the timer/service units installed by panels up to
+# v1.8.14. The rewritten unit is compared with the current template, not with a
+# marker: a host that already carries the right file and is armed is a no-op,
+# while a stale template from a future release is fixed too. Only units that
+# still carry the panel's own Description are touched; a customised, masked or
+# deliberately disabled timer is reported and left alone so the panel never
+# fights the owner of the host.
+_TIMER_MIGRATION_TEMPLATE = """#!/bin/bash
+set -u
+UNIT=__UNIT_PATH__
+SVC=__SERVICE_PATH__
+if ! command -v systemctl >/dev/null 2>&1; then
+  echo "smartroute-timer: unsupported no-systemd"; exit 0
+fi
+if [ ! -f "$UNIT" ]; then
+  echo "smartroute-timer: unsupported no-unit"; exit 0
+fi
+if ! grep -qx 'Description=Smart Route prefix updater timer' "$UNIT"; then
+  echo "smartroute-timer: unsupported foreign-unit"; exit 0
+fi
+ENABLED=$(systemctl is-enabled smartroute.timer 2>/dev/null || true)
+case "$ENABLED" in
+  enabled|enabled-runtime|static|indirect|generated) ;;
+  *) echo "smartroute-timer: unsupported disabled-${ENABLED:-unknown}"; exit 0 ;;
+esac
+TS=$(date +%Y%m%d-%H%M%S)
+CHANGED=no
+BAKS=""
+TMP=$(mktemp -d) || { echo "smartroute-timer: failed no-tmp"; exit 1; }
+trap 'rm -rf "$TMP"' EXIT
+cat > "$TMP/timer" <<'UNITEOF'
+__TIMER_UNIT__UNITEOF
+if ! cmp -s "$TMP/timer" "$UNIT"; then
+  cp -a "$UNIT" "$UNIT.bak.$TS" || { echo "smartroute-timer: failed backup-failed"; exit 1; }
+  BAKS="$UNIT.bak.$TS"
+  cat "$TMP/timer" > "$UNIT" || { echo "smartroute-timer: failed write-failed"; exit 1; }
+  CHANGED=yes
+fi
+if [ -f "$SVC" ] && grep -qx 'Description=Smart Route prefix updater' "$SVC"; then
+  cat > "$TMP/service" <<'SVCEOF'
+__SERVICE_UNIT__SVCEOF
+  if ! cmp -s "$TMP/service" "$SVC"; then
+    cp -a "$SVC" "$SVC.bak.$TS" || { echo "smartroute-timer: failed backup-failed"; exit 1; }
+    BAKS="${BAKS:+$BAKS,}$SVC.bak.$TS"
+    cat "$TMP/service" > "$SVC" || { echo "smartroute-timer: failed write-failed"; exit 1; }
+    CHANGED=yes
+  fi
+fi
+if [ "$CHANGED" = yes ]; then
+  systemctl daemon-reload || { echo "smartroute-timer: failed daemon-reload backup=${BAKS:-none}"; exit 1; }
+fi
+ARMED=no
+systemctl list-timers smartroute.timer --no-legend 2>/dev/null | grep -q . && ARMED=yes
+if [ "$CHANGED" = no ] && [ "$ARMED" = yes ]; then
+  echo "smartroute-timer: unchanged"; exit 0
+fi
+systemctl enable smartroute.timer >/dev/null 2>&1
+systemctl restart smartroute.timer || { echo "smartroute-timer: failed restart backup=${BAKS:-none}"; exit 1; }
+sleep 1
+if systemctl list-timers smartroute.timer --no-legend 2>/dev/null | grep -q .; then
+  echo "smartroute-timer: migrated backup=${BAKS:-none}"
+else
+  echo "smartroute-timer: failed not-armed backup=${BAKS:-none}"
+  exit 1
+fi
+"""
+
+
+def build_timer_migration_script():
+    """Rewrite the panel-managed timer/service units once, idempotently."""
+    return (_TIMER_MIGRATION_TEMPLATE
+            .replace('__UNIT_PATH__', SMARTR_TIMER_UNIT)
+            .replace('__SERVICE_PATH__', SMARTR_SERVICE_UNIT)
+            .replace('__TIMER_UNIT__', _SMARP_TIMER)
+            .replace('__SERVICE_UNIT__', _SMARP_UNIT.format(bin=SMARTR_BIN)))
 
 
 def _install_phase_body(phase):
@@ -455,8 +546,16 @@ echo "smartroute: units: timer unit written"
 echo "smartroute: activate: systemd reloaded"
 systemctl enable --now smartroute.timer >/dev/null 2>&1
 echo "smartroute: activate: timer enabled and started"
+systemctl restart smartroute.timer
+echo "smartroute: activate: timer restarted (fresh next-elapse)"
 systemctl enable smartroute.service >/dev/null 2>&1
 echo "smartroute: activate: service enabled"
+if systemctl list-timers smartroute.timer --no-legend 2>/dev/null | grep -q .; then
+  echo "smartroute: activate: timer is armed (next run scheduled)"
+else
+  echo "ERROR: smartroute.timer is active but has no scheduled run" >&2
+  exit 1
+fi
 '''
     if phase == 'download':
         # First list download runs in the background: the source fallback can
@@ -473,6 +572,12 @@ if systemctl is-enabled --quiet smartroute.timer; then
   echo "smartroute: verify: timer is enabled"
 else
   echo "ERROR: smartroute.timer is not enabled after install" >&2
+  exit 1
+fi
+if systemctl list-timers smartroute.timer --no-legend 2>/dev/null | grep -q .; then
+  echo "smartroute: verify: timer is armed"
+else
+  echo "ERROR: smartroute.timer has no next run scheduled" >&2
   exit 1
 fi
 echo "smartroute: installed, first list download running in background"
@@ -578,6 +683,21 @@ class SmartRouteManager:
     def install(self, phase='all', on_line=None):
         return self._run_script(build_install_script(phase), on_line=on_line)
 
+    def migrate_timer(self):
+        """One-shot: replace a legacy OnUnitActiveSec timer with OnCalendar.
+
+        Returns {'state': ..., 'detail': ..., 'log': ...}. Raises
+        SmartRouteError on a real failure (the caller keeps the server pending
+        and retries on the next panel start).
+        """
+        out = self._run_script(build_timer_migration_script(), timeout=120)
+        state, detail = 'unknown', ''
+        for line in (out or '').splitlines():
+            if line.startswith('smartroute-timer: '):
+                body = line[len('smartroute-timer: '):].strip()
+                state, _, detail = body.partition(' ')
+        return {'state': state, 'detail': detail.strip(), 'log': (out or '').strip()}
+
     def uninstall(self):
         return self._run_script(build_remove_script())
 
@@ -614,12 +734,67 @@ class SmartRouteManager:
                 next_run = candidate
         out, _, code = self.ssh.run_command(f'ls {SMARTR_INSTANCES} 2>/dev/null')
         instances = sorted(out.split()) if code == 0 and out.strip() else []
+        # Timer health. An "active" timer with no next elapse (ZK 2026-11-19)
+        # or a last trigger hours old means nothing re-applies the list while
+        # the card still shows green. The age is computed here so the UI never
+        # parses dates or guesses the server's time zone.
+        # ``--timestamp=unix`` does not apply to the USec properties on the
+        # systemd versions we meet (252 on Debian 12, 257 on Debian 13): the
+        # value stays human-readable, so an epoch has to come from somewhere
+        # else. Persistent timers keep their last activation in a stamp file,
+        # which is exactly the "last run" the UI needs; the parsed property is
+        # only a fallback. Both numbers come from the host in one command, so a
+        # skewed panel clock cannot invent a stale timer.
+        out, _, code = self.ssh.run_command(
+            'TS=$(stat -c %Y /var/lib/systemd/timers/stamp-smartroute.timer '
+            '2>/dev/null || true); '
+            'if [ -z "$TS" ]; then '
+            'RAW=$(systemctl show smartroute.timer -p LastTriggerUSec --value 2>/dev/null); '
+            'SET=${RAW#* }; SET=${SET% *}; '
+            'case "$SET" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*) '
+            'TS=$(date -d "$SET" +%s 2>/dev/null || true) ;; esac; fi; '
+            'echo "${TS:-0}"; date +%s')
+        last_trigger_ts = None
+        host_now = None
+        if code == 0:
+            parts = [p.strip() for p in (out or '').splitlines() if p.strip()]
+            timestamps = []
+            for part in parts:
+                try:
+                    timestamps.append(int(part))
+                except ValueError:
+                    timestamps.append(None)
+            if len(timestamps) >= 2:
+                last_trigger_ts, host_now = timestamps[0], timestamps[1]
+            elif timestamps:
+                last_trigger_ts = timestamps[0]
+        # 0 means "never triggered" (no stamp file and no property value): a
+        # fresh install must not be painted as hours-old.
+        if not last_trigger_ts:
+            last_trigger_ts = None
+        timer_age_sec = None
+        last_trigger = ''
+        if last_trigger_ts:
+            # Age is measured against the host clock: a skewed panel must not
+            # invent a multi-hour delay out of a few minutes of drift.
+            reference = host_now or int(time.time())
+            timer_age_sec = max(0, reference - last_trigger_ts)
+            last_trigger = datetime.fromtimestamp(
+                last_trigger_ts, timezone.utc).isoformat(timespec='seconds')
+        timer_armed = bool(next_run)
+        timer_stale = bool(
+            not timer_armed
+            or (timer_age_sec is not None and timer_age_sec > SMARTR_TIMER_STALE_SEC))
         return {
             **status,
             'installed': self.is_installed(),
             'status': status,
             'next_run': next_run,
             'next_update': next_run,
+            'timer_armed': timer_armed,
+            'timer_stale': timer_stale,
+            'timer_age_sec': timer_age_sec,
+            'last_trigger': last_trigger,
             'instances': instances,
         }
 
@@ -717,11 +892,14 @@ class SmartRouteManager:
 
     def instance_counters(self, container, config_path, subnet_default):
         """Read-only probe: accounting chains (egress + ingress) + throw count."""
+        # `grep -c` exits 1 on zero matches, and a container whose split routes
+        # were wiped has exactly zero - the read must report 0, not fail with
+        # an SSH error (that is the state the self-heal has to detect).
         script = render_container_script(
             'iptables -t mangle -L __CHAIN__ -vnx 2>/dev/null\n'
             'iptables -t mangle -L __CHAIN_IN__ -vnx 2>/dev/null\n'
             'echo ---\n'
-            'ip -4 route show table __TABLE__ | grep -c "^throw"\n',
+            'ip -4 route show table __TABLE__ | grep -c "^throw" || true\n',
             config_path=config_path, subnet_default=subnet_default)
         out, err, code = self.ssh.run_sudo_command(
             f"docker exec -i {container} sh -c '{script}'", timeout=60)

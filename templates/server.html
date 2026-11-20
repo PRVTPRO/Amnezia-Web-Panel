@@ -3207,6 +3207,35 @@
                 <tbody id="ipInstancesBody"></tbody>
             </table>
         </div>
+
+        <h3 class="form-label" style="margin-top:var(--space-md);">{{ _('ipv4_egress_title') }}</h3>
+        <div class="form-group">
+            <label class="form-label">{{ _('ipv4_egress_label') }}</label>
+            <div style="display:flex; gap:var(--space-sm);">
+                <input class="form-input" type="text" id="ipv4EgressIp"
+                       style="flex:1;" spellcheck="false">
+                <button class="btn btn-primary btn-sm" onclick="saveIpv4Egress()"
+                        id="ipv4EgressBtn">{{ _('save') }}</button>
+            </div>
+            <div class="form-hint" id="ipv4EgressStatus">{{ _('ipv4_egress_hint') }}</div>
+        </div>
+
+        <h3 class="form-label" style="margin-top:var(--space-md);">{{ _('ipv4_ingress_title') }}</h3>
+        <div class="form-group">
+            <label class="form-label">{{ _('ipv4_ingress_label') }}</label>
+            <div style="display:flex; gap:var(--space-sm);">
+                <input class="form-input" type="text" id="ipv4IngressIp"
+                       style="flex:1;" spellcheck="false">
+                <button class="btn btn-primary btn-sm" onclick="saveIpv4Ingress()"
+                        id="ipv4IngressBtn">{{ _('save') }}</button>
+            </div>
+            <div class="form-hint">{{ _('ipv4_ingress_hint') }}</div>
+            <button class="btn btn-secondary btn-sm" style="margin-top:var(--space-xs);"
+                    onclick="recreateIngress()" id="ipv4RecreateBtn">
+                {{ _('ipv4_recreate_btn') }}
+            </button>
+        </div>
+
         <div class="modal-footer">
             <button class="btn btn-secondary"
                     onclick="closeIpSettings()">{{ _('server_ipv6_cancel') }}</button>
@@ -5140,6 +5169,80 @@
     async function openIpSettings() {
         openModal('ipSettingsModal');
         await loadIpStatus();
+        loadIpv4Status();
+    }
+
+    // ===== IPv4 egress (SNAT) / ingress (published-port binding) =====
+    async function loadIpv4Status() {
+        if (!document.getElementById('ipv4EgressIp')) return;
+        try {
+            const data = await apiCall(`/api/servers/${SERVER_ID}/ipv4/status`);
+            document.getElementById('ipv4EgressIp').value = data.egress_ip || '';
+            document.getElementById('ipv4IngressIp').value = data.ingress_ip || '';
+            const st = document.getElementById('ipv4EgressStatus');
+            if (!st) return;
+            if (!data.egress_ip) {
+                st.textContent = _('ipv4_status_none');
+                return;
+            }
+            const rules = (data.snat_rules || []).length;
+            let line = `${_('ipv4_status_rule')}: ${rules ? '✓' : '✗'} · `
+                + `${_('ipv4_status_assigned')}: ${data.assigned ? '✓' : '✗'} · `
+                + `${_('ipv4_status_verified')}: ${data.egress_verified ? '✓' : '✗'} · `
+                + `${_('ipv4_status_container')}: ${data.container_ok ? '✓' : '✗'}`;
+            if (data.egress_ip && data.container_egress_ip
+                    && data.container_egress_ip !== data.egress_ip) {
+                line += ` (${data.container_egress_ip})`;
+            }
+            st.textContent = line;
+        } catch (err) { /* the modal works without the status line */ }
+    }
+
+    async function saveIpv4Egress() {
+        const btn = document.getElementById('ipv4EgressBtn');
+        const statusEl = document.getElementById('ipv4EgressStatus');
+        btn.disabled = true;
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/ipv4/egress`, 'POST',
+                { ip: document.getElementById('ipv4EgressIp').value.trim() });
+            showToast(_('saved') || 'Saved', 'success');
+            await loadIpv4Status();
+        } catch (err) {
+            statusEl.textContent = '❌ ' + err.message;
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    async function saveIpv4Ingress() {
+        const btn = document.getElementById('ipv4IngressBtn');
+        btn.disabled = true;
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/ipv4/ingress`, 'POST',
+                { ip: document.getElementById('ipv4IngressIp').value.trim() });
+            showToast(_('ipv4_ingress_saved') || 'Saved', 'success');
+        } catch (err) {
+            showToast((_('error') || 'Error') + ': ' + err.message, 'error');
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    async function recreateIngress() {
+        if (!confirm(_('ipv4_recreate_confirm'))) return;
+        const btn = document.getElementById('ipv4RecreateBtn');
+        btn.disabled = true;
+        try {
+            await apiCall(`/api/servers/${SERVER_ID}/ipv4/ingress/recreate`, 'POST', {});
+            showToast(_('saved') || 'OK', 'success');
+        } catch (err) {
+            // the recreate dance reports known codes; show them translated
+            const key = IP_BLOCKED_KEYS[err.message];
+            showToast((_('error') || 'Error') + ': '
+                + (key ? _(key) : err.message), 'error');
+        } finally {
+            btn.disabled = false;
+        }
     }
 
     // The install button mirrors the IPv6 gate: a pending Docker restart
@@ -7562,9 +7665,14 @@
             return;
         }
         const enabled = status.enabled !== false;
-        badgeEl.innerHTML = enabled
-            ? `<span class="badge badge-success"><span class="badge-dot"></span> ${_('smartroute_card_running')}</span>`
-            : `<span class="badge badge-warn"><span class="badge-dot"></span> ${_('smartroute_card_paused')}</span>`;
+        // Running but with a dead updater timer is not "healthy": prefixes
+        // silently freeze while the green badge says everything is fine.
+        const stale = enabled && !!((status.host || {}).timer_stale);
+        badgeEl.innerHTML = !enabled
+            ? `<span class="badge badge-warn"><span class="badge-dot"></span> ${_('smartroute_card_paused')}</span>`
+            : stale
+                ? `<span class="badge badge-warn"><span class="badge-dot"></span> ${_('smartroute_card_running')} — ${_('smartroute_card_warn')}</span>`
+                : `<span class="badge badge-success"><span class="badge-dot"></span> ${_('smartroute_card_running')}</span>`;
         if (toggleBtn) {
             toggleBtn.textContent = enabled ? _('smartroute_card_disable') : _('smartroute_card_enable');
             toggleBtn.classList.toggle('btn-primary', !enabled);
@@ -7579,6 +7687,10 @@
             `${_('smartroute_card_active_instances')}:<br>${splits.length ? splits.map(getProtoTitle).join(', ') : _('smartroute_split_none')}`,
         ];
         if (host.updated_at) rows.push(`${_('smartroute_updated')}: <br>${escapeHtml(formatSmartRouteTime(host.updated_at))}`);
+        if (host.timer_stale) {
+            const why = host.timer_armed === false ? _('smartroute_timer_warn') : _('smartroute_timer_stale');
+            rows.push(`<span style="color:var(--warning, #fbbf24)">⚠ ${escapeHtml(why)}</span>`);
+        }
         if (host.error) rows.push(`<span style="color:var(--danger, #f87171)">${escapeHtml(host.error)}</span>`);
         const grid = document.getElementById('smartroute-info-grid');
         if (grid) grid.innerHTML = rows.map(r => `<div>${r}</div>`).join('');
@@ -7742,7 +7854,20 @@
         if (host.source_v4) rows.push(`${_('smartroute_source')}: ${escapeHtml(host.source_v4)}`);
         if (host.updated_at) rows.push(`${_('smartroute_updated')}: ${escapeHtml(formatSmartRouteTime(host.updated_at))}`);
         if (host.next_update) rows.push(`${_('smartroute_next_update')}: ${escapeHtml(formatSmartRouteTime(host.next_update))}`);
+        if (host.last_trigger) {
+            rows.push(`${_('smartroute_timer_age')}: ${escapeHtml(formatSmartRouteTime(host.last_trigger))}`);
+        } else {
+            rows.push(`${_('smartroute_timer_age')}: ${_('smartroute_timer_never')}`);
+        }
+        if (host.timer_stale) {
+            const why = host.timer_armed === false ? _('smartroute_timer_warn') : _('smartroute_timer_stale');
+            rows.push(`<span style="color:var(--warning, #fbbf24)">⚠ ${escapeHtml(why)}</span>`);
+        }
         document.getElementById('smartRouteListsInfo').innerHTML = rows.map(r => `<div>${r}</div>`).join('');
+        if (host.timer_stale) {
+            // Keep the badge honest: a stale updater is a warning, not "installed".
+            state.innerHTML = `<span class="badge badge-warn"><span class="badge-dot"></span> ${_('installed')} — ${_('smartroute_card_warn')}</span>`;
+        }
         document.getElementById('smartRouteListsError').textContent = host.error || '';
         document.getElementById('smartRouteOwnSubnets').value = (status.own_subnets || []).join('\n');
         document.getElementById('smartRouteDnsViaExit').checked = !!status.dns_via_exit;

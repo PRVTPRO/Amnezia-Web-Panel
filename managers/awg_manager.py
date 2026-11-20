@@ -12,7 +12,6 @@ import json
 import os
 import secrets
 import struct
-import hashlib
 import ipaddress
 import logging
 import re
@@ -1647,7 +1646,8 @@ class AWGManager:
         return parsed[0] if isinstance(parsed, list) and parsed else None
 
     @staticmethod
-    def _run_cmd_from_inspect(info, name, image, port_override=None):
+    def _run_cmd_from_inspect(info, name, image, port_override=None,
+                              host_ip_override=None):
         """Rebuild the run command from the container's own inspect data.
 
         Keeps binds, caps, ulimits, ports, restart policy and sysctls, then
@@ -1655,6 +1655,8 @@ class AWGManager:
 
         ``port_override`` republishes every UDP mapping on another port; the
         instance copy uses it to move a container to a free port on the target.
+        ``host_ip_override`` rewrites every published port's host address
+        (ingress binding); '' restores publishing on all addresses.
         """
         if not isinstance(info, dict):
             return None
@@ -1729,6 +1731,8 @@ class AWGManager:
             container_port = (f'{override}/{protocol}' if protocol else str(override)) if override else port
             for binding in bindings or []:
                 host_ip = binding.get('HostIp') or ''
+                if host_ip_override is not None:
+                    host_ip = str(host_ip_override)
                 host_port = str(override) if override else (binding.get('HostPort') or '')
                 mapping = (f'{host_ip}:{host_port}:{container_port}' if host_ip
                            else f'{host_port}:{container_port}')
@@ -1752,12 +1756,32 @@ class AWGManager:
 
     # Known failure codes raised by this path (and handled by callers):
     # server_off, env_off, state_unreadable, recreate_rollback_failed.
-    def _recreate_container_ipv6(self, protocol_type):
-        """Recreate an IPv4-only container as dual-stack.
+    def _tunnel_up(self, container):
+        """Whether the tunnel interface itself is up. 'running' is not
+        enough: a freshly created container can boot before its extra
+        networks settle and come up without the tunnel."""
+        out, _, _ = self.ssh.run_sudo_command(
+            f"docker exec {container} sh -c "
+            f"'awg show 2>/dev/null || wg show 2>/dev/null'")
+        return bool((out or '').strip())
 
-        The old container is renamed to `<name>-ipv6bak` and kept until the new
-        one answers on IPv6. On any failure the old container is renamed back
-        and started again. The image is never removed, so a retry stays cheap.
+    def _wait_tunnel(self, container, polls=8, pause=2):
+        for _ in range(polls):
+            if self._tunnel_up(container):
+                return True
+            time.sleep(pause)
+        return self._tunnel_up(container)
+
+    def _recreate_awg_container(self, protocol_type, host_ip=None, ipv6=False):
+        """The state-safe container recreate shared by the IPv6-enable and
+        the ingress-binding flows: the running container is renamed to a
+        backup and kept until the new one is verified, the in-container
+        state (keys, peers, clientsTable) is copied over and checked
+        before start, and any failure rolls the backup back. The image is
+        never removed, so a retry stays cheap.
+
+        host_ip pins the published UDP port to that address ('' = all
+        addresses); the IPv6 flow keeps the bindings as they are.
         """
         container = self._container_name(protocol_type)
         path = self._resolve_config_path(protocol_type)
@@ -1766,8 +1790,7 @@ class AWGManager:
             raise RuntimeError('state_unreadable')
         image = self._container_run_image(container)
         port = self._container_udp_port(config_text)
-        source_sha = hashlib.sha256(config_text.encode('utf-8')).hexdigest()
-        backup = f'{container}-ipv6bak'
+        backup = f'{container}-ipv6bak' if ipv6 else f'{container}-ingressbak'
         self.ssh.run_sudo_command(f"docker rm -f {backup} >/dev/null 2>&1; true")
         _out, _err, code = self.ssh.run_sudo_command(f"docker stop {container}")
         if code != 0:
@@ -1794,8 +1817,10 @@ class AWGManager:
 
         # Rebuild from the container's own runtime config, not from a guess.
         run_cmd = (self._run_cmd_from_inspect(
-            self._inspect_container(backup), container, image)
-            or self._docker_run_cmd(container, image, port, True))
+            self._inspect_container(backup), container, image,
+            host_ip_override=None if ipv6 else (host_ip or ''))
+            or self._docker_run_cmd(container, image, port, True,
+                                    host_ip=None if ipv6 else (host_ip or None)))
         _out, _err, code = self.ssh.run_sudo_command(run_cmd)
         if code != 0:
             if not restore():
@@ -1819,31 +1844,43 @@ class AWGManager:
             raise RuntimeError('env_off')
         # All AWG state (keys, clientsTable, bwlimits, config) lives in
         # /opt/amnezia/awg. Copying only the config file loses every peer and
-        # key, so the whole directory is copied.
+        # key, so the whole directory is copied. docker cp cannot copy
+        # container-to-container ("copying between containers is not
+        # supported"), so both hops go through a temp dir on the host - one
+        # atomic chain, cleaned up on any failure.
         awg_dir = path.rsplit('/', 1)[0]
-        _out, _err, code = self.ssh.run_sudo_command(
-            f"docker cp {backup}:{awg_dir}/. {container}:{awg_dir}/")
+        tmp_dir = f'/tmp/awg-recreate-{container}'
+        _out, copy_err, code = self.ssh.run_sudo_command(
+            f'rm -rf {tmp_dir} && mkdir -p {tmp_dir} && '
+            f'docker cp {backup}:{awg_dir}/. {tmp_dir}/ && '
+            f'docker cp {tmp_dir}/. {container}:{awg_dir}/ && '
+            f'docker cp {backup}:/opt/amnezia/start.sh {tmp_dir}/start.sh && '
+            f'docker cp {tmp_dir}/start.sh {container}:/opt/amnezia/start.sh && '
+            f'rm -rf {tmp_dir}')
         if code != 0:
-            if not restore():
-                raise RuntimeError('recreate_rollback_failed')
-            raise RuntimeError('state_unreadable')
-        _out, _err, code = self.ssh.run_sudo_command(
-            f"docker cp {backup}:/opt/amnezia/start.sh {container}:/opt/amnezia/start.sh")
-        if code != 0:
+            self.ssh.run_sudo_command(f'rm -rf {tmp_dir}')
+            logger.warning("State copy from %s to %s failed: %s",
+                           backup, container, copy_err)
             if not restore():
                 raise RuntimeError('recreate_rollback_failed')
             raise RuntimeError('state_unreadable')
 
         def failed_verification(message):
-            logger.warning("IPv6 recreate verification failed: %s", message)
+            logger.warning("%s recreate verification failed: %s",
+                           'IPv6' if ipv6 else 'Ingress', message)
             if not restore():
                 raise RuntimeError('recreate_rollback_failed')
             raise RuntimeError('state_unreadable')
 
-        # The config must be byte-identical to the source before start.
+        # The copy must be faithful: the new container's config has to be
+        # byte-identical to the backup's. The panel's config view is not a
+        # valid reference - it can differ from the file on disk.
+        old_config = self._container_file_sha(backup, path)
         copied_sha = self._container_file_sha(container, path)
-        if copied_sha and copied_sha != source_sha:
-            failed_verification(f'config sha {copied_sha} != {source_sha}')
+        if not old_config or not copied_sha:
+            failed_verification('config sha unreadable')
+        if old_config != copied_sha:
+            failed_verification(f'config sha {copied_sha} != backup {old_config}')
         # The keys must survive the copy: a new private key would invalidate
         # every issued client config.
         for key_name in ('wireguard_server_private_key.key',
@@ -1875,22 +1912,65 @@ class AWGManager:
             if not restore():
                 raise RuntimeError('recreate_rollback_failed')
             raise RuntimeError('env_off')
-        out, _, _ = self.ssh.run_sudo_command(
-            f"docker exec {container} ip -6 route show default 2>/dev/null")
-        if not (out or '').strip():
-            if not restore():
-                raise RuntimeError('recreate_rollback_failed')
-            raise RuntimeError('env_off')
+        # A container can boot before its extra networks settle and come up
+        # without the tunnel (awg show empty, bare iptables). Restart it
+        # once with the networks attached and require the interface itself.
+        if not self._wait_tunnel(container):
+            self.ssh.run_sudo_command(f"docker restart {container}")
+            try:
+                self._wait_container_running(container)
+            except RuntimeError:
+                if not restore():
+                    raise RuntimeError('recreate_rollback_failed')
+                raise RuntimeError('env_off')
+            if not self._wait_tunnel(container):
+                if not restore():
+                    raise RuntimeError('recreate_rollback_failed')
+                raise RuntimeError('env_off')
+        if ipv6:
+            out, _, _ = self.ssh.run_sudo_command(
+                f"docker exec {container} ip -6 route show default 2>/dev/null")
+            if not (out or '').strip():
+                if not restore():
+                    raise RuntimeError('recreate_rollback_failed')
+                raise RuntimeError('env_off')
+        else:
+            # The published port must actually listen on the wanted
+            # address (docker prints 0.0.0.0 for all-address bindings).
+            out, _, _ = self.ssh.run_sudo_command(
+                f"docker port {container} {port}/udp 2>/dev/null")
+            if (host_ip or '0.0.0.0') not in (out or ''):
+                if not restore():
+                    raise RuntimeError('recreate_rollback_failed')
+                raise RuntimeError('env_off')
         _out, err, code = self.ssh.run_sudo_command(
             f"docker rm -f {backup} >/dev/null 2>&1")
         if code != 0:
             # A leftover copy must not look like a second instance.
-            logger.warning("Could not remove the IPv6 backup container %s: %s",
+            logger.warning("Could not remove the recreate backup container %s: %s",
                            backup, err)
         if hasattr(self.ssh, 'docker_ps_invalidate'):
             self.ssh.docker_ps_invalidate()
         self._invalidate_config_cache(protocol_type)
         return container
+
+    def _recreate_container_ipv6(self, protocol_type):
+        """Recreate an IPv4-only container as dual-stack.
+
+        The old container is renamed to `<name>-ipv6bak` and kept until the new
+        one answers on IPv6. On any failure the old container is renamed back
+        and started again. The image is never removed, so a retry stays cheap.
+        """
+        return self._recreate_awg_container(protocol_type, ipv6=True)
+
+    def recreate_container(self, protocol_type, ingress_ip=None):
+        """Recreate the AWG container with its UDP port published on
+        ingress_ip (None or '' = all addresses). Same state-safe dance
+        as the IPv6 recreate: keys, peers and clientsTable are copied to
+        the fresh container and verified before start, with rollback to
+        the renamed backup on any failure."""
+        return self._recreate_awg_container(
+            protocol_type, host_ip=ingress_ip or '', ipv6=False)
 
     def set_instance_ipv6(self, protocol_type, enabled, allow_repair=False):
         """Enable or disable IPv6 on an instance.
@@ -3134,7 +3214,7 @@ H4 = {awg_params['transport_packet_magic_header']}
         )
 
     @staticmethod
-    def _docker_run_cmd(container_name, image, port, ipv6_enabled):
+    def _docker_run_cmd(container_name, image, port, ipv6_enabled, host_ip=None):
         """`docker run` command line of a protocol container.
 
         The IPv6 sysctls have to be passed at creation time: the netns
@@ -3142,18 +3222,21 @@ H4 = {awg_params['transport_packet_magic_header']}
         them can never add an IPv6 address to a tunnel interface (ip -6
         address add -> RTNETLINK Permission denied, and awg-quick then
         deletes the whole awg0).
+
+        host_ip pins the published UDP port to one address (ingress).
         """
         ipv6_sysctls = (
             '--sysctl="net.ipv6.conf.all.disable_ipv6=0" \\\n'
             '--sysctl="net.ipv6.conf.default.disable_ipv6=0" \\\n'
             if ipv6_enabled else ''
         )
+        bind = f'{host_ip}:' if host_ip else ''
         return f"""docker run -d \
 --restart always \
 --privileged \
 --cap-add=NET_ADMIN \
 --cap-add=SYS_MODULE \
--p {port}:{port}/udp \
+-p {bind}{port}:{port}/udp \
 -v /lib/modules:/lib/modules \
 --sysctl="net.ipv4.conf.all.src_valid_mark=1" \
 {ipv6_sysctls} --name {container_name} \
