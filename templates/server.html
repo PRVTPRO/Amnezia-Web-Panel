@@ -2638,7 +2638,7 @@
         role="button" tabindex="0" onclick="TorrentPlugin.open()"
         onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); TorrentPlugin.open(); }">
         <div class="protocol-card-head">
-            <div class="protocol-icon">{{ ui_icon('shield', 18) }}</div>
+            <div class="protocol-icon">{{ ui_icon('torrent-guard', 35) }}</div>
             <div class="protocol-name">{{ _('tp_name') }}</div>
         </div>
         <div class="protocol-desc">{{ _('tp_desc') }}</div>
@@ -3907,7 +3907,7 @@
     // когда плагин установлен. Нет установки — нет ни разметки, ни JS.
     const TORRENT_PLUGIN = {{ (torrent_plugin or {}) | tojson }};
     // Иконка плагина из общего реестра: эмодзи в новой вёрстке не используем.
-    const TP_ICON_SVG = {{ ui_icon('shield', 19) | tojson }};
+    const TP_ICON_SVG = {{ ui_icon('torrent-guard', 35) | tojson }};
     document.body.dataset.serverUid = {{ (server.uid or '') | tojson }};
     const SERVER_HOST = "{{ server.host }}";
     const CUSTOM_PROTO_NAMES = {
