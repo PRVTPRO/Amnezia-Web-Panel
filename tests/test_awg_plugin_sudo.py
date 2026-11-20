@@ -257,6 +257,39 @@ class InstallUsesSudoScriptTests(unittest.TestCase):
         self.assertIn('install -y -qq dkms', command)
         self.assertIn('dependencies are ready', log.messages())
 
+    def test_apt_get_update_goes_through_run_sudo_script(self):
+        """Stale lists are refreshed with root rights, like the install itself."""
+        ssh = PrivilegedFakeSSH(cloud_handler(dkms='no'), root=False)
+
+        with patch('managers.awg_plugin_updater.time.sleep'):
+            AwgPluginUpdater(ssh).ensure_dependencies(KERNEL_MODULE, _Log())
+
+        updates = ssh.find('apt-get update')
+        self.assertEqual(len(updates), 1, ssh.calls)
+        self.assertEqual(updates[0][0], 'sudo_script')
+
+    def test_header_hint_probes_go_through_run_sudo_command(self):
+        """The hint commands are single-line probes and must be elevated too."""
+        def on_install(packages, state):
+            return ('', 'E: Unable to locate package ' + packages[0], 100)
+
+        ssh = PrivilegedFakeSSH(
+            cloud_handler(
+                dkms='yes',
+                probe=lambda method, state: dict(state, headers='no'),
+                on_install=on_install,
+            ),
+            root=False,
+        )
+
+        with self.assertRaises(PluginUpdateError):
+            AwgPluginUpdater(ssh).ensure_dependencies(KERNEL_MODULE, _Log())
+
+        for needle in ('for d in /lib/modules/*/build', 'apt-cache depends'):
+            self.assertTrue(ssh.methods_for(needle), needle)
+            self.assertEqual(set(ssh.methods_for(needle)), {'sudo_command'}, needle)
+        self.assertNotIn('command', ssh.methods())
+
 
 class DkmsAfterSudoInstallRegressionTests(unittest.TestCase):
     """The OVH case: dkms is installed but only visible to the elevated probe."""

@@ -68,13 +68,15 @@ def _install_commands(commands):
 
 def kernel_handler(*, kernel=KVER, headers='yes', dkms='yes', gcc='yes',
                    make='yes', git='yes', manager='apt-get', secure_boot='',
-                   install=None):
+                   install=None, depends='', kernels_with_headers=''):
     """Scripted host state for preflight, dependency installation and update.
 
     Flags start as the *current* state.  A successful package install updates
     the flags, so the post-install preflight sees the fixed host, exactly like
     the real module.  ``install(packages, state)`` overrides the default
     success answer and can script failures, apt locks or header fallbacks.
+    ``depends``/``kernels_with_headers`` script the hints the module reads
+    when the running kernel has no headers in the repositories.
     """
     state = {
         'headers': headers, 'dkms': dkms, 'gcc': gcc,
@@ -96,6 +98,17 @@ def kernel_handler(*, kernel=KVER, headers='yes', dkms='yes', gcc='yes',
                    state['make'], state['git']),
                 '', 0,
             )
+        # hints for a running kernel whose headers are gone from the pool
+        if command.startswith('for d in /lib/modules'):
+            return (kernels_with_headers, '', 0)
+        if command.startswith('apt-cache depends'):
+            return (depends, '', 0)
+        if command.startswith('apt-cache search'):
+            return ('', '', 0)
+        if command.startswith('apt-cache show'):
+            return ('Package: ' + depends, '', 0) if depends else ('', '', 0)
+        if command.startswith('DEBIAN_FRONTEND=noninteractive apt-get update'):
+            return ('', '', 0)
 
         # one-click dependency installation
         for prefix in INSTALL_PREFIXES:
@@ -255,6 +268,177 @@ class HeadersFallbackTests(unittest.TestCase):
         self.assertFalse(ssh.find('git clone'))
 
 
+class AptListRefreshTests(unittest.TestCase):
+    def test_lists_are_refreshed_once_before_the_first_install(self):
+        ssh = FakeSSH(kernel_handler(dkms='no', gcc='no'))
+
+        AwgPluginUpdater(ssh).update(KERNEL_MODULE, NEW)
+
+        updates = [i for i, command in enumerate(ssh.commands)
+                   if command.startswith('DEBIAN_FRONTEND=noninteractive apt-get update')]
+        installs = [i for i, command in enumerate(ssh.commands)
+                    if command.startswith('DEBIAN_FRONTEND=noninteractive apt-get install')]
+        self.assertEqual(len(updates), 1, ssh.find('apt-get update'))
+        self.assertLess(updates[0], installs[0])
+
+    def test_stale_lists_are_refreshed_and_the_install_retried(self):
+        calls = []
+
+        def install(packages, state):
+            calls.append(list(packages))
+            if len(calls) == 1:
+                return (
+                    '',
+                    'E: Failed to fetch http://deb.debian.org/debian/pool/main/d/dpkg/'
+                    'libdpkg-perl_1.21.22_all.deb  404  Not Found [IP: 151.101.2.132 80]\n'
+                    'E: Unable to fetch some archives, maybe run apt-get update',
+                    100,
+                )
+            return _apply_install(packages, state)
+
+        ssh = FakeSSH(kernel_handler(dkms='no', gcc='no', install=install))
+        log = _Log()
+
+        result = AwgPluginUpdater(ssh).update(KERNEL_MODULE, NEW, log=log)
+
+        self.assertEqual(len(calls), 2, calls)
+        self.assertGreaterEqual(len(ssh.find('apt-get update')), 2)
+        self.assertIn('the install failed on package metadata, refreshing the lists '
+                      'and retrying once', log.messages())
+        self.assertEqual(result['state'], 'updated')
+
+    def test_plain_failure_is_not_retried_after_a_refresh(self):
+        ssh = FakeSSH(kernel_handler(
+            dkms='no', install=lambda packages, state: ('', 'E: Sub-process /usr/bin/dpkg returned an error code (1)', 100),
+        ))
+
+        with self.assertRaises(PluginUpdateError):
+            AwgPluginUpdater(ssh).update(KERNEL_MODULE, NEW)
+
+        self.assertEqual(len(ssh.find('apt-get update')), 1)
+        self.assertEqual(len(_install_commands(ssh.commands)), 1)
+
+
+class OutdatedKernelTests(unittest.TestCase):
+    """The running kernel is older than the one the repositories carry."""
+
+    def _failing_headers(self, packages, state):
+        return ('', 'E: Unable to locate package ' + packages[0], 100)
+
+    def test_installed_headers_for_another_kernel_ask_for_a_reboot(self):
+        ssh = FakeSSH(kernel_handler(
+            headers='no', install=self._failing_headers,
+            kernels_with_headers='6.1.0-56-amd64\n',
+            depends='linux-headers-6.1.0-56-amd64',
+        ))
+
+        with self.assertRaises(PluginUpdateError) as ctx:
+            AwgPluginUpdater(ssh).update(KERNEL_MODULE, NEW)
+
+        self.assertEqual(ctx.exception.code, 'preflight_failed')
+        self.assertIn('6.1.0-56-amd64', ctx.exception.message)
+        self.assertIn('reboot the server', ctx.exception.message)
+        self.assertFalse(ssh.find('git clone'))
+
+    def test_missing_headers_point_to_the_current_kernel(self):
+        ssh = FakeSSH(kernel_handler(
+            headers='no', install=self._failing_headers,
+            depends='linux-headers-6.1.0-56-amd64',
+        ))
+
+        with self.assertRaises(PluginUpdateError) as ctx:
+            AwgPluginUpdater(ssh).update(KERNEL_MODULE, NEW)
+
+        message = ctx.exception.message
+        self.assertIn('carry headers only for kernel 6.1.0-56-amd64', message)
+        self.assertIn('linux-image-amd64', message)
+        self.assertIn('linux-headers-amd64', message)
+
+    def test_ubuntu_flavour_gets_its_own_package_names(self):
+        ssh = FakeSSH(kernel_handler(
+            kernel='6.8.0-45-generic', headers='no',
+            install=self._failing_headers,
+            depends='linux-headers-6.8.0-46-generic',
+        ))
+
+        with self.assertRaises(PluginUpdateError) as ctx:
+            AwgPluginUpdater(ssh).update(KERNEL_MODULE, NEW)
+
+        message = ctx.exception.message
+        self.assertIn('carry headers only for kernel 6.8.0-46-generic', message)
+        self.assertIn('linux-image-generic', message)
+        self.assertIn('linux-headers-generic', message)
+        self.assertNotIn('linux-image-amd64', message)
+
+    def test_headers_installed_for_the_other_kernel_still_block_the_build(self):
+        def install(packages, state):
+            if packages[0] == 'linux-headers-%s' % KVER:
+                return ('', 'E: Unable to locate package ' + packages[0], 100)
+            return ('', '', 0)
+
+        ssh = FakeSSH(kernel_handler(
+            headers='no', install=install,
+            kernels_with_headers='6.1.0-56-amd64\n',
+        ))
+
+        with self.assertRaises(PluginUpdateError) as ctx:
+            AwgPluginUpdater(ssh).update(KERNEL_MODULE, NEW)
+
+        self.assertEqual(ctx.exception.code, 'preflight_failed')
+        self.assertIn('still missing after installation: headers', ctx.exception.message)
+        self.assertIn('reboot the server', ctx.exception.message)
+
+    def test_no_hint_when_the_repositories_match_the_running_kernel(self):
+        ssh = FakeSSH(kernel_handler(
+            headers='no', install=self._failing_headers,
+            depends='linux-headers-%s' % KVER,
+        ))
+
+        with self.assertRaises(PluginUpdateError) as ctx:
+            AwgPluginUpdater(ssh).update(KERNEL_MODULE, NEW)
+
+        self.assertNotIn('reboot', ctx.exception.message)
+
+    def test_fallback_search_stays_within_the_running_kernel_flavour(self):
+        ssh = FakeSSH(kernel_handler(
+            kernel='6.1.0-45-amd64', headers='no',
+            install=self._failing_headers, depends='',
+        ))
+
+        with self.assertRaises(PluginUpdateError):
+            AwgPluginUpdater(ssh).update(KERNEL_MODULE, NEW)
+
+        searches = [command for command in ssh.commands
+                    if command.startswith('apt-cache search')]
+        self.assertEqual(len(searches), 1, searches)
+        # -cloud-amd64 and -rt-amd64 must not be offered for a plain kernel.
+        self.assertIn('-[0-9]+-amd64$', searches[0])
+
+
+class PackageManagerRefreshTests(unittest.TestCase):
+    def test_dnf_metadata_is_refreshed_before_the_install(self):
+        ssh = FakeSSH(kernel_handler(dkms='no', manager='dnf'))
+
+        AwgPluginUpdater(ssh).ensure_dependencies(KERNEL_MODULE, _Log())
+
+        refresh = [i for i, command in enumerate(ssh.commands)
+                   if command == 'dnf -q makecache']
+        install = [i for i, command in enumerate(ssh.commands)
+                   if command.startswith('dnf install')]
+        self.assertEqual(len(refresh), 1, ssh.commands)
+        self.assertEqual(len(install), 1, ssh.commands)
+        self.assertLess(refresh[0], install[0])
+
+    def test_pacman_is_not_synced_without_an_upgrade(self):
+        ssh = FakeSSH(kernel_handler(dkms='no', manager='pacman'))
+
+        AwgPluginUpdater(ssh).ensure_dependencies(KERNEL_MODULE, _Log())
+
+        # `pacman -Sy` without `-u` is a partial upgrade, not a refresh.
+        self.assertFalse(ssh.find('pacman -Sy'))
+        self.assertTrue(ssh.find('pacman -S --noconfirm --needed dkms'))
+
+
 class SecureBootTests(unittest.TestCase):
     def test_secure_boot_is_a_blocker_and_nothing_is_installed(self):
         ssh = FakeSSH(kernel_handler(secure_boot='SecureBoot enabled'))
@@ -273,7 +457,8 @@ class SecureBootTests(unittest.TestCase):
 class InstallFailureTests(unittest.TestCase):
     def test_failed_install_stops_before_download_and_build(self):
         def install(packages, state):
-            # A plain failure, not a lock: no retry is expected.
+            # "Unable to locate" is a stale-list symptom, so one refresh+retry
+            # is expected; after that the failure is real and must stop the run.
             return ('', 'E: Unable to locate package dkms', 1)
 
         ssh = FakeSSH(kernel_handler(dkms='no', install=install))
@@ -287,8 +472,8 @@ class InstallFailureTests(unittest.TestCase):
         self.assertFalse(ssh.find('dkms add'))
         self.assertFalse(ssh.find('dkms build'))
         self.assertFalse(ssh.find('dkms install'))
-        # Only the failed package installation touched the host.
-        self.assertEqual(len(_install_commands(ssh.commands)), 1)
+        # The failed package installation was retried once after a refresh.
+        self.assertEqual(len(_install_commands(ssh.commands)), 2)
 
 
 class UserspaceDependenciesTests(unittest.TestCase):
