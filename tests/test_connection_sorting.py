@@ -18,7 +18,8 @@ class ConnectionSortingTests(unittest.TestCase):
             cls.template = f.read()
 
     def test_sort_menu_and_all_criteria_are_present(self):
-        for element in ('connSortField', 'connSortDirection', 'connectionsListInner'):
+        # Список клиентов и учёток теперь один: entityListInner.
+        for element in ('connSortField', 'connSortDirection', 'entityListInner'):
             self.assertIn('id="%s"' % element, self.template)
         for field in ('name', 'created', 'handshake', 'rx', 'tx',
                       'maxspeed', 'total', 'ip', 'quota', 'expiry'):
