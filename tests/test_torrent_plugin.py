@@ -599,11 +599,12 @@ class TemplateTests(unittest.TestCase):
         self.assertIn('window.TORRENT_PLUGIN_STATE', markup)
 
     def test_torrent_guard_has_its_own_icon(self):
-        # Иконка плагина отличается от общего щита протоколов: щит с
-        # двусторонними стрелками (обмен данными под защитой).
+        # Иконка плагина отличается от общего щита протоколов: щит с крестом
+        # внутри (срезанный трафик под защитой), линии базовой толщины.
         registry = self.read('templates/_ui_icons.html')
         self.assertIn("'torrent-guard':", registry)
-        self.assertIn('<g transform="translate(6 6.5) scale(0.5)" stroke-width="4">', registry)
+        self.assertIn('<path d="m14.5 9.5-5 5"/><path d="m9.5 9.5 5 5"/>', registry)
+        self.assertNotIn('<g transform=', registry)
         page = self.read('templates/server.html')
         self.assertIn("ui_icon('torrent-guard', 19)", page)
         # Карточка плагина в магазине берёт иконку из TP_ICON_SVG, а не из
