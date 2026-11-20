@@ -600,13 +600,22 @@ class TemplateTests(unittest.TestCase):
 
     def test_torrent_guard_has_its_own_icon(self):
         # Иконка плагина отличается от общего щита протоколов: щит с крестом
-        # внутри (срезанный трафик под защитой), линии базовой толщины.
+        # внутри (срезанный трафик под защитой). Контур тоньше базового
+        # (stroke-width 0.8 = 40% от 2), потому что щит и крест в 24px
+        # выглядят тяжелее остальных иконок.
         registry = self.read('templates/_ui_icons.html')
         self.assertIn("'torrent-guard':", registry)
-        self.assertIn('<path d="m14.5 9.5-5 5"/><path d="m9.5 9.5 5 5"/>', registry)
+        self.assertIn('<path stroke-width="0.8" d="m14.5 9.5-5 5"/>'
+                      '<path stroke-width="0.8" d="m9.5 9.5 5 5"/>', registry)
         self.assertNotIn('<g transform=', registry)
         page = self.read('templates/server.html')
-        self.assertIn("ui_icon('torrent-guard', 19)", page)
+        # Все три места: плитка инстанса, TP_ICON_SVG и шапка панели плагина.
+        self.assertIn("ui_icon('torrent-guard', 22)", page)
+        self.assertIn("ui_icon('torrent-guard', 23)", page)
+        self.assertIn("ui_icon('torrent-guard', 22)",
+                      self.read('templates/_torrent_plugin_modal.html'))
+        # Старого щита у плагина не осталось ни в одном шаблоне.
+        self.assertNotIn("ui_icon('shield', 18)", page)
         # Карточка плагина в магазине берёт иконку из TP_ICON_SVG, а не из
         # поля icon (для kind:'plugin' оно не рендерится как текст).
         self.assertIn('return renderMarketplacePluginCard(app);', page)
