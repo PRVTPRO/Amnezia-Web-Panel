@@ -7665,9 +7665,14 @@
             return;
         }
         const enabled = status.enabled !== false;
-        badgeEl.innerHTML = enabled
-            ? `<span class="badge badge-success"><span class="badge-dot"></span> ${_('smartroute_card_running')}</span>`
-            : `<span class="badge badge-warn"><span class="badge-dot"></span> ${_('smartroute_card_paused')}</span>`;
+        // Running but with a dead updater timer is not "healthy": prefixes
+        // silently freeze while the green badge says everything is fine.
+        const stale = enabled && !!((status.host || {}).timer_stale);
+        badgeEl.innerHTML = !enabled
+            ? `<span class="badge badge-warn"><span class="badge-dot"></span> ${_('smartroute_card_paused')}</span>`
+            : stale
+                ? `<span class="badge badge-warn"><span class="badge-dot"></span> ${_('smartroute_card_running')} — ${_('smartroute_card_warn')}</span>`
+                : `<span class="badge badge-success"><span class="badge-dot"></span> ${_('smartroute_card_running')}</span>`;
         if (toggleBtn) {
             toggleBtn.textContent = enabled ? _('smartroute_card_disable') : _('smartroute_card_enable');
             toggleBtn.classList.toggle('btn-primary', !enabled);
@@ -7682,6 +7687,10 @@
             `${_('smartroute_card_active_instances')}:<br>${splits.length ? splits.map(getProtoTitle).join(', ') : _('smartroute_split_none')}`,
         ];
         if (host.updated_at) rows.push(`${_('smartroute_updated')}: <br>${escapeHtml(formatSmartRouteTime(host.updated_at))}`);
+        if (host.timer_stale) {
+            const why = host.timer_armed === false ? _('smartroute_timer_warn') : _('smartroute_timer_stale');
+            rows.push(`<span style="color:var(--warning, #fbbf24)">⚠ ${escapeHtml(why)}</span>`);
+        }
         if (host.error) rows.push(`<span style="color:var(--danger, #f87171)">${escapeHtml(host.error)}</span>`);
         const grid = document.getElementById('smartroute-info-grid');
         if (grid) grid.innerHTML = rows.map(r => `<div>${r}</div>`).join('');
@@ -7845,7 +7854,20 @@
         if (host.source_v4) rows.push(`${_('smartroute_source')}: ${escapeHtml(host.source_v4)}`);
         if (host.updated_at) rows.push(`${_('smartroute_updated')}: ${escapeHtml(formatSmartRouteTime(host.updated_at))}`);
         if (host.next_update) rows.push(`${_('smartroute_next_update')}: ${escapeHtml(formatSmartRouteTime(host.next_update))}`);
+        if (host.last_trigger) {
+            rows.push(`${_('smartroute_timer_age')}: ${escapeHtml(formatSmartRouteTime(host.last_trigger))}`);
+        } else {
+            rows.push(`${_('smartroute_timer_age')}: ${_('smartroute_timer_never')}`);
+        }
+        if (host.timer_stale) {
+            const why = host.timer_armed === false ? _('smartroute_timer_warn') : _('smartroute_timer_stale');
+            rows.push(`<span style="color:var(--warning, #fbbf24)">⚠ ${escapeHtml(why)}</span>`);
+        }
         document.getElementById('smartRouteListsInfo').innerHTML = rows.map(r => `<div>${r}</div>`).join('');
+        if (host.timer_stale) {
+            // Keep the badge honest: a stale updater is a warning, not "installed".
+            state.innerHTML = `<span class="badge badge-warn"><span class="badge-dot"></span> ${_('installed')} — ${_('smartroute_card_warn')}</span>`;
+        }
         document.getElementById('smartRouteListsError').textContent = host.error || '';
         document.getElementById('smartRouteOwnSubnets').value = (status.own_subnets || []).join('\n');
         document.getElementById('smartRouteDnsViaExit').checked = !!status.dns_via_exit;

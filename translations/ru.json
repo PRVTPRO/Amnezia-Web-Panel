@@ -1577,5 +1577,11 @@
   "tp_err_no_iptables_modules": "В контейнере нет модулей iptables (xt_string/xt_connbytes) — фильтр там не может работать",
   "tp_err_unreachable": "Сервер недоступен по SSH — правила не применены",
   "tp_state_needs_start": "Нужно запустить контейнер",
-  "close": "Закрыть"
+  "close": "Закрыть",
+  "smartroute_timer_warn": "Таймер обновления списка не взведён — префиксы не обновляются",
+  "smartroute_timer_age": "Последнее обновление списка",
+  "smartroute_timer_never": "ещё не запускался",
+  "smartroute_timer_stale": "Список префиксов давно не обновлялся",
+  "smartroute_timer_armed": "Таймер взведён",
+  "smartroute_card_warn": "внимание"
 }

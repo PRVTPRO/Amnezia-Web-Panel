@@ -311,6 +311,13 @@ RELEASE_1811_KEYS = {
 }
 
 
+# Smart Route timer health (self-heal PR): a later addition, declared here so
+# the frozen catalogue hash keeps guarding the original keys.
+SMARTROUTE_TIMER_KEYS = {
+    'smartroute_timer_warn', 'smartroute_timer_age', 'smartroute_timer_never',
+    'smartroute_timer_stale', 'smartroute_timer_armed', 'smartroute_card_warn',
+}
+
 # Lifecycle fence banner (#341): a later addition, declared here so the frozen
 # catalogue hash keeps guarding the original keys.
 LIFECYCLE_FENCE_KEYS = {
@@ -533,7 +540,7 @@ class TestC6Translations(unittest.TestCase):
                                     - RELEASE_1811_KEYS - USER_LIMIT_KEYS - TELEGRAM_ACCOUNT_KEYS
                                     - LIFECYCLE_FENCE_KEYS - STORAGE_KEYS
                                     - SUBSCRIPTION_KEYS - CLOSE_KEYS
-                                    - IPV4_POLICY_KEYS))
+                                    - SMARTROUTE_TIMER_KEYS - IPV4_POLICY_KEYS))
         self.assertEqual(hashlib.sha256(previous.encode('utf-8')).hexdigest(),
                          PRE_PANEL_ACCESS_KEYS_SHA256,
                          'Existing catalogue changed outside the declared additions')
@@ -544,7 +551,7 @@ class TestC6Translations(unittest.TestCase):
             for key in (NEW_KEYS | PANEL_ACCESS_KEYS | PROTOCOL_UNINSTALL_KEYS
                         | TORRENT_GUARD_KEYS | TORRENT_PLUGIN_KEYS | AWG_I1_KEYS | USER_LIMIT_KEYS | TELEGRAM_ACCOUNT_KEYS
                         | LIFECYCLE_FENCE_KEYS | SUBSCRIPTION_KEYS | CLOSE_KEYS
-                        | IPV4_POLICY_KEYS):
+                        | SMARTROUTE_TIMER_KEYS | IPV4_POLICY_KEYS):
                 self.assertIn(key, data)
                 self.assertTrue(str(data[key]).strip(), "%s empty in %s" % (key, locale))
 

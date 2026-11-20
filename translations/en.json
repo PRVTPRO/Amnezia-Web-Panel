@@ -1577,5 +1577,11 @@
   "tp_err_no_iptables_modules": "The container lacks iptables modules (xt_string/xt_connbytes), so the filter cannot work there",
   "tp_err_unreachable": "The server is unreachable over SSH - the rules were not applied",
   "tp_state_needs_start": "Start the container first",
-  "close": "Close"
+  "close": "Close",
+  "smartroute_timer_warn": "The list updater timer is not armed — prefixes are not refreshing",
+  "smartroute_timer_age": "Last list update",
+  "smartroute_timer_never": "never ran yet",
+  "smartroute_timer_stale": "The prefix list has not been refreshed for too long",
+  "smartroute_timer_armed": "Timer is armed",
+  "smartroute_card_warn": "warning"
 }

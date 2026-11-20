@@ -5,6 +5,7 @@ serve canned answers.
 """
 
 import shlex
+import time
 import unittest
 
 from managers.smartroute_manager import (
@@ -14,7 +15,8 @@ from managers.smartroute_manager import (
     SMARTR_INSTALL_PHASES,
     SMARTR_INSTANCES, SMARTR_MIN_PREFIXES, SMARTR_TABLE,
     SmartRouteManager, SmartRouteError, SOURCES_V4, SOURCES_V6,
-    build_install_script, build_remove_script, build_update_script,
+    build_install_script, build_remove_script, build_timer_migration_script,
+    build_update_script,
     normalize_cidrs, parse_acct_counters, parse_ripe_delegated,
     render_container_script,
 )
@@ -27,6 +29,8 @@ class FakeSSH:
                    '"updated_at": "2026-10-14T10:00:00", "error": null}')
     list_timers_out = '2026-10-14 11:00:00\n'
     list_timers_code = 0
+    last_trigger_out = ''
+    last_trigger_code = 0
 
     def __init__(self):
         self.commands = []
@@ -55,6 +59,8 @@ class FakeSSH:
             return self.status_json, '', 0
         if 'systemctl list-timers' in cmd:
             return self.list_timers_out, '', self.list_timers_code
+        if 'LastTriggerUSec' in cmd:
+            return self.last_trigger_out, '', self.last_trigger_code
         if 'ls /etc/smartroute/instances' in cmd:
             return 'amnezia-awg2\namnezia-awg3\n', '', 0
         if 'iptables -t mangle -L' in cmd:
@@ -240,8 +246,15 @@ class InstallRemoveScriptTests(unittest.TestCase):
         for needle in ('/usr/local/sbin/smartroute-update.sh',
                        'smartroute.service', 'smartroute.timer',
                        'systemctl enable --now smartroute.timer',
-                       'RandomizedDelaySec=900', 'Persistent=true'):
+                       'RandomizedDelaySec=300', 'Persistent=true'):
             self.assertIn(needle, script)
+        # Regression: OnUnitActiveSec is derived from the service's last
+        # activation and silently stops arming when that stamp goes stale
+        # (ZK 2026-11-19: timer "active", no next run, no hourly re-apply).
+        self.assertIn('OnCalendar=*-*-* ', script)
+        self.assertNotIn('OnUnitActiveSec', script)
+        # The install must prove the timer is armed instead of reporting success
+        self.assertIn('timer is armed', script)
         self.assertIn('smartroute-update.sh', scripts['script'])  # updater payload
         # first run is background: worst-case fallback walk exceeds any SSH timeout
         self.assertIn('nohup', scripts['download'])
@@ -257,6 +270,57 @@ class InstallRemoveScriptTests(unittest.TestCase):
                       build_install_script('activate'))
         self.assertIn('systemctl is-enabled --quiet smartroute.timer',
                       build_install_script('verify'))
+
+    def test_timer_migration_rewrites_only_panel_units(self):
+        script = build_timer_migration_script()
+        # Absolute schedule in the rewritten unit, never the monotonic one.
+        self.assertIn('OnCalendar=*-*-* *:15:00', script)
+        self.assertNotIn('OnUnitActiveSec', script)
+        # Only a unit the panel itself wrote is touched; a customised,
+        # masked or deliberately disabled timer is reported and left alone.
+        self.assertIn("grep -qx 'Description=Smart Route prefix updater timer'", script)
+        self.assertIn('unsupported foreign-unit', script)
+        self.assertIn('unsupported disabled-', script)
+        self.assertIn('unsupported no-systemd', script)
+        # Backups are named next to the original and reported back.
+        self.assertIn('$UNIT.bak.$TS', script)
+        self.assertIn('$SVC.bak.$TS', script)
+        # Idempotent: an identical, armed unit is a no-op without a restart.
+        self.assertIn('cmp -s', script)
+        self.assertIn('smartroute-timer: unchanged', script)
+        # Success is proven, not assumed.
+        self.assertIn('list-timers smartroute.timer --no-legend', script)
+        self.assertIn('smartroute-timer: migrated', script)
+        self.assertIn('smartroute-timer: failed', script)
+
+    def test_timer_migration_script_parses_in_bash(self):
+        # The migration runs once per host and is the hardest thing here to
+        # retry by hand: a quoting mistake must be caught before it reaches a
+        # production host, not after.
+        import shutil
+        import subprocess
+        import tempfile
+
+        bash = shutil.which('bash')
+        if not bash:
+            self.skipTest('bash is not installed on this host')
+        for name, script in (
+                ('install', build_install_script('all')),
+                ('remove', build_remove_script()),
+                ('migration', build_timer_migration_script())):
+            with self.subTest(name):
+                with tempfile.NamedTemporaryFile('w', suffix='.sh', delete=False,
+                                                 encoding='utf-8', newline='\n') as fh:
+                    fh.write(script)
+                    path = fh.name
+                try:
+                    res = subprocess.run([bash, '-n', path],
+                                         capture_output=True, text=True)
+                    self.assertEqual(res.returncode, 0,
+                                     f'{name}: {res.stderr[:800]}')
+                finally:
+                    import os
+                    os.unlink(path)
 
     def test_unknown_phase_is_rejected(self):
         with self.assertRaises(SmartRouteError):
@@ -399,7 +463,59 @@ class ManagerFlowTests(unittest.TestCase):
         self.assertEqual(status['updated_at'], '2026-10-14T10:00:00')
         self.assertEqual(status['next_run'], '2026-10-14 11:00:00')
         self.assertEqual(status['next_update'], '2026-10-14 11:00:00')
+        self.assertTrue(status['timer_armed'])
+        # No last-trigger timestamp on the host: the age is unknown, and an
+        # armed timer is not stale on that basis alone.
+        self.assertIsNone(status['timer_age_sec'])
+        self.assertFalse(status['timer_stale'])
+        self.assertEqual(status['last_trigger'], '')
         self.assertEqual(status['instances'], ['amnezia-awg2', 'amnezia-awg3'])
+
+    def test_host_status_flags_timer_stale(self):
+        now = int(time.time())
+        ssh = FakeSSH()
+        ssh.last_trigger_out = f'{now - 3 * 60 * 60}\n'
+        status = SmartRouteManager(ssh).host_status()
+        self.assertTrue(status['timer_armed'])
+        self.assertTrue(status['timer_stale'])
+        self.assertGreaterEqual(status['timer_age_sec'], 3 * 60 * 60)
+        self.assertTrue(status['last_trigger'])
+
+    def test_host_status_fresh_timer_is_not_stale(self):
+        ssh = FakeSSH()
+        ssh.last_trigger_out = f'{int(time.time()) - 60}\n'
+        status = SmartRouteManager(ssh).host_status()
+        self.assertFalse(status['timer_stale'])
+        self.assertLess(status['timer_age_sec'], 120)
+
+    def test_host_status_unarmed_timer_is_stale(self):
+        # "Active" but no next elapse: exactly the ZK case, the card must warn.
+        ssh = FakeSSH()
+        ssh.list_timers_out = ''
+        status = SmartRouteManager(ssh).host_status()
+        self.assertFalse(status['timer_armed'])
+        self.assertTrue(status['timer_stale'])
+
+    def test_host_status_reads_the_stamp_file_not_the_ts_option(self):
+        # `--timestamp=unix` is ignored for the USec properties on systemd 252
+        # (Debian 12) and 257 (Debian 13): the command returned a human date,
+        # the panel parsed nothing and the age was silently always unknown.
+        ssh = FakeSSH()
+        ssh.last_trigger_out = '0\n' + str(int(time.time())) + '\n'
+        SmartRouteManager(ssh).host_status()
+        cmd = next(c for c in ssh.commands if 'stamp-smartroute.timer' in c)
+        self.assertIn('/var/lib/systemd/timers/stamp-smartroute.timer', cmd)
+        self.assertIn('LastTriggerUSec', cmd)   # fallback only
+        self.assertIn('date +%s', cmd)          # host clock for the age
+
+    def test_host_status_tolerates_a_host_clock_skew(self):
+        # Age is host_now - host_stamp, never panel_now - host_stamp: a panel
+        # running hours off must not report a healthy timer as stale.
+        ssh = FakeSSH()
+        ssh.last_trigger_out = '1000000\n1000060\n'
+        status = SmartRouteManager(ssh).host_status()
+        self.assertEqual(status['timer_age_sec'], 60)
+        self.assertFalse(status['timer_stale'])
 
     def test_host_status_timer_command_prints_date_and_time(self):
         # list-timers prints "WEEKDAY DATE TIME"; the panel wants DATE TIME,
