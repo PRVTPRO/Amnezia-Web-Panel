@@ -600,19 +600,17 @@ class TemplateTests(unittest.TestCase):
 
     def test_torrent_guard_has_its_own_icon(self):
         # Иконка плагина отличается от общего щита протоколов: щит с крестом
-        # внутри (срезанный трафик под защитой). Контур тоньше базового
-        # (stroke-width 0.8 = 40% от 2), потому что щит и крест в 24px
-        # выглядят тяжелее остальных иконок.
+        # внутри (срезанный трафик под защитой). Толщина линии задана явно
+        # (1.8 против реестровых 2) и размер 35px — по требованию владельца.
         registry = self.read('templates/_ui_icons.html')
         self.assertIn("'torrent-guard':", registry)
-        self.assertIn('<path stroke-width="0.8" d="m14.5 9.5-5 5"/>'
-                      '<path stroke-width="0.8" d="m9.5 9.5 5 5"/>', registry)
+        self.assertIn('<path stroke-width="1.8" d="m14.5 9.5-5 5"/>'
+                      '<path stroke-width="1.8" d="m9.5 9.5 5 5"/>', registry)
         self.assertNotIn('<g transform=', registry)
         page = self.read('templates/server.html')
         # Все три места: плитка инстанса, TP_ICON_SVG и шапка панели плагина.
-        self.assertIn("ui_icon('torrent-guard', 22)", page)
-        self.assertIn("ui_icon('torrent-guard', 23)", page)
-        self.assertIn("ui_icon('torrent-guard', 22)",
+        self.assertIn("ui_icon('torrent-guard', 35)", page)
+        self.assertIn("ui_icon('torrent-guard', 35)",
                       self.read('templates/_torrent_plugin_modal.html'))
         # Старого щита у плагина не осталось ни в одном шаблоне.
         self.assertNotIn("ui_icon('shield', 18)", page)
