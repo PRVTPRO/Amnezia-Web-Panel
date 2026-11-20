@@ -33,6 +33,7 @@ const CONFIRM = '/api/ssh-trust/onboarding/confirm';
 const calls = [];
 let testOutcomes = [];
 let addErrorCode = null;
+let confirmError = null;
 let delayedTest = false;
 let pendingTest = null;
 
@@ -61,6 +62,11 @@ async function apiCall(url, method = 'GET', body = null) {
             status: 'trusted'}};
     }
     if (url === CONFIRM) {
+        if (confirmError) {
+            const error = new Error(confirmError.error);
+            error.payload = clone(confirmError);
+            throw error;
+        }
         return {status: 'success', ssh_authenticated: false};
     }
     if (url === ADD) {
@@ -124,6 +130,13 @@ class CompactEnrollmentBrowserTests(unittest.TestCase):
             raise AssertionError('the post-add redirect was not found in the enrollment script')
         cls.wizard_js = wizard_js
 
+        # The console-help renderer ships in base.html; execute the real code,
+        # not a copy, so the spoiler markup and quoting are covered together.
+        base_source = (ROOT / 'templates' / 'base.html').read_text(encoding='utf-8')
+        start = base_source.index('function renderSshHelp(')
+        end = base_source.index('/* ===== Download file ===== */', start)
+        cls.help_js = 'function copyToClipboard() {}\n' + base_source[start:end]
+
     @classmethod
     def tearDownClass(cls):
         browser = getattr(cls, 'browser', None)
@@ -146,6 +159,7 @@ class CompactEnrollmentBrowserTests(unittest.TestCase):
         page.set_content(html)
         page.add_style_tag(path=str(ROOT / 'static' / 'css' / 'style.css'))
         page.add_script_tag(content='window.I18N = ' + json.dumps(self.strings) + ';\n' + HELPERS_JS)
+        page.add_script_tag(content=self.help_js)
         page.add_script_tag(content=self.wizard_js)
         return page
 
@@ -179,18 +193,36 @@ class CompactEnrollmentBrowserTests(unittest.TestCase):
             },
         }}
 
-    def changed_outcome(self, token='changed-token'):
+    def changed_outcome(self, token='changed-token', remediation=None):
+        host_key = {
+            'host': 'node.example.test', 'port': 2222,
+            'algorithm': 'ssh-ed25519', 'fingerprint': 'SHA256:new',
+            'old_fingerprints': [{'algorithm': 'ssh-ed25519',
+                                  'fingerprint': 'SHA256:old'}],
+            'status': 'changed', 'token': token,
+        }
+        if remediation is not None:
+            host_key['remediation'] = remediation
         return {'error': {
             'error': 'Host key changed; verify and accept the new key',
             'error_code': 'host_key_changed',
-            'host_key': {
-                'host': 'node.example.test', 'port': 2222,
-                'algorithm': 'ssh-ed25519', 'fingerprint': 'SHA256:new',
-                'old_fingerprints': [{'algorithm': 'ssh-ed25519',
-                                      'fingerprint': 'SHA256:old'}],
-                'status': 'changed', 'token': token,
-            },
+            'host_key': host_key,
         }}
+
+    def remediation(self):
+        return {
+            'reason': 'system_conflict',
+            'service_user': 'root',
+            'panel_host': 'panel.example.test',
+            'endpoint': '[node.example.test]:2222',
+            'system_file': '/root/.ssh/known_hosts',
+            'panel_file': '/root/panel/ssh_known_hosts',
+            'verify_command': "find /etc/ssh -maxdepth 1 -name 'ssh_host_*_key.pub' -exec ssh-keygen -lf {} \\;",
+            'remove_system': "ssh-keygen -R '[node.example.test]:2222' -f /root/.ssh/known_hosts",
+            'remove_panel': "ssh-keygen -R '[node.example.test]:2222' -f /root/panel/ssh_known_hosts",
+            'panel_readonly': False,
+            'chmod_panel': '',
+        }
 
     def test_add_is_disabled_until_a_successful_test(self):
         page = self.new_page()
@@ -353,6 +385,56 @@ class CompactEnrollmentBrowserTests(unittest.TestCase):
         self.click(page, '#enrollTestBtn')
         page.wait_for_function("document.getElementById('enrollChanged').hidden === false")
         self.assert_no_horizontal_overflow(page)
+
+    def test_changed_key_shows_console_commands_under_a_spoiler(self):
+        page = self.new_page()
+        self.configure_outcomes(page, self.changed_outcome(remediation=self.remediation()))
+        self.fill_valid(page)
+        self.click(page, '#enrollTestBtn')
+        page.wait_for_function("document.getElementById('enrollHelp').hidden === false")
+
+        help_box = page.locator('#enrollHelp')
+        self.assertEqual(help_box.locator('summary').inner_text(), self.strings['ssh_help_summary'])
+        # A spoiler is collapsed by default: the operator opens it on demand.
+        self.assertFalse(help_box.evaluate('(el) => el.open'))
+        # textContent, not innerText: a closed <details> hides its body.
+        text = help_box.evaluate('(el) => el.textContent')
+        self.assertIn("ssh-keygen -R '[node.example.test]:2222'", text)
+        self.assertIn('/root/.ssh/known_hosts', text)
+        self.assertIn('find /etc/ssh', text)
+        self.assertIn('ssh_host_*_key.pub', text)
+        # The hint must name the host to run the cleanup on: the operator's
+        # own shell (the target server) is the wrong place.
+        self.assertIn('panel.example.test', text)
+        self.assertIn(self.strings['ssh_help_retry'], text)
+
+    def test_failed_accept_opens_the_help_with_commands(self):
+        page = self.new_page()
+        self.configure_outcomes(page, self.changed_outcome(remediation=self.remediation()))
+        page.evaluate('() => { confirmError = ' + json.dumps({
+            'error': 'Conflicting system known_hosts entry',
+            'error_code': 'system_trust_conflict',
+            'remediation': self.remediation(),
+        }) + '; }')
+        self.fill_valid(page)
+        self.click(page, '#enrollTestBtn')
+        page.wait_for_function("document.getElementById('enrollChanged').hidden === false")
+        page.check('#enrollChangedVerified')
+        self.click(page, '#enrollAcceptBtn')
+        page.wait_for_function(
+            "() => document.getElementById('enrollHelp').open === true")
+        self.assertEqual(
+            page.locator('#enrollError').inner_text(),
+            self.strings['enroll_error_trust_conflict'])
+        self.assertIn('ssh-keygen -R', page.locator('#enrollHelp').inner_text())
+
+    def test_no_spoiler_when_the_key_is_trusted(self):
+        page = self.new_page()
+        self.configure_outcomes(page, self.success_outcome())
+        self.fill_valid(page)
+        self.click(page, '#enrollTestBtn')
+        page.wait_for_function("document.getElementById('enrollSuccess').hidden === false")
+        self.assertTrue(page.locator('#enrollHelp').is_hidden())
 
     def assert_no_horizontal_overflow(self, page):
         widths = page.evaluate("""() => ({

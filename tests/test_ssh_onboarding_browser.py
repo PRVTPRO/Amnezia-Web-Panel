@@ -20,6 +20,10 @@ class OnboardingBrowserTests(unittest.TestCase):
             request=None, settings={}, site_settings={}, current_user={'role': 'admin'},
             _=lambda key: strings.get(key, key))
         source = (root / 'templates/index.html').read_text(encoding='utf-8')
+        base_source = (root / 'templates/base.html').read_text(encoding='utf-8')
+        help_start = base_source.index('function renderSshHelp(')
+        help_end = base_source.index('/* ===== Download file ===== */', help_start)
+        help_js = 'function copyToClipboard() {}\n' + base_source[help_start:help_end]
         # Only actual onboarding handlers; no load-time polling or production URLs.
         match = re.search(r'    /\* Trust candidates.*?(?=    /\* ========== Ping indicators)', source, re.S)
         self.assertIsNotNone(match)
@@ -40,14 +44,39 @@ class OnboardingBrowserTests(unittest.TestCase):
 const calls = [];
 const messages = """ + json.dumps(strings) + """;
 const _ = key => messages[key] || key;
-let delayed = false, resolveInspect, fail = false;
+let delayed = false, resolveInspect, fail = false, changedMode = false, confirmError = null;
+const syntheticRemediation = {
+    reason: 'system_conflict',
+    service_user: 'root',
+    panel_host: 'panel.example.test',
+    endpoint: '[node.example.test]:2222',
+    system_file: '/root/.ssh/known_hosts',
+    panel_file: '/root/panel/ssh_known_hosts',
+    verify_command: "find /etc/ssh -maxdepth 1 -name 'ssh_host_*_key.pub' -exec ssh-keygen -lf {} \\;",
+    remove_system: "ssh-keygen -R '[node.example.test]:2222' -f /root/.ssh/known_hosts",
+    remove_panel: "ssh-keygen -R '[node.example.test]:2222' -f /root/panel/ssh_known_hosts",
+    panel_readonly: false,
+    chmod_panel: ''
+};
 const apiCall = async (url, method, body) => {
     calls.push({url, method, body});
     if (fail) throw new Error('synthetic network timeout');
     if (delayed && url.endsWith('/inspect')) await new Promise(resolve => {resolveInspect = resolve;});
-    return url.endsWith('/inspect') ? {host:body.host,port:body.ssh_port,algorithm:'ssh-ed25519',fingerprint:'SHA256:synthetic',status:'unknown',old_fingerprints:[],token:'synthetic-signed-token'} : {status:'success',ssh_authenticated:false};
+    if (url.endsWith('/confirm') && confirmError) {
+        const error = new Error(confirmError.error);
+        error.payload = confirmError;
+        throw error;
+    }
+    if (url.endsWith('/inspect')) {
+        if (changedMode) return {host: body.host, port: body.ssh_port,
+            algorithm: 'ssh-ed25519', fingerprint: 'SHA256:new', status: 'changed',
+            old_fingerprints: [{algorithm: 'ssh-ed25519', fingerprint: 'SHA256:old'}],
+            token: 'synthetic-signed-token', remediation: syntheticRemediation};
+        return {host:body.host,port:body.ssh_port,algorithm:'ssh-ed25519',fingerprint:'SHA256:synthetic',status:'unknown',old_fingerprints:[],token:'synthetic-signed-token'};
+    }
+    return {status:'success',ssh_authenticated:false};
 };
-""" + match[0])
+""" + help_js + "\n" + match[0])
                 for kind, host_id, port_id, password_id in [('add', 'serverHost', 'serverPort', 'serverPassword'),
                                                           ('edit', 'editServerHost', 'editServerPort', 'editServerPassword')]:
                     with self.subTest(kind=kind):
@@ -86,6 +115,31 @@ const apiCall = async (url, method, body) => {
                 page.evaluate("delayed=false; fail=true; void inspectOnboardingTrust('add')")
                 page.wait_for_function("document.getElementById('add-trust-details').textContent.includes('timeout')")
                 self.assertFalse(page.locator('#add-trust-inspect').is_disabled())
+                # A changed key renders copy-ready console commands under a spoiler.
+                page.evaluate("() => { fail = false; changedMode = true; }")
+                page.evaluate("""() => {
+                    const host = document.getElementById('serverHost');
+                    host.value = 'node.example.test';
+                    host.dispatchEvent(new Event('input'));
+                }""")
+                page.evaluate("document.getElementById('add-trust-inspect').click()")
+                page.wait_for_function("document.getElementById('add-trust-help').hidden === false")
+                help_box = page.locator('#add-trust-help')
+                self.assertFalse(help_box.evaluate('(el) => el.open'))
+                self.assertIn("ssh-keygen -R '[node.example.test]:2222'",
+                              help_box.evaluate('(el) => el.textContent'))
+                self.assertIn(strings['ssh_help_summary'],
+                              help_box.evaluate('(el) => el.textContent'))
+                # A refused confirmation names the cause and opens the spoiler.
+                page.evaluate("""() => { confirmError = {
+                    error: 'Conflicting system known_hosts entry',
+                    error_code: 'system_trust_conflict',
+                    remediation: syntheticRemediation }; }""")
+                page.evaluate("document.getElementById('add-trust-verified').checked = true")
+                page.evaluate("document.getElementById('add-trust-save').click()")
+                page.wait_for_function("document.getElementById('add-trust-help').open === true")
+                self.assertEqual(page.locator('#add-trust-details').text_content(),
+                                 strings['enroll_error_trust_conflict'])
                 self.assertEqual(errors, [])
             finally:
                 browser.close()

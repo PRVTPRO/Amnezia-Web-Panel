@@ -5033,6 +5033,35 @@ def _ssh_onboarding_endpoint(req):
     return endpoint
 
 
+_TRUST_ERROR_CODES = (
+    (ssh_trust.SystemTrustConflict, 'system_trust_conflict', 'system_conflict'),
+    (ssh_trust.TrustFileReadOnly, 'trust_file_readonly', 'trust_readonly'),
+    (ssh_trust.TrustChanged, 'trust_changed', ''),
+)
+
+
+def _trust_error_response(exc, server=None, status_code=409):
+    """409 body for a trust write the panel refuses to do on its own.
+
+    ``remediation`` carries copy-ready console commands, built from this
+    installation's real paths, so the same hint works for any host and port.
+    ``server`` is None when the request failed before the endpoint was
+    resolved; then only the error code is reported.
+    """
+    error_code = 'trust_error'
+    remediation = None
+    for kind, code, reason in _TRUST_ERROR_CODES:
+        if isinstance(exc, kind):
+            error_code = code
+            if reason and server is not None:
+                remediation = ssh_trust.remediation(server, reason)
+            break
+    payload = {'error': str(exc), 'error_code': error_code}
+    if remediation:
+        payload['remediation'] = remediation
+    return JSONResponse(payload, status_code=status_code)
+
+
 @app.post('/api/ssh-trust/onboarding/inspect', tags=["Servers"])
 async def api_ssh_onboarding_inspect(request: Request, req: SSHOnboardingEndpoint):
     if not _ssh_trust_admin(request):
@@ -5055,6 +5084,7 @@ async def api_ssh_onboarding_confirm(request: Request, req: SSHOnboardingConfirm
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     if not req.confirmed:
         return JSONResponse({'error': 'Explicit confirmation required'}, status_code=400)
+    endpoint = None
     try:
         async with DATA_LOCK:
             endpoint = _ssh_onboarding_endpoint(req)
@@ -5065,7 +5095,7 @@ async def api_ssh_onboarding_confirm(request: Request, req: SSHOnboardingConfirm
             lambda: endpoint == _ssh_onboarding_endpoint(req), reset_server)
         return dict(result, ssh_authenticated=False)
     except Exception as exc:
-        return JSONResponse({'error': str(exc)}, status_code=409)
+        return _trust_error_response(exc, endpoint)
 
 
 def _ssh_trust_admin(request):
@@ -5168,7 +5198,7 @@ async def api_ssh_trust_confirm(request: Request, server_id: int, req: SSHTrustC
                        for s in current)
         return await _save_ssh_confirmation(server, req.token, key, unchanged, server)
     except Exception as exc:
-        return JSONResponse({'error': str(exc)}, status_code=409)
+        return _trust_error_response(exc, server)
 
 
 def _server_identity(server_id, server_uid=None):
@@ -5210,11 +5240,23 @@ def _classify_ssh_error(exc):
     the two host-key states Paramiko reports as generic SSHException.
     """
     import paramiko as _paramiko
+    # Imported here, not at module level, so this function stays usable when it
+    # is extracted on its own (tests exec it with a reduced globals namespace).
+    from managers import ssh_trust as _ssh_trust
 
     if isinstance(exc, _paramiko.AuthenticationException):
         return 'authentication_failed'
     if isinstance(exc, _paramiko.BadHostKeyException):
         return 'host_key_changed'
+    # Trust write refusals carry their own codes. They subclass
+    # ValueError/PermissionError, so they must be checked before the generic
+    # OSError branch turns a read-only trust file into "network_error".
+    if isinstance(exc, _ssh_trust.SystemTrustConflict):
+        return 'system_trust_conflict'
+    if isinstance(exc, _ssh_trust.TrustFileReadOnly):
+        return 'trust_file_readonly'
+    if isinstance(exc, _ssh_trust.TrustChanged):
+        return 'trust_changed'
     if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
         return 'network_error'
     if isinstance(exc, _paramiko.SSHException):

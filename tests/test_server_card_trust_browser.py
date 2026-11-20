@@ -88,6 +88,12 @@ class ServerCardTrustBrowserTests(unittest.TestCase):
         cls.trust_js = script.split(START, 1)[1].split(END, 1)[0]
         cls.trust_js = START + cls.trust_js
 
+        # The console-help renderer ships in base.html; run the real code.
+        base_source = (ROOT / 'templates' / 'base.html').read_text(encoding='utf-8')
+        help_start = base_source.index('function renderSshHelp(')
+        help_end = base_source.index('/* ===== Download file ===== */', help_start)
+        cls.help_js = 'function copyToClipboard() {}\n' + base_source[help_start:help_end]
+
     @classmethod
     def tearDownClass(cls):
         browser = getattr(cls, 'browser', None)
@@ -110,6 +116,7 @@ class ServerCardTrustBrowserTests(unittest.TestCase):
         page.set_content(html)
         page.add_style_tag(path=str(ROOT / 'static' / 'css' / 'style.css'))
         page.add_script_tag(content='window.I18N = ' + json.dumps(self.strings) + ';\n' + HELPERS_JS)
+        page.add_script_tag(content=self.help_js)
         page.add_script_tag(content=self.trust_js)
         return page
 
@@ -123,6 +130,19 @@ class ServerCardTrustBrowserTests(unittest.TestCase):
             'old_fingerprints': [{'algorithm': 'ssh-ed25519',
                                   'fingerprint': 'SHA256:old'}],
             'token': 'changed-token',
+            'remediation': {
+                'reason': 'system_conflict',
+                'service_user': 'root',
+                'panel_host': 'panel.example.test',
+                'endpoint': '192.0.2.10',
+                'system_file': '/root/.ssh/known_hosts',
+                'panel_file': '/root/panel/ssh_known_hosts',
+                'verify_command': "find /etc/ssh -maxdepth 1 -name 'ssh_host_*_key.pub' -exec ssh-keygen -lf {} \\;",
+                'remove_system': 'ssh-keygen -R 192.0.2.10 -f /root/.ssh/known_hosts',
+                'remove_panel': 'ssh-keygen -R 192.0.2.10 -f /root/panel/ssh_known_hosts',
+                'panel_readonly': False,
+                'chmod_panel': '',
+            },
         }
 
     def test_changed_key_icon_opens_modal_and_requires_one_checkbox(self):
@@ -144,6 +164,9 @@ class ServerCardTrustBrowserTests(unittest.TestCase):
         details = page.locator('#serverTrustDetails').text_content()
         self.assertIn('SHA256:new', details)
         self.assertIn('SHA256:old', details)
+        help_text = page.locator('#serverTrustHelp').evaluate('(el) => el.textContent')
+        self.assertIn('ssh-keygen -R 192.0.2.10', help_text)
+        self.assertFalse(page.locator('#serverTrustHelp').evaluate('(el) => el.open'))
         self.assertTrue(page.locator('#serverTrustConfirmRow').is_visible())
         self.assertTrue(page.locator('#serverTrustAccept').is_disabled())
 

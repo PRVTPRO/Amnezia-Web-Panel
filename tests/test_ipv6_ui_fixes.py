@@ -168,6 +168,15 @@ TORRENT_PLUGIN_KEYS = {
     'tp_uninstall_done',
 }
 
+# Keys of the "What to do?" console help for a changed host key.
+SSH_HELP_KEYS = {
+    'ssh_help_summary', 'ssh_help_copy', 'ssh_help_step_verify',
+    'ssh_help_label_target', 'ssh_help_step_remove', 'ssh_help_label_panel',
+    'ssh_help_step_readonly', 'ssh_help_retry',
+    'enroll_error_retest', 'enroll_error_trust_conflict',
+    'enroll_error_trust_readonly',
+}
+
 PRE_PANEL_ACCESS_KEYS_SHA256 = 'c70dff505a825b0a8506b2d1ca7d76fca9378e3f9514cc44231f7fd2a847af36'
 # Keys of the "Copy instance" panel: a later addition, declared here so the
 # frozen catalogue hash keeps guarding the original keys.
@@ -540,7 +549,8 @@ class TestC6Translations(unittest.TestCase):
                                     - RELEASE_1811_KEYS - USER_LIMIT_KEYS - TELEGRAM_ACCOUNT_KEYS
                                     - LIFECYCLE_FENCE_KEYS - STORAGE_KEYS
                                     - SUBSCRIPTION_KEYS - CLOSE_KEYS
-                                    - SMARTROUTE_TIMER_KEYS - IPV4_POLICY_KEYS))
+                                    - SSH_HELP_KEYS - SMARTROUTE_TIMER_KEYS
+                                    - IPV4_POLICY_KEYS))
         self.assertEqual(hashlib.sha256(previous.encode('utf-8')).hexdigest(),
                          PRE_PANEL_ACCESS_KEYS_SHA256,
                          'Existing catalogue changed outside the declared additions')

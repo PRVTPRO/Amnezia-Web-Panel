@@ -425,6 +425,51 @@
             }
         }
 
+        /* ===== SSH trust: console help for a pin the panel cannot fix ===== */
+        // `data` is the `remediation` object produced by managers/ssh_trust.py:
+        // {endpoint, verify_command, remove_system, remove_panel,
+        //  panel_file, panel_readonly, chmod_panel, reason}
+        function renderSshHelp(box, data) {
+            if (!box) return;
+            const body = box.querySelector('.ssh-help__body');
+            if (!body) return;
+            body.textContent = '';
+            if (!data || !data.remove_system) {
+                box.hidden = true;
+                return;
+            }
+            const add = (tag, cls, text) => {
+                const el = document.createElement(tag);
+                if (cls) el.className = cls;
+                if (text !== undefined) el.textContent = text;
+                body.appendChild(el);
+                return el;
+            };
+            const block = (label, commands) => {
+                add('p', 'ssh-help__label', label);
+                const pre = add('pre', 'ssh-help__code', commands.join('\n'));
+                pre.setAttribute('dir', 'ltr');
+                const copy = add('button', 'btn btn-secondary ssh-help__copy', _('ssh_help_copy'));
+                copy.type = 'button';
+                copy.addEventListener('click', () => copyToClipboard(commands.join('\n')));
+            };
+
+            if (data.reason === 'trust_readonly') {
+                add('p', 'ssh-help__step', _('ssh_help_step_readonly').replace('{path}', data.panel_file || ''));
+                if (data.chmod_panel) block(_('ssh_help_label_panel'), [data.chmod_panel, data.remove_panel]);
+            } else {
+                add('p', 'ssh-help__step', _('ssh_help_step_verify').replace('{endpoint}', data.endpoint || ''));
+                block(_('ssh_help_label_target'), [data.verify_command]);
+                add('p', 'ssh-help__step', _('ssh_help_step_remove')
+                    .replace('{host}', data.panel_host || '')
+                    .replace('{user}', data.service_user || '')
+                    .replace('{file}', data.system_file || ''));
+                block(_('ssh_help_label_panel'), [data.remove_system]);
+            }
+            add('p', 'ssh-help__note', _('ssh_help_retry'));
+            box.hidden = false;
+        }
+
         /* ===== Download file ===== */
         function downloadFile(content, filename) {
             const blob = new Blob([content], { type: 'text/plain' });

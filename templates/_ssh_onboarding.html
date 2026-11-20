@@ -3,6 +3,7 @@
     <button type="button" class="btn btn-secondary" id="{{ trust_kind }}-trust-inspect"
         onclick="inspectOnboardingTrust('{{ trust_kind }}')">{{ _('ssh_trust_inspect') }}</button>
     <pre id="{{ trust_kind }}-trust-details" aria-live="polite" style="white-space: pre-wrap; overflow-wrap: anywhere;"></pre>
+    {% set help_id = trust_kind + '-trust-help' %}{% include '_ssh_help.html' %}
     <div id="{{ trust_kind }}-trust-confirmation" hidden>
         <p>{{ _('ssh_trust_warning') }}</p>
         <label><input type="checkbox" id="{{ trust_kind }}-trust-verified"> {{ _('ssh_trust_verified') }}</label>

@@ -3378,6 +3378,62 @@ body,
     width: auto;
 }
 
+/* Спойлер «Что делать?» при смене ключа хоста: команды для консоли. */
+.ssh-help {
+    margin: 0 0 var(--space-md);
+    padding: var(--space-sm) var(--space-md);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    text-align: start;
+}
+
+.ssh-help__summary {
+    cursor: pointer;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.ssh-help__body {
+    padding-top: var(--space-sm);
+}
+
+.ssh-help__step {
+    margin: 0 0 var(--space-xs);
+    color: var(--text-secondary);
+}
+
+.ssh-help__label {
+    margin: var(--space-sm) 0 var(--space-xs);
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+}
+
+.ssh-help__code {
+    margin: 0 0 var(--space-xs);
+    padding: var(--space-sm) var(--space-md);
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 0.8rem;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    direction: ltr;
+    text-align: left;
+}
+
+.ssh-help__copy {
+    width: auto;
+    margin-bottom: var(--space-sm);
+}
+
+.ssh-help__note {
+    margin: 0;
+    color: var(--text-secondary);
+}
+
 .enroll-hint {
     margin: 0 0 var(--space-sm);
     color: var(--warning);

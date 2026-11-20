@@ -323,6 +323,8 @@
                 <span class="text-muted">{{ _('ssh_trust_inspect') }}…</span>
             </div>
 
+            {% set help_id = 'serverTrustHelp' %}{% include '_ssh_help.html' %}
+
             <label id="serverTrustConfirmRow" class="hidden" style="display: flex; gap: var(--space-sm); align-items: flex-start;">
                 <input type="checkbox" id="serverTrustVerified">
                 <span>{{ _('ssh_trust_verified') }}</span>
@@ -591,6 +593,7 @@
         document.getElementById(kind + '-trust-verified').checked = false;
         document.getElementById(kind + '-trust-inspect').disabled = false;
         document.getElementById(kind + '-trust-save').disabled = false;
+        renderSshHelp(document.getElementById(kind + '-trust-help'), null);
     }
     async function inspectOnboardingTrust(kind) {
         resetOnboardingTrust(kind);
@@ -608,6 +611,7 @@
                 data.algorithm + ' ' + data.fingerprint + '\n' + _('ssh_trust_old') + ':\n' +
                 data.old_fingerprints.map(k => k.algorithm + ' ' + k.fingerprint).join('\n');
             document.getElementById(kind + '-trust-confirmation').hidden = data.status === 'trusted';
+            renderSshHelp(document.getElementById(kind + '-trust-help'), data.remediation);
         } catch (error) {
             if (onboardingTrust[kind] === state) document.getElementById(kind + '-trust-details').textContent = error.message;
         } finally {
@@ -627,9 +631,25 @@
         } catch (error) {
             if (onboardingTrust[kind] === state) {
                 resetOnboardingTrust(kind);
-                document.getElementById(kind + '-trust-details').textContent = error.message;
+                const payload = error && error.payload;
+                if (payload && payload.remediation) {
+                    const help = document.getElementById(kind + '-trust-help');
+                    renderSshHelp(help, payload.remediation);
+                    if (help) help.open = true;
+                }
+                document.getElementById(kind + '-trust-details').textContent =
+                    trustErrorMessage(payload, error.message);
             }
         }
+    }
+
+    // Actionable text for a trust write the panel refuses to perform itself.
+    function trustErrorMessage(payload, fallback) {
+        const code = payload && payload.error_code;
+        if (code === 'system_trust_conflict') return _('enroll_error_trust_conflict');
+        if (code === 'trust_file_readonly') return _('enroll_error_trust_readonly');
+        if (code === 'trust_changed') return _('enroll_error_retest');
+        return fallback || _('ssh_trust_error');
     }
     for (const kind of ['add', 'edit']) {
         const ids = kind === 'add' ? ['serverHost', 'serverPort'] : ['editServerHost', 'editServerPort'];
@@ -694,6 +714,7 @@
             old.append(label, list);
             box.append(old);
         }
+        renderSshHelp(document.getElementById('serverTrustHelp'), detail.remediation);
     }
 
     function resetServerTrust() {
@@ -711,6 +732,7 @@
         document.getElementById('serverTrustAcceptText').textContent = _('ssh_trust_save');
         document.getElementById('serverTrustTitle').textContent = _('ssh_trust_changed');
         document.getElementById('serverTrustWarning').textContent = _('ssh_trust_warning');
+        renderSshHelp(document.getElementById('serverTrustHelp'), null);
     }
 
     async function openServerTrust(idx) {
@@ -777,13 +799,23 @@
                 body: JSON.stringify({ token: serverTrust.detail.token, confirmed: true })
             });
             const data = await res.json().catch(() => ({}));
-            if (!res.ok) throw new Error(data.error || _('ssh_trust_error'));
+            if (!res.ok) {
+                const err = new Error(data.error || _('ssh_trust_error'));
+                err.payload = data;
+                throw err;
+            }
             closeModal('serverTrustModal');
             setServerTrustIcon(idx, 'trusted');
             showToast(_('ssh_trust_trusted'), 'success');
             pingServer(idx);
         } catch (err) {
-            error.textContent = err.message || _('ssh_trust_error');
+            const payload = err && err.payload;
+            if (payload && payload.remediation) {
+                const help = document.getElementById('serverTrustHelp');
+                renderSshHelp(help, payload.remediation);
+                if (help) help.open = true;
+            }
+            error.textContent = trustErrorMessage(payload, err.message);
             error.classList.remove('hidden');
             accept.disabled = !document.getElementById('serverTrustVerified').checked;
         } finally {
