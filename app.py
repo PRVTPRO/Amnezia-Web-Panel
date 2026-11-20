@@ -13815,13 +13815,13 @@ def _subscription_config_block(sub_path, profile_title, entries=()):
                      + _nginx_quote(userinfo) + '" always;')
         lines.append('        add_header profile-title "'
                      + _nginx_quote(profile_title) + '" always;')
-        lines.append('        add_header profile-update-interval "24" always;')
+        lines.append('        add_header profile-update-interval "6" always;')
         lines.append('        try_files $uri =404;')
         lines.append('    ' + chr(125))
     lines.append(f'    location /{sub_path}/ ' + chr(123))
     lines.append('        add_header profile-title "'
                  + _nginx_quote(profile_title) + '" always;')
-    lines.append('        add_header profile-update-interval "24" always;')
+    lines.append('        add_header profile-update-interval "6" always;')
     lines.append('        try_files $uri =404;')
     lines.append('    ' + chr(125))
     lines.append('    # === end panel subscription block ===')

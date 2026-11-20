@@ -229,7 +229,7 @@ class SubscriptionConfigTests(unittest.TestCase):
         injected = panel._apply_subscription_config_text(base, 'sub', 'My VPN')
         self.assertIn('location /sub/', injected)
         self.assertIn('add_header profile-title "My VPN" always;', injected)
-        self.assertIn('profile-update-interval "24"', injected)
+        self.assertIn('profile-update-interval "6"', injected)
 
         replaced = panel._apply_subscription_config_text(
             injected, 'sub2', panel._subscription_profile_title('Другое имя'))
