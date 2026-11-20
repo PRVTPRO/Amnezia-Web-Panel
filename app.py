@@ -13764,20 +13764,72 @@ def _subscription_profile_title(name):
     return 'base64:' + base64.b64encode(name.encode()).decode()
 
 
-def _subscription_config_block(sub_path, profile_title):
-    return (
-        "\n    # === panel subscription (managed) ===\n"
-        f"    location /{sub_path}/ {{\n"
-        f"        add_header profile-title \"{profile_title}\" always;\n"
-        f"        add_header profile-update-interval \"24\" always;\n"
-        f"        try_files $uri =404;\n"
-        f"    }}\n"
-        "    # === end panel subscription block ===\n"
-    )
+def _nginx_quote(value):
+    """Escape a value for an nginx double-quoted config string."""
+    value = str(value).replace(chr(92), chr(92) * 2)
+    value = value.replace(chr(34), chr(92) + chr(34))
+    return value
+
+
+def _subscription_userinfo(user):
+    """subscription-userinfo header value: the user's used quota and
+    expiry, as of the last push. Clients render it as a traffic bar."""
+    parts = ['upload=0']
+    used = user.get('traffic_used')
+    if isinstance(used, int) and used >= 0:
+        parts.append('download=' + str(used))
+    limit = user.get('traffic_limit')
+    if isinstance(limit, int) and limit > 0:
+        parts.append('total=' + str(limit))
+    expires = user.get('expiration_date')
+    if expires:
+        try:
+            ts = int(datetime.fromisoformat(str(expires)).timestamp())
+            if ts > 0:
+                parts.append('expire=' + str(ts))
+        except (ValueError, TypeError):
+            pass
+    return '; '.join(parts)
+
+
+def _subscription_config_entries(data):
+    """[(token, userinfo), ...] for users with a token and xray targets."""
+    entries = []
+    for user in data.get('users', []):
+        token = user.get('sub_token')
+        if not token or not _subscription_user_targets(data, user):
+            continue
+        entries.append((token, _subscription_userinfo(user)))
+    return entries
+
+
+def _subscription_config_block(sub_path, profile_title, entries=()):
+    """Per-token exact-match locations carry the per-user userinfo
+    header (values as of the last push); the generic prefix location
+    keeps serving the mask site for unknown tokens."""
+    nl = chr(10)
+    lines = [nl + '    # === panel subscription (managed) ===']
+    for token, userinfo in entries:
+        lines.append(f'    location = /{sub_path}/{token} ' + chr(123))
+        lines.append('        add_header subscription-userinfo "'
+                     + _nginx_quote(userinfo) + '" always;')
+        lines.append('        add_header profile-title "'
+                     + _nginx_quote(profile_title) + '" always;')
+        lines.append('        add_header profile-update-interval "6" always;')
+        lines.append('        try_files $uri =404;')
+        lines.append('    ' + chr(125))
+    lines.append(f'    location /{sub_path}/ ' + chr(123))
+    lines.append('        add_header profile-title "'
+                 + _nginx_quote(profile_title) + '" always;')
+    lines.append('        add_header profile-update-interval "6" always;')
+    lines.append('        try_files $uri =404;')
+    lines.append('    ' + chr(125))
+    lines.append('    # === end panel subscription block ===')
+    return nl.join(lines) + nl
 
 
 def _apply_subscription_config_text(config, sub_path='sub', profile_title='',
-                                    remove=False):
+                                    entries=(), remove=False):
     """Inject/replace/remove the managed subscription location inside the
     last server block of the mask site config (pure text, testable)."""
     cleaned = re.sub(r"\n?[ \t]*# === panel subscription \(managed\) ===.*?"
@@ -13788,14 +13840,14 @@ def _apply_subscription_config_text(config, sub_path='sub', profile_title='',
     index = cleaned.rstrip().rfind('}')
     if index == -1:
         raise RuntimeError('unexpected NGINX config shape')
-    return cleaned[:index] + _subscription_config_block(sub_path, profile_title) \
-        + cleaned[index:]
+    return cleaned[:index] + _subscription_config_block(sub_path, profile_title, entries) + cleaned[index:]
 
 
 def _apply_subscription_config(nginx_server, nginx_protocol, sub_settings,
-                               remove=False):
+                               entries=(), remove=False):
     """Apply the managed subscription location on the live mask (nginx -t
-    validated by save_server_config, which reverts on failure)."""
+    validated by save_server_config, which reverts on failure). Skips the
+    write when the live config already matches."""
     from managers.nginx_manager import NginxManager
     ssh = get_ssh(nginx_server)
     ssh.connect()
@@ -13805,7 +13857,9 @@ def _apply_subscription_config(nginx_server, nginx_protocol, sub_settings,
         new_config = _apply_subscription_config_text(
             config, sub_settings['path'],
             _subscription_profile_title(sub_settings.get('name')),
-            remove=remove)
+            entries=entries, remove=remove)
+        if new_config == config:
+            return False
         return nginx.save_server_config(nginx_protocol, new_config)
     finally:
         ssh.disconnect()
@@ -13967,6 +14021,17 @@ def auto_push_subscriptions(data, user_ids=None):
                            user.get('username'), e)
     if updated:
         logger.info("subscription auto-push: %d file(s) updated", updated)
+    # The per-token userinfo headers live in the mask config: refresh them
+    # with the fresh counters (skipped internally when nothing changed).
+    try:
+        nginx_key = next((key for key in (nginx_server.get('protocols') or {})
+                          if protocol_base(key) == 'nginx'), None)
+        if nginx_key:
+            _apply_subscription_config(
+                nginx_server, nginx_key, sub_settings,
+                entries=_subscription_config_entries(data))
+    except Exception:
+        logger.warning("subscription userinfo refresh failed", exc_info=True)
     save_data(data)
 
 
@@ -13997,6 +14062,16 @@ def push_all_subscriptions(data):
         except Exception as e:
             errors.append(f"{user.get('username')}: {e}")
     _subscription_prune_stale_files(data, nginx_server, sub_settings, valid_tokens)
+    # Refresh the per-token userinfo headers with the fresh counters.
+    try:
+        nginx_key = next((key for key in (nginx_server.get('protocols') or {})
+                          if protocol_base(key) == 'nginx'), None)
+        if nginx_key:
+            _apply_subscription_config(
+                nginx_server, nginx_key, sub_settings,
+                entries=_subscription_config_entries(data))
+    except Exception:
+        logger.warning("subscription userinfo refresh failed", exc_info=True)
     return {'pushed': pushed, 'errors': errors,
             'path': sub_settings['path'], 'domain': domain}
 
@@ -14080,7 +14155,8 @@ def api_subscription_settings_save(request: Request, req: SubscriptionSettingsRe
             nginx_key = next(key for key in (probe.get('protocols') or {})
                              if protocol_base(key) == 'nginx')
             _apply_subscription_config(probe, nginx_key,
-                                       subscription_settings(data))
+                                       subscription_settings(data),
+                                       entries=_subscription_config_entries(data))
             outcome = push_all_subscriptions(data)
             save_data(data)  # freshly minted sub tokens
             result['pushed'] = outcome['pushed']
