@@ -22,6 +22,17 @@ CLEANUP = ('rm -rf /tmp/awg-plugin-update /tmp/awg-plugin-backup-* '
            '/tmp/awp-updater-warp-exclude.tgz /tmp/awp-restore.tgz')
 
 
+class _Log:
+    def __init__(self):
+        self.entries = []
+
+    def __call__(self, stage, message):
+        self.entries.append((stage, message))
+
+    def messages(self):
+        return [message for _stage, message in self.entries]
+
+
 def _index(commands, needle, start=0):
     """First index of a command containing ``needle`` at or after ``start``."""
     for index in range(start, len(commands)):
@@ -76,6 +87,8 @@ def kernel_handler(*, backup=True, build=0, install=0, dry_run=0, unload=0,
             return (sys_version, '', 0)
         if 'modinfo -F version amneziawg' in command:
             return (OLD, '', 0)
+        if command.startswith('modinfo -n amneziawg'):
+            return ('/lib/modules/%s/updates/dkms/amneziawg.ko' % KVER, '', 0)
         if 'modinfo -F vermagic' in command:
             return (default_vermagic if vermagic is None else vermagic, '', 0)
 
@@ -111,8 +124,8 @@ def kernel_handler(*, backup=True, build=0, install=0, dry_run=0, unload=0,
 
 
 class ReinstallRunningVersionTests(unittest.TestCase):
-    def test_reinstall_of_running_version_does_not_deregister_it(self):
-        """``target == installed`` must not remove the running DKMS version."""
+    def test_reinstall_of_running_version_does_not_touch_dkms(self):
+        """``target == installed`` is a no-op: no deregistration, no rebuild."""
         ssh = FakeSSH(kernel_handler(sys_version=OLD))
         result = AwgPluginUpdater(ssh).update(KERNEL_MODULE, OLD)
 
@@ -120,16 +133,42 @@ class ReinstallRunningVersionTests(unittest.TestCase):
         self.assertEqual(result['previous'], OLD)
         self.assertEqual(result['installed'], OLD)
 
-        add_index = _index(ssh.commands, 'dkms add')
-        remove_old = 'dkms remove amneziawg/%s --all' % OLD
-        before_add = [
-            command for command in ssh.commands[:add_index]
-            if remove_old in command
-        ]
-        self.assertEqual(
-            before_add, [],
-            'the running module was deregistered before dkms add: %r' % (before_add,),
-        )
+        # DKMS refuses a second registration of the same module/version, so
+        # the only correct answer is to leave the working tree alone.
+        self.assertFalse(ssh.find('dkms add'))
+        self.assertFalse(ssh.find('dkms remove'))
+        self.assertFalse(ssh.find('dkms build'))
+        self.assertFalse(ssh.find('git clone'))
+
+    def test_registered_version_is_replaced_with_the_fresh_sources(self):
+        base = kernel_handler()
+        calls = {'add': 0}
+
+        def handler(command):
+            if 'dkms add' in command:
+                calls['add'] += 1
+                if calls['add'] == 1:
+                    return (
+                        '',
+                        'Error! DKMS tree already contains: amneziawg-%s\n'
+                        'You cannot add the same module/version combo more than once.' % NEW,
+                        1,
+                    )
+            return base(command)
+
+        ssh = FakeSSH(handler)
+        log = _Log()
+        result = AwgPluginUpdater(ssh).update(KERNEL_MODULE, NEW, log=log)
+
+        self.assertEqual(result['state'], 'updated')
+        self.assertEqual(calls['add'], 2)
+        # prepare drops the target once, the recovery re-registers the clone
+        self.assertGreaterEqual(
+            len(ssh.find('dkms remove amneziawg/%s --all' % NEW)), 2)
+        self.assertIn(
+            'the DKMS tree already has %s; re-registering the fresh sources' % NEW,
+            log.messages())
+        self.assertTrue(ssh.find('dkms build amneziawg/%s' % NEW))
 
 
 class PreflightTests(unittest.TestCase):

@@ -1251,7 +1251,11 @@
     function openAwgPluginModal() {
         openModal('awgPluginModal');
         renderAwgPluginModal();
-        if (!awgPluginStatus) loadAwgPluginStatus().then(renderAwgPluginModal);
+        // The badge is fed from a 12-hour cache so a page load does not probe
+        // every server over SSH. The modal is where the operator decides, so
+        // it always reads the real state: a module installed outside the panel
+        // must not keep looking absent for half a day.
+        loadAwgPluginStatus(true).then(renderAwgPluginModal);
         if (xrayProtocols.length) {
             // The user is looking at the update dialog: re-probe the core
             // for real. A cached badge may lag a core that was updated
@@ -1516,6 +1520,30 @@
         }
     }
 
+    // Keeps the "Installed: …" line and the badge truthful after an operation
+    // without re-rendering the whole block (that would drop the error message
+    // or the journal the operator is reading).
+    function updateAwgPluginComponentLine(component, info) {
+        if (!info) return;
+        const labels = awgPluginLabel();
+        const versions = document.getElementById('awgPluginVersions-' + component);
+        if (versions) {
+            versions.textContent = labels.installed + ': ' + (info.installed || labels.unknown);
+            if (info.update_available && info.available) {
+                versions.appendChild(document.createTextNode('  →  ' + labels.available + ': '));
+                versions.appendChild(awgPluginElement('span', 'awg-plugin-updated', info.available));
+            }
+        }
+        const badge = document.getElementById('awgPluginBadge-' + component);
+        if (badge) {
+            badge.className = 'badge ' + (info.update_available ? 'badge-success' : 'badge-info');
+            badge.textContent = '';
+            badge.appendChild(awgPluginElement('span', 'badge-dot'));
+            badge.appendChild(document.createTextNode(
+                ' ' + (info.update_available ? labels.available : labels.no_update)));
+        }
+    }
+
     async function loadAwgPluginChangelog(component, version, box) {
         const labels = awgPluginLabel();
         if (!box || !version) return;
@@ -1696,13 +1724,13 @@
                 }
             }
             if (data.state === 'success' && data.result) {
-                const versions = document.getElementById('awgPluginVersions-' + component);
-                if (versions) versions.textContent = labels.installed + ': ' + (data.result.installed || '');
-                const badge = document.getElementById('awgPluginBadge-' + component);
-                if (badge) {
-                    badge.className = 'badge badge-info';
-                    badge.textContent = labels.no_update;
-                }
+                // The operation result is authoritative even if the follow-up
+                // status probe fails on a flaky link; the probe below only
+                // refines it.
+                updateAwgPluginComponentLine(component, {
+                    installed: data.result.installed,
+                    update_available: false
+                });
                 const button = document.getElementById('awgPluginUpdate-' + component);
                 if (button) button.remove();
             }
@@ -1720,8 +1748,14 @@
                 const logBox = document.getElementById('awgPluginLogBox-' + component);
                 if (logBox) logBox.open = true;
             }
-            if (data.state === 'success' || data.state === 'manual_step_required') {
-                await loadAwgPluginStatus(true);
+            if (data.state === 'success' || data.state === 'manual_step_required' ||
+                    data.state === 'failed' || data.state === 'cancelled') {
+                // A failed run may still have changed the host (or proven that
+                // the version is already in place), so the "Installed" line is
+                // re-read instead of keeping the value from before the click.
+                const fresh = await loadAwgPluginStatus(true);
+                updateAwgPluginComponentLine(component,
+                    fresh && fresh.components ? fresh.components[component] : null);
             }
             delete awgPluginOps[component];
         } catch (error) {
