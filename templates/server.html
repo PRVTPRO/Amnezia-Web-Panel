@@ -3907,7 +3907,7 @@
     // когда плагин установлен. Нет установки — нет ни разметки, ни JS.
     const TORRENT_PLUGIN = {{ (torrent_plugin or {}) | tojson }};
     // Иконка плагина из общего реестра: эмодзи в новой вёрстке не используем.
-    const TP_ICON_SVG = {{ ui_icon('shield', 19) | tojson }};
+    const TP_ICON_SVG = {{ ui_icon('torrent-guard', 19) | tojson }};
     document.body.dataset.serverUid = {{ (server.uid or '') | tojson }};
     const SERVER_HOST = "{{ server.host }}";
     const CUSTOM_PROTO_NAMES = {
@@ -3944,7 +3944,7 @@
         { proto: 'smartroute', category: 'services', icon: '🧭', title: 'Smart Route', descKey: 'smartroute_desc', badge: 'NEW' },
         { proto: 'warp', category: 'services', icon: '☁️', title: 'Cloudflare WARP', descKey: 'srv_warp_card_desc' },
         { proto: 'rknblock', category: 'services', icon: '🌈', title: 'RKN Block (C24Be)', descKey: 'rknblock_desc' },
-        { kind: 'plugin', id: 'torrent_guard', category: 'services', icon: 'shield', titleKey: 'tp_name', descKey: 'tp_desc', badge: 'NEW' },
+        { kind: 'plugin', id: 'torrent_guard', category: 'services', icon: 'torrent-guard', titleKey: 'tp_name', descKey: 'tp_desc', badge: 'NEW' },
         { proto: 'nginx', category: 'web_servers', icon: '🌐', title: 'NGINX', descKey: 'nginx_desc' },
         { proto: 'haproxy', category: 'web_servers', icon: '⚖️', title: 'HAProxy', descKey: 'haproxy_desc' },
     ];

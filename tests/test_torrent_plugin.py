@@ -595,8 +595,20 @@ class TemplateTests(unittest.TestCase):
             self.assertNotIn('style="', text, name)
             self.assertNotRegex(text, r'[\U0001F300-\U0001FAFF\u2600-\u27BF]', name)
         markup = self.read('templates/_torrent_plugin_modal.html')
-        self.assertIn("ui_icon('shield'", markup)
+        self.assertIn("ui_icon('torrent-guard'", markup)
         self.assertIn('window.TORRENT_PLUGIN_STATE', markup)
+
+    def test_torrent_guard_has_its_own_icon(self):
+        # Иконка плагина отличается от общего щита протоколов: щит с
+        # двусторонними стрелками (обмен данными под защитой).
+        registry = self.read('templates/_ui_icons.html')
+        self.assertIn("'torrent-guard':", registry)
+        self.assertIn('<g transform="translate(6 6.5) scale(0.5)" stroke-width="4">', registry)
+        page = self.read('templates/server.html')
+        self.assertIn("ui_icon('torrent-guard', 19)", page)
+        self.assertIn("id: 'torrent_guard', category: 'services', icon: 'torrent-guard'", page)
+        # Иконка уникальна для плагина: другие плитки её не берут.
+        self.assertEqual(page.count("icon: 'torrent-guard'"), 1)
 
     def test_install_shim_reports_partial_errors(self):
         page = (ROOT / 'templates' / 'server.html').read_text(encoding='utf-8')
