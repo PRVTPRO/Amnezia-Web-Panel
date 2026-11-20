@@ -29,20 +29,21 @@ def _random_range(low_min, low_max, span_min, span_max):
 
 
 def _xhttp_extra():
-    """XHTTP tuning per the XTLS guidance: express every knob the core
-    accepts as a range, and shift the bounds per install so servers do
-    not share one padding/multiplexing profile. hKeepAlivePeriod is the
-    one field that rejects ranges; maxConnections conflicts with
-    maxConcurrency and stays off."""
+    """XHTTP tuning per the current classic anti-DPI profile
+    (mode stream-one, maxConnections=1), proven on weak mobile clients:
+    high multiplexing values make old phones drop the tunnel mid-session.
+    Every knob the core accepts as a range stays a range, with bounds
+    shifted per install so servers do not share one padding/muxing
+    profile. hKeepAlivePeriod is the one field that rejects ranges."""
     return {
         "xPaddingBytes": _random_range(50, 300, 500, 1200),
         "scStreamUpServerSecs": _random_range(10, 30, 40, 60),
         "xmux": {
-            "maxConcurrency": _random_range(8, 16, 4, 16),
-            "maxConnections": 0,
-            "cMaxReuseTimes": 0,
-            "hMaxRequestTimes": _random_range(400, 800, 200, 400),
-            "hMaxReusableSecs": _random_range(1200, 2400, 600, 1200),
+            "maxConcurrency": 0,
+            "maxConnections": 1,
+            "cMaxReuseTimes": _random_range(64, 128, 10, 20),
+            "hMaxRequestTimes": _random_range(400, 600, 50, 100),
+            "hMaxReusableSecs": _random_range(1200, 1800, 150, 350),
             "hKeepAlivePeriod": 0,
         },
     }
@@ -546,7 +547,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
                 "xhttpSettings": {
                     "path": '/' + uuid.uuid4().hex[:16],
                     "host": site_name,
-                    "mode": "auto",
+                    "mode": "stream-one",
                     "extra": _xhttp_extra(),
                 },
                 "realitySettings": reality_settings,
