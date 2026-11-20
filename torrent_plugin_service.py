@@ -309,10 +309,18 @@ class TorrentPlugin:
         if not key:
             return
         error = str((result or {}).get('error') or '')
+        # Сколько пиров реально накрыто правилами: ответ apply/collect несёт
+        # это число, и админу важно видеть его рядом с «правила на месте».
+        # apply/read отдают список IP, collect — уже готовое число.
+        peers = (result or {}).get('peers')
+        if isinstance(peers, (list, tuple)):
+            peers = len(peers)
+        entry = {'ok': not error, 'error': error, 'ts': int(time.time())}
+        if isinstance(peers, int) and not isinstance(peers, bool):
+            entry['peers'] = peers
         with self._health_lock:
             bucket = self._health.setdefault(key, {})
-            bucket[proto] = {'ok': not error, 'error': error,
-                             'ts': int(time.time())}
+            bucket[proto] = entry
 
     def clear_health(self, server):
         key = plugin_key(server)
@@ -763,6 +771,10 @@ class TorrentPlugin:
                 raise
             except Exception as exc:                    # noqa: BLE001
                 report = {'error': str(exc) or exc.__class__.__name__}
+            # Без хуков правила фактически сняты: `read` всё равно печатает
+            # пиров интерфейса, и «пиров под правилами: N» было бы ложью.
+            if isinstance(report, dict) and not report.get('hook'):
+                report.pop('peers', None)
             self.set_health(server, proto, report)
             if report.get('error'):
                 errors.append('%s: %s' % (proto, report['error']))

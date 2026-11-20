@@ -141,6 +141,7 @@ function createEnv(options) {
         _: key => {
             if (key === 'torrent_activity_text') return '{when} {sig} {count}';
             if (key === 'tp_marks_cleared') return '{count}';
+            if (key === 'tp_health_peers') return 'peers: {count}';
             return key;
         },
         apiCall(url, method, body) {
@@ -159,7 +160,7 @@ function createEnv(options) {
         settings: { default_mode: 'on', include_wireguard: true,
                     marks_ttl_days: 30, clear_marks_on_disable: false,
                     poll_seconds: 60 },
-        health: { state: 'ok', protocols: { awg3: { ok: true, ts: 1760000000 } } },
+        health: { state: 'ok', protocols: { awg3: { ok: true, ts: 1760000000, peers: 3 } } },
         events: 2, last_at: 1760000000,
     };
     sandbox.window.TORRENT_PLUGIN_ICONS = ICONS;
@@ -191,6 +192,8 @@ async function run() {
     check('бейдж состояния', html.includes('tp_state_on'));
     check('мастер-выключатель', html.includes('id="tpEnabled"'));
     check('инстанс awg3', html.includes('data-tp-proto="awg3"'));
+    check('подсказка об ограничениях', html.includes('tp_limits_hint'));
+    check('здоровье: число пиров', html.includes('peers: 3'));
     check('настройки плагина', html.includes('id="tpPollSeconds"'));
     check('метки и их очистка', html.includes('id="tpMarksClear"'));
     check('кнопка удаления', html.includes('id="tpUninstall"'));
