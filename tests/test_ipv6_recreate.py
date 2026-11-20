@@ -99,7 +99,7 @@ class RecreateContainerIpv6Tests(unittest.TestCase):
     """`_recreate_container_ipv6` end-to-end against a scripted Mock SSH."""
 
     def _manager(self, inspect_data=None, fail_cp=False, copied_sha=None,
-                 route_out='default via fe80::1 dev eth0\n'):
+                 backup_sha=None, route_out='default via fe80::1 dev eth0\n'):
         ssh = mock.Mock()
         ssh._awg_batch = None
         commands = []
@@ -120,12 +120,15 @@ class RecreateContainerIpv6Tests(unittest.TestCase):
                 return ('', '', 0)
             if 'docker network connect amnezia-dns-net' in command:
                 return ('', '', 0)
-            if command.startswith('docker cp '):
+            if 'docker cp ' in command:
                 if fail_cp:
                     return ('', 'cp: error copying', 1)
                 return ('', '', 0)
             if 'sha256sum' in command:
-                return (f'{copied_sha}  {CONFIG_PATH}\n', '', 0)
+                # the temp file name carries the container: reads from the
+                # backup and from the fresh container are told apart
+                sha = backup_sha if 'ipv6bak' in command else copied_sha
+                return ((f'{sha}  {CONFIG_PATH}' if sha else '') + '\n', '', 0)
             if '{{.State.Status}}' in command:
                 return ('running\n', '', 0)
             if 'ip -6 route show default' in command:
@@ -134,6 +137,7 @@ class RecreateContainerIpv6Tests(unittest.TestCase):
 
         ssh.run_sudo_command.side_effect = sudo
         manager = AWGManager(ssh)
+        manager._tunnel_up = mock.Mock(return_value=True)
         return manager, commands
 
     @staticmethod
@@ -142,7 +146,8 @@ class RecreateContainerIpv6Tests(unittest.TestCase):
 
     def test_inspect_missing_falls_back_to_docker_run_cmd(self):
         manager, commands = self._manager(
-            inspect_data=None, copied_sha=self._source_sha())
+            inspect_data=None, copied_sha=self._source_sha(),
+            backup_sha=self._source_sha())
         result = manager._recreate_container_ipv6('awg')
         self.assertEqual(result, CONTAINER)
         self.assertIn('docker inspect amnezia-awg-ipv6bak 2>/dev/null', commands)
@@ -169,7 +174,8 @@ class RecreateContainerIpv6Tests(unittest.TestCase):
             }
         }
         manager, commands = self._manager(
-            inspect_data=inspect_data, copied_sha=self._source_sha())
+            inspect_data=inspect_data, copied_sha=self._source_sha(),
+            backup_sha=self._source_sha())
         manager._recreate_container_ipv6('awg')
         run = next(c for c in commands if c.startswith('docker run -d'))
         self.assertIn('--privileged', run)
@@ -206,15 +212,27 @@ class RecreateContainerIpv6Tests(unittest.TestCase):
         self.assertNotIn('ip -6 route show default', ' | '.join(commands))
 
     def test_config_sha_mismatch_restores_old_container(self):
-        manager, commands = self._manager(copied_sha='f' * 64)
+        # the fresh container's config must be byte-identical to the
+        # backup's - a diverged copy cannot be trusted
+        manager, commands = self._manager(copied_sha='f' * 64,
+                                          backup_sha='a' * 64)
         with self.assertRaises(RuntimeError) as ctx:
             manager._recreate_container_ipv6('awg')
         self.assertEqual(str(ctx.exception), 'state_unreadable')
         self.assert_restore_sequence(commands)
         self.assertFalse(any(c == FINAL_RM for c in commands))
 
+    def test_unreadable_config_sha_restores_old_container(self):
+        manager, commands = self._manager(copied_sha=None,
+                                          backup_sha='a' * 64)
+        with self.assertRaises(RuntimeError) as ctx:
+            manager._recreate_container_ipv6('awg')
+        self.assertEqual(str(ctx.exception), 'state_unreadable')
+        self.assert_restore_sequence(commands)
+
     def test_success_keeps_backup_until_route_check(self):
-        manager, commands = self._manager(copied_sha=self._source_sha())
+        manager, commands = self._manager(copied_sha=self._source_sha(),
+                                          backup_sha=self._source_sha())
         result = manager._recreate_container_ipv6('awg')
         self.assertEqual(result, CONTAINER)
         route = next(c for c in commands if 'ip -6 route show default' in c)

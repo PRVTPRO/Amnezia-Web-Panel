@@ -102,13 +102,22 @@ class A2RecreateCopyTests(unittest.TestCase):
         manager._container_run_image = mock.Mock(return_value=IMAGE)
         manager._wait_container_running = mock.Mock(return_value=True)
         manager._invalidate_config_cache = mock.Mock()
+        manager._tunnel_up = mock.Mock(return_value=True)
         return manager, ssh.commands
 
     def test_full_awg_directory_is_copied_and_verified(self):
         manager, commands = self._manager()
         manager._recreate_container_ipv6('awg')
         joined = '\n'.join(commands)
+        # docker cp cannot copy container-to-container: the state hops
+        # through a temp dir on the host
         self.assertIn(
+            f'docker cp {BACKUP}:{AWG_DIR}/. /tmp/awg-recreate-{CONTAINER}/',
+            joined)
+        self.assertIn(
+            f'docker cp /tmp/awg-recreate-{CONTAINER}/. {CONTAINER}:{AWG_DIR}/',
+            joined)
+        self.assertNotIn(
             f'docker cp {BACKUP}:{AWG_DIR}/. {CONTAINER}:{AWG_DIR}/', joined)
         # Keys and clientsTable are verified, not silently lost.
         self.assertIn('wireguard_server_public_key.key', joined)
