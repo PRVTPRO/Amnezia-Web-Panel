@@ -90,6 +90,7 @@
                 <h2 class="enroll-changed__title">{{ _('enroll_changed_title') }}</h2>
                 <p class="enroll-changed__help">{{ _('enroll_changed_help') }}</p>
                 <pre class="enroll-changed__details" id="enrollChangedDetails" dir="ltr"></pre>
+                {% set help_id = 'enrollHelp' %}{% include '_ssh_help.html' %}
                 <div class="enroll-check">
                     <input type="checkbox" id="enrollChangedVerified" onchange="syncAcceptButton()">
                     <label for="enrollChangedVerified">{{ _('enroll_accept_confirm') }}</label>
@@ -322,6 +323,7 @@
         enrollState.changedPort = Number.isInteger(portNumber) ? portNumber : null;
         enrollEl('enrollChangedVerified').checked = false;
         enrollEl('enrollChanged').hidden = false;
+        renderSshHelp(document.getElementById('enrollHelp'), hostKey.remediation);
         enrollSyncAcceptButton();
     }
 
@@ -348,6 +350,9 @@
             case 'network_error': return _('enroll_error_network');
             case 'forbidden': return _('enroll_error_forbidden');
             case 'host_key_changed': return _('enroll_error_host_key');
+            case 'system_trust_conflict': return _('enroll_error_trust_conflict');
+            case 'trust_file_readonly': return _('enroll_error_trust_readonly');
+            case 'trust_changed': return _('enroll_error_retest');
             default: return _('enroll_error_test');
         }
     }
@@ -359,6 +364,9 @@
             case 'network_error': return _('enroll_error_network');
             case 'forbidden': return _('enroll_error_forbidden');
             case 'host_key_changed': return _('enroll_error_host_key');
+            case 'system_trust_conflict': return _('enroll_error_trust_conflict');
+            case 'trust_file_readonly': return _('enroll_error_trust_readonly');
+            case 'trust_changed': return _('enroll_error_retest');
             default: return _('enroll_error_generic');
         }
     }
@@ -488,7 +496,13 @@
             await testConnection();
         } catch (error) {
             if (sequence !== enrollState.sequence) return;
-            enrollShowError(_('enroll_error_accept'));
+            const payload = error && error.payload;
+            if (payload && payload.remediation) {
+                renderSshHelp(document.getElementById('enrollHelp'), payload.remediation);
+                const box = document.getElementById('enrollHelp');
+                if (box) box.open = true;
+            }
+            enrollShowError(enrollAcceptErrorMessage(payload));
         } finally {
             if (sequence === enrollState.sequence) {
                 enrollState.accepting = false;
@@ -496,6 +510,14 @@
                 enrollSetAcceptBusy(false);
             }
         }
+    }
+
+    function enrollAcceptErrorMessage(payload) {
+        const code = payload && payload.error_code;
+        if (code === 'system_trust_conflict') return _('enroll_error_trust_conflict');
+        if (code === 'trust_file_readonly') return _('enroll_error_trust_readonly');
+        if (code === 'trust_changed') return _('enroll_error_retest');
+        return _('enroll_error_accept');
     }
 
     async function addServer() {
