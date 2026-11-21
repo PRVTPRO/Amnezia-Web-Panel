@@ -2343,7 +2343,7 @@ docker --version
             for chunk in exit_chunks:
                 if chunk.startswith(exit_marker + ' '):
                     exit_current = chunk.split(' ', 1)[1].strip()
-                    exit_data[exit_current] = {'raw': [], 'link_rc': None, 'wg_rc': None}
+                    exit_data[exit_current] = {'raw': [], 'link_rc': None}
                     continue
                 if not exit_data or exit_current is None:
                     continue
@@ -2396,9 +2396,10 @@ docker --version
         if link_rc == 9:
             return None
         if link_rc not in (0, None):
+            detail = (entry.get('raw') or '').strip()
             return {'up': False, 'handshake_age': None, 'rx_bytes': 0,
                     'tx_bytes': 0, 'endpoint': '',
-                    'error': (entry.get('raw') or '').strip()}
+                    'error': detail or f'exit-link probe failed (rc {link_rc})'}
         raw = entry.get('raw') or ''
         if not raw.strip():
             return _EXIT_MISS

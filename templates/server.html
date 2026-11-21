@@ -9924,6 +9924,16 @@
             }, 60000);
         }
         ProbeQueue.background('ip', 90, () => loadIpStatus(), 25000);
+        // The peer list poll dies with pagehide as well; restart it only when
+        // the section is open, exactly like loadConnections does.
+        if (PEER_POLL_INTERVAL > 0
+                && document.getElementById('connectionsSection')
+                && document.getElementById('connectionsSection').style.display !== 'none') {
+            clearTimeout(window.connPollTimer);
+            window.connPollTimer = setTimeout(function () {
+                ProbeQueue.background('connections', 10, () => loadConnections(true), 25000);
+            }, PEER_POLL_INTERVAL * 1000);
+        }
         ProbeQueue.pump();
     });
 </script>

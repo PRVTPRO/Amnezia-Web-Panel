@@ -8,8 +8,11 @@ no block was collected at all.
 """
 import re
 import unittest
+from pathlib import Path
 
 from managers.awg_manager import AWGManager
+
+ROOT = Path(__file__).resolve().parents[1]
 
 PEER = 'PEERKEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
 
@@ -100,11 +103,6 @@ class ExitLinkBatchTest(unittest.TestCase):
         self.assertNotIn('error', state)
         self.assertEqual(ssh.direct_reads, 0, 'answer must come from the batch')
 
-    def test_missing_file_answers_none_without_ssh(self):
-        ssh, mgr = self._prefetch(link_rc=9)
-        self.assertIsNone(mgr.exit_link_status('awg2'))
-        self.assertEqual(ssh.direct_reads, 0)
-
     def test_failed_command_answers_error_dict_without_ssh(self):
         ssh, mgr = self._prefetch(link_rc=1, payload='RTNETLINK answers: No such device\n')
         state = mgr.exit_link_status('awg2')
@@ -119,6 +117,17 @@ class ExitLinkBatchTest(unittest.TestCase):
         self.assertIsNotNone(state)
         self.assertEqual(ssh.direct_reads, 1,
                          'direct read expected when the prefetch has no exit block')
+
+    def test_composite_maps_a_missing_file_to_rc_nine(self):
+        # Pin the shell text: `test -f` answers 1, while the direct path uses
+        # `|| exit 9`. Without this mapping "no link file" would be reported as
+        # a probe error instead of None.
+        source = (ROOT / 'managers' / 'awg_manager.py').read_text(encoding='utf-8')
+        self.assertIn('else rc=9; fi', source)
+        self.assertNotIn('test -f {EXIT_CONF}; rc=$?;', source)
+        ssh, _mgr = self._prefetch(link_rc=9)
+        cmd = [c for c in ssh.commands if c.startswith('for c in ')][0]
+        self.assertIn('else rc=9; fi', cmd)
 
     def test_exit_block_is_emitted_only_for_flagged_instances(self):
         ssh, _mgr = self._prefetch(exit_protocols=())
