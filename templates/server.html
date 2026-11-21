@@ -9859,6 +9859,10 @@
     };
 
     // ========== Init ==========
+    // The Smart Route card is host-level and answers from the queue, so mark it
+    // pending before the first paint: it then appears as a skeleton instead of
+    // popping in (or being hidden and reappearing) a second later.
+    smartRoutePending = true;
     applyInstalledAppsVisibility();
     // /check owns the critical lane; the queued probes below start only after
     // it answers, so they cannot compete for the pooled SSH connection.
