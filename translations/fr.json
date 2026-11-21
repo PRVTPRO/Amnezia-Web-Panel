@@ -1596,5 +1596,6 @@
   "smartroute_timer_never": "pas encore exécuté",
   "smartroute_timer_stale": "La liste de préfixes n'a pas été actualisée depuis trop longtemps",
   "smartroute_timer_armed": "Minuteur armé",
-  "smartroute_card_warn": "attention"
+  "smartroute_card_warn": "attention",
+  "editor_load_failed": "Impossible de charger l'éditeur de code — un champ texte simple est utilisé"
 }

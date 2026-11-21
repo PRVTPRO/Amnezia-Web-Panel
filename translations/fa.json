@@ -1596,5 +1596,6 @@
   "smartroute_timer_never": "هنوز اجرا نشده",
   "smartroute_timer_stale": "فهرست پیشوندها مدت زیادی به‌روزرسانی نشده است",
   "smartroute_timer_armed": "تایمر فعال است",
-  "smartroute_card_warn": "هشدار"
+  "smartroute_card_warn": "هشدار",
+  "editor_load_failed": "بارگذاری ویرایشگر کد ممکن نشد — از فیلد متنی ساده استفاده میشود"
 }

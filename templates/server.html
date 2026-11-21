@@ -5,8 +5,6 @@
 {% block page_class %}page page--server-detail{% endblock %}
 
 {% block head_extra %}
-<link rel="stylesheet" href="/static/vendor/codemirror/codemirror.min.css">
-<link rel="stylesheet" href="/static/vendor/codemirror/theme/material-darker.min.css">
 <style>
     .marketplace-grid {
         display: grid;
@@ -3898,13 +3896,6 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="/static/vendor/codemirror/codemirror.min.js"></script>
-<script src="/static/vendor/codemirror/mode/nginx/nginx.min.js"></script>
-<script src="/static/vendor/codemirror/mode/xml/xml.min.js"></script>
-<script src="/static/vendor/codemirror/mode/javascript/javascript.min.js"></script>
-<script src="/static/vendor/codemirror/mode/css/css.min.js"></script>
-<script src="/static/vendor/codemirror/mode/properties/properties.min.js"></script>
-<script src="/static/vendor/codemirror/mode/htmlmixed/htmlmixed.min.js"></script>
 <script>
     const SERVER_ID = {{ server_id }};
     let SSH_COOLDOWN_BASE = {{ (server.get('ssh_cooldown_base') or 30) | tojson }};
@@ -5662,6 +5653,75 @@
         return 'properties';
     }
 
+    // ========== Lazy CodeMirror ==========
+    // Nine files (~79 KB gzip) used to load on every server page, although
+    // only two modals need an editor. They are injected on first use, in the
+    // order the modes require (htmlmixed needs xml + css + javascript), and
+    // exactly once: a second click awaits the same promise.
+    let codeMirrorLoader = null;
+
+    function loadStylesheetOnce(href) {
+        return new Promise((resolve, reject) => {
+            const link = document.createElement('link');
+            link.rel = 'stylesheet';
+            link.href = href;
+            link.onload = () => resolve(true);
+            link.onerror = () => reject(new Error(href));
+            document.head.appendChild(link);
+        });
+    }
+
+    function loadScriptOnce(src) {
+        return new Promise((resolve, reject) => {
+            const script = document.createElement('script');
+            script.src = src;
+            script.onload = () => resolve(true);
+            script.onerror = () => reject(new Error(src));
+            document.body.appendChild(script);
+        });
+    }
+
+    function ensureCodeMirror() {
+        if (window.CodeMirror) return Promise.resolve(true);
+        if (codeMirrorLoader) return codeMirrorLoader;
+        const css = [
+            '/static/vendor/codemirror/codemirror.min.css',
+            '/static/vendor/codemirror/theme/material-darker.min.css'
+        ];
+        // Theme first: fromTextArea measures the widget, and without the theme
+        // it would be built for the light palette.
+        const js = [
+            '/static/vendor/codemirror/codemirror.min.js',
+            '/static/vendor/codemirror/mode/nginx/nginx.min.js',
+            '/static/vendor/codemirror/mode/xml/xml.min.js',
+            '/static/vendor/codemirror/mode/javascript/javascript.min.js',
+            '/static/vendor/codemirror/mode/css/css.min.js',
+            '/static/vendor/codemirror/mode/properties/properties.min.js',
+            '/static/vendor/codemirror/mode/htmlmixed/htmlmixed.min.js'
+        ];
+        codeMirrorLoader = (async () => {
+            for (const href of css) await loadStylesheetOnce(href);
+            for (const src of js) await loadScriptOnce(src);
+            if (!window.CodeMirror) throw new Error('CodeMirror unavailable');
+            return true;
+        })().catch(error => {
+            // Let the next attempt retry instead of caching the failure.
+            codeMirrorLoader = null;
+            throw error;
+        });
+        return codeMirrorLoader;
+    }
+
+    async function withCodeMirror(task) {
+        try {
+            await ensureCodeMirror();
+        } catch (error) {
+            console.warn('CodeMirror failed to load:', error);
+            showToast(_('editor_load_failed'), 'error');
+        }
+        return task();
+    }
+
     function ensureConfigEditor(textareaId, options = {}) {
         const textarea = document.getElementById(textareaId);
         if (!textarea) return null;
@@ -6063,8 +6123,10 @@
             const res = await apiCall(`/api/servers/${SERVER_ID}/server_config?server_uid=${encodeURIComponent(document.body.dataset.serverUid || '')}`, 'POST', { protocol: proto });
             document.getElementById('serverConfigModalTitle').textContent = `${_('server_config')} — ${name}`;
             document.getElementById('serverConfigProto').value = proto;
-            setEditorValue('serverConfigText', res.config || '', { mode: editorModeFor('server', proto) });
             serverConfigFilename = `server_${proto}.conf`;
+            await withCodeMirror(() => {
+                setEditorValue('serverConfigText', res.config || '', { mode: editorModeFor('server', proto) });
+            });
             openModal('serverConfigModal');
             refreshConfigEditor('serverConfigText');
         } catch (err) {
@@ -6438,7 +6500,9 @@
             const res = await apiCall(`/api/servers/${SERVER_ID}/nginx/site`, 'POST', { protocol: proto });
             document.getElementById('siteConfigModalTitle').textContent = `${_('site_editor')} — ${getProtoTitle(proto)}`;
             document.getElementById('siteConfigProto').value = proto;
-            setEditorValue('siteConfigText', res.html || '', { mode: editorModeFor('site', proto) });
+            await withCodeMirror(() => {
+                setEditorValue('siteConfigText', res.html || '', { mode: editorModeFor('site', proto) });
+            });
             openModal('siteConfigModal');
             refreshConfigEditor('siteConfigText');
         } catch (err) {
