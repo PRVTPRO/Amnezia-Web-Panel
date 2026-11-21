@@ -114,7 +114,7 @@ class MarketplaceBrowserTests(unittest.TestCase):
 const SERVER_ID=0, calls=[], pending=[];
 let checkFailure=false, dockerInstalled=true;
 let rknBlockStatus={installed:true,available:false,agent_state:'unknown',running:false,healthy:false}, rknBlockLoadId=0, rknBlockBusy=false;
-let smartRouteStatus=null, currentProtocolStatus={}, installedAppsLoading=false;
+let smartRouteStatus=null, smartRoutePending=false, currentProtocolStatus={}, installedAppsLoading=false;
 let warpStatus=null;
 function warpIsInstalled() { return false; }
 const MARKETPLACE_APPS=[{proto:'rknblock',category:'security',title:'RKN Block',descKey:'description',icon:''}];
@@ -153,8 +153,13 @@ const apiCall=(url,method='GET')=>{calls.push({url,method});
                         page.evaluate('applyInstalledAppsVisibility(); renderMarketplace()')
                         self.assertTrue(page.locator('#proto-rknblock').is_visible())
                         page.evaluate('checkServer()')
+                        # P4: checkServer no longer starts the header probes
+                        # itself, so the RKN probe is started explicitly here
+                        # (the page queue does the same after /check answers).
+                        page.evaluate('() => { loadRknBlock(); }')
                         self.assertEqual(page.evaluate('pending.length'), 1)
-                        self.assertIn('server_uid=fixture-node', page.evaluate('calls[0].url'))
+                        self.assertIn('server_uid=fixture-node',
+                                      page.evaluate('calls[calls.length - 1].url'))
                         self.assertEqual(page.locator('#statusBadges .badge-success').count(), 2)
                         self.assertEqual(page.locator('#statusBadges svg[aria-hidden="true"]').count(), 2)
                         self.assertIn('ssh_ok', page.locator('#statusBadges').inner_text())
@@ -194,6 +199,9 @@ const apiCall=(url,method='GET')=>{calls.push({url,method});
                         self.assertEqual(page.locator('#statusBadges .badge-success').count(), 0)
                         self.assertIn('server_connection_error', page.locator('#statusBadges .badge-danger').inner_text())
                         self.assertEqual(page.locator('#statusBadges .badge-danger svg').count(), 1)
+                        # P4: the RKN probe is queued after /check now, so it
+                        # is started explicitly here before driving its outage.
+                        page.evaluate('() => { loadRknBlock(); }')
                         page.evaluate("pending.shift().reject(new Error('SSH down'))")
                         page.wait_for_function('rknBlockStatus.available === false')
                         self.assertTrue(page.locator('#proto-rknblock').is_visible())
@@ -201,11 +209,13 @@ const apiCall=(url,method='GET')=>{calls.push({url,method});
                         page.evaluate('() => {checkFailure=false; dockerInstalled=false; return checkServer();}')
                         self.assertEqual(page.locator('#statusBadges .badge-success').count(), 1)
                         self.assertIn('docker_not_installed', page.locator('#statusBadges .badge-warn').inner_text())
+                        page.evaluate('() => { loadRknBlock(); }')
                         page.evaluate('data => pending.shift().resolve(data)', healthy)
                         page.wait_for_function('rknBlockStatus.available === true')
                         page.evaluate('() => {dockerInstalled=true; return checkServer();}')
                         self.assertEqual(page.locator('#statusBadges .badge-success').count(), 2)
                         self.assertEqual(page.locator('#statusBadges .badge-danger').count(), 0)
+                        page.evaluate('() => { loadRknBlock(); }')
                         page.evaluate('data => pending.shift().resolve(data)', healthy)
                         page.wait_for_function('rknBlockStatus.available === true')
                         page.close()
