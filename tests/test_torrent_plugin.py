@@ -595,8 +595,29 @@ class TemplateTests(unittest.TestCase):
             self.assertNotIn('style="', text, name)
             self.assertNotRegex(text, r'[\U0001F300-\U0001FAFF\u2600-\u27BF]', name)
         markup = self.read('templates/_torrent_plugin_modal.html')
-        self.assertIn("ui_icon('shield'", markup)
+        self.assertIn("ui_icon('torrent-guard'", markup)
         self.assertIn('window.TORRENT_PLUGIN_STATE', markup)
+
+    def test_torrent_guard_has_its_own_icon(self):
+        # Иконка плагина отличается от общего щита протоколов: щит с крестом
+        # внутри (срезанный трафик под защитой). Толщина линии задана явно
+        # (1.8 против реестровых 2) и размер 35px — по требованию владельца.
+        registry = self.read('templates/_ui_icons.html')
+        self.assertIn("'torrent-guard':", registry)
+        self.assertIn('<path stroke-width="1.8" d="m14.5 9.5-5 5"/>'
+                      '<path stroke-width="1.8" d="m9.5 9.5 5 5"/>', registry)
+        self.assertNotIn('<g transform=', registry)
+        page = self.read('templates/server.html')
+        # Все три места: плитка инстанса, TP_ICON_SVG и шапка панели плагина.
+        self.assertIn("ui_icon('torrent-guard', 35)", page)
+        self.assertIn("ui_icon('torrent-guard', 35)",
+                      self.read('templates/_torrent_plugin_modal.html'))
+        # Старого щита у плагина не осталось ни в одном шаблоне.
+        self.assertNotIn("ui_icon('shield', 18)", page)
+        # Карточка плагина в магазине берёт иконку из TP_ICON_SVG, а не из
+        # поля icon (для kind:'plugin' оно не рендерится как текст).
+        self.assertIn('return renderMarketplacePluginCard(app);', page)
+        self.assertIn('${TP_ICON_SVG}', page)
 
     def test_install_shim_reports_partial_errors(self):
         page = (ROOT / 'templates' / 'server.html').read_text(encoding='utf-8')

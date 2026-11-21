@@ -127,9 +127,14 @@ class BackupManager:
             paths['host'] = ['/opt/amnezia/adguard']
             paths['container'] = ['/opt/adguardhome/conf', '/opt/adguardhome/work']
         elif base == 'socks5':
+            # /etc/3proxy в контейнерах — read-only bind-mount каталога с
+            # хоста. Поэтому восстановление идёт только через host-пути:
+            # `docker exec rm -rf /etc/3proxy` падает с «Device or resource
+            # busy», а содержимое и так читается из смонтированного каталога.
             config_dir = inst_path('/opt/amnezia/socks5proxy')
-            paths['host'] = [config_dir]
-            paths['container'] = ['/etc/3proxy']
+            http_config_dir = inst_path('/opt/amnezia/httpproxy')
+            paths['host'] = [config_dir, http_config_dir]
+            paths['container'] = []
         elif base == 'nginx':
             paths['host'] = ['/opt/amnezia/nginx']
             paths['container'] = ['/etc/nginx/conf.d', '/usr/share/nginx/html']
@@ -141,6 +146,21 @@ class BackupManager:
             paths['container'] = [f'/opt/amnezia/{base}']
 
         return paths
+
+    def _backup_containers(self, protocol, container_name):
+        """Контейнеры, из которых в бэкап копируется /etc/3proxy.
+
+        Для socks5 это SOCKS5-контейнер и, если он есть, HTTP-контейнер:
+        у каждого свой конфиг, объединённый каталог на хосте их не заменяет.
+        """
+        names = [str(container_name or '')]
+        if self.proto_base(protocol) == 'socks5':
+            idx = self.proto_instance(protocol)
+            http_name = ('amnezia-httpproxy' if idx <= 1
+                         else f'amnezia-httpproxy-{idx}')
+            if http_name not in names:
+                names.append(http_name)
+        return [name for name in names if name]
 
     def list_backups(self, protocol):
         safe_proto = self.safe_protocol(protocol)
@@ -178,6 +198,8 @@ class BackupManager:
         safe_proto_q = shlex.quote(safe_proto)
         container_q = shlex.quote(str(container_name or ''))
         backup_dir_q = shlex.quote(backup_dir)
+        containers_words = ' '.join(
+            shlex.quote(name) for name in self._backup_containers(protocol, container_name))
 
         script = f"""
 set -eu
@@ -207,22 +229,37 @@ copy_host_path() {{
   fi
 }}
 copy_container_path() {{
-  src="$1"
-  if [ -n "$container" ] && docker inspect "$container" >/dev/null 2>&1; then
-    mkdir -p "$work_dir/container$(dirname "$src")"
-    docker cp "$container:$src" "$work_dir/container$src" >/dev/null 2>&1 || true
+  cname="$1"
+  src="$2"
+  if [ -n "$cname" ] && docker inspect "$cname" >/dev/null 2>&1; then
+    if [ "$cname" = "$container" ]; then
+      dest_root="$work_dir/container"
+    else
+      dest_root="$work_dir/docker/$cname"
+    fi
+    mkdir -p "$dest_root$(dirname "$src")"
+    docker cp "$cname:$src" "$dest_root$src" >/dev/null 2>&1 || true
   fi
 }}
 for p in {host_paths}; do copy_host_path "$p"; done
-for p in {container_paths}; do copy_container_path "$p"; done
+for c in {containers_words}; do
+  for p in {container_paths}; do copy_container_path "$c" "$p"; done
+done
 for root in "$work_dir/host" "$work_dir/container"; do
   rm -rf "$root/opt/amnezia/awg/warp" "$root/opt/amnezia/exit/warp"
   rm -f "$root/opt/amnezia/awg/"warp-link-*
 done
-if [ -n "$container" ] && docker inspect "$container" >/dev/null 2>&1; then
-  docker inspect "$container" > "$work_dir/docker/inspect.json" 2>/dev/null || true
-  docker logs --tail 300 "$container" > "$work_dir/docker/logs-tail.txt" 2>&1 || true
-fi
+for c in {containers_words}; do
+  if [ -n "$c" ] && docker inspect "$c" >/dev/null 2>&1; then
+    if [ "$c" = "$container" ]; then
+      docker inspect "$c" > "$work_dir/docker/inspect.json" 2>/dev/null || true
+      docker logs --tail 300 "$c" > "$work_dir/docker/logs-tail.txt" 2>&1 || true
+    else
+      docker inspect "$c" > "$work_dir/docker/inspect-$c.json" 2>/dev/null || true
+      docker logs --tail 300 "$c" > "$work_dir/docker/logs-tail-$c.txt" 2>&1 || true
+    fi
+  fi
+done
 archive="$backup_dir/${{safe_proto}}-${{timestamp}}.tar.gz"
 tar -C "$work_dir" -czf "$archive" .
 chmod 0644 "$archive"
@@ -442,6 +479,23 @@ else
 fi
 """
 
+        # socks5 хранит конфиг в двух каталогах, а перезапускается только
+        # контейнер, переданный в container_name. Без второго рестарта
+        # amnezia-httpproxy продолжал бы работать по старому конфигу.
+        extra_restart_cmds = ''
+        if self.proto_base(protocol) == 'socks5':
+            idx = self.proto_instance(protocol)
+            http_name = ('amnezia-httpproxy' if idx <= 1
+                         else f'amnezia-httpproxy-{idx}')
+            # Для socks5__2 контейнеры называются -2; и не перезапускаем
+            # тот же контейнер, который уже перезапустил основной блок.
+            if http_name != str(container_name or ''):
+                http_q = shlex.quote(http_name)
+                extra_restart_cmds = f"""if docker inspect {http_q} >/dev/null 2>&1; then
+  docker restart {http_q} >/dev/null 2>&1 || true
+fi
+"""
+
         # Defense in depth: refuse absolute / traversal members before extract,
         # then keep extraction rooted under $work_dir.
         script = f"""
@@ -517,6 +571,7 @@ if [ -n "$container" ] && docker inspect "$container" >/dev/null 2>&1; then
   fi
 fi
 
+{extra_restart_cmds}
 echo "restore_success"
 """.strip()
 
