@@ -184,13 +184,43 @@ async def api_json_error_handler(request: Request, exc: Exception):
 _IPV6_BAD_BODY_PATH = re.compile(
     r'^/api/servers/[^/]+/(?:ipv6|docker/ipv6/apply|protocol/[^/]+/ipv6)$')
 
+# Keys FastAPI puts the rejected value into. `input` holds it verbatim, and
+# `ctx` can carry it too (e.g. the pattern that failed). A mistyped password,
+# API token or private key would otherwise travel back to the caller inside
+# the response body — and from there into browser devtools, HAR captures,
+# reverse-proxy logs and bug reports. A per-field denylist would miss the next
+# secret-bearing model, so every entry is scrubbed instead: `loc`, `msg` and
+# `type` stay, which is all the panel UI and the tests need.
+_LEAKY_VALIDATION_KEYS = ('input', 'ctx', 'url')
+
+
+def _scrub_validation_errors(errors):
+    """Strip echoed request values from a FastAPI validation detail list."""
+    cleaned = []
+    for error in errors or ():
+        if isinstance(error, dict):
+            error = {key: value for key, value in error.items()
+                     if key not in _LEAKY_VALIDATION_KEYS}
+        cleaned.append(error)
+    return cleaned
+
 
 @app.exception_handler(RequestValidationError)
-async def ipv6_validation_error_handler(request: Request, exc: RequestValidationError):
+async def request_validation_error_handler(request: Request,
+                                           exc: RequestValidationError):
     if _IPV6_BAD_BODY_PATH.match(request.url.path):
         return JSONResponse({'error': 'bad_request', 'code': 'bad_request'},
                             status_code=400)
-    return await request_validation_exception_handler(request, exc)
+    response = await request_validation_exception_handler(request, exc)
+    try:
+        payload = json.loads(response.body)
+    except (TypeError, ValueError):
+        return response
+    detail = payload.get('detail') if isinstance(payload, dict) else None
+    if not isinstance(detail, list):
+        return response
+    payload['detail'] = _scrub_validation_errors(detail)
+    return JSONResponse(payload, status_code=response.status_code)
 
 
 @app.get("/redoc", include_in_schema=False)
