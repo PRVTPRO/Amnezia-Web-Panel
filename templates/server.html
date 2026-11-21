@@ -796,7 +796,6 @@
             document.getElementById('ssh-trust-details').textContent = error.message;
         } finally { button.disabled = false; }
     }
-    document.addEventListener('DOMContentLoaded', loadSSHTrustStatus);
 </script>
 
 <!-- ===== Copy one AWG instance to another server ===== -->
@@ -1997,7 +1996,6 @@
     }
 
     // Статус плагина тоже дорогой (16 SSH-команд): грузим последним.
-    window.addEventListener('load', () => loadAwgPluginStatus());
 </script>
 {% endif %}
 <a href="/" class="back-link page-back-link">{{ _('back_to_servers') }}</a>
@@ -4401,7 +4399,7 @@
                 PEER_POLL_INTERVAL = value;
                 clearTimeout(window.connPollTimer);
                 if (PEER_POLL_INTERVAL > 0 && document.getElementById('connectionsSection').style.display !== 'none') {
-                    window.connPollTimer = setTimeout(function() { loadConnections(true); }, PEER_POLL_INTERVAL * 1000);
+                    window.connPollTimer = setTimeout(function() { ProbeQueue.refresh('connections', () => loadConnections(true), 25000); }, PEER_POLL_INTERVAL * 1000);
                 }
             },
         });
@@ -5548,28 +5546,11 @@
     }
 
     async function checkServer(forcePlugins, boot) {
-        loadRknBlock();
-        if (typeof loadWarpStatus === 'function') loadWarpStatus(true);
         setInstalledAppsLoading(true);
-        // Manual check bypasses the 12 h plugin cache.
-        if (forcePlugins) loadAwgPluginStatus(true);
-        // Smart Route is host-level: its status is a separate probe, not part
-        // of the /check payload. It runs in parallel but must never hold the
-        // grid: the result is applied when it arrives (see below), so the
-        // cards paint as soon as /check returns.
-        smartRoutePending = true;
-        const smartRouteProbe = loadSmartRouteStatus()
-            .catch(() => null)
-            .then(status => {
-                smartRouteStatus = status || null;
-                smartRoutePending = false;
-                // Repaint every surface that reads smartRouteStatus.
-                applyInstalledAppsVisibility();
-                refreshExitMarks();
-                renderSmartRouteCard();
-                renderMarketplace();
-                return status;
-            });
+        // Every other probe is started by the queue after this request
+        // answers: loadRknBlock/loadWarpStatus/loadAwgPluginStatus/
+        // loadSmartRouteStatus used to start here, in parallel with /check,
+        // and competed for the single pooled SSH connection.
         try {
             const data = await apiCall(
                 `/api/servers/${SERVER_ID}/check` + (boot ? '?boot=1' : ''), 'POST');
@@ -5617,20 +5598,24 @@
                     } else if (firstVal) {
                         protoSelect.value = firstVal;
                     }
-                    loadConnections();
+                    // Connections open right after the grid on purpose: the
+                    // peer list (and the deep-link highlight) is what the user
+                    // came for. The queue keeps it first in the background.
+                    ProbeQueue.refresh('connections', () => loadConnections(), 25000);
                 }
             }
-            // Cards were painted before the probe resolved: repaint the
-            // exit-node marks now that "installed/enabled" is known.
-            // (The Smart Route answer itself is applied by its own .then:
-            // waiting for it here made it a gate for the whole grid.)
             updateStatusCounts(data.protocols || {});
+            if (forcePlugins) {
+                // Manual check bypasses the 12 h plugin cache, but it must not
+                // compete with the check itself: refresh after the answer.
+                ProbeQueue.refresh('plugin', () => loadAwgPluginStatus(true), 30000);
+            }
             if (data.cached) {
-                // Сетка уже нарисована из снимка панели: свежую проверку
-                // догоняем фоном. У её ответа флага cached нет, поэтому
-                // второго круга не будет.
-                checkServer(forcePlugins).catch(error => console.warn(
-                    'Fresh server check failed:', error));
+                // The grid is already painted from the panel snapshot: run the
+                // fresh check in the background. Its answer has no `cached`
+                // flag, so there is no second round.
+                ProbeQueue.refresh('check-fresh', () => checkServer(forcePlugins), 120000)
+                    .catch(error => console.warn('Fresh server check failed:', error));
             } else {
                 showToast(_('server_check_complete'), 'success');
             }
@@ -7885,11 +7870,20 @@
     }
 
     async function loadSmartRouteStatus() {
+        smartRoutePending = true;
         try {
             smartRouteStatus = await apiCall(`/api/servers/${SERVER_ID}/smartroute/status`);
         } catch (err) {
             smartRouteStatus = null;
             throw err;
+        } finally {
+            smartRoutePending = false;
+            // Every surface that reads smartRouteStatus repaints here, so the
+            // card never stays in its skeleton state after the answer lands.
+            applyInstalledAppsVisibility();
+            refreshExitMarks();
+            renderSmartRouteCard();
+            renderMarketplace();
         }
         return smartRouteStatus;
     }
@@ -8171,7 +8165,7 @@
         if (isPoll && !force && document.querySelector('#connectionsListInner .rename-editor')) {
             clearTimeout(window.connPollTimer);
             if (PEER_POLL_INTERVAL > 0 && document.getElementById('connectionsSection').style.display !== 'none') {
-                window.connPollTimer = setTimeout(function() { loadConnections(true); }, PEER_POLL_INTERVAL * 1000);
+                window.connPollTimer = setTimeout(function() { ProbeQueue.refresh('connections', () => loadConnections(true), 25000); }, PEER_POLL_INTERVAL * 1000);
             }
             return;
         }
@@ -8354,7 +8348,7 @@
             // interval is opt-in per server (0 = off, management modal).
             clearTimeout(window.connPollTimer);
             if (PEER_POLL_INTERVAL > 0 && document.getElementById('connectionsSection').style.display !== 'none') {
-                window.connPollTimer = setTimeout(function() { loadConnections(true); }, PEER_POLL_INTERVAL * 1000);
+                window.connPollTimer = setTimeout(function() { ProbeQueue.refresh('connections', () => loadConnections(true), 25000); }, PEER_POLL_INTERVAL * 1000);
             }
         }
     }
@@ -9676,18 +9670,166 @@
         }
     }
 
+    // ========== Background probe queue ==========
+    // Every page-open probe except /check goes through this queue. They all
+    // share one pooled SSH connection per server (SSHManager._exec_lock), so
+    // running them "in parallel" only piles threads on the same lock and lets
+    // the background starve the check itself. One probe at a time, ordered by
+    // priority: what the user sees first runs first.
+    const BG_CONCURRENCY = 1;
+    // Set on pagehide: queued probes must not start on a dying page (their
+    // requests would race the navigation and hold the SSH lock for nothing).
+    let pageClosing = false;
+
+    function pluginCacheFresh() {
+        const cached = readAwgPluginCache();
+        return !!(cached && (Date.now() - cached.ts) < AWG_PLUGIN_CACHE_TTL);
+    }
+
+    function withProbeTimeout(task, timeoutMs) {
+        // The timer rejects the CALLER, not the task: a task that ignores the
+        // timeout keeps running and holds the SSH lock on the backend. The
+        // queue therefore frees its slot on timeout (so the rest of the page
+        // keeps loading) and only then forgets the key, which prevents the
+        // same probe from being duplicated while the stale one is still alive.
+        return new Promise((resolve, reject) => {
+            const timer = setTimeout(
+                () => reject(new Error('timeout')), timeoutMs || 25000);
+            Promise.resolve().then(task).then(
+                value => { clearTimeout(timer); resolve(value); },
+                error => { clearTimeout(timer); reject(error); });
+        });
+    }
+
+    const ProbeQueue = {
+        queue: [],
+        inflight: new Map(),
+        active: 0,
+        criticalDone: false,
+        pendingCritical: null,
+
+        whenCriticalDone() {
+            if (this.criticalDone) return Promise.resolve();
+            if (!this.pendingCritical) {
+                let settle;
+                this.pendingCritical = new Promise(resolve => { settle = resolve; });
+                this.pendingCritical._settle = settle;
+            }
+            return this.pendingCritical;
+        },
+
+        settleCritical() {
+            this.criticalDone = true;
+            if (this.pendingCritical) {
+                this.pendingCritical._settle();
+                this.pendingCritical = null;
+            }
+            this.pump();
+        },
+
+        critical(key, task, timeoutMs) {
+            // Critical work (the first /check) runs immediately and owns the
+            // single slot: everything queued waits for it.
+            if (this.inflight.has(key)) return this.inflight.get(key);
+            this.active += 1;
+            const promise = withProbeTimeout(task, timeoutMs)
+                .finally(() => {
+                    this.active -= 1;
+                    this.inflight.delete(key);
+                    this.pump();
+                });
+            this.inflight.set(key, promise);
+            return promise;
+        },
+
+        background(key, priority, task, timeoutMs) {
+            if (this.inflight.has(key)) return this.inflight.get(key);
+            let settle;
+            const promise = new Promise(resolve => { settle = resolve; });
+            this.inflight.set(key, promise);
+            const entry = {key, priority, task, timeoutMs, settle};
+            this.whenCriticalDone().then(() => {
+                if (pageClosing) {
+                    this.inflight.delete(key);
+                    settle();
+                    return;
+                }
+                // Re-check after the wait: a manual refresh may have queued
+                // the same key while the critical run was finishing.
+                if (this.inflight.get(key) !== promise) { settle(); return; }
+                this.queue.push(entry);
+                this.queue.sort((a, b) => a.priority - b.priority);
+                this.pump();
+            });
+            return promise;
+        },
+
+        pump() {
+            if (pageClosing || this.active >= BG_CONCURRENCY) return;
+            const entry = this.queue.shift();
+            if (!entry) return;
+            this.active += 1;
+            withProbeTimeout(entry.task, entry.timeoutMs)
+                .catch(error => {
+                    // `busy` is a normal answer on a single SSH lock: the probe
+                    // is skipped until its next scheduled run, not retried in a
+                    // loop and not painted as an error.
+                    if (String(error && error.message || '').indexOf('busy') === -1) {
+                        console.warn('Background probe failed:', entry.key, error);
+                    }
+                })
+                .finally(() => {
+                    this.active -= 1;
+                    this.inflight.delete(entry.key);
+                    entry.settle();
+                    this.pump();
+                });
+        },
+
+        refresh(key, task, timeoutMs) {
+            // Explicit user action: never queued behind background work, but
+            // still deduplicated against an identical probe already running.
+            if (this.inflight.has(key)) return this.inflight.get(key);
+            return this.critical(key, task, timeoutMs);
+        }
+    };
+
     // ========== Init ==========
     applyInstalledAppsVisibility();
-    checkServer(false, true);
-    loadServerStats();
-    // ip-status - самая дорогая проба (десятки SSH-команд): уходит
-    // последней, после того как браузер получил дешёвые ответы.
-    window.addEventListener('load', function () { loadIpStatus(); });
+    // /check owns the critical lane; the queued probes below start only after
+    // it answers, so they cannot compete for the pooled SSH connection.
+    ProbeQueue.critical('check', () => checkServer(false, true), 120000)
+        .catch(error => console.warn('Server check failed:', error))
+        .finally(() => {
+            ProbeQueue.settleCritical();
+            ProbeQueue.background('smartroute', 45, () => loadSmartRouteStatus(), 15000);
+            ProbeQueue.background('ssh-trust', 20, () => loadSSHTrustStatus(), 15000);
+            ProbeQueue.background('stats', 30, () => loadServerStats(), 25000);
+            ProbeQueue.background('warp', 35, () => loadWarpStatus(true), 25000);
+            ProbeQueue.background('rkn', 36, () => loadRknBlock(), 25000);
+            ProbeQueue.background('cheburcheck', 40, () => loadCheburcheck(), 15000);
+            // ip-status and the plugin badge are the most expensive probes
+            // (dozens of SSH commands each): the page is already filled in
+            // when they land.
+            ProbeQueue.background('ip', 90, () => loadIpStatus(), 25000);
+            if (!pluginCacheFresh()) {
+                ProbeQueue.background('plugin', 95, () => loadAwgPluginStatus(), 30000);
+            }
+        });
     let ipStatusPoller = null;
     if (!ipStatusPoller) {
-        ipStatusPoller = setInterval(() => { if (!document.hidden) loadIpStatus(); }, 60000);
+        ipStatusPoller = setInterval(() => {
+            if (!document.hidden) ProbeQueue.refresh('ip', () => loadIpStatus(), 25000);
+        }, 60000);
     }
-    document.addEventListener('visibilitychange', () => { if (!document.hidden) loadIpStatus(); });
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) ProbeQueue.refresh('ip', () => loadIpStatus(), 25000);
+    });
+    window.addEventListener('pagehide', () => {
+        pageClosing = true;
+        if (ipStatusPoller) clearInterval(ipStatusPoller);
+        if (window.connPollTimer) clearTimeout(window.connPollTimer);
+    });
 </script>
 <script>
 function cheburAge(checkedAt) {
@@ -9876,6 +10018,5 @@ function openCheburcheckModal() {
     loadCheburcheck();
 }
 
-document.addEventListener('DOMContentLoaded', loadCheburcheck);
 </script>
 {% endblock %}
