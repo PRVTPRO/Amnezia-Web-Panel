@@ -74,6 +74,13 @@ class ProbeQueueStructureTests(unittest.TestCase):
         tail = PAGE[PAGE.index("window.addEventListener('pagehide'"):]
         self.assertIn('clearInterval(ipStatusPoller)', tail)
 
+    def test_cache_refill_never_jumps_the_peer_list(self):
+        # On a warm /check the snapshot is served from cache and the fresh
+        # check is queued: it must run after the visible probes (connections
+        # first), otherwise the peer list waits seconds for a background task.
+        self.assertIn("ProbeQueue.background('check-fresh', 96,", PAGE)
+        self.assertNotIn("ProbeQueue.background('check-fresh', 1,", PAGE)
+
     def test_manual_check_refreshes_the_plugin_badge(self):
         fn = body('async function checkServer(', 'function updateStatusCounts(')
         self.assertIn("ProbeQueue.background('plugin', 5,", fn)

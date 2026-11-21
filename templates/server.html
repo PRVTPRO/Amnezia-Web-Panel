@@ -5605,7 +5605,7 @@
                 // The grid is already painted from the panel snapshot: run the
                 // fresh check in the background. Its answer has no `cached`
                 // flag, so there is no second round.
-                ProbeQueue.background('check-fresh', 1, () => checkServer(forcePlugins), 120000)
+                ProbeQueue.background('check-fresh', 96, () => checkServer(forcePlugins), 120000)
                     .catch(error => console.warn('Fresh server check failed:', error));
             } else {
                 showToast(_('server_check_complete'), 'success');
