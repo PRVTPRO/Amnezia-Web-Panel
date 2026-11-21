@@ -7676,7 +7676,13 @@ def api_check_server(request: Request, server_id: int):
         try:
             awg_protos = [p for p in protocols_to_check if protocol_base(p) in AWG_PROTOCOLS]
             if awg_protos:
-                AWGManager(ssh).prefetch_awg_state(awg_protos)
+                # Only instances that actually have a link need the extra
+                # `wg show exit0` block: it is three commands per container.
+                exit_protos = [
+                    p for p in awg_protos
+                    if ((server.get('protocols') or {}).get(p) or {}).get('exit_link')
+                ]
+                AWGManager(ssh).prefetch_awg_state(awg_protos, exit_protocols=exit_protos)
         except Exception as e:
             logger.warning(f"AWG status prefetch failed, falling back to per-instance checks: {e}")
         # Run checks sequentially. Several managers use the same SSH connection;
