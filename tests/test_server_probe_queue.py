@@ -28,11 +28,11 @@ class ProbeQueueStructureTests(unittest.TestCase):
         # queue (after the /check answer), never as a bare call.
         for line in fn.splitlines():
             if 'loadAwgPluginStatus(' in line:
-                self.assertIn('ProbeQueue.refresh', line)
+                self.assertRegex(line, r'ProbeQueue\.(refresh|background)\(')
 
     def test_connections_are_queued_first(self):
         fn = body('async function checkServer(', 'function updateStatusCounts(')
-        self.assertIn("ProbeQueue.refresh('connections'", fn)
+        self.assertIn("ProbeQueue.background('connections', 10,", fn)
 
     def test_init_runs_check_as_the_only_critical_probe(self):
         init = body('// ========== Init ==========', 'let ipStatusPoller = null;')
@@ -76,7 +76,7 @@ class ProbeQueueStructureTests(unittest.TestCase):
 
     def test_manual_check_refreshes_the_plugin_badge(self):
         fn = body('async function checkServer(', 'function updateStatusCounts(')
-        self.assertIn("ProbeQueue.refresh('plugin'", fn)
+        self.assertIn("ProbeQueue.background('plugin', 5,", fn)
         self.assertIn('loadAwgPluginStatus(true)', fn)
 
 

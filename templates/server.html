@@ -4390,7 +4390,7 @@
                 PEER_POLL_INTERVAL = value;
                 clearTimeout(window.connPollTimer);
                 if (PEER_POLL_INTERVAL > 0 && document.getElementById('connectionsSection').style.display !== 'none') {
-                    window.connPollTimer = setTimeout(function() { ProbeQueue.refresh('connections', () => loadConnections(true), 25000); }, PEER_POLL_INTERVAL * 1000);
+                    window.connPollTimer = setTimeout(function() { ProbeQueue.background('connections', 10, () => loadConnections(true), 25000); }, PEER_POLL_INTERVAL * 1000);
                 }
             },
         });
@@ -5592,20 +5592,20 @@
                     // Connections open right after the grid on purpose: the
                     // peer list (and the deep-link highlight) is what the user
                     // came for. The queue keeps it first in the background.
-                    ProbeQueue.refresh('connections', () => loadConnections(), 25000);
+                    ProbeQueue.background('connections', 10, () => loadConnections(), 25000);
                 }
             }
             updateStatusCounts(data.protocols || {});
             if (forcePlugins) {
                 // Manual check bypasses the 12 h plugin cache, but it must not
                 // compete with the check itself: refresh after the answer.
-                ProbeQueue.refresh('plugin', () => loadAwgPluginStatus(true), 30000);
+                ProbeQueue.background('plugin', 5, () => loadAwgPluginStatus(true), 30000);
             }
             if (data.cached) {
                 // The grid is already painted from the panel snapshot: run the
                 // fresh check in the background. Its answer has no `cached`
                 // flag, so there is no second round.
-                ProbeQueue.refresh('check-fresh', () => checkServer(forcePlugins), 120000)
+                ProbeQueue.background('check-fresh', 1, () => checkServer(forcePlugins), 120000)
                     .catch(error => console.warn('Fresh server check failed:', error));
             } else {
                 showToast(_('server_check_complete'), 'success');
@@ -8229,7 +8229,7 @@
         if (isPoll && !force && document.querySelector('#connectionsListInner .rename-editor')) {
             clearTimeout(window.connPollTimer);
             if (PEER_POLL_INTERVAL > 0 && document.getElementById('connectionsSection').style.display !== 'none') {
-                window.connPollTimer = setTimeout(function() { ProbeQueue.refresh('connections', () => loadConnections(true), 25000); }, PEER_POLL_INTERVAL * 1000);
+                window.connPollTimer = setTimeout(function() { ProbeQueue.background('connections', 10, () => loadConnections(true), 25000); }, PEER_POLL_INTERVAL * 1000);
             }
             return;
         }
@@ -8412,7 +8412,7 @@
             // interval is opt-in per server (0 = off, management modal).
             clearTimeout(window.connPollTimer);
             if (PEER_POLL_INTERVAL > 0 && document.getElementById('connectionsSection').style.display !== 'none') {
-                window.connPollTimer = setTimeout(function() { ProbeQueue.refresh('connections', () => loadConnections(true), 25000); }, PEER_POLL_INTERVAL * 1000);
+                window.connPollTimer = setTimeout(function() { ProbeQueue.background('connections', 10, () => loadConnections(true), 25000); }, PEER_POLL_INTERVAL * 1000);
             }
         }
     }
@@ -9887,11 +9887,11 @@
     let ipStatusPoller = null;
     if (!ipStatusPoller) {
         ipStatusPoller = setInterval(() => {
-            if (!document.hidden) ProbeQueue.refresh('ip', () => loadIpStatus(), 25000);
+            if (!document.hidden) ProbeQueue.background('ip', 90, () => loadIpStatus(), 25000);
         }, 60000);
     }
     document.addEventListener('visibilitychange', () => {
-        if (!document.hidden) ProbeQueue.refresh('ip', () => loadIpStatus(), 25000);
+        if (!document.hidden) ProbeQueue.background('ip', 90, () => loadIpStatus(), 25000);
     });
     window.addEventListener('pagehide', () => {
         pageClosing = true;
