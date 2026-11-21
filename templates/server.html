@@ -4384,7 +4384,7 @@
             serverUid: document.body.dataset.serverUid || '',
             sshCooldown: SSH_COOLDOWN_BASE,
             peerPollInterval: PEER_POLL_INTERVAL,
-            onCheck: () => checkServer(true),
+            onCheck: () => ProbeQueue.refresh('check', () => checkServer(true), 120000),
             onCooldownChange(value) { SSH_COOLDOWN_BASE = value; },
             onPollChange(value) {
                 PEER_POLL_INTERVAL = value;
@@ -5600,6 +5600,11 @@
                 // Manual check bypasses the 12 h plugin cache, but it must not
                 // compete with the check itself: refresh after the answer.
                 ProbeQueue.background('plugin', 5, () => loadAwgPluginStatus(true), 30000);
+                // The base checkServer also refreshed the host-app cards on
+                // every run; keep that behaviour, now through the queue.
+                ProbeQueue.background('warp', 35, () => loadWarpStatus(true), 25000);
+                ProbeQueue.background('rkn', 36, () => loadRknBlock(), 25000);
+                ProbeQueue.background('smartroute', 45, () => loadSmartRouteStatus(), 15000);
             }
             if (data.cached) {
                 // The grid is already painted from the panel snapshot: run the
@@ -7941,7 +7946,9 @@
             smartRouteStatus = null;
             throw err;
         } finally {
-            smartRoutePending = false;
+            // A failed probe keeps the skeleton: hiding the card would make it
+            // pop back on the next successful load (TZ P1.2).
+            smartRoutePending = smartRouteStatus === null;
             // Every surface that reads smartRouteStatus repaints here, so the
             // card never stays in its skeleton state after the answer lands.
             applyInstalledAppsVisibility();
@@ -9833,7 +9840,12 @@
             const entry = this.queue.shift();
             if (!entry) return;
             this.active += 1;
-            withProbeTimeout(entry.task, entry.timeoutMs)
+            const started = Promise.resolve().then(entry.task);
+            // The caller gets a timeout, and the slot is freed on timeout so
+            // the rest of the page keeps loading. The KEY, however, is released
+            // only when the real task settles: a timed-out probe may still run
+            // and hold the SSH lock, and a duplicate would take the slot again.
+            withProbeTimeout(() => started, entry.timeoutMs)
                 .catch(error => {
                     // `busy` is a normal answer on a single SSH lock: the probe
                     // is skipped until its next scheduled run, not retried in a
@@ -9844,17 +9856,20 @@
                 })
                 .finally(() => {
                     this.active -= 1;
-                    this.inflight.delete(entry.key);
                     entry.settle();
                     this.pump();
                 });
+            const release = () => { this.inflight.delete(entry.key); };
+            started.then(release, release);
         },
 
         refresh(key, task, timeoutMs) {
-            // Explicit user action: never queued behind background work, but
-            // still deduplicated against an identical probe already running.
+            // Explicit user action: it goes to the FRONT of the background
+            // queue (priority 0) instead of running in parallel with the
+            // critical check and fighting it for the single SSH lock. If the
+            // same probe is already in flight, that promise is returned.
             if (this.inflight.has(key)) return this.inflight.get(key);
-            return this.critical(key, task, timeoutMs);
+            return this.background(key, 0, task, timeoutMs);
         }
     };
 
@@ -9896,7 +9911,20 @@
     window.addEventListener('pagehide', () => {
         pageClosing = true;
         if (ipStatusPoller) clearInterval(ipStatusPoller);
+        ipStatusPoller = null;
         if (window.connPollTimer) clearTimeout(window.connPollTimer);
+    });
+    window.addEventListener('pageshow', (event) => {
+        if (!event.persisted) return;
+        // Back from the bfcache: pagehide stopped the queue and the pollers.
+        pageClosing = false;
+        if (!ipStatusPoller) {
+            ipStatusPoller = setInterval(() => {
+                if (!document.hidden) ProbeQueue.background('ip', 90, () => loadIpStatus(), 25000);
+            }, 60000);
+        }
+        ProbeQueue.background('ip', 90, () => loadIpStatus(), 25000);
+        ProbeQueue.pump();
     });
 </script>
 <script>

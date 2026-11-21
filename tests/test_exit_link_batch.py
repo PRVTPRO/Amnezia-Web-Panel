@@ -32,14 +32,22 @@ class FakeSSH:
     def run_sudo_command(self, cmd, timeout=60):
         self.commands.append(cmd)
         if cmd.startswith('for c in '):
+            clients = re.search(r'@@CLIENTS_[0-9a-f]+@@', cmd)
             found = re.search(r'@@EXIT_[0-9a-f]+@@', cmd)
             rc_marker = re.search(r'@@EXITRC_[0-9a-f]+@@', cmd)
-            if not found or not rc_marker:
+            if not clients:
                 return '', '', 0
-            exit_marker = found.group(0)
-            container = re.search(re.escape(exit_marker) + r' ([A-Za-z0-9_.-]+)', cmd).group(1)
-            out = (f'{exit_marker} {container}\n\n'
-                   f'{rc_marker.group(0)} {self.link_rc}\n{self.payload}')
+            # A realistic composite: the container dumps come first, then the
+            # exit block. Omitting the dumps is what previously hid the bug
+            # where the last clientsTable swallowed the exit tail.
+            out = ('@@CONTAINER@@ amnezia-awg2\n'
+                   '[Interface]\n[Peer]\nPublicKey = PEER_A\n'
+                   f'{clients.group(0)}\n[{{"clientId": "PEER_A"}}]\n')
+            if found and rc_marker:
+                container = re.search(
+                    re.escape(found.group(0)) + r' ([A-Za-z0-9_.-]+)', cmd).group(1)
+                out += (f'{found.group(0)} {container}\n\n'
+                        f'{rc_marker.group(0)} {self.link_rc}\n{self.payload}')
             return out, '', 0
         if 'exit0.conf' in cmd:
             self.direct_reads += 1
@@ -58,6 +66,24 @@ class ExitLinkBatchTest(unittest.TestCase):
         mgr = AWGManager(ssh)
         mgr.prefetch_awg_state(['awg2'], exit_protocols=list(exit_protocols))
         return ssh, mgr
+
+    def test_last_container_keeps_its_clients_table(self):
+        # Regression for B1: the exit tail used to be glued to the last
+        # container's clientsTable, so json.loads failed and the batch entry
+        # was dropped on every check of a server with an exit link.
+        ssh, mgr = self._prefetch(payload='')
+        clients = mgr._get_clients_table('awg2')
+        self.assertEqual([c['clientId'] for c in clients], ['PEER_A'])
+        direct = [c for c in ssh.commands
+                  if 'docker exec' in c and not c.startswith('for c in ')]
+        self.assertEqual(direct, [], 'the batch must stay usable')
+
+    def test_missing_file_is_reported_as_none(self):
+        # The composite maps `test -f` failure to 9 (the direct path uses
+        # `|| exit 9`); rc 1 must never appear for a missing file.
+        ssh, mgr = self._prefetch(link_rc=9)
+        self.assertIsNone(mgr.exit_link_status('awg2'))
+        self.assertEqual(ssh.direct_reads, 0)
 
     def test_success_matches_direct_read_shape(self):
         payload = (f'{PEER}\t1700000000\n'

@@ -21,14 +21,14 @@ def body(start_marker, end_marker):
 class ProbeQueueStructureTests(unittest.TestCase):
     def test_check_does_not_start_header_probes_itself(self):
         fn = body('async function checkServer(', 'function updateStatusCounts(')
-        for call in ('loadRknBlock(', 'loadWarpStatus(', 'loadSmartRouteStatus('):
-            self.assertNotIn(call, fn,
-                             f'{call} must be queued, not started inside checkServer')
-        # The manual-check plugin refresh is allowed, but only through the
-        # queue (after the /check answer), never as a bare call.
+        # A probe may only appear as the task of a queue entry, never as a bare
+        # call in the function body (that would start it before /check answers).
         for line in fn.splitlines():
-            if 'loadAwgPluginStatus(' in line:
-                self.assertRegex(line, r'ProbeQueue\.(refresh|background)\(')
+            for call in ('loadRknBlock(', 'loadWarpStatus(', 'loadSmartRouteStatus(',
+                         'loadAwgPluginStatus(', 'loadIpStatus('):
+                if call in line:
+                    self.assertRegex(line, r'ProbeQueue\.(refresh|background)\(',
+                                     f'{call} must go through the queue')
 
     def test_connections_are_queued_first(self):
         fn = body('async function checkServer(', 'function updateStatusCounts(')
@@ -57,12 +57,23 @@ class ProbeQueueStructureTests(unittest.TestCase):
         self.assertIn('const BG_CONCURRENCY = 1;', PAGE)
         self.assertIn('this.queue.sort((a, b) => a.priority - b.priority);', queue)
 
-    def test_slot_is_freed_on_timeout(self):
+    def test_slot_is_freed_on_timeout_but_key_waits_for_the_task(self):
         queue = body('const ProbeQueue = {', '// ========== Init ==========')
-        # active/inflight are released in .finally(), i.e. on timeout too:
         self.assertIn('this.active -= 1;', queue)
-        self.assertIn('this.inflight.delete(entry.key);', queue)
         self.assertIn("new Error('timeout')", PAGE)
+        # The key must NOT be released from the timeout path: a timed-out probe
+        # can still hold the SSH lock, and a duplicate would take the slot.
+        self.assertNotIn('this.inflight.delete(entry.key);\n                    entry.settle();', queue)
+        self.assertIn('const release = () => { this.inflight.delete(entry.key); };', queue)
+        self.assertIn('started.then(release, release);', queue)
+
+    def test_manual_refresh_is_first_in_the_queue(self):
+        queue = body('const ProbeQueue = {', '// ========== Init ==========')
+        self.assertIn('return this.background(key, 0, task, timeoutMs);', queue)
+        self.assertIn("onCheck: () => ProbeQueue.refresh('check'", PAGE)
+        # pageshow restores what pagehide stopped (bfcache).
+        self.assertIn("window.addEventListener('pageshow'", PAGE)
+        self.assertIn('pageClosing = false;', PAGE)
 
     def test_busy_is_not_retried_or_painted_as_error(self):
         queue = body('const ProbeQueue = {', '// ========== Init ==========')

@@ -2275,7 +2275,9 @@ docker --version
                 # container name must be literal here: `$c` is unset there.
                 'echo "' + exit_marker + ' ' + cname + '"; '
                 'docker exec "' + cname + '" sh -c \''
-                f'test -f {EXIT_CONF}; rc=$?; echo; '
+                # `test -f` answers 1, while the direct path uses `|| exit 9`:
+                # map it to 9 so both paths report "no link file" identically.
+                f'if [ -f {EXIT_CONF} ]; then rc=0; else rc=9; fi; echo; '
                 'echo "' + exit_rc_marker + ' $rc"; '
                 '[ "$rc" = 0 ] || exit 0; '
                 f'{wg_bin} show {EXIT_IFACE} latest-handshakes; echo; '
@@ -2306,12 +2308,23 @@ docker --version
             with _awg_batch_lock_of(self.ssh):
                 self.ssh._awg_batch = None
             return
+        # Exit blocks are appended AFTER the container loop, so they must be
+        # cut off before the clients split runs: otherwise the last
+        # container's clientsTable would swallow the whole exit tail and stop
+        # being valid JSON, dropping its batch entry on every check.
+        container_out = out or ''
+        exit_out = ''
+        if exit_containers:
+            exit_at = container_out.find(exit_marker)
+            if exit_at != -1:
+                exit_out = container_out[exit_at:]
+                container_out = container_out[:exit_at]
         batch = {}
         current = None
         # Belt and braces: split on markers found anywhere in the stream,
         # not only at line start, so even a glued marker still separates
         # sections (the payload fragment before it stays with its owner).
-        for piece in re.split(r'(@@CONTAINER@@ [^\n]+|' + re.escape(clients_marker) + ')', out or ''):
+        for piece in re.split(r'(@@CONTAINER@@ [^\n]+|' + re.escape(clients_marker) + ')', container_out):
             if piece.startswith('@@CONTAINER@@ '):
                 current = piece.split(' ', 1)[1].strip()
                 batch[current] = {'config': [], 'clients': [], 'part': 'config'}
@@ -2324,9 +2337,9 @@ docker --version
         # block: the block is cut on markers, never on `---`.
         exit_data = {}
         exit_current = None
-        if exit_containers:
+        if exit_containers and exit_out:
             exit_chunks = re.split(
-                r'(' + re.escape(exit_marker) + r' [^\n]+)', out or '')
+                r'(' + re.escape(exit_marker) + r' [^\n]+)', exit_out)
             for chunk in exit_chunks:
                 if chunk.startswith(exit_marker + ' '):
                     exit_current = chunk.split(' ', 1)[1].strip()
@@ -2401,7 +2414,8 @@ docker --version
             'endpoint': peer.get('endpoint', ''),
         }
 
-    def _parse_exit_link_output(self, out):
+    @staticmethod
+    def _parse_exit_link_output(out):
         """Разбор вывода grep по exit0.conf в тот же словарь, что отдаёт
         exit_link_info. Общий для прямой команды и для батча."""
         info = {}
