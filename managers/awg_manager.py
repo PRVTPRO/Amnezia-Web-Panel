@@ -4216,8 +4216,14 @@ x_warp_up() {
                     conf_text = batch.get('config') or ''
                     pubkeys = set(re.findall(
                         r'^\s*PublicKey\s*=\s*(\S+)', conf_text, re.MULTILINE))
+                    # A disabled peer is deliberately absent from awg0.conf
+                    # (toggle_client rewrites the file without its [Peer]), so
+                    # it must not fail the integrity check for the whole
+                    # instance. Strictly `is False`: an absent flag means the
+                    # peer is enabled and must still be verified.
                     missing = [c.get('clientId', '') for c in data
-                               if c.get('clientId', '') not in pubkeys]
+                               if c.get('clientId', '') not in pubkeys
+                               and (c.get('userData') or {}).get('enabled') is not False]
                     if missing:
                         logger.warning(
                             f"clientsTable {container_name} from prefetch is "
