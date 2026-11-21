@@ -52,7 +52,8 @@ class DashboardServerManagementTests(unittest.TestCase):
         self.assertIn('card.dataset.sshCooldown = value', INDEX)
         self.assertIn('card.dataset.peerPoll = value', INDEX)
         self.assertIn('ServerManagement.open({', DETAIL)
-        self.assertIn('onCheck: () => checkServer(true)', DETAIL)
+        # P4: the manual check goes through the probe queue (first in line).
+        self.assertIn("onCheck: () => ProbeQueue.refresh('check', () => checkServer(true)", DETAIL)
         self.assertNotIn('id="checkBtn"', DETAIL)
         self.assertIn('serverId: SERVER_ID', DETAIL)
         self.assertIn('/reboot', SHARED)
