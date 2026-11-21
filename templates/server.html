@@ -352,12 +352,21 @@
         border-color: var(--border-color);
         animation: serverStatsPulse 1.2s ease-in-out infinite;
     }
+    /* Smart Route card: same skeleton while the first probe is in flight, so
+       the card does not pop in a round-trip after the grid. */
+    .protocol-card .badge.is-skeleton {
+        color: transparent;
+        background: var(--bg-secondary);
+        border-color: var(--border-color);
+        animation: serverStatsPulse 1.2s ease-in-out infinite;
+    }
     @media (prefers-reduced-motion: reduce) {
         .srv-header .srv-status-btn[data-state="loading"] .ssh-trust-dot,
         .srv-header .srv-status-btn[data-state="loading"] .awg-plugin-dot,
         .srv-header .srv-status-btn[data-state="loading"] .cheburcheck-dot,
         .srv-header .badge.is-skeleton,
-        .srv-header .ip-chip.is-skeleton { animation: none; }
+        .srv-header .ip-chip.is-skeleton,
+        .protocol-card .badge.is-skeleton { animation: none; }
     }
     @media (max-width: 520px) {
         .server-stats-popover {
@@ -3966,6 +3975,10 @@
     let currentAwgProto = 'awg2';
     // Smart Route app state (GET /api/servers/{id}/smartroute/status); null = not loaded.
     let smartRouteStatus = null;
+    // True while the first Smart Route probe is in flight: the card is shown
+    // with a skeleton badge instead of being hidden (no layout jump when the
+    // answer arrives).
+    let smartRoutePending = false;
     // Last /check protocols payload: lets the exit-node marks be repainted after
     // a Smart Route action without running a second (SSH-heavy) check.
     let lastProtocolsInfo = {};
@@ -4661,12 +4674,14 @@
         });
 
         // Smart Route card: host-level app, installed-state comes from the
-        // smartroute status endpoint rather than the protocol check.
+        // smartroute status endpoint rather than the protocol check. While the
+        // first probe is in flight the card is visible with a skeleton badge.
+        const srPending = smartRoutePending && !smartRouteStatus;
         const srInstalled = !!(smartRouteStatus && smartRouteStatus.installed);
         const srCard = document.getElementById('proto-smartroute');
         if (srCard) {
-            srCard.classList.toggle('installed-app-hidden', !srInstalled);
-            srCard.classList.toggle('installed-app-visible', srInstalled);
+            srCard.classList.toggle('installed-app-hidden', !srInstalled && !srPending);
+            srCard.classList.toggle('installed-app-visible', srInstalled || srPending);
         }
         if (srInstalled) installedCount++;
         renderSmartRouteCard();
@@ -5539,10 +5554,22 @@
         // Manual check bypasses the 12 h plugin cache.
         if (forcePlugins) loadAwgPluginStatus(true);
         // Smart Route is host-level: its status is a separate probe, not part
-        // of the /check payload. Start it in parallel with the check and
-        // settle it before updateStatusCounts() reveals the grid, otherwise
-        // the card pops in one round-trip after every other badge.
-        const smartRouteProbe = loadSmartRouteStatus().catch(() => null);
+        // of the /check payload. It runs in parallel but must never hold the
+        // grid: the result is applied when it arrives (see below), so the
+        // cards paint as soon as /check returns.
+        smartRoutePending = true;
+        const smartRouteProbe = loadSmartRouteStatus()
+            .catch(() => null)
+            .then(status => {
+                smartRouteStatus = status || null;
+                smartRoutePending = false;
+                // Repaint every surface that reads smartRouteStatus.
+                applyInstalledAppsVisibility();
+                refreshExitMarks();
+                renderSmartRouteCard();
+                renderMarketplace();
+                return status;
+            });
         try {
             const data = await apiCall(
                 `/api/servers/${SERVER_ID}/check` + (boot ? '?boot=1' : ''), 'POST');
@@ -5593,13 +5620,10 @@
                     loadConnections();
                 }
             }
-            // Settle the parallel probe before the grid is revealed, so the
-            // Smart Route card is painted with its final badge together with
-            // the protocol cards instead of appearing later.
-            smartRouteStatus = await smartRouteProbe;
             // Cards were painted before the probe resolved: repaint the
             // exit-node marks now that "installed/enabled" is known.
-            refreshExitMarks();
+            // (The Smart Route answer itself is applied by its own .then:
+            // waiting for it here made it a gate for the whole grid.)
             updateStatusCounts(data.protocols || {});
             if (data.cached) {
                 // Сетка уже нарисована из снимка панели: свежую проверку
@@ -7693,6 +7717,13 @@
         const info = document.getElementById('smartroute-info');
         const toggleBtn = document.getElementById('smartroute-toggle-btn');
         if (!badgeEl) return;
+        if (!status && smartRoutePending) {
+            // First probe still in flight: keep the card in place with a
+            // skeleton badge so nothing jumps when the answer arrives.
+            badgeEl.innerHTML = '<span class="badge is-skeleton" aria-hidden="true">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span>';
+            if (info) info.classList.add('hidden');
+            return;
+        }
         if (!installed) {
             badgeEl.innerHTML = `<span class="badge badge-warn"><span class="badge-dot"></span> ${_('not_installed')}</span>`;
             if (info) info.classList.add('hidden');
