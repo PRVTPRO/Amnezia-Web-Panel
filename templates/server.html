@@ -5599,7 +5599,7 @@
             if (forcePlugins) {
                 // Manual check bypasses the 12 h plugin cache, but it must not
                 // compete with the check itself: refresh after the answer.
-                ProbeQueue.background('plugin', 5, () => loadAwgPluginStatus(true), 30000);
+                ProbeQueue.background('plugin', 95, () => loadAwgPluginStatus(true), 30000);
                 // The base checkServer also refreshed the host-app cards on
                 // every run; keep that behaviour, now through the queue.
                 ProbeQueue.background('warp', 35, () => loadWarpStatus(true), 25000);
@@ -9818,7 +9818,7 @@
             let settle;
             const promise = new Promise(resolve => { settle = resolve; });
             this.inflight.set(key, promise);
-            const entry = {key, priority, task, timeoutMs, settle};
+            const entry = {key, priority, task, timeoutMs, settle, promise};
             this.whenCriticalDone().then(() => {
                 if (pageClosing) {
                     this.inflight.delete(key);
@@ -9861,14 +9861,28 @@
                 });
             const release = () => { this.inflight.delete(entry.key); };
             started.then(release, release);
+            // Grace period: a probe whose task never settles (a fetch without
+            // an abort path) must not keep the key forever — the probe would be
+            // dead until the page reloads. After the timeout and a grace window
+            // the key is released anyway; a late duplicate is harmless because
+            // the backend serializes the SSH lock itself.
+            setTimeout(() => {
+                if (this.inflight.get(entry.key) !== entry.promise) return;
+                this.inflight.delete(entry.key);
+            }, (entry.timeoutMs || 25000) + 5000);
         },
 
         refresh(key, task, timeoutMs) {
             // Explicit user action: it goes to the FRONT of the background
             // queue (priority 0) instead of running in parallel with the
-            // critical check and fighting it for the single SSH lock. If the
-            // same probe is already in flight, that promise is returned.
-            if (this.inflight.has(key)) return this.inflight.get(key);
+            // critical check and fighting it for the single SSH lock.
+            // `critical(key)` is the one case that returns an already-running
+            // probe: while the boot check is in flight, a manual check must
+            // not be silently swallowed — it is queued behind it with an
+            // explicit `forcePlugins`, so the plugin card still refreshes.
+            if (this.inflight.has(key) && key !== 'check') {
+                return this.inflight.get(key);
+            }
             return this.background(key, 0, task, timeoutMs);
         }
     };
@@ -9923,6 +9937,14 @@
                 if (!document.hidden) ProbeQueue.background('ip', 90, () => loadIpStatus(), 25000);
             }, 60000);
         }
+        // Everything pagehide silenced is re-queued: the badges would
+        // otherwise stay stale until a manual reload.
+        ProbeQueue.background('smartroute', 45, () => loadSmartRouteStatus(), 15000);
+        ProbeQueue.background('ssh-trust', 20, () => loadSSHTrustStatus(), 15000);
+        ProbeQueue.background('stats', 30, () => loadServerStats(), 25000);
+        ProbeQueue.background('warp', 35, () => loadWarpStatus(true), 25000);
+        ProbeQueue.background('rkn', 36, () => loadRknBlock(), 25000);
+        ProbeQueue.background('cheburcheck', 40, () => loadCheburcheck(), 15000);
         ProbeQueue.background('ip', 90, () => loadIpStatus(), 25000);
         // The peer list poll dies with pagehide as well; restart it only when
         // the section is open, exactly like loadConnections does.

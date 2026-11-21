@@ -66,6 +66,21 @@ class ProbeQueueStructureTests(unittest.TestCase):
         self.assertNotIn('this.inflight.delete(entry.key);\n                    entry.settle();', queue)
         self.assertIn('const release = () => { this.inflight.delete(entry.key); };', queue)
         self.assertIn('started.then(release, release);', queue)
+        # A task that never settles must not kill the key forever: there is a
+        # grace release after the timeout.
+        self.assertIn('entry.timeoutMs || 25000) + 5000', queue)
+
+    def test_refresh_is_not_swallowed_during_the_boot_check(self):
+        queue = body('const ProbeQueue = {', '// ========== Init ==========')
+        self.assertIn("key !== 'check'", queue)
+        self.assertIn('return this.background(key, 0, task, timeoutMs);', queue)
+
+    def test_bfcache_requeues_every_probe(self):
+        tail = PAGE[PAGE.index("window.addEventListener('pageshow'"):]
+        for key in ('smartroute', 'ssh-trust', 'stats', 'warp', 'rkn',
+                    'cheburcheck', 'ip'):
+            self.assertIn(f"ProbeQueue.background('{key}'", tail)
+        self.assertIn("ProbeQueue.background('plugin', 95", PAGE)
 
     def test_manual_refresh_is_first_in_the_queue(self):
         queue = body('const ProbeQueue = {', '// ========== Init ==========')
@@ -94,7 +109,9 @@ class ProbeQueueStructureTests(unittest.TestCase):
 
     def test_manual_check_refreshes_the_plugin_badge(self):
         fn = body('async function checkServer(', 'function updateStatusCounts(')
-        self.assertIn("ProbeQueue.background('plugin', 5,", fn)
+        # Priority 95 matches the documented table (P4.11), so a manual check
+        # does not run the plugin probe ahead of the visible cards.
+        self.assertIn("ProbeQueue.background('plugin', 95,", fn)
         self.assertIn('loadAwgPluginStatus(true)', fn)
 
 
