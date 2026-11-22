@@ -89,6 +89,42 @@ class WarpApiTests(unittest.TestCase):
     def post(self, path, body):
         return self.client.post('/api/servers/0/warp/%s' % path, json=body)
 
+    # ----- install guard over every instance -------------------------------
+
+    def two_instances(self):
+        self.write_data(protocols={
+            'awg': {'installed': True, 'base_protocol': 'awg'},
+            'awg2': {'installed': True, 'base_protocol': 'awg2'},
+        })
+
+    def mark_registered(self, proto):
+        def mutate(state):
+            panel.proto_record(state, 'srv-uid', proto)['warp']['registered'] = True
+        panel.warp_state_store.mutate(mutate)
+
+    def test_install_guard_covers_every_instance(self):
+        """A host-level install must refuse when *any* instance is registered.
+
+        The request used to collapse to the first AWG instance, so a host with
+        awg2 already registered was allowed to install WARP over it.
+        """
+        self.two_instances()
+        self.mark_registered('awg2')
+        server = panel.load_data()['servers'][0]
+
+        with self.assertRaises(panel.SrvWarpError) as ctx:
+            panel._warp_install_guard(server, 'srv-uid', None)
+
+        self.assertEqual(ctx.exception.code, 'srv_warp_registered_unlink_first')
+
+    def test_install_guard_with_an_explicit_protocol_stays_narrow(self):
+        self.two_instances()
+        self.mark_registered('awg2')
+        server = panel.load_data()['servers'][0]
+
+        # Targeting the free instance explicitly is still allowed.
+        panel._warp_install_guard(server, 'srv-uid', 'awg')
+
     def wait_for_link(self):
         for _ in range(100):
             state = panel.warp_state_store.load()

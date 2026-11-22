@@ -283,6 +283,32 @@ class WarpRuntimeHarness(unittest.TestCase):
         self.assertFalse(self.record('awg')['warp']['registered'])
         self.assertTrue(self.data['servers'][0]['warp']['installed'])
 
+    def test_a_total_install_failure_keeps_its_reason(self):
+        # Every instance fails: the job must report the concrete reason, not a
+        # misleading "no targets" (nothing was skipped).
+        def always_fail(manager, proto):
+            raise ws.SrvWarpError('srv_warp_register_failed', 502)
+
+        self.runtime._ensure_wgcf = always_fail
+        with self.assertRaises(ws.SrvWarpError) as ctx:
+            run_coro(self.runtime.install(0, 'srv-1', job_id='job-all-fail'))
+
+        self.assertEqual(ctx.exception.code, 'srv_warp_register_failed')
+        self.assertFalse((self.data['servers'][0].get('warp') or {})
+                         .get('installed'))
+
+    def test_an_unexpected_install_error_gets_a_stable_code(self):
+        # A class name must never become the operation error code: it would be
+        # serialized as a JSON array and the UI could not translate it.
+        def boom(manager, proto):
+            raise TimeoutError('ssh went away')
+
+        self.runtime._ensure_wgcf = boom
+        with self.assertRaises(ws.SrvWarpError) as ctx:
+            run_coro(self.runtime.install(0, 'srv-1', job_id='job-boom'))
+
+        self.assertEqual(ctx.exception.code, 'srv_warp_install_failed')
+
     def test_install_reports_a_skipped_stopped_instance(self):
         self.ssh.container_state = {
             'amnezia-awg': (True, True),
@@ -350,10 +376,14 @@ class WarpRuntimeHarness(unittest.TestCase):
         run_coro(self.runtime.repair(0, 'srv-1', job_id='job-repair-isolate'))
 
         self.assertEqual(calls['n'], 2)
-        # The healthy instance is repaired, the broken one is left untouched.
+        # The healthy instance is repaired, the broken one records why.
         self.assertEqual(self.record('awg2')['warp']['repair_state']['state'],
                          'ok')
-        self.assertIsNone(self.record('awg')['warp']['repair_state'])
+        self.assertEqual(self.record('awg')['warp']['repair_state']['state'],
+                         'error')
+        self.assertEqual(
+            self.record('awg')['warp']['repair_state']['last_error'],
+            'srv_warp_arch_unsupported')
 
     def test_repair_missing_creds_registers_again(self):
         self.seed_state(registered=True, link=None)

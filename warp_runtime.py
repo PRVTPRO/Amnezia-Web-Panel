@@ -434,7 +434,9 @@ class WarpRuntime:
                 except Exception as exc:
                     logger.exception("warp install failed for %s/%s",
                                      uid, proto)
-                    failures.append((proto, (exc.__class__.__name__,)))
+                    # A stable code: the class name of an unexpected exception
+                    # must not become a JSON array in the operation result.
+                    failures.append((proto, 'srv_warp_install_failed'))
                     report('failed', 'failed %s: %s'
                            % (proto, exc.__class__.__name__))
                     continue
@@ -541,6 +543,7 @@ class WarpRuntime:
 
             # Repair order from the TZ: (1) creds, (2) start.sh, (3) restart.
             repaired = []
+            failed = {}
             for proto in targets:
                 # Host-level repair covers every registered instance: isolate
                 # each one, so a broken instance cannot cancel the rest.
@@ -561,13 +564,15 @@ class WarpRuntime:
                 except ws.SrvWarpError as exc:
                     logger.warning("warp repair failed for %s/%s: %s",
                                    uid, proto, exc.code)
+                    failed[proto] = exc.code
                     continue
                 except Exception:
                     logger.exception("warp repair failed for %s/%s", uid, proto)
+                    failed[proto] = 'srv_warp_repair_failed'
                     continue
                 repaired.append(proto)
 
-            if repaired:
+            if repaired or failed:
                 def mark(current):
                     for proto in repaired:
                         rec = ws.proto_record(current, uid, proto)
@@ -577,6 +582,15 @@ class WarpRuntime:
                             'queue_reason': None,
                         }
                         rec['warp']['quarantine'] = False
+                    # A failed instance used to vanish from the state entirely:
+                    # the job log was the only trace. Record why it failed.
+                    for proto, code in failed.items():
+                        rec = ws.proto_record(current, uid, proto)
+                        rec['warp']['repair_state'] = {
+                            'state': 'error',
+                            'last_error': code,
+                            'queue_reason': None,
+                        }
 
                 self.state_store.mutate(mark)
         except ws.SrvWarpError as exc:
