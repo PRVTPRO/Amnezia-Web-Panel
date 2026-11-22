@@ -5596,21 +5596,31 @@
                 }
             }
             updateStatusCounts(data.protocols || {});
-            if (forcePlugins) {
-                // Manual check bypasses the 12 h plugin cache, but it must not
-                // compete with the check itself: refresh after the answer.
-                ProbeQueue.background('plugin', 95, () => loadAwgPluginStatus(true), 30000);
-                // The base checkServer also refreshed the host-app cards on
-                // every run; keep that behaviour, now through the queue.
+            if (!boot) {
+                // Базовая версия обновляла хостовые карточки при КАЖДОМ
+                // checkServer(). Стартовая проверка (boot) получает те же три
+                // пробы из блока инициализации ниже — здесь дубля нет;
+                // обычные вызовы (протоколы, toggle, настройки, failover)
+                // ставят их в очередь, а dedup не даёт запустить дважды.
                 ProbeQueue.background('warp', 35, () => loadWarpStatus(true), 25000);
                 ProbeQueue.background('rkn', 36, () => loadRknBlock(), 25000);
                 ProbeQueue.background('smartroute', 45, () => loadSmartRouteStatus(), 15000);
+            }
+            if (forcePlugins) {
+                // Manual check bypasses the 12 h plugin cache, but it must not
+                // compete with the check itself: refresh after the answer.
+                // Форс нужен, потому что стартовая проба плагинов может ещё
+                // идти: без флага dedup вернул бы её promise и принудительная
+                // проверка не состоялась бы (приоритет 95 — после карточек).
+                ProbeQueue.background('plugin', 95, () => loadAwgPluginStatus(true), 30000, true);
             }
             if (data.cached) {
                 // The grid is already painted from the panel snapshot: run the
                 // fresh check in the background. Its answer has no `cached`
                 // flag, so there is no second round.
-                ProbeQueue.background('check-fresh', 96, () => checkServer(forcePlugins), 120000)
+                // Принудительная проба плагинов уже поставлена ручной
+                // проверкой: свежий /check не должен ставить её второй раз.
+                ProbeQueue.background('check-fresh', 96, () => checkServer(false), 120000)
                     .catch(error => console.warn('Fresh server check failed:', error));
             } else {
                 showToast(_('server_check_complete'), 'success');
@@ -9806,22 +9816,29 @@
             const promise = withProbeTimeout(task, timeoutMs)
                 .finally(() => {
                     this.active -= 1;
-                    this.inflight.delete(key);
+                    // Форсированная задача может уже занимать этот key: не
+                    // стирай её запись при завершении старого /check.
+                    if (this.inflight.get(key) === promise) this.inflight.delete(key);
                     this.pump();
                 });
             this.inflight.set(key, promise);
             return promise;
         },
 
-        background(key, priority, task, timeoutMs) {
-            if (this.inflight.has(key)) return this.inflight.get(key);
+        background(key, priority, task, timeoutMs, force = false) {
+            // Форс (ручная «Проверка», принудительные плагины) обходит dedup:
+            // пользовательское действие не должно вернуть уже идущий promise.
+            // Старый promise не теряется — его задача сама его завершит; в
+            // inflight просто лежит новая запись. Все очистки ниже проверяют
+            // владельца записи по ссылке, чтобы старый task не стёр новую.
+            if (!force && this.inflight.has(key)) return this.inflight.get(key);
             let settle;
             const promise = new Promise(resolve => { settle = resolve; });
             this.inflight.set(key, promise);
             const entry = {key, priority, task, timeoutMs, settle, promise};
             this.whenCriticalDone().then(() => {
                 if (pageClosing) {
-                    this.inflight.delete(key);
+                    if (this.inflight.get(key) === promise) this.inflight.delete(key);
                     settle();
                     return;
                 }
@@ -9859,7 +9876,9 @@
                     entry.settle();
                     this.pump();
                 });
-            const release = () => { this.inflight.delete(entry.key); };
+            const release = () => {
+                if (this.inflight.get(entry.key) === entry.promise) this.inflight.delete(entry.key);
+            };
             started.then(release, release);
             // Grace period: a probe whose task never settles (a fetch without
             // an abort path) must not keep the key forever — the probe would be
@@ -9883,7 +9902,10 @@
             if (this.inflight.has(key) && key !== 'check') {
                 return this.inflight.get(key);
             }
-            return this.background(key, 0, task, timeoutMs);
+            // `check` принудительно обходит dedup, но background всё равно
+            // дождётся критического lane: ручная проверка встаёт в очередь,
+            // а не идёт параллельно со стартовой.
+            return this.background(key, 0, task, timeoutMs, true);
         }
     };
 
