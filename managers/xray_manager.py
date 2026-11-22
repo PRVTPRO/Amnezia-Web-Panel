@@ -32,7 +32,10 @@ def _xhttp_extra():
     """XHTTP tuning per the current classic anti-DPI profile (mode
     stream-one, maxConnections=1), proven on weak mobile clients: the
     wide maxConcurrency ranges of the previous profile made old phones
-    drop the tunnel mid-session.
+    drop the tunnel mid-session. Keeping maxConnections in the 1-2
+    range is also a popular DPI-evasion choice in its own right - a
+    single long-lived connection looks like an ordinary browser HTTP/2
+    session instead of a multiplexed tunnel.
 
     The profile is "one connection, reuse-heavy": maxConnections=1 pins
     a single reusable connection, and maxConcurrency=0 leaves the
