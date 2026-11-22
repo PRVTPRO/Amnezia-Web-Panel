@@ -414,6 +414,110 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
             manager, protocol, 'test -f %s/warp0.conf' % warp_dir)
         return cred_code == 0 and conf_code == 0
 
+    def _has_profile(self, manager, protocol):
+        """True when the instance already holds both WARP credential files."""
+        warp_dir = _warp_dir(protocol)
+        _out, _err, code = self._sh(
+            manager, protocol,
+            'test -s %s/account.toml && test -s %s/warp0.conf'
+            % (warp_dir, warp_dir))
+        return code == 0
+
+    def _registration_api_reachable(self, manager, protocol, timeout=25):
+        """Can this instance's host still reach the WARP registration API?
+
+        ``wgcf`` calls ``api.cloudflareclient.com``; a provider that filters
+        TLS by SNI breaks exactly that call while the WARP dataplane keeps
+        working. The image already carries curl (it downloads wgcf), so the
+        probe walks the same path registration does. Any HTTP status --
+        including a 4xx -- proves the TLS handshake to the real API finished.
+
+        True/False, or None when the probe itself could not run.
+        """
+        out, _err, _code = self._sh(
+            manager, protocol,
+            "curl -s -o /dev/null -w '%{http_code}' --max-time 8 "
+            "https://api.cloudflareclient.com/v0a2158/reg || true",
+            timeout=timeout)
+        status = (out or '').strip()
+        if not status.isdigit():
+            return None
+        return status != '000'
+
+    async def _probe_source(self, source, protocols):
+        """Capability row for one candidate source server (never raises)."""
+        src_uid = ws._norm_uid(source.get('uid') or '')
+        row = {
+            'uid': src_uid,
+            'name': source.get('name') or source.get('host') or src_uid,
+            'host': source.get('host') or '',
+            'protocols': protocols,
+            'status': 'unreachable',
+            'protocol': None,
+        }
+        try:
+            manager = await self._awg(source)
+            running = []
+            for proto in protocols:
+                if await asyncio.to_thread(
+                        self._container_running, manager, proto):
+                    running.append(proto)
+            if not running:
+                row['status'] = 'no_instance'
+                return row
+            for proto in running:
+                if await asyncio.to_thread(
+                        self._has_profile, manager, proto):
+                    row.update(status='ready', protocol=proto)
+                    return row
+            proto = running[0]
+            reachable = await asyncio.to_thread(
+                self._registration_api_reachable, manager, proto)
+            if reachable is True:
+                row.update(status='can_register', protocol=proto)
+            elif reachable is False:
+                row.update(status='blocked', protocol=proto)
+            else:
+                row.update(status='unknown', protocol=proto)
+        except Exception as exc:
+            logger.warning("warp source probe failed for %s: %s", src_uid, exc)
+            row.update(status='unreachable', protocol=None)
+        return row
+
+    async def probe_sources(self, server_id, uid, source_protocol=None,
+                            concurrency=4):
+        """Which other panel servers can actually donate a WARP profile.
+
+        A source is usable when it already holds a profile, or when its host
+        can still reach the registration API. The UI runs this before offering
+        an import, so a user whose own host is SNI-filtered learns which server
+        to register on instead of guessing.
+        """
+        data = self.load_data()
+        idx, _server = self._server(data, server_id, uid)
+        if idx is None:
+            raise ws.SrvWarpError('srv_warp_identity_mismatch', 409)
+
+        candidates = []
+        for index, source in enumerate(data.get('servers') or []):
+            if index == idx:
+                continue
+            if not ws._norm_uid(source.get('uid') or ''):
+                continue
+            protocols = self._awg_protocols(source)
+            if not protocols:
+                continue
+            candidates.append((source, protocols))
+
+        gate = asyncio.Semaphore(max(1, int(concurrency)))
+
+        async def one(source, protocols):
+            async with gate:
+                return await self._probe_source(source, protocols)
+
+        return list(await asyncio.gather(
+            *[one(source, protocols) for source, protocols in candidates]))
+
     def _register_and_write_conf(self, manager, protocol, uid=None):
         """Register (if needed), generate and sanitize warp0.conf.
 
@@ -437,6 +541,11 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
             )
             if code != 0:
                 logger.warning("wgcf register failed for %s: %s", protocol, err)
+                # A provider TLS/SNI block looks different from every other
+                # failure: the WARP dataplane still works, only registration
+                # is broken. Say so, so the UI can offer a profile import.
+                if self._registration_api_reachable(manager, protocol) is False:
+                    raise ws.SrvWarpError('srv_warp_register_api_unreachable', 502)
                 raise ws.SrvWarpError('srv_warp_register_failed', 502)
 
         _out, err, code = self._sh(

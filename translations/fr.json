@@ -1606,5 +1606,16 @@
   "srv_warp_import_target": "Instance cible",
   "srv_warp_import_action": "Importer",
   "srv_warp_stage_source": "Lecture du profil depuis le serveur source",
-  "srv_warp_stage_handshake": "Vérification de la poignée de main WARP"
+  "srv_warp_stage_handshake": "Vérification de la poignée de main WARP",
+  "srv_warp_import_check": "Vérifier les serveurs sources",
+  "srv_warp_import_checking": "Vérification des serveurs sources…",
+  "srv_warp_source_status_ready": "Profil prêt",
+  "srv_warp_source_status_can_register": "Peut s'enregistrer",
+  "srv_warp_source_status_blocked": "API bloquée par le fournisseur",
+  "srv_warp_source_status_unreachable": "Serveur injoignable",
+  "srv_warp_source_status_no_instance": "Aucune instance AWG active",
+  "srv_warp_source_status_unknown": "Vérification impossible",
+  "srv_warp_import_no_usable": "Aucun serveur ne peut fournir de profil WARP pour l'instant.",
+  "srv_warp_import_copy_hint": "Le profil est copié ici et reste sur la source : ne gardez pas WARP connecté sur les deux hôtes en même temps.",
+  "srv_warp_err_api_unreachable": "Cet hôte ne peut pas joindre l'API d'enregistrement Cloudflare : le fournisseur filtre TLS par nom de serveur. Le tunnel WARP lui-même fonctionne — importez plutôt un profil depuis un autre serveur."
 }

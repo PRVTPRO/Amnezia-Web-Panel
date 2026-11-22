@@ -284,6 +284,12 @@ SRV_WARP_IMPORT_KEYS = {
     'srv_warp_import_source_protocol', 'srv_warp_import_target',
     'srv_warp_import_action',
     'srv_warp_stage_source', 'srv_warp_stage_handshake',
+    'srv_warp_import_check', 'srv_warp_import_checking',
+    'srv_warp_import_no_usable', 'srv_warp_import_copy_hint',
+    'srv_warp_source_status_ready', 'srv_warp_source_status_can_register',
+    'srv_warp_source_status_blocked', 'srv_warp_source_status_unreachable',
+    'srv_warp_source_status_no_instance', 'srv_warp_source_status_unknown',
+    'srv_warp_err_api_unreachable',
 }
 LATER_FEATURE_KEYS = {
     'exit_awg3', 'exit_awg3_hint',

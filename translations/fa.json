@@ -1606,5 +1606,16 @@
   "srv_warp_import_target": "نمونه مقصد",
   "srv_warp_import_action": "درون‌ریزی",
   "srv_warp_stage_source": "خواندن نمایه از سرور منبع",
-  "srv_warp_stage_handshake": "بررسی دست‌دادن WARP"
+  "srv_warp_stage_handshake": "بررسی دست‌دادن WARP",
+  "srv_warp_import_check": "بررسی سرورهای منبع",
+  "srv_warp_import_checking": "در حال بررسی سرورهای منبع…",
+  "srv_warp_source_status_ready": "نمایه آماده است",
+  "srv_warp_source_status_can_register": "می‌تواند ثبت‌نام کند",
+  "srv_warp_source_status_blocked": "API توسط ارائه‌دهنده مسدود شده",
+  "srv_warp_source_status_unreachable": "سرور در دسترس نیست",
+  "srv_warp_source_status_no_instance": "هیچ نمونه AWG در حال اجرا نیست",
+  "srv_warp_source_status_unknown": "بررسی ممکن نشد",
+  "srv_warp_import_no_usable": "در حال حاضر هیچ سروری نمی‌تواند نمایه WARP را بدهد.",
+  "srv_warp_import_copy_hint": "نمایه به اینجا کپی می‌شود و روی منبع باقی می‌ماند: WARP را همزمان روی هر دو میزبان فعال نگه ندارید.",
+  "srv_warp_err_api_unreachable": "این میزبان نمی‌تواند به API ثبت‌نام Cloudflare دسترسی پیدا کند: ارائه‌دهنده TLS را بر اساس نام سرور فیلتر می‌کند. خود تونل WARP کار می‌کند — به‌جای آن نمایه را از سرور دیگر پنل وارد کنید."
 }

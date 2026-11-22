@@ -1606,5 +1606,16 @@
   "srv_warp_import_target": "目标实例",
   "srv_warp_import_action": "导入",
   "srv_warp_stage_source": "正在从来源服务器读取配置",
-  "srv_warp_stage_handshake": "正在校验 WARP 握手"
+  "srv_warp_stage_handshake": "正在校验 WARP 握手",
+  "srv_warp_import_check": "检查来源服务器",
+  "srv_warp_import_checking": "正在检查来源服务器…",
+  "srv_warp_source_status_ready": "配置已就绪",
+  "srv_warp_source_status_can_register": "可以注册",
+  "srv_warp_source_status_blocked": "API 被运营商封锁",
+  "srv_warp_source_status_unreachable": "服务器无法访问",
+  "srv_warp_source_status_no_instance": "没有运行中的 AWG 实例",
+  "srv_warp_source_status_unknown": "无法检查",
+  "srv_warp_import_no_usable": "当前没有服务器可以提供 WARP 配置。",
+  "srv_warp_import_copy_hint": "配置会复制到此处，同时保留在来源服务器上：请勿在两台主机上同时启用 WARP。",
+  "srv_warp_err_api_unreachable": "此主机无法连接 Cloudflare 注册 API：运营商按服务器名称过滤 TLS。WARP 隧道本身可用——请改为从另一台面板服务器导入配置。"
 }

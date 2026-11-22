@@ -71,6 +71,19 @@ SRV_WARP_KEYS = {
     'srv_warp_import_source_protocol',
     'srv_warp_import_target',
     'srv_warp_import_action',
+    # Source capability check: tells the user which server can donate a
+    # profile and which one the provider blocks.
+    'srv_warp_import_check',
+    'srv_warp_import_checking',
+    'srv_warp_import_no_usable',
+    'srv_warp_import_copy_hint',
+    'srv_warp_source_status_ready',
+    'srv_warp_source_status_can_register',
+    'srv_warp_source_status_blocked',
+    'srv_warp_source_status_unreachable',
+    'srv_warp_source_status_no_instance',
+    'srv_warp_source_status_unknown',
+    'srv_warp_err_api_unreachable',
 }
 
 WARP_STAGE_KEYS = {
@@ -161,6 +174,34 @@ class WarpTemplateRenderTests(unittest.TestCase):
         # The WARP host app must never fall through to the protocol install
         # wizard (rknblock-style direct call instead).
         self.assertNotIn("openInstallModal('warp'", page)
+
+
+class WarpImportUiGlobalsTests(unittest.TestCase):
+    """Every handler the WARP markup calls must be declared on the same page."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.page = (ROOT / 'templates' / 'server.html').read_text(encoding='utf-8')
+
+    def test_warp_handlers_are_declared(self):
+        handlers = set(re.findall(r'on(?:click|change)="(\w+)\(', self.page))
+        warp_handlers = {name for name in handlers if 'arp' in name}
+        self.assertTrue(warp_handlers, 'no WARP handlers found in markup')
+        for name in sorted(warp_handlers):
+            self.assertIn('function %s' % name, self.page,
+                          '%s is called by markup but not declared' % name)
+
+    def test_the_source_check_is_wired_up(self):
+        self.assertIn('id="warp-import-check-btn"', self.page)
+        self.assertIn('function checkWarpImportSources', self.page)
+        self.assertIn('function renderWarpImportSources', self.page)
+        self.assertIn('function onWarpImportSourceChange', self.page)
+        # A failed install must be able to offer the import directly.
+        self.assertIn('id="installWarpCta"', self.page)
+        self.assertIn("'srv_warp_register_api_unreachable'", self.page)
+        # The old closure-based handler is gone: a dangling onchange callback
+        # throws a ReferenceError the moment the select changes.
+        self.assertNotIn('syncWarpImportForm', self.page)
 
 
 class WarpStoreInstallTemplateTests(unittest.TestCase):

@@ -1,5 +1,6 @@
 """Тесты импорта WARP-профиля с другого сервера (фича для SNI-фильтрованных хостов)."""
 
+import asyncio
 import json
 import os
 import shutil
@@ -126,6 +127,33 @@ class WarpImportApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409, response.text)
         self.assertEqual(response.json()['code'], 'srv_warp_tos_required')
 
+    # ----- source capability check -----------------------------------------
+
+    def test_sources_endpoint_returns_probe_rows(self):
+        async def fake_probe(server_id, uid, source_protocol=None):
+            return [{'uid': 'source-uid', 'name': 'Open host', 'host': 'x',
+                     'protocols': ['awg3'], 'status': 'ready',
+                     'protocol': 'awg3'}]
+
+        with mock.patch.object(panel.warp_runtime, 'probe_sources', fake_probe):
+            response = self.client.post('/api/servers/0/warp/import/sources',
+                                        json={'server_uid': 'target-uid'})
+
+        self.assertEqual(response.status_code, 200, response.text)
+        rows = response.json()['sources']
+        self.assertEqual([row['status'] for row in rows], ['ready'])
+
+    def test_sources_endpoint_rejects_an_unknown_uid(self):
+        async def fake_probe(server_id, uid, source_protocol=None):
+            self.fail('the probe must not run for an unknown server')
+
+        with mock.patch.object(panel.warp_runtime, 'probe_sources', fake_probe):
+            response = self.client.post('/api/servers/0/warp/import/sources',
+                                        json={'server_uid': 'nope-uid'})
+
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()['code'], 'srv_warp_identity_mismatch')
+
     # ----- happy path ------------------------------------------------------
 
     def test_import_records_after_a_handshake(self):
@@ -224,6 +252,149 @@ class WarpImportSecretsTests(unittest.TestCase):
         self.assertIn('SECRET-PRIVATE-KEY', joined_scripts)
         self.assertTrue(any('chmod 600' in s or 'chmod 700' in s
                             for s in manager.ssh.scripts + manager.ssh.commands))
+
+
+class WarpSourceProbeTests(unittest.TestCase):
+    """Which servers can donate a profile, and why the others cannot."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._data_file = panel.DATA_FILE
+        panel.DATA_FILE = os.path.join(self.tmp, 'data.json')
+        self.addCleanup(self._restore)
+        self.runtime = panel.warp_runtime
+
+    def _restore(self):
+        panel.DATA_FILE = self._data_file
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def write_data(self, servers):
+        with open(panel.DATA_FILE, 'w', encoding='utf-8') as handle:
+            json.dump({'servers': servers, 'users': [], 'user_connections': []},
+                      handle)
+
+    def install(self, *, running=True, profile=False, api=True):
+        """Point the runtime at one fake host with the given capability."""
+
+        class FakeSSH:
+            def run_sudo_command(self, command, timeout=60):
+                if 'test -s' in command:
+                    return '', '', 0 if profile else 1
+                if 'api.cloudflareclient.com' in command:
+                    if api is None:
+                        return '', 'curl: not found', 127
+                    return ('200' if api else '000'), '', 0
+                return '', '', 0
+
+            def run_sudo_script(self, script, timeout=120):
+                return '', '', 0
+
+        class FakeManager:
+            def _container_name(self, protocol):
+                return 'amnezia-awg3'
+
+        ssh = FakeSSH()
+        manager = FakeManager()
+        manager.ssh = ssh
+        for name, value in (('get_ssh', lambda server: ssh),
+                            ('awg_manager_factory', lambda conn: manager),
+                            ('_container_running', lambda m, p: running)):
+            patcher = mock.patch.object(self.runtime, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def probe(self, servers):
+        self.write_data(servers)
+        return asyncio.run(self.runtime.probe_sources(0, 'target-uid'))
+
+    def test_a_stored_profile_marks_the_source_ready(self):
+        self.install(profile=True)
+        rows = self.probe([server_record('target-uid', 'Blocked', {'awg3': {}}),
+                           server_record('source-uid', 'Open', {'awg3': {}})])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['status'], 'ready')
+        self.assertEqual(rows[0]['protocol'], 'awg3')
+
+    def test_reachable_api_means_the_source_can_register(self):
+        self.install(profile=False, api=True)
+        rows = self.probe([server_record('target-uid', 'Blocked', {'awg3': {}}),
+                           server_record('source-uid', 'Open', {'awg3': {}})])
+        self.assertEqual(rows[0]['status'], 'can_register')
+
+    def test_a_blocked_api_is_reported_as_blocked(self):
+        self.install(profile=False, api=False)
+        rows = self.probe([server_record('target-uid', 'Blocked', {'awg3': {}}),
+                           server_record('source-uid', 'Blocked too', {'awg3': {}})])
+        self.assertEqual(rows[0]['status'], 'blocked')
+
+    def test_an_unprobeable_source_is_reported_as_unknown(self):
+        self.install(profile=False, api=None)
+        rows = self.probe([server_record('target-uid', 'Blocked', {'awg3': {}}),
+                           server_record('source-uid', 'Odd', {'awg3': {}})])
+        self.assertEqual(rows[0]['status'], 'unknown')
+
+    def test_a_stopped_instance_is_reported_not_usable(self):
+        self.install(running=False)
+        rows = self.probe([server_record('target-uid', 'Blocked', {'awg3': {}}),
+                           server_record('source-uid', 'Stopped', {'awg3': {}})])
+        self.assertEqual(rows[0]['status'], 'no_instance')
+
+    def test_an_ssh_failure_is_reported_as_unreachable(self):
+        def boom(server):
+            raise RuntimeError('ssh handshake failed')
+
+        patcher = mock.patch.object(self.runtime, 'get_ssh', boom)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        rows = self.probe([server_record('target-uid', 'Blocked', {'awg3': {}}),
+                           server_record('source-uid', 'Dead', {'awg3': {}})])
+        self.assertEqual(rows[0]['status'], 'unreachable')
+
+    def test_the_target_itself_is_never_offered(self):
+        self.install(profile=True)
+        rows = self.probe([server_record('target-uid', 'Blocked', {'awg3': {}})])
+        self.assertEqual(rows, [])
+
+
+class WarpRegisterFailureClassTests(unittest.TestCase):
+    """A provider TLS/SNI block must be reported as such, not as a generic failure."""
+
+    def make_manager(self, probe_status):
+        class FakeSSH:
+            def run_sudo_command(self, command, timeout=60):
+                if 'command -v wgcf' in command:
+                    return '/usr/local/bin/wgcf\n', '', 0
+                if 'api.cloudflareclient.com' in command:
+                    return probe_status, '', 0
+                if 'test -f' in command:
+                    return '', '', 1
+                if 'wgcf register' in command:
+                    return '', 'TLS handshake failed', 1
+                return '', '', 0
+
+            def run_sudo_script(self, script, timeout=120):
+                return '', '', 0
+
+        class FakeManager:
+            ssh = FakeSSH()
+
+            def _container_name(self, protocol):
+                return 'amnezia-awg3'
+
+        return FakeManager()
+
+    def test_a_blocked_api_raises_the_dedicated_code(self):
+        manager = self.make_manager('000')
+        with self.assertRaises(panel.SrvWarpError) as ctx:
+            panel.warp_runtime._register_and_write_conf(manager, 'awg3')
+        self.assertEqual(ctx.exception.code,
+                         'srv_warp_register_api_unreachable')
+
+    def test_any_other_register_failure_keeps_the_generic_code(self):
+        manager = self.make_manager('200')
+        with self.assertRaises(panel.SrvWarpError) as ctx:
+            panel.warp_runtime._register_and_write_conf(manager, 'awg3')
+        self.assertEqual(ctx.exception.code, 'srv_warp_register_failed')
 
 
 if __name__ == '__main__':

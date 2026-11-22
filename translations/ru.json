@@ -1606,5 +1606,16 @@
   "srv_warp_import_target": "Целевой инстанс",
   "srv_warp_import_action": "Импортировать",
   "srv_warp_stage_source": "Чтение профиля с сервера-источника",
-  "srv_warp_stage_handshake": "Проверка WARP-хендшейка"
+  "srv_warp_stage_handshake": "Проверка WARP-хендшейка",
+  "srv_warp_import_check": "Проверить серверы-источники",
+  "srv_warp_import_checking": "Проверка серверов-источников…",
+  "srv_warp_source_status_ready": "Профиль готов",
+  "srv_warp_source_status_can_register": "Сможет зарегистрировать",
+  "srv_warp_source_status_blocked": "API заблокирован провайдером",
+  "srv_warp_source_status_unreachable": "Сервер недоступен",
+  "srv_warp_source_status_no_instance": "Нет запущенного инстанса AWG",
+  "srv_warp_source_status_unknown": "Не удалось проверить",
+  "srv_warp_import_no_usable": "Сейчас ни один сервер не может отдать профиль WARP.",
+  "srv_warp_import_copy_hint": "Профиль копируется сюда и остаётся на источнике: не держите WARP включённым на обоих хостах одновременно.",
+  "srv_warp_err_api_unreachable": "Этот хост не может подключиться к API регистрации Cloudflare: провайдер фильтрует TLS по имени сервера. Сам туннель WARP при этом работает — импортируйте профиль с другого сервера панели."
 }

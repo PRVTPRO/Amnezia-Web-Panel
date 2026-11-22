@@ -1813,6 +1813,8 @@
         installOp = {opId, flow, offset: 0, timer: null, creep: null, creepRunning: false, display: 0, cap: 0, step: 0, total: 0};
         document.getElementById('installForm').classList.add('hidden');
         document.getElementById('installDone').style.display = 'none';
+        const warpCta = document.getElementById('installWarpCta');
+        if (warpCta) warpCta.classList.add('hidden');
         const progressDiv = document.getElementById('installProgress');
         progressDiv.classList.remove('hidden');
         const logEl = document.getElementById('installLog');
@@ -1964,8 +1966,6 @@
                 else if (flow === 'warp' || flow === 'warp_import') warpBusy = false;
                 // WARP failures carry a stable code: show the translated text
                 // instead of the raw srv_warp_* code in the log and the toast.
-                // WARP failures carry a stable code: show the translated text
-                // instead of the raw srv_warp_* code in the log and the toast.
                 const opErrorText = (flow === 'warp' || flow === 'warp_import')
                     && data.error?.code
                     ? warpErrorMessage({payload: data.error})
@@ -1988,6 +1988,14 @@
                     await loadWarpStatus(true);
                     applyInstalledAppsVisibility();
                     renderMarketplace();
+                }
+                // An SNI-filtered host can never register: offer the import
+                // straight from the failure instead of leaving a dead end.
+                const cta = document.getElementById('installWarpCta');
+                if (cta) {
+                    cta.classList.toggle(
+                        'hidden',
+                        data.error?.code !== 'srv_warp_register_api_unreachable');
                 }
                 document.getElementById('installDone').style.display = '';
             } else if (data.state === 'cancelled') {
@@ -2558,16 +2566,25 @@
                 <h2 class="modal-title">{{ _('srv_warp_import_title') }}</h2>
                 <button class="modal-close" onclick="closeModal('warpImportModal')">×</button>
             </div>
-            <div class="form-hint" style="margin-bottom:12px;">{{ _('srv_warp_import_hint') }}</div>
+            <div class="form-hint" style="margin-bottom:10px;">{{ _('srv_warp_import_hint') }}</div>
+            <button class="btn btn-secondary btn-sm" id="warp-import-check-btn"
+                onclick="checkWarpImportSources()" style="width:100%; margin-bottom:10px;">
+                {{ _('srv_warp_import_check') }}
+            </button>
+            <div id="warp-import-sources" class="hidden" style="margin-bottom:12px;"></div>
+            <div id="warp-import-no-usable" class="form-hint is-error hidden">
+                {{ _('srv_warp_import_no_usable') }}
+            </div>
             <div id="warp-import-empty" class="form-hint hidden">{{ _('srv_warp_import_no_sources') }}</div>
             <label class="form-label" for="warp-import-source">{{ _('srv_warp_import_source') }}</label>
             <select id="warp-import-source" class="input" style="margin-bottom:12px;"
-                onchange="syncWarpImportForm()"></select>
+                onchange="onWarpImportSourceChange()"></select>
             <label class="form-label" for="warp-import-source-protocol">{{ _('srv_warp_import_source_protocol') }}</label>
             <select id="warp-import-source-protocol" class="input" style="margin-bottom:12px;"></select>
             <label class="form-label" for="warp-import-target">{{ _('srv_warp_import_target') }}</label>
             <select id="warp-import-target" class="input" style="margin-bottom:12px;"></select>
             <div id="warp-import-error" class="form-hint is-error hidden"></div>
+            <div class="form-hint" style="margin-top:10px;">{{ _('srv_warp_import_copy_hint') }}</div>
             <div class="modal-footer">
                 <button class="btn btn-secondary" onclick="closeModal('warpImportModal')">{{ _('cancel') }}</button>
                 <button class="btn btn-primary" onclick="importWarp()" id="warp-import-btn">
@@ -3223,6 +3240,15 @@
             <div class="awg-plugin-stage" id="installStage"></div>
             <div class="log-output" id="installLog"></div>
             <div class="mt-md" id="installDone" style="display:none;">
+                <div id="installWarpCta" class="hidden" style="margin-bottom:10px;">
+                    <div class="form-hint is-error" style="margin-bottom:8px;">
+                        {{ _('srv_warp_err_api_unreachable') }}
+                    </div>
+                    <button class="btn btn-secondary" style="width:100%"
+                        onclick="openWarpImportModal(true)">
+                        {{ _('srv_warp_import') }}
+                    </button>
+                </div>
                 <button class="btn btn-primary" onclick="closeModal('installModal'); window.location.reload();"
                     style="width:100%">
                     {{ _('done') }}
@@ -9379,6 +9405,7 @@
         srv_warp_source_register_failed: 'srv_warp_err_source_register',
         srv_warp_handshake_failed: 'srv_warp_err_handshake',
         srv_warp_quota_exhausted: 'srv_warp_err_quota',
+        srv_warp_register_api_unreachable: 'srv_warp_err_api_unreachable',
         install_in_progress: 'srv_warp_err_job_busy',
     };
 
@@ -9593,17 +9620,131 @@
     // Import a WARP profile registered on another panel server. Needed when
     // this host cannot reach api.cloudflareclient.com (the provider filters
     // TLS by SNI) while the WARP tunnel itself works.
-    function openWarpImportModal() {
+    const WARP_IMPORT_STATUS_KEYS = {
+        ready: 'srv_warp_source_status_ready',
+        can_register: 'srv_warp_source_status_can_register',
+        blocked: 'srv_warp_source_status_blocked',
+        unreachable: 'srv_warp_source_status_unreachable',
+        no_instance: 'srv_warp_source_status_no_instance',
+        unknown: 'srv_warp_source_status_unknown',
+    };
+    const WARP_IMPORT_STATUS_CLASS = {
+        ready: 'badge-success',
+        can_register: 'badge-success',
+        blocked: 'badge-danger',
+        unreachable: 'badge-danger',
+        no_instance: 'badge-warn',
+        unknown: 'badge-warn',
+    };
+    let warpImportChecked = null;
+
+    function warpImportSourceUsable(row) {
+        return !!row && (row.status === 'ready' || row.status === 'can_register');
+    }
+
+    function fillWarpImportSourceProtocols() {
+        const sourceSel = document.getElementById('warp-import-source');
+        const protoSel = document.getElementById('warp-import-source-protocol');
+        if (!sourceSel || !protoSel) return;
+        const rows = (Array.isArray(warpImportChecked) && warpImportChecked.length)
+            ? warpImportChecked
+            : (Array.isArray(WARP_IMPORT_SOURCES) ? WARP_IMPORT_SOURCES : []);
+        const picked = rows.find(item => item.uid === sourceSel.value);
+        const protos = (picked && Array.isArray(picked.protocols)) ? picked.protocols : [];
+        protoSel.innerHTML = protos.map(proto =>
+            `<option value="${escapeHtml(proto)}">${escapeHtml(proto)}</option>`
+        ).join('');
+        protoSel.disabled = !protos.length;
+    }
+
+    function onWarpImportSourceChange() {
+        fillWarpImportSourceProtocols();
+    }
+
+    // Paint the result of the source check: which server can hand over a
+    // profile, which can register one, and which is blocked by the provider.
+    function renderWarpImportSources(rows) {
+        const listEl = document.getElementById('warp-import-sources');
+        const sourceSel = document.getElementById('warp-import-source');
+        const noUsable = document.getElementById('warp-import-no-usable');
+        const importBtn = document.getElementById('warp-import-btn');
+        if (!listEl || !sourceSel) return;
+        listEl.classList.remove('hidden');
+        listEl.innerHTML = rows.map(row => {
+            const cls = WARP_IMPORT_STATUS_CLASS[row.status] || 'badge-warn';
+            const text = _(WARP_IMPORT_STATUS_KEYS[row.status] || 'srv_warp_source_status_unknown');
+            const proto = row.protocol ? ' · ' + row.protocol : '';
+            return '<div class="flex gap-sm" style="align-items:center; margin-bottom:6px;">' +
+                `<span class="badge ${cls}"><span class="badge-dot"></span> ${escapeHtml(text)}</span>` +
+                `<span class="text-sm">${escapeHtml(row.name)}${escapeHtml(proto)}</span>` +
+                '</div>';
+        }).join('');
+
+        // A blocked host cannot supply a profile: keep it visible (the reason
+        // must stay readable) but not selectable.
+        sourceSel.innerHTML = rows.map(row => {
+            const text = _(WARP_IMPORT_STATUS_KEYS[row.status] || 'srv_warp_source_status_unknown');
+            const disabled = warpImportSourceUsable(row) ? '' : ' disabled';
+            return `<option value="${escapeHtml(row.uid)}"${disabled}>` +
+                `${escapeHtml(row.name + ' — ' + text)}</option>`;
+        }).join('');
+        const first = rows.find(row => row.status === 'ready')
+            || rows.find(row => row.status === 'can_register');
+        if (first) sourceSel.value = first.uid;
+        fillWarpImportSourceProtocols();
+
+        const anyUsable = rows.some(warpImportSourceUsable);
+        if (noUsable) noUsable.classList.toggle('hidden', anyUsable);
+        if (importBtn) importBtn.disabled = !anyUsable || !sourceSel.value;
+    }
+
+    async function checkWarpImportSources() {
+        const listEl = document.getElementById('warp-import-sources');
+        const btn = document.getElementById('warp-import-check-btn');
+        const noUsable = document.getElementById('warp-import-no-usable');
+        if (btn) btn.disabled = true;
+        if (noUsable) noUsable.classList.add('hidden');
+        if (listEl) {
+            listEl.classList.remove('hidden');
+            listEl.innerHTML = `<div class="form-hint">${escapeHtml(_('srv_warp_import_checking'))}</div>`;
+        }
+        try {
+            const res = await warpPost('import/sources', {});
+            const rows = (res && Array.isArray(res.sources)) ? res.sources : [];
+            warpImportChecked = rows;
+            if (!rows.length) {
+                if (listEl) {
+                    listEl.innerHTML = `<div class="form-hint">` +
+                        `${escapeHtml(_('srv_warp_import_no_sources'))}</div>`;
+                }
+                return;
+            }
+            renderWarpImportSources(rows);
+        } catch (err) {
+            if (listEl) {
+                listEl.innerHTML = `<div class="form-hint is-error">` +
+                    `${escapeHtml(warpErrorMessage(err))}</div>`;
+            }
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    }
+
+    function openWarpImportModal(autoCheck) {
         const sources = Array.isArray(WARP_IMPORT_SOURCES) ? WARP_IMPORT_SOURCES : [];
         const emptyEl = document.getElementById('warp-import-empty');
         const sourceSel = document.getElementById('warp-import-source');
-        const protoSel = document.getElementById('warp-import-source-protocol');
         const targetSel = document.getElementById('warp-import-target');
         const errorEl = document.getElementById('warp-import-error');
+        const listEl = document.getElementById('warp-import-sources');
+        const noUsable = document.getElementById('warp-import-no-usable');
         const btn = document.getElementById('warp-import-btn');
         if (errorEl) { errorEl.textContent = ''; errorEl.classList.add('hidden'); }
+        if (listEl) { listEl.innerHTML = ''; listEl.classList.add('hidden'); }
+        if (noUsable) noUsable.classList.add('hidden');
         if (btn) btn.disabled = !sources.length;
         if (emptyEl) emptyEl.classList.toggle('hidden', sources.length > 0);
+        warpImportChecked = null;
 
         if (sourceSel) {
             sourceSel.innerHTML = sources.map(item =>
@@ -9613,17 +9754,7 @@
         }
 
         // Source instances of the selected source server.
-        const fillSourceProtocols = () => {
-            if (!sourceSel || !protoSel) return;
-            const picked = sources.find(item => item.uid === sourceSel.value);
-            const protos = (picked && Array.isArray(picked.protocols)) ? picked.protocols : [];
-            protoSel.innerHTML = protos.map(proto =>
-                `<option value="${escapeHtml(proto)}">${escapeHtml(proto)}</option>`
-            ).join('');
-            protoSel.disabled = !protos.length;
-        };
-        if (sourceSel) sourceSel.onchange = fillSourceProtocols;
-        fillSourceProtocols();
+        fillWarpImportSourceProtocols();
 
         // Target instances on this server: every registered AWG instance.
         if (targetSel) {
@@ -9635,7 +9766,13 @@
             ).join('');
             targetSel.disabled = !targets.length;
         }
+        // When the modal is opened from a failed install it must not sit
+        // behind the install progress one.
+        if (document.getElementById('installModal')?.classList.contains('active')) {
+            closeModal('installModal');
+        }
         openModal('warpImportModal');
+        if (autoCheck && sources.length) checkWarpImportSources();
     }
 
     async function importWarp() {

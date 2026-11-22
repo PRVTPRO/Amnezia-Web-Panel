@@ -3160,6 +3160,11 @@ class SrvWarpImportRequest(BaseModel):
     accept_tos: Optional[bool] = False
 
 
+class SrvWarpImportSourcesRequest(BaseModel):
+    """Body of /warp/import/sources: which server is asking for candidates."""
+    server_uid: Optional[str] = None
+
+
 class SmartRouteOwnSubnetsRequest(BaseModel):
     cidrs: list = []
 
@@ -6898,6 +6903,33 @@ async def api_srv_warp_import(request: Request, server_id: int,
         asyncio.create_task(_run_warp_import(
             op['id'], idx, uid, source_uid, protocol, source_protocol))
         return {'operation_id': op['id']}
+    except SrvWarpError as exc:
+        return JSONResponse({'error': exc.code, 'code': exc.code},
+                            status_code=exc.http_status)
+
+
+@app.post('/api/servers/{server_id}/warp/import/sources', tags=["Servers"])
+async def api_srv_warp_import_sources(request: Request, server_id: int,
+                                      req: SrvWarpImportSourcesRequest):
+    """Probe which panel servers can actually donate a WARP profile.
+
+    Registration is impossible from an SNI-filtered host, so the user needs to
+    know which *other* server can either hand over a stored profile or still
+    register one. That check is an SSH round trip per candidate and runs only
+    when asked (the UI's "check servers" button).
+    """
+    actor = _request_user(request)
+    if not actor or actor.get('role') not in ('admin', 'support'):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        idx = _rkn_server_index(data, server_id, req.server_uid)
+        if idx is None:
+            raise SrvWarpError('srv_warp_identity_mismatch', 409)
+        uid = data['servers'][idx].get('uid') or ''
+        if not uid:
+            raise SrvWarpError('srv_warp_identity_mismatch', 409)
+        return {'sources': await warp_runtime.probe_sources(idx, uid)}
     except SrvWarpError as exc:
         return JSONResponse({'error': exc.code, 'code': exc.code},
                             status_code=exc.http_status)

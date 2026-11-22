@@ -1606,5 +1606,16 @@
   "srv_warp_import_target": "Target instance",
   "srv_warp_import_action": "Import",
   "srv_warp_stage_source": "Reading the profile from the source server",
-  "srv_warp_stage_handshake": "Verifying the WARP handshake"
+  "srv_warp_stage_handshake": "Verifying the WARP handshake",
+  "srv_warp_import_check": "Check source servers",
+  "srv_warp_import_checking": "Checking source servers…",
+  "srv_warp_source_status_ready": "Profile ready",
+  "srv_warp_source_status_can_register": "Can register",
+  "srv_warp_source_status_blocked": "API blocked by provider",
+  "srv_warp_source_status_unreachable": "Server unreachable",
+  "srv_warp_source_status_no_instance": "No running AWG instance",
+  "srv_warp_source_status_unknown": "Could not check",
+  "srv_warp_import_no_usable": "No server can donate a WARP profile right now.",
+  "srv_warp_import_copy_hint": "The profile is copied here and stays on the source: do not keep WARP connected on both hosts at the same time.",
+  "srv_warp_err_api_unreachable": "This host cannot reach the Cloudflare registration API: the provider filters TLS by server name. The WARP tunnel itself works — import a profile from another panel server instead."
 }
