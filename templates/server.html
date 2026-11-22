@@ -1914,6 +1914,9 @@
                 : `/api/servers/${SERVER_ID}/${installOp.flow}/install/${encodeURIComponent(installOp.opId)}?offset=${installOp.offset}`;
             const data = await apiCall(url, 'GET');
             installOp.offset = data.next_offset || installOp.offset;
+            // The backend echoes the flow: trust it over the caller's guess,
+            // so a stage map can never be looked up under the wrong key.
+            if (data.flow) installOp.flow = data.flow;
             setInstallOpProgress(data.step, data.total, data.percent, data.state === 'running', data.stage);
             appendInstallOpLines(data.lines);
             if (data.state === 'running') {
@@ -9799,7 +9802,9 @@
                 closeModal('warpImportModal');
                 warpBusy = true;
                 renderWarpCard();
-                renderInstallOpProgress(res.operation_id, 'warp');
+                // The import has its own stage map (source/handshake): the
+                // shared poller must look it up, not the install one.
+                renderInstallOpProgress(res.operation_id, 'warp_import');
                 return;
             }
             await loadWarpStatus(true);

@@ -397,5 +397,75 @@ class WarpRegisterFailureClassTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 'srv_warp_register_failed')
 
 
+class WarpImportStageMapTests(unittest.TestCase):
+    """The import flow has its own stage sequence, registered in the engine."""
+
+    def test_import_stages_are_monotonic_unique_and_registered(self):
+        stages = panel.WARP_IMPORT_STAGES
+        keys = list(stages)
+        values = [stages[key] for key in keys]
+        self.assertEqual(len(keys), len(values))
+        self.assertEqual(values, sorted(values))
+        self.assertEqual(len(values), len(set(values)))
+        self.assertEqual(values[0], 1)
+        self.assertTrue(all(isinstance(value, int) and not isinstance(value, bool)
+                            for value in values))
+        # Exact import-only sequence: 'source' and 'handshake' are real
+        # boundaries, not aliases of the install stages.
+        self.assertEqual(stages, {
+            'start': 1, 'source': 2, 'profile': 3, 'handshake': 4,
+            'startsh': 5, 'done': 6,
+        })
+        self.assertIs(panel.FLOW_STAGES['warp_import'], stages)
+        self.assertEqual(panel.FLOW_STAGES['warp_import'], stages)
+        self.assertEqual(panel.FLOW_TOTALS['warp_import'], max(values))
+
+
+class WarpImportHandshakeCleanupTests(unittest.TestCase):
+    """A dead handshake must leave no profile the install path could adopt."""
+
+    def test_failed_handshake_removes_profile_without_registering(self):
+        runtime = panel.warp_runtime
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        store = WarpStateStore(os.path.join(tmp, 'warp_state.json'))
+        old_store = runtime.state_store
+        runtime.state_store = store
+        self.addCleanup(setattr, runtime, 'state_store', old_store)
+
+        data = {'servers': [
+            server_record('target-uid', 'Blocked', {'awg3': {}}),
+            server_record('source-uid', 'Open', {'awg3': {}}),
+        ]}
+        manager = mock.MagicMock()
+        remove = mock.MagicMock()
+        patches = (
+            ('load_data', lambda: data),
+            ('get_ssh', lambda server: object()),
+            ('awg_manager_factory', lambda ssh: manager),
+            ('_container_running', lambda m, p: True),
+            ('_source_profile', lambda m, p: ('ACC', 'PROFILE')),
+            ('_write_imported_profile', lambda m, p, a, pf: 'deadbeef'),
+            ('_handshake_probe', lambda m, p: None),
+            ('_remove_imported_profile', remove),
+            ('job_end', mock.MagicMock()),
+        )
+        for name, replacement in patches:
+            patcher = mock.patch.object(runtime, name, replacement)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+        with self.assertRaises(panel.SrvWarpError) as ctx:
+            asyncio.run(runtime.import_profile(
+                0, 'target-uid', 'source-uid', protocol='awg3'))
+
+        self.assertEqual(ctx.exception.code, 'srv_warp_handshake_failed')
+        remove.assert_called_once_with(manager, 'awg3')
+        server_state = (store.load().get('servers') or {}).get('target-uid') or {}
+        rec = (server_state.get('protocols') or {}).get('awg3') or {}
+        self.assertFalse((rec.get('warp') or {}).get('registered', False))
+        self.assertIsNone((rec.get('warp') or {}).get('conf_hash'))
+
+
 if __name__ == '__main__':
     unittest.main()

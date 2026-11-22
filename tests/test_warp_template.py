@@ -213,6 +213,34 @@ class WarpImportUiGlobalsTests(unittest.TestCase):
         # throws a ReferenceError the moment the select changes.
         self.assertNotIn('syncWarpImportForm', self.page)
 
+    def test_import_uses_the_import_stage_map(self):
+        # Scope to importWarp's body: installWarp legitimately renders the
+        # 'warp' map a few lines below, and must not be matched here.
+        match = re.search(r'async function importWarp\(\)(.*?)\n    async function ',
+                          self.page, re.S)
+        self.assertIsNotNone(match, 'importWarp body not found')
+        body = match.group(1)
+        self.assertIn("renderInstallOpProgress(res.operation_id, 'warp_import')",
+                      body)
+        self.assertNotIn("renderInstallOpProgress(res.operation_id, 'warp')",
+                         body)
+
+    def test_poller_prefers_the_flow_from_the_payload(self):
+        match = re.search(
+            r'async function pollInstallOp\(\)(.*?)\n    (?:async )?function ',
+            self.page, re.S)
+        self.assertIsNotNone(match, 'pollInstallOp body not found')
+        self.assertIn('if (data.flow) installOp.flow = data.flow;',
+                      match.group(1))
+
+    def test_the_import_stage_map_declares_source_and_handshake(self):
+        block = re.search(r'\n        warp_import: \{(.*?)\n        \}',
+                          self.page, re.S)
+        self.assertIsNotNone(block, 'warp_import stage map not found')
+        for entry in ("source: 'srv_warp_stage_source'",
+                      "handshake: 'srv_warp_stage_handshake'"):
+            self.assertIn(entry, block.group(1))
+
 
 class WarpStoreInstallTemplateTests(unittest.TestCase):
     @classmethod

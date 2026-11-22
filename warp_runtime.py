@@ -335,6 +335,10 @@ class WarpRuntime:
     _HANDSHAKE_PROBE = """IF=warp0
 CONF=__CONF_DIR__/warp0.conf
 [ -f "$CONF" ] || { echo NO_PROFILE; exit 0; }
+# Guarantee the probe interface and its temp file are gone on every exit path,
+# including a kill-switch SIGKILL of the SSH command: a leftover warp0 would
+# otherwise survive until the next probe.
+trap 'ip link del "$IF" 2>/dev/null; rm -f "${TMP:-}"' EXIT
 ip link del "$IF" 2>/dev/null || true
 if command -v amneziawg-go >/dev/null 2>&1 && [ ! -d /sys/module/amneziawg ]; then
   amneziawg-go "$IF" >/dev/null 2>&1 || { echo NO_LINK; exit 0; }
@@ -715,6 +719,22 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
             raise ws.SrvWarpError('srv_warp_register_failed', 502)
         return conf_hash
 
+    def _remove_imported_profile(self, manager, protocol):
+        """Undo _write_imported_profile after a failed handshake probe.
+
+        The install path adopts an existing account.toml without running
+        ``wgcf register`` and without a handshake check, so a profile that
+        never handshook must not stay behind: a later install would silently
+        mark the instance registered on a dead account.
+        """
+        warp_dir = _warp_dir(protocol)
+        _out, err, code = self._sh(
+            manager, protocol,
+            'rm -f %s/account.toml %s/warp0.conf' % (warp_dir, warp_dir))
+        if code != 0:
+            logger.warning("imported profile cleanup failed for %s: %s",
+                           protocol, err)
+
     async def import_profile(self, server_id, uid, source_uid, protocol=None,
                              source_protocol=None, job_id=None,
                              progress=None):
@@ -793,6 +813,11 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
                 stamp = await asyncio.to_thread(
                     self._handshake_probe, manager, proto)
                 if stamp is None:
+                    # Leave nothing the install path could adopt silently:
+                    # without cleanup a later install would treat the dead
+                    # profile as already registered.
+                    await asyncio.to_thread(
+                        self._remove_imported_profile, manager, proto)
                     failed.append(proto)
                     continue
 
