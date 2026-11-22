@@ -1069,7 +1069,7 @@
 </div>
 <script>
     let awgPluginStatus = null;
-    const awgPluginOps = {};
+    let awgPluginLoading = false;    const awgPluginOps = {};
 
     const xrayStageLabels = {{ {
         'start': _('xray_update_stage_start'),
@@ -1104,6 +1104,7 @@
             'manual': _('awg_plugin_manual_step'),
             'no_update': _('awg_plugin_no_update'),
             'error': _('awg_plugin_check_failed'),
+            'loading': _('awg_plugin_loading'),
             'log': _('awg_plugin_log'),
             'rollback': _('awg_plugin_rollback_failed'),
             'cancel': _('awg_plugin_cancel'),
@@ -1250,12 +1251,18 @@
 
     function openAwgPluginModal() {
         openModal('awgPluginModal');
+        // While the real probe runs, the modal must say "checking", not
+        // "failed": no answer yet is not an error.
+        awgPluginLoading = true;
         renderAwgPluginModal();
         // The badge is fed from a 12-hour cache so a page load does not probe
         // every server over SSH. The modal is where the operator decides, so
         // it always reads the real state: a module installed outside the panel
         // must not keep looking absent for half a day.
-        loadAwgPluginStatus(true).then(renderAwgPluginModal);
+        loadAwgPluginStatus(true).then(() => {
+            awgPluginLoading = false;
+            renderAwgPluginModal();
+        });
         if (xrayProtocols.length) {
             // The user is looking at the update dialog: re-probe the core
             // for real. A cached badge may lag a core that was updated
@@ -1285,7 +1292,9 @@
         host.textContent = '';
         const labels = awgPluginLabel();
         if (!awgPluginStatus) {
-            host.appendChild(awgPluginElement('p', 'text-muted', labels.error));
+            host.appendChild(awgPluginElement('p', 'text-muted',
+                awgPluginLoading ? labels.loading : labels.error));
+            return;
         }
         const descriptions = {kernel_module: labels.kernel_desc, userspace: labels.userspace_desc};
         const titles = {kernel_module: labels.kernel, userspace: labels.userspace};
