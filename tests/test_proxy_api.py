@@ -107,6 +107,21 @@ class ProxyPureFunctionsTests(unittest.TestCase):
         account['type'] = 'http'
         self.assertEqual(panel.proxy_account_keys(server, 'socks5', account), [])
 
+    def test_keys_not_issued_for_disabled_account(self):
+        """Выключенная учётка исключена из users — её ключ не работает."""
+        server = {'host': '198.51.100.10',
+                  'protocols': {'socks5': {'port': '1080', 'http_port': '8312',
+                                           'http_enabled': True}}}
+        account = {'login': 'alex', 'password': 's3cret', 'type': 'both',
+                   'enabled': False}
+        self.assertEqual(panel.proxy_account_keys(server, 'socks5', account), [])
+        # Старые записи без поля enabled считаются включёнными.
+        account.pop('enabled')
+        self.assertEqual(len(panel.proxy_account_keys(server, 'socks5', account)), 2)
+        # Строковый false из старых данных тоже выключает учётку.
+        account['enabled'] = 'false'
+        self.assertEqual(panel.proxy_account_keys(server, 'socks5', account), [])
+
     def test_normalize_returns_exactly_the_model_fields(self):
         account = panel.proxy_normalize_account({
             'name': 'Ноутбук', 'login': 'alex_laptop', 'password': 'secret',
@@ -239,6 +254,36 @@ class ProxyStatusApiTests(unittest.TestCase):
         self.assertFalse(body['installed'])
         self.assertEqual(body['accounts'], [])
         self.assertFalse(body['container']['running'])
+        get_ssh.assert_not_called()
+
+    def test_negative_server_id_returns_404(self):
+        """-1 — валидный int для FastAPI, но не индекс сервера."""
+        endpoints = (
+            ('get', '/api/servers/-1/proxy/status', None),
+            ('post', '/api/servers/-1/proxy/install', {}),
+            ('post', '/api/servers/-1/proxy/settings', {}),
+            ('post', '/api/servers/-1/proxy/port-check', {'port': 1080}),
+            ('post', '/api/servers/-1/proxy/accounts',
+             {'login': 'phone', 'password': 'pw', 'type': 'socks5'}),
+            ('post', '/api/servers/-1/proxy/accounts/acct-1', {'login': 'phone'}),
+            ('delete', '/api/servers/-1/proxy/accounts/acct-1', None),
+            ('post', '/api/servers/-1/proxy/accounts/acct-1/toggle',
+             {'enabled': False}),
+            ('get', '/api/servers/-1/proxy/accounts/acct-1/key', None),
+        )
+        for method, path, payload in endpoints:
+            with self.subTest(method=method, path=path):
+                call = getattr(self.client, method)
+                response = call(path, json=payload) if payload is not None \
+                    else call(path)
+                self.assertEqual(response.status_code, 404, response.text)
+
+    def test_settings_reject_log_format_without_traffic_variables(self):
+        with mock.patch.object(panel, 'get_ssh') as get_ssh:
+            response = self.client.post('/api/servers/0/proxy/settings',
+                                        json={'log_format': 'L%Y-%m-%d %H:%M:%S %I %O'})
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn('%U', response.json()['error'])
         get_ssh.assert_not_called()
 
     def test_status_reports_container_accounts_usage_and_keys(self):
@@ -696,6 +741,19 @@ class ProxyListenerSettingsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             panel.proxy_instance_settings(
                 {'listener_type': 'both', 'port': 1080, 'http_port': 1080}, {})
+
+    def test_custom_log_format_requires_traffic_variables(self):
+        """Без %U/%I/%O парсер статистики не видит логин и байты."""
+        for fmt in ('L%Y-%m-%d %H:%M:%S %I %O',
+                    'L%Y-%m-%d %H:%M:%S %U %O',
+                    'L%Y-%m-%d %H:%M:%S %U %I'):
+            with self.subTest(fmt=fmt), self.assertRaises(ValueError):
+                panel.proxy_instance_settings({'log_format': fmt}, {})
+        for fmt in (panel.PROXY_DEFAULT_LOG_FORMAT, 'L%Y %U %I %O'):
+            with self.subTest(fmt=fmt):
+                settings, _ = panel.proxy_instance_settings(
+                    {'log_format': fmt}, {})
+                self.assertEqual(settings['log_format'], fmt)
 
 
 class ProxyCounterTests(unittest.TestCase):

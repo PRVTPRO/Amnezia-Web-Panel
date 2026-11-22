@@ -2069,6 +2069,10 @@ def proxy_next_counter(accounts, record=None):
 
 def proxy_account_keys(server, protocol, account):
     """URL-ключи учётки: socks5 для socks5/both, http для http/both (ТЗ 4.6)."""
+    # Выключенная учётка исключена из users конфига — её ключ не работает.
+    # У старых записей поля enabled нет: такая учётка считается включённой.
+    if not _proxy_bool(account.get('enabled'), True):
+        return []
     record = (server.get('protocols') or {}).get(protocol) or {}
     host, public_port = protocol_public_endpoint(server, protocol)
     kind = str(account.get('type') or 'socks5').strip().lower()
@@ -2296,6 +2300,11 @@ def proxy_instance_settings(payload, existing=None):
         or PROXY_DEFAULT_LOG_FORMAT
     if len(log_format) > 200 or any(ch in log_format for ch in ('"', '\\', '\n', '\r')):
         raise ValueError('log_format: недопустимые символы')
+    # Парсер статистики читает строку «дата время <логин> <in> <out>»: без
+    # %U (логин) и %I/%O (байты) не считаются расход квоты и «онлайн».
+    if log_format != PROXY_DEFAULT_LOG_FORMAT and any(
+            token not in log_format for token in ('%U', '%I', '%O')):
+        raise ValueError('log_format: нужны переменные %U, %I и %O для учёта трафика')
 
     settings = {
         'port': str(port),
@@ -9904,7 +9913,7 @@ def api_proxy_status(request: Request, server_id: int, protocol: str = 'socks5')
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
         data = load_data()
-        if server_id >= len(data['servers']):
+        if not 0 <= server_id < len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
         protocol = protocol if is_valid_protocol(protocol) \
@@ -9986,7 +9995,7 @@ def api_proxy_install(request: Request, server_id: int, req: ProxyInstallRequest
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
         data = load_data()
-        if server_id >= len(data['servers']):
+        if not 0 <= server_id < len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
         protocols = server.setdefault('protocols', {})
@@ -10073,7 +10082,7 @@ def api_proxy_settings(request: Request, server_id: int, req: ProxySettingsReque
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
         data = load_data()
-        if server_id >= len(data['servers']):
+        if not 0 <= server_id < len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
         record = _proxy_require_record(server)
@@ -10146,7 +10155,7 @@ def api_proxy_port_check(request: Request, server_id: int, req: ProxyPortCheckRe
         return JSONResponse({'error': str(e), 'free': False, 'holder': '',
                              'valid': False}, status_code=400)
     data = load_data()
-    if server_id >= len(data['servers']):
+    if not 0 <= server_id < len(data['servers']):
         return JSONResponse({'error': 'Server not found'}, status_code=404)
     ssh = None
     try:
@@ -10177,7 +10186,7 @@ def api_proxy_create_account(request: Request, server_id: int,
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
         data = load_data()
-        if server_id >= len(data['servers']):
+        if not 0 <= server_id < len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
         record = _proxy_require_record(server)
@@ -10217,7 +10226,7 @@ def api_proxy_update_account(request: Request, server_id: int, account_id: str,
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
         data = load_data()
-        if server_id >= len(data['servers']):
+        if not 0 <= server_id < len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
         record = _proxy_require_record(server)
@@ -10264,7 +10273,7 @@ def api_proxy_delete_account(request: Request, server_id: int, account_id: str):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
         data = load_data()
-        if server_id >= len(data['servers']):
+        if not 0 <= server_id < len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
         record = _proxy_require_record(server)
@@ -10300,7 +10309,7 @@ def api_proxy_toggle_account(request: Request, server_id: int, account_id: str,
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
         data = load_data()
-        if server_id >= len(data['servers']):
+        if not 0 <= server_id < len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
         record = _proxy_require_record(server)
@@ -10337,7 +10346,7 @@ def api_proxy_account_key(request: Request, server_id: int, account_id: str):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
         data = load_data()
-        if server_id >= len(data['servers']):
+        if not 0 <= server_id < len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
         record = _proxy_require_record(server)
