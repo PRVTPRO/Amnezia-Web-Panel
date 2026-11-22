@@ -1604,5 +1604,7 @@
   "srv_warp_import_source": "سرور منبع",
   "srv_warp_import_source_protocol": "نمونه منبع",
   "srv_warp_import_target": "نمونه مقصد",
-  "srv_warp_import_action": "درون‌ریزی"
+  "srv_warp_import_action": "درون‌ریزی",
+  "srv_warp_stage_source": "خواندن نمایه از سرور منبع",
+  "srv_warp_stage_handshake": "بررسی دست‌دادن WARP"
 }

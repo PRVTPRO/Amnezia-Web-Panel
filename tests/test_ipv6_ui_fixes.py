@@ -283,6 +283,7 @@ SRV_WARP_IMPORT_KEYS = {
     'srv_warp_import_no_sources', 'srv_warp_import_source',
     'srv_warp_import_source_protocol', 'srv_warp_import_target',
     'srv_warp_import_action',
+    'srv_warp_stage_source', 'srv_warp_stage_handshake',
 }
 LATER_FEATURE_KEYS = {
     'exit_awg3', 'exit_awg3_hint',

@@ -1796,6 +1796,14 @@
             download: 'srv_warp_stage_download', register: 'srv_warp_stage_register',
             profile: 'srv_warp_stage_profile', startsh: 'srv_warp_stage_startsh',
             done: 'srv_warp_stage_done', error: 'error'
+        },
+        // Profile import: no download/register, the account comes from another
+        // server; 'source' and 'handshake' are its own stages.
+        warp_import: {
+            start: 'srv_warp_stage_start', source: 'srv_warp_stage_source',
+            profile: 'srv_warp_stage_profile', handshake: 'srv_warp_stage_handshake',
+            startsh: 'srv_warp_stage_startsh',
+            done: 'srv_warp_stage_done', error: 'error'
         }
     };
 
@@ -1824,15 +1832,17 @@
             protocol: 'install_starting',
             smartroute: 'smartroute_stage_start',
             rknblock: 'rknblock_stage_start',
-            warp: 'srv_warp_stage_start'
+            warp: 'srv_warp_stage_start',
+            warp_import: 'srv_warp_stage_start'
         };
+        const isWarpFlow = flow === 'warp' || flow === 'warp_import';
         if (stageEl) stageEl.textContent = _(initialStageMap[flow] || 'install_starting');
         // Set modal title based on flow
         const titleEl = document.getElementById('installModalTitle');
         if (titleEl) {
             if (flow === 'smartroute') titleEl.textContent = _('smartroute_install');
             else if (flow === 'rknblock') titleEl.textContent = _('rkn_block_title');
-            else if (flow === 'warp') titleEl.textContent = 'Cloudflare WARP';
+            else if (isWarpFlow) titleEl.textContent = 'Cloudflare WARP';
             else titleEl.textContent = _('install_protocol');
         }
         openModal('installModal');
@@ -1895,7 +1905,9 @@
         if (!installOp) return;
         const logEl = document.getElementById('installLog');
         try {
-            const url = installOp.flow === 'warp'
+            // Both the WARP app install and the profile import share the
+            // generic progress endpoint; the other flows have their own.
+            const url = (installOp.flow === 'warp' || installOp.flow === 'warp_import')
                 ? `/api/servers/${SERVER_ID}/install/progress?operation_id=${encodeURIComponent(installOp.opId)}&offset=${installOp.offset}`
                 : `/api/servers/${SERVER_ID}/${installOp.flow}/install/${encodeURIComponent(installOp.opId)}?offset=${installOp.offset}`;
             const data = await apiCall(url, 'GET');
@@ -1937,7 +1949,7 @@
                     await loadRknBlock();
                     applyInstalledAppsVisibility();
                     renderMarketplace();
-                } else if (flow === 'warp') {
+                } else if (flow === 'warp' || flow === 'warp_import') {
                     warpBusy = false;
                     await loadWarpStatus(true);
                     applyInstalledAppsVisibility();
@@ -1949,10 +1961,13 @@
             } else if (data.state === 'failed' || data.state === 'error') {
                 if (flow === 'smartroute') smartRouteBusy = false;
                 else if (flow === 'rknblock') rknBlockBusy = false;
-                else if (flow === 'warp') warpBusy = false;
+                else if (flow === 'warp' || flow === 'warp_import') warpBusy = false;
                 // WARP failures carry a stable code: show the translated text
                 // instead of the raw srv_warp_* code in the log and the toast.
-                const opErrorText = flow === 'warp' && data.error?.code
+                // WARP failures carry a stable code: show the translated text
+                // instead of the raw srv_warp_* code in the log and the toast.
+                const opErrorText = (flow === 'warp' || flow === 'warp_import')
+                    && data.error?.code
                     ? warpErrorMessage({payload: data.error})
                     : (data.error?.message || _('install_error'));
                 if (stageEl) {
@@ -1969,7 +1984,7 @@
                 logEl.appendChild(errDiv);
                 logEl.scrollTop = logEl.scrollHeight;
                 showToast(_('install_error') + ': ' + opErrorText, 'error');
-                if (flow === 'warp') {
+                if (flow === 'warp' || flow === 'warp_import') {
                     await loadWarpStatus(true);
                     applyInstalledAppsVisibility();
                     renderMarketplace();

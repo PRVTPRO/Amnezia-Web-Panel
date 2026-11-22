@@ -1604,5 +1604,7 @@
   "srv_warp_import_source": "来源服务器",
   "srv_warp_import_source_protocol": "来源实例",
   "srv_warp_import_target": "目标实例",
-  "srv_warp_import_action": "导入"
+  "srv_warp_import_action": "导入",
+  "srv_warp_stage_source": "正在从来源服务器读取配置",
+  "srv_warp_stage_handshake": "正在校验 WARP 握手"
 }

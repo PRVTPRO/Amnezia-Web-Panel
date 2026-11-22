@@ -1604,5 +1604,7 @@
   "srv_warp_import_source": "Serveur source",
   "srv_warp_import_source_protocol": "Instance source",
   "srv_warp_import_target": "Instance cible",
-  "srv_warp_import_action": "Importer"
+  "srv_warp_import_action": "Importer",
+  "srv_warp_stage_source": "Lecture du profil depuis le serveur source",
+  "srv_warp_stage_handshake": "Vérification de la poignée de main WARP"
 }

@@ -60,6 +60,8 @@ SRV_WARP_KEYS = {
     'srv_warp_stage_profile',
     'srv_warp_stage_startsh',
     'srv_warp_stage_done',
+    'srv_warp_stage_source',
+    'srv_warp_stage_handshake',
     # WARP profile import from another panel server (SNI-filtered hosts).
     'srv_warp_import',
     'srv_warp_import_title',
@@ -78,6 +80,8 @@ WARP_STAGE_KEYS = {
     'srv_warp_stage_profile',
     'srv_warp_stage_startsh',
     'srv_warp_stage_done',
+    'srv_warp_stage_source',
+    'srv_warp_stage_handshake',
 }
 
 INLINE_SCRIPT_RE = re.compile(r'<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>', re.S)
@@ -163,6 +167,25 @@ class WarpStoreInstallTemplateTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.page = (ROOT / 'templates' / 'server.html').read_text(encoding='utf-8')
+
+    def test_warp_import_flow_is_handled_like_warp_everywhere(self):
+        """The import flow must not fall through the generic WARP branches.
+
+        A flow value the page does not recognise silently skips the terminal
+        handling: the card is never refreshed, `warpBusy` stays true and the
+        error code is printed raw instead of translated.
+        """
+        page = self.page
+        # Shared progress endpoint.
+        self.assertIn("installOp.flow === 'warp' || installOp.flow === 'warp_import'",
+                      page)
+        # Terminal handling (success and error) + busy reset.
+        self.assertIn("flow === 'warp' || flow === 'warp_import'", page)
+        # Stage translations for the import-only stages.
+        self.assertIn("source: 'srv_warp_stage_source'", page)
+        self.assertIn("handshake: 'srv_warp_stage_handshake'", page)
+        # The modal title must be the WARP one, not the protocol picker.
+        self.assertIn("isWarpFlow", page)
 
     def test_warp_card_is_not_forced_visible(self):
         self.assertNotIn("warpCard.classList.remove('installed-app-hidden')",

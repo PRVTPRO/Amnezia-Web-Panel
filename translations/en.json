@@ -1604,5 +1604,7 @@
   "srv_warp_import_source": "Source server",
   "srv_warp_import_source_protocol": "Source instance",
   "srv_warp_import_target": "Target instance",
-  "srv_warp_import_action": "Import"
+  "srv_warp_import_action": "Import",
+  "srv_warp_stage_source": "Reading the profile from the source server",
+  "srv_warp_stage_handshake": "Verifying the WARP handshake"
 }
