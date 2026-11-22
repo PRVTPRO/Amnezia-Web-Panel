@@ -401,6 +401,7 @@ class WarpRuntime:
             manager = await self._awg(server)
 
             done = []
+            failures = []
             for proto in protocols:
                 if not self._container_running(manager, proto):
                     logger.info("warp install: %s/%s container is not running",
@@ -408,21 +409,43 @@ class WarpRuntime:
                     report('skip', 'skipped %s: container is not running'
                            % proto)
                     continue
-                report('download', 'downloading the wgcf client')
-                await asyncio.to_thread(self._ensure_wgcf, manager, proto)
-                report('register', 'registering with Cloudflare')
-                await asyncio.to_thread(
-                    self._register_and_write_conf, manager, proto, uid)
-                report('profile', 'preparing the sanitized WARP profile')
-                # No restart on install: the running container keeps its
-                # current dataplane until the operator links WARP.
-                config_path = self._config_path(manager, proto)
-                report('startsh', 'updating the container start script')
-                await asyncio.to_thread(
-                    manager._write_start_script, proto, config_path, None)
+                # A host-level install covers several instances: one broken
+                # instance must not abort the others (the target list used to
+                # be a single instance, so this loop never had to isolate).
+                try:
+                    report('download', 'downloading the wgcf client')
+                    await asyncio.to_thread(self._ensure_wgcf, manager, proto)
+                    report('register', 'registering with Cloudflare')
+                    await asyncio.to_thread(
+                        self._register_and_write_conf, manager, proto, uid)
+                    report('profile', 'preparing the sanitized WARP profile')
+                    # No restart on install: the running container keeps its
+                    # current dataplane until the operator links WARP.
+                    config_path = self._config_path(manager, proto)
+                    report('startsh', 'updating the container start script')
+                    await asyncio.to_thread(
+                        manager._write_start_script, proto, config_path, None)
+                except ws.SrvWarpError as exc:
+                    logger.warning("warp install failed for %s/%s: %s",
+                                   uid, proto, exc.code)
+                    failures.append((proto, exc.code))
+                    report('failed', 'failed %s: %s' % (proto, exc.code))
+                    continue
+                except Exception as exc:
+                    logger.exception("warp install failed for %s/%s",
+                                     uid, proto)
+                    failures.append((proto, (exc.__class__.__name__,)))
+                    report('failed', 'failed %s: %s'
+                           % (proto, exc.__class__.__name__))
+                    continue
                 done.append(proto)
 
             if not done:
+                # Nothing was registered: report the first concrete reason
+                # instead of a generic "no targets", so a partial failure is
+                # not disguised as an empty target list.
+                if failures:
+                    raise ws.SrvWarpError(failures[0][1], 502)
                 # Every target container is stopped: no profile was registered,
                 # so this is not an install and must not be reported as one.
                 raise ws.SrvWarpError('srv_warp_no_targets', 409)
@@ -517,24 +540,36 @@ class WarpRuntime:
             manager = await self._awg(server) if targets else None
 
             # Repair order from the TZ: (1) creds, (2) start.sh, (3) restart.
+            repaired = []
             for proto in targets:
-                await asyncio.to_thread(self._ensure_wgcf, manager, proto)
-                if not await asyncio.to_thread(
-                        self._conf_present, manager, proto):
-                    await asyncio.to_thread(
-                        self._register_and_write_conf, manager, proto, uid)
-                current = self.state_store.load()
-                if ws.warp_link(ws.proto_record(current, uid, proto)):
-                    ctx = ws.warp_ctx_for(current, uid, proto)
-                    config_path = self._config_path(manager, proto)
-                    await asyncio.to_thread(
-                        manager._write_start_script, proto, config_path, ctx)
-                    await asyncio.to_thread(
-                        manager._upload_start_script, proto, warp_ctx=ctx)
+                # Host-level repair covers every registered instance: isolate
+                # each one, so a broken instance cannot cancel the rest.
+                try:
+                    await asyncio.to_thread(self._ensure_wgcf, manager, proto)
+                    if not await asyncio.to_thread(
+                            self._conf_present, manager, proto):
+                        await asyncio.to_thread(
+                            self._register_and_write_conf, manager, proto, uid)
+                    current = self.state_store.load()
+                    if ws.warp_link(ws.proto_record(current, uid, proto)):
+                        ctx = ws.warp_ctx_for(current, uid, proto)
+                        config_path = self._config_path(manager, proto)
+                        await asyncio.to_thread(
+                            manager._write_start_script, proto, config_path, ctx)
+                        await asyncio.to_thread(
+                            manager._upload_start_script, proto, warp_ctx=ctx)
+                except ws.SrvWarpError as exc:
+                    logger.warning("warp repair failed for %s/%s: %s",
+                                   uid, proto, exc.code)
+                    continue
+                except Exception:
+                    logger.exception("warp repair failed for %s/%s", uid, proto)
+                    continue
+                repaired.append(proto)
 
-            if targets:
+            if repaired:
                 def mark(current):
-                    for proto in targets:
+                    for proto in repaired:
                         rec = ws.proto_record(current, uid, proto)
                         rec['warp']['repair_state'] = {
                             'state': 'ok',

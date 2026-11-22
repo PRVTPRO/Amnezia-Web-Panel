@@ -256,6 +256,33 @@ class WarpRuntimeHarness(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 'srv_warp_no_targets')
         self.assertEqual(self.ssh.commands, [])
 
+    def test_install_isolates_a_failing_instance(self):
+        # A host-level install covers every AWG instance: one failing
+        # instance must not abort the others (the target list used to hold
+        # a single instance, so the loop never had to isolate failures).
+        calls = {'n': 0}
+        original = self.runtime._ensure_wgcf
+
+        def flaky(manager, proto):
+            calls['n'] += 1
+            if proto == 'awg':
+                raise ws.SrvWarpError('srv_warp_register_failed', 502)
+            return original(manager, proto)
+
+        self.runtime._ensure_wgcf = flaky
+        stages = []
+        # awg fails, awg2 still installs: a host-level run must not abort on
+        # a single broken instance.
+        run_coro(self.runtime.install(
+            0, 'srv-1', job_id='job-isolate',
+            progress=lambda stage, msg: stages.append(stage)))
+
+        self.assertEqual(calls['n'], 2)
+        self.assertIn('failed', stages)
+        self.assertTrue(self.record('awg2')['warp']['registered'])
+        self.assertFalse(self.record('awg')['warp']['registered'])
+        self.assertTrue(self.data['servers'][0]['warp']['installed'])
+
     def test_install_reports_a_skipped_stopped_instance(self):
         self.ssh.container_state = {
             'amnezia-awg': (True, True),
@@ -300,6 +327,33 @@ class WarpRuntimeHarness(unittest.TestCase):
         self.assertFalse(any('curl -fsSL' in cmd for cmd in self.ssh.commands))
 
     # ----- repair ----------------------------------------------------------
+
+    def test_repair_host_level_isolates_a_failing_instance(self):
+        # Both instances are registered; a host-level repair must not let one
+        # broken instance cancel the repair of the other.
+        def seed(state):
+            for proto in ('awg', 'awg2'):
+                ws.proto_record(state, 'srv-1', proto)['warp']['registered'] = True
+
+        self.state_store.mutate(seed)
+
+        calls = {'n': 0}
+        original = self.runtime._ensure_wgcf
+
+        def flaky(manager, proto):
+            calls['n'] += 1
+            if proto == 'awg':
+                raise ws.SrvWarpError('srv_warp_arch_unsupported', 409)
+            return original(manager, proto)
+
+        self.runtime._ensure_wgcf = flaky
+        run_coro(self.runtime.repair(0, 'srv-1', job_id='job-repair-isolate'))
+
+        self.assertEqual(calls['n'], 2)
+        # The healthy instance is repaired, the broken one is left untouched.
+        self.assertEqual(self.record('awg2')['warp']['repair_state']['state'],
+                         'ok')
+        self.assertIsNone(self.record('awg')['warp']['repair_state'])
 
     def test_repair_missing_creds_registers_again(self):
         self.seed_state(registered=True, link=None)
