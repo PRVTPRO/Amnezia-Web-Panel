@@ -1601,5 +1601,7 @@
   "self_service_delete_unavailable": "Self-service deletion is temporarily unavailable. Nothing was changed.",
   "self_service_delete_ssh_failed": "Could not remove the connection on the server. Nothing was changed; please try again later.",
   "self_service_delete_busy": "Another connection operation is still running. Please try again in a moment.",
-  "self_service_delete_restore_required": "The server did not confirm the result. Nothing was deleted; an administrator must check the connection state."
+  "self_service_delete_restore_required": "The server did not confirm the result. Nothing was deleted; an administrator must check the connection state.",
+  "self_service_delete_link_disappeared": "This connection was changed or removed. Refresh the page and try again.",
+  "self_service_delete_not_found": "Connection not found. Refresh the page."
 }

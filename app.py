@@ -2355,6 +2355,14 @@ async def _finalize_and_remove_peer(server, protocol, client_id, *, actor, kind,
     conn = find_connection(data, server_id, protocol, client_id,
                            user_id=owner_user_id)
     if conn is None:
+        if owner_user_id is not None:
+            # A self-service caller must never fall back to raw removal: the row
+            # it owns vanished between the ownership check and this lookup (an
+            # admin removal or an unlink won the race), and another user's row
+            # may share the physical peer. Raw removal would drop that peer
+            # without settling the other row.
+            raise FinalizationError('connection_link_disappeared',
+                                    'Connection link disappeared during removal')
         # An unowned peer has no baselines to settle: remove it raw. The panel
         # keeps no accounting record for it, so there is nothing to lose.
         ssh = None
@@ -2556,6 +2564,12 @@ def _self_service_error_response(exc, lang='en'):
             # Same status as the admin path; the remote text stays server-side.
             body['error'] = _t('self_service_delete_ssh_failed', lang)
             status_code = 502
+        elif exc.code == 'connection_link_disappeared':
+            # The row changed under us: nothing to settle, nothing removed.
+            body['error'] = _t('self_service_delete_link_disappeared', lang)
+        elif exc.code in ('server_not_found', 'connection_not_found'):
+            body['error'] = _t('self_service_delete_not_found', lang)
+            status_code = 404
         return JSONResponse(body, status_code=status_code)
     if isinstance(exc, peer_lifecycle_lock.PeerLifecycleBusy):
         return JSONResponse({

@@ -346,6 +346,8 @@ SELF_SERVICE_DELETE_KEYS = {
     'self_service_delete_ssh_failed',
     'self_service_delete_busy',
     'self_service_delete_restore_required',
+    'self_service_delete_link_disappeared',
+    'self_service_delete_not_found',
 }
 
 SECURITY_SETUP_KEYS = {

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import re
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import telegram_bot as tg_bot
@@ -967,6 +968,25 @@ class TestTelegramLocalization(unittest.IsolatedAsyncioTestCase):
                         collections.Counter(re.findall(r'\{[^{}]*\}', value)),
                         collections.Counter(re.findall(r'\{[^{}]*\}', reference[key])),
                     )
+
+    def test_uncertain_lifecycle_reason_asks_for_restore_not_retry(self):
+        error = SimpleNamespace(code='peer_lifecycle_uncertain')
+
+        reason = tg_bot._delete_failure_reason(error, 'ru')
+
+        self.assertEqual(
+            reason, tg_bot.TG_TRANSLATIONS['ru']['self_service_delete_restore_required'])
+        self.assertNotEqual(
+            reason, tg_bot.TG_TRANSLATIONS['ru']['self_service_delete_busy'])
+
+    def test_restore_required_key_exists_in_all_five_languages(self):
+        self.assertEqual(set(tg_bot.TG_TRANSLATIONS), {'en', 'ru', 'fr', 'zh', 'fa'})
+        for lang in ('en', 'ru', 'fr', 'zh', 'fa'):
+            with self.subTest(lang=lang):
+                self.assertIn(
+                    'self_service_delete_restore_required', tg_bot.TG_TRANSLATIONS[lang])
+                self.assertTrue(
+                    tg_bot.TG_TRANSLATIONS[lang]['self_service_delete_restore_required'].strip())
 
     async def test_disabled_account_message_is_localized_for_every_language(self):
         expected = {

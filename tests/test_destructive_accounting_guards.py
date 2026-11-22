@@ -645,6 +645,37 @@ class SelfServiceDeleteThroughEndpoint(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.commit.call_args.args[2], 'u')
         self.assertEqual(self.commit.call_args.args[3], 'self_service_peer_remove')
 
+    async def test_repeated_self_service_delete_is_404_without_second_ssh(self):
+        # commit_finalize is stubbed in this fixture; persist its committed
+        # snapshot so the second request sees the real post-delete state.
+        def persist(data_file, operation_id, actor, kind, intent, before, after):
+            self.data.clear()
+            self.data.update(copy.deepcopy(after))
+            return {'status': 'success', 'operation_id': operation_id,
+                    'replayed': False, 'counters_verified_final': False}
+
+        self.commit.side_effect = persist
+
+        first = await self.delete()
+
+        self.assertEqual(getattr(first, 'status_code', 200), 200,
+                         getattr(first, 'body', first))
+        self.assertEqual(first['status'], 'success')
+        self.remove.assert_called_once()
+        self.assertEqual(self.remove.call_args.args[1:], ('remove_client', 'awg3', 'peer'))
+        self.assertEqual(self.ssh.connect.call_count, 1)
+        self.assertEqual(self.commit.call_count, 1)
+
+        second = await self.delete()
+
+        self.assertEqual(second.status_code, 404, getattr(second, 'body', second))
+        self.assertNotIn('finalized', json.loads(second.body))
+        # The peer was already removed: no second SSH round, no second commit.
+        self.assertEqual(self.ssh.connect.call_count, 1)
+        self.assertEqual(self.read.call_count, 1)
+        self.assertEqual(self.remove.call_count, 1)
+        self.assertEqual(self.commit.call_count, 1)
+
     async def test_admin_created_connection_is_refused_untouched(self):
         self.data['user_connections'][0]['created_by'] = 'admin'
 

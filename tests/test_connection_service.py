@@ -1,7 +1,10 @@
 import asyncio
 import copy
+import json
 import unittest
+from unittest.mock import MagicMock, patch
 
+import app as panel
 from connection_service import ConnectionService, RateLimitError, SelfServiceError
 
 
@@ -646,6 +649,50 @@ class ConnectionServiceTest(unittest.IsolatedAsyncioTestCase):
             await service.create_user_connection('user-1', 0, 'xray', 'home', 'web')
 
         self.assertIn('not allowed', str(ctx.exception).lower())
+
+
+class TestFinalizationLinkDisappeared(unittest.IsolatedAsyncioTestCase):
+    """A vanished owned row must fail closed before any remote peer is touched."""
+
+    async def test_disappeared_owned_link_refuses_without_ssh(self):
+        data = base_data()
+        server = data['servers'][0]
+
+        with patch.object(panel, 'load_data', return_value=data), \
+             patch.object(panel, 'get_ssh', MagicMock()) as ssh:
+            with self.assertRaises(panel.FinalizationError) as ctx:
+                await panel._finalize_and_remove_peer(
+                    server, 'awg', 'нет-такого-client-id',
+                    actor='u', kind='self_service_peer_remove',
+                    server_id=0, owner_user_id='1',
+                )
+
+        self.assertEqual(ctx.exception.code, 'connection_link_disappeared')
+        ssh.assert_not_called()
+
+    def test_disappeared_link_error_is_localized(self):
+        exc = panel.FinalizationError('connection_link_disappeared', 'x')
+
+        response = panel._self_service_error_response(exc, 'ru')
+
+        self.assertEqual(response.status_code, 409)
+        body = json.loads(response.body)
+        self.assertEqual(body['code'], 'connection_link_disappeared')
+        self.assertNotEqual(body['error'], str(exc))
+        self.assertNotIn('x', body['error'])
+        self.assertIn('Обновите страницу', body['error'])
+
+    def test_server_not_found_error_is_localized_404(self):
+        exc = panel.FinalizationError('server_not_found', 'x')
+
+        response = panel._self_service_error_response(exc, 'ru')
+
+        self.assertEqual(response.status_code, 404)
+        body = json.loads(response.body)
+        self.assertEqual(body['code'], 'server_not_found')
+        self.assertNotEqual(body['error'], str(exc))
+        self.assertNotIn('x', body['error'])
+        self.assertIn('Подключение не найдено', body['error'])
 
 
 if __name__ == '__main__':
