@@ -53,6 +53,7 @@ SRV_WARP_KEYS = {
     'srv_warp_err_job_busy',
     'srv_warp_err_generic',
     'srv_warp_err_no_awg',
+    'srv_warp_err_registered',
     'srv_warp_no_awg',
     'srv_warp_stage_start',
     'srv_warp_stage_download',
@@ -217,6 +218,18 @@ class WarpTranslationsTests(unittest.TestCase):
         for lang, table in self.locales.items():
             with self.subTest(lang=lang):
                 self.assertEqual(WARP_STAGE_KEYS - set(table), set())
+
+    def test_every_mapped_error_code_has_a_translation(self):
+        """A mapped value that is missing prints the raw key in the card."""
+        page = (ROOT / 'templates' / 'server.html').read_text(encoding='utf-8')
+        block = re.search(r'const WARP_ERROR_KEYS = \{(.*?)\};', page, re.S)
+        self.assertIsNotNone(block, 'WARP_ERROR_KEYS not found')
+        keys = set(re.findall(r":\s*'(\w+)'", block.group(1)))
+        self.assertTrue(keys)
+
+        for lang, table in self.locales.items():
+            with self.subTest(lang=lang):
+                self.assertEqual(sorted(keys - set(table)), [])
 
 
 class ProjectCompileTests(unittest.TestCase):

@@ -9321,6 +9321,9 @@
         srv_warp_tos_required: 'srv_warp_err_tos',
         srv_warp_job_busy: 'srv_warp_err_job_busy',
         srv_warp_no_targets: 'srv_warp_err_no_awg',
+        // The host-level install refuses when any instance is registered;
+        // without this entry the 409 would fall back to a generic message.
+        srv_warp_registered_unlink_first: 'srv_warp_err_registered',
     };
 
     function warpAggregate() {

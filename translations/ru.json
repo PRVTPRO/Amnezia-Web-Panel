@@ -1596,5 +1596,6 @@
   "smartroute_timer_never": "ещё не запускался",
   "smartroute_timer_stale": "Список префиксов давно не обновлялся",
   "smartroute_timer_armed": "Таймер взведён",
-  "smartroute_card_warn": "внимание"
+  "smartroute_card_warn": "внимание",
+  "srv_warp_err_registered": "WARP уже зарегистрирован на одном из инстансов этого сервера. Сначала отвяжите его там."
 }

@@ -272,6 +272,8 @@ AWG_I1_KEYS = {
 # marketplace badge and the operation error share this wording.
 SRV_WARP_NO_AWG_KEYS = {
     'srv_warp_no_awg', 'srv_warp_err_no_awg',
+    # The host-level install refusal now has its own sentence.
+    'srv_warp_err_registered',
 # Keys of later panels that were merged without registering them here; before
 # this set existed the frozen hash failed on an unchanged catalogue.
 }

@@ -1596,5 +1596,6 @@
   "smartroute_timer_never": "هنوز اجرا نشده",
   "smartroute_timer_stale": "فهرست پیشوندها مدت زیادی به‌روزرسانی نشده است",
   "smartroute_timer_armed": "تایمر فعال است",
-  "smartroute_card_warn": "هشدار"
+  "smartroute_card_warn": "هشدار",
+  "srv_warp_err_registered": "WARP قبلاً روی یکی از نمونه‌های این سرور ثبت شده است. ابتدا آن را جدا کنید."
 }
