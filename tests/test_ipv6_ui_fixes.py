@@ -290,6 +290,11 @@ SRV_WARP_IMPORT_KEYS = {
     'srv_warp_source_status_blocked', 'srv_warp_source_status_unreachable',
     'srv_warp_source_status_no_instance', 'srv_warp_source_status_unknown',
     'srv_warp_err_api_unreachable',
+    'srv_warp_err_registered', 'srv_warp_err_protocol_unsupported',
+    'srv_warp_err_source_required', 'srv_warp_err_source_self',
+    'srv_warp_err_source_not_found', 'srv_warp_err_source_no_targets',
+    'srv_warp_err_source_unreachable', 'srv_warp_err_source_register',
+    'srv_warp_err_handshake', 'srv_warp_err_quota',
 }
 LATER_FEATURE_KEYS = {
     'exit_awg3', 'exit_awg3_hint',

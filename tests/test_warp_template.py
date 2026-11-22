@@ -84,6 +84,16 @@ SRV_WARP_KEYS = {
     'srv_warp_source_status_no_instance',
     'srv_warp_source_status_unknown',
     'srv_warp_err_api_unreachable',
+    'srv_warp_err_registered',
+    'srv_warp_err_protocol_unsupported',
+    'srv_warp_err_source_required',
+    'srv_warp_err_source_self',
+    'srv_warp_err_source_not_found',
+    'srv_warp_err_source_no_targets',
+    'srv_warp_err_source_unreachable',
+    'srv_warp_err_source_register',
+    'srv_warp_err_handshake',
+    'srv_warp_err_quota',
 }
 
 WARP_STAGE_KEYS = {
@@ -290,6 +300,23 @@ class WarpTranslationsTests(unittest.TestCase):
         for lang, table in self.locales.items():
             with self.subTest(lang=lang):
                 self.assertEqual(WARP_STAGE_KEYS - set(table), set())
+
+    def test_every_mapped_error_code_has_a_translation(self):
+        """WARP_ERROR_KEYS values must resolve, or the UI prints the raw key.
+
+        Ten of these were mapped in the page while the catalogue had no such
+        entry, so the card showed `srv_warp_err_source_unreachable` instead of
+        a sentence.
+        """
+        page = (ROOT / 'templates' / 'server.html').read_text(encoding='utf-8')
+        block = re.search(r'const WARP_ERROR_KEYS = \{(.*?)\};', page, re.S)
+        self.assertIsNotNone(block, 'WARP_ERROR_KEYS not found')
+        keys = set(re.findall(r":\s*'(\w+)'", block.group(1)))
+        self.assertTrue(keys)
+
+        for lang, table in self.locales.items():
+            with self.subTest(lang=lang):
+                self.assertEqual(sorted(keys - set(table)), [])
 
 
 class ProjectCompileTests(unittest.TestCase):

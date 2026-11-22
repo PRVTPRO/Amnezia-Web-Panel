@@ -1617,5 +1617,15 @@
   "srv_warp_source_status_unknown": "无法检查",
   "srv_warp_import_no_usable": "当前没有服务器可以提供 WARP 配置。",
   "srv_warp_import_copy_hint": "配置会复制到此处，同时保留在来源服务器上：请勿在两台主机上同时启用 WARP。",
-  "srv_warp_err_api_unreachable": "此主机无法连接 Cloudflare 注册 API：运营商按服务器名称过滤 TLS。WARP 隧道本身可用——请改为从另一台面板服务器导入配置。"
+  "srv_warp_err_api_unreachable": "此主机无法连接 Cloudflare 注册 API：运营商按服务器名称过滤 TLS。WARP 隧道本身可用——请改为从另一台面板服务器导入配置。",
+  "srv_warp_err_registered": "此服务器的某个实例已注册 WARP，请先解除绑定。",
+  "srv_warp_err_protocol_unsupported": "WARP 只能安装在 AmneziaWG 实例上。",
+  "srv_warp_err_source_required": "请选择来源服务器。",
+  "srv_warp_err_source_self": "服务器不能从自身导入配置。",
+  "srv_warp_err_source_not_found": "面板中找不到来源服务器。",
+  "srv_warp_err_source_no_targets": "来源服务器没有可用于提取配置的 AWG 实例。",
+  "srv_warp_err_source_unreachable": "来源服务器无法访问，或其容器未运行。",
+  "srv_warp_err_source_register": "来源服务器无法在 Cloudflare 注册账号。",
+  "srv_warp_err_handshake": "配置已写入，但没有收到 WARP 握手，安装未记录。",
+  "srv_warp_err_quota": "已达到注册上限：每 7 天最多 3 个账号。"
 }

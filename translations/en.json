@@ -1617,5 +1617,15 @@
   "srv_warp_source_status_unknown": "Could not check",
   "srv_warp_import_no_usable": "No server can donate a WARP profile right now.",
   "srv_warp_import_copy_hint": "The profile is copied here and stays on the source: do not keep WARP connected on both hosts at the same time.",
-  "srv_warp_err_api_unreachable": "This host cannot reach the Cloudflare registration API: the provider filters TLS by server name. The WARP tunnel itself works — import a profile from another panel server instead."
+  "srv_warp_err_api_unreachable": "This host cannot reach the Cloudflare registration API: the provider filters TLS by server name. The WARP tunnel itself works — import a profile from another panel server instead.",
+  "srv_warp_err_registered": "WARP is already registered on one of this server's instances. Unlink it there first.",
+  "srv_warp_err_protocol_unsupported": "WARP can only be installed on an AmneziaWG instance.",
+  "srv_warp_err_source_required": "Choose a source server.",
+  "srv_warp_err_source_self": "A server cannot import its own profile.",
+  "srv_warp_err_source_not_found": "The source server was not found in the panel.",
+  "srv_warp_err_source_no_targets": "The source has no AWG instance to take a profile from.",
+  "srv_warp_err_source_unreachable": "The source server is unreachable or its container is not running.",
+  "srv_warp_err_source_register": "The source could not register an account with Cloudflare.",
+  "srv_warp_err_handshake": "The profile was written, but no WARP handshake came back, so the install was not recorded.",
+  "srv_warp_err_quota": "Registration limit reached: no more than 3 accounts per 7 days."
 }
