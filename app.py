@@ -6740,7 +6740,14 @@ async def _warp_post(actor, request, server_id, req, kind, runner, *, tos=False,
             raise SrvWarpError('srv_warp_job_busy', 409)
 
         if kind in ('install', 'uninstall', 'repair'):
-            protocol = _warp_named_protocol(req, server=server, required=False)
+            # Host-level operations without an explicit protocol cover every
+            # registered AWG instance: the card's Install/Delete act on the
+            # whole host.  _warp_named_protocol() used to collapse "no
+            # protocol" to the first candidate, so on a multi-instance server
+            # only the first instance was touched -- the others stayed
+            # registered and the card got stuck.
+            protocol = (_warp_named_protocol(req, server=server, required=False)
+                        if (req.protocol or '').strip() else None)
         elif kind == 'exit-egress':
             protocol = None
         else:
@@ -6797,7 +6804,14 @@ async def api_srv_warp_install(request: Request, server_id: int, req: SrvWarpReq
             raise SrvWarpError('srv_warp_identity_mismatch', 409)
         if _warp_job_active(uid):
             raise SrvWarpError('srv_warp_job_busy', 409)
-        protocol = _warp_named_protocol(req, server=server, required=False)
+        # No protocol in the request means every registered AWG instance:
+        # the marketplace installs the app for the whole host (see the
+        # matching comment in server.html).  _warp_named_protocol() would
+        # otherwise collapse "no protocol" to the first candidate, so a
+        # stopped first instance made a host with a running instance look
+        # like it had no target.
+        protocol = (_warp_named_protocol(req, server=server, required=False)
+                    if (req.protocol or '').strip() else None)
         await _warp_require_tos(server, bool(req.accept_tos))
         _warp_install_guard(server, uid, protocol)
         _install_ops_load()
