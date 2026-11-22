@@ -1597,5 +1597,7 @@
   "smartroute_timer_stale": "The prefix list has not been refreshed for too long",
   "smartroute_timer_armed": "Timer is armed",
   "smartroute_card_warn": "warning",
-  "srv_warp_err_registered": "WARP is already registered on one of this server's instances. Unlink it there first."
+  "srv_warp_err_registered": "WARP is already registered on one of this server's instances. Unlink it there first.",
+  "srv_warp_err_install_failed": "WARP install failed on this instance",
+  "srv_warp_err_repair_failed": "WARP repair failed on this instance"
 }

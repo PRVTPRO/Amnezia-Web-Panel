@@ -6667,6 +6667,10 @@ def _warp_status_payload(server, state):
             'dns_via_warp': bool((link or {}).get('dns_via_warp')),
             'quarantine': bool(warp_record.get('quarantine')),
             'state_stale': bool((link or {}).get('stale')),
+            # Repair runs as a background task, so its outcome is only
+            # observable here: without this field a failed repair left no
+            # trace anywhere the panel could show.
+            'repair_state': warp_record.get('repair_state') or None,
         })
 
     active_job = _WARP_JOBS.get(str(uid))
@@ -6706,10 +6710,42 @@ async def _warp_require_tos(server, accept):
 def _warp_install_guard(server, uid, protocol):
     state = warp_state_store.load()
     protocols = [protocol] if protocol else _warp_awg_protocols(server)
+    if not protocol:
+        # Status also lists instances that live in the warp store but are gone
+        # from data.json (a registered instance could be deleted as a protocol
+        # while unlinked). A host-level install must refuse on those too,
+        # otherwise it registers a second Cloudflare account next to the
+        # leftover record.
+        stored = ((state.get('servers') or {}).get(str(uid)) or {}).get('protocols') or {}
+        for proto in stored:
+            if protocol_base(proto) in ('awg', 'awg2', 'awg3') and proto not in protocols:
+                protocols.append(proto)
     for proto in protocols:
         record = proto_record(state, uid, proto)
         if (record.get('warp') or {}).get('registered') or warp_link(record):
             raise SrvWarpError('srv_warp_registered_unlink_first', 409)
+
+
+def _drop_warp_instance_state(uid, protocol):
+    """Forget the warp record of an instance that was just deleted.
+
+    A leftover record made the WARP card show a phantom "installed" instance
+    forever: the status projection merges store-only protocols, while
+    ``_targets()`` and uninstall only walk ``server['protocols']``.
+    """
+    if not uid or protocol_base(protocol) not in ('awg', 'awg2', 'awg3'):
+        return
+    uid = str(uid)
+
+    def drop(state):
+        record = (state.get('servers') or {}).get(uid) or {}
+        protocols = record.get('protocols') or {}
+        protocols.pop(protocol, None)
+
+    try:
+        warp_state_store.mutate(drop)
+    except Exception:
+        logger.exception("Failed to drop warp state for %s/%s", uid, protocol)
 
 
 def _warp_link_preflight(data, server_id, server, uid, protocol):
@@ -10833,6 +10869,11 @@ async def api_uninstall_protocol(request: Request, server_id: int, req: Protocol
             ]
             save_data(data)
         ssh.disconnect()
+        # The instance is gone, so its warp record must go too. Without this
+        # the card kept showing it as installed and a host-level install was
+        # allowed to register a second account beside the leftover record.
+        if req.protocol not in (server.get('protocols') or {}):
+            _drop_warp_instance_state(server.get('uid'), req.protocol)
         if base == 'exit':
             detached = await exit_link_svc.detach_entries_for_exit(server.get('uid'), 'exit_uninstalled')
             return {'status': 'success', 'detached': detached}

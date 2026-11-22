@@ -274,6 +274,8 @@ SRV_WARP_NO_AWG_KEYS = {
     'srv_warp_no_awg', 'srv_warp_err_no_awg',
     # The host-level install refusal now has its own sentence.
     'srv_warp_err_registered',
+    # Per-instance background failures shown in the WARP card line.
+    'srv_warp_err_install_failed', 'srv_warp_err_repair_failed',
 # Keys of later panels that were merged without registering them here; before
 # this set existed the frozen hash failed on an unchanged catalogue.
 }

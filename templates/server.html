@@ -9324,6 +9324,10 @@
         // The host-level install refuses when any instance is registered;
         // without this entry the 409 would fall back to a generic message.
         srv_warp_registered_unlink_first: 'srv_warp_err_registered',
+        // Per-instance failures that only exist as a background job outcome;
+        // without these entries the card would show a generic message.
+        srv_warp_install_failed: 'srv_warp_err_install_failed',
+        srv_warp_repair_failed: 'srv_warp_err_repair_failed',
     };
 
     function warpAggregate() {
@@ -9432,6 +9436,14 @@
                     if (item.link_active) bits.push(`☁️ ${escapeHtml(_('srv_warp_link'))}`);
                     if (item.quarantine) bits.push('⚠️');
                     if (item.client_mtu) bits.push(`MTU ${escapeHtml(String(item.client_mtu))}`);
+                    // A failed repair is a background outcome: this row is the
+                    // only place a user can see it.
+                    const repair = item.repair_state || {};
+                    if (repair.state === 'error') {
+                        const reasonKey = WARP_ERROR_KEYS[repair.last_error]
+                            || 'srv_warp_err_repair_failed';
+                        bits.push(`❌ ${escapeHtml(_(reasonKey))}`);
+                    }
                     return `<div class="text-sm">${bits.join(' • ')}</div>`;
                 }).join('');
                 const budget = d.budget

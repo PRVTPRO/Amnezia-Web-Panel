@@ -427,6 +427,27 @@ class WarpRuntimeHarness(unittest.TestCase):
 
     # ----- uninstall -------------------------------------------------------
 
+    def test_uninstall_clears_store_only_instance_when_container_ops_fail(self):
+        # A deleted instance can leave a registered warp record behind. Its
+        # container is gone, but the state cleanup must still happen.
+        self.data['servers'][0]['protocols'] = {'awg': {'installed': True}}
+
+        def seed(state):
+            ws.proto_record(state, 'srv-1', 'awg2')['warp']['registered'] = True
+
+        self.state_store.mutate(seed)
+        original_name = self.manager._container_name
+
+        def flaky_name(protocol):
+            if protocol == 'awg2':
+                raise RuntimeError('container is gone')
+            return original_name(protocol)
+
+        self.manager._container_name = flaky_name
+        run_coro(self.runtime.uninstall(0, 'srv-1', job_id='job-orphan'))
+
+        self.assertFalse(self.record('awg2')['warp']['registered'])
+
     def test_uninstall_removes_artifacts_and_clears_state(self):
         self.seed_state(registered=True, link=None, client_mtu=1220)
         self.data['servers'][0]['warp'] = {'installed': True}

@@ -117,6 +117,25 @@ class WarpApiTests(unittest.TestCase):
 
         self.assertEqual(ctx.exception.code, 'srv_warp_registered_unlink_first')
 
+    def test_install_guard_refuses_a_store_only_instance(self):
+        """A registered record without a protocol entry is still a target.
+
+        Deleting an instance as a protocol while it was unlinked left its
+        warp record in the store; a host-level install then registered a
+        second Cloudflare account beside the leftover record.
+        """
+        def mark(state):
+            panel.proto_record(state, 'srv-uid', 'awg2')['warp']['registered'] = True
+
+        panel.warp_state_store.mutate(mark)
+        server = panel.load_data()['servers'][0]
+        self.assertEqual(list(server['protocols']), ['awg'])
+
+        with self.assertRaises(panel.SrvWarpError) as ctx:
+            panel._warp_install_guard(server, 'srv-uid', None)
+
+        self.assertEqual(ctx.exception.code, 'srv_warp_registered_unlink_first')
+
     def test_install_guard_with_an_explicit_protocol_stays_narrow(self):
         self.two_instances()
         self.mark_registered('awg2')
@@ -162,6 +181,19 @@ class WarpApiTests(unittest.TestCase):
 
         panel.warp_state_store.mutate(mutate)
 
+    def test_drop_warp_instance_state_removes_only_named_protocol(self):
+        def seed(state):
+            for proto in ('awg', 'awg2', 'awg3'):
+                panel.proto_record(state, 'srv-uid', proto)['warp']['registered'] = True
+
+        panel.warp_state_store.mutate(seed)
+        panel._drop_warp_instance_state('srv-uid', 'awg2')
+
+        protocols = panel.warp_state_store.load()['servers']['srv-uid']['protocols']
+        self.assertNotIn('awg2', protocols)
+        self.assertIn('awg3', protocols)
+        self.assertTrue(protocols['awg3']['warp']['registered'])
+
     # ----- GET status ------------------------------------------------------
 
     def test_status_payload_shape(self):
@@ -176,6 +208,24 @@ class WarpApiTests(unittest.TestCase):
         self.assertEqual(body['quota']['limit'], 3)
         self.assertEqual(body['orphans'], [])
         self.assertEqual(body['jobs'], [])
+
+    def test_status_payload_exposes_repair_state(self):
+        repair = {'state': 'error', 'last_error': 'srv_warp_repair_failed',
+                  'queue_reason': None}
+
+        def seed(state):
+            rec = panel.proto_record(state, 'srv-uid', 'awg')
+            rec['warp']['repair_state'] = repair
+
+        panel.warp_state_store.mutate(seed)
+        server = panel.load_data()['servers'][0]
+        body = panel._warp_status_payload(server, panel.warp_state_store.load())
+
+        instance = next(item for item in body['instances']
+                        if item['protocol'] == 'awg')
+        self.assertEqual(instance['repair_state']['state'], 'error')
+        self.assertEqual(instance['repair_state']['last_error'],
+                         'srv_warp_repair_failed')
 
     def test_status_uid_mismatch_is_404(self):
         response = self.client.get('/api/servers/0/warp/status?server_uid=other')
@@ -277,6 +327,13 @@ class WarpApiTests(unittest.TestCase):
         self.assertEqual(seen, ['awg2'])
 
     # ----- POST guards -----------------------------------------------------
+
+    def test_install_with_non_awg_protocol_is_409(self):
+        response = self.post('install', {'server_uid': 'srv-uid',
+                                         'protocol': 'xray', 'accept_tos': True})
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()['code'],
+                         'srv_warp_protocol_unsupported')
 
     def test_post_uid_mismatch_is_409(self):
         response = self.post('install', {'server_uid': 'other'})

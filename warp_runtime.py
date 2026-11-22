@@ -472,6 +472,16 @@ class WarpRuntime:
             if idx is None:
                 raise ws.SrvWarpError('srv_warp_identity_mismatch', 409)
             protocols = self._targets(server, protocol)
+            if protocol is None:
+                # A record can outlive its instance (deleted as a protocol while
+                # unlinked). Uninstall must still be able to clear it, or the
+                # card keeps showing a phantom "installed" instance forever.
+                stored = ((self.state_store.load().get('servers') or {})
+                          .get(str(uid)) or {}).get('protocols') or {}
+                for proto in stored:
+                    if (_protocol_base(proto) in self.awg_protocols
+                            and proto not in protocols):
+                        protocols.append(proto)
             manager = await self._awg(server) if protocols else None
 
             state = self.state_store.load()
@@ -488,18 +498,25 @@ class WarpRuntime:
                         current, uid, protocols))
 
             for proto in protocols:
-                warp_dir = _warp_dir(proto)
-                await asyncio.to_thread(
-                    self._sh, manager, proto, 'rm -rf %s' % warp_dir)
-                await asyncio.to_thread(
-                    self._sh, manager, proto,
-                    'rm -f %s' % ws.marker_path(proto))
-                config_path = self._config_path(manager, proto)
-                await asyncio.to_thread(
-                    manager._write_start_script, proto, config_path, None)
-                if active.get(proto):
+                # One missing container must not abort the state cleanup below:
+                # the record is what keeps the card stuck, not the container.
+                try:
+                    warp_dir = _warp_dir(proto)
                     await asyncio.to_thread(
-                        manager._upload_start_script, proto, warp_ctx=None)
+                        self._sh, manager, proto, 'rm -rf %s' % warp_dir)
+                    await asyncio.to_thread(
+                        self._sh, manager, proto,
+                        'rm -f %s' % ws.marker_path(proto))
+                    config_path = self._config_path(manager, proto)
+                    await asyncio.to_thread(
+                        manager._write_start_script, proto, config_path, None)
+                    if active.get(proto):
+                        await asyncio.to_thread(
+                            manager._upload_start_script, proto, warp_ctx=None)
+                except Exception:
+                    logger.exception(
+                        "warp uninstall: container cleanup failed for %s/%s",
+                        uid, proto)
 
             def clear(state):
                 for proto in protocols:
