@@ -1596,5 +1596,13 @@
   "smartroute_timer_never": "never ran yet",
   "smartroute_timer_stale": "The prefix list has not been refreshed for too long",
   "smartroute_timer_armed": "Timer is armed",
-  "smartroute_card_warn": "warning"
+  "smartroute_card_warn": "warning",
+  "srv_warp_import": "Import from another server",
+  "srv_warp_import_title": "Import a WARP profile",
+  "srv_warp_import_hint": "Some hosts cannot reach the Cloudflare registration API (the provider filters TLS by server name) while the WARP tunnel itself works. Register an account on a server that can reach it and copy the profile here. The profile is accepted only after a live WARP handshake succeeds on this host.",
+  "srv_warp_import_no_sources": "No other server is available as a source.",
+  "srv_warp_import_source": "Source server",
+  "srv_warp_import_source_protocol": "Source instance",
+  "srv_warp_import_target": "Target instance",
+  "srv_warp_import_action": "Import"
 }

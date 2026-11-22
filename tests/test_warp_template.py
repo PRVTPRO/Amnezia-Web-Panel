@@ -60,6 +60,15 @@ SRV_WARP_KEYS = {
     'srv_warp_stage_profile',
     'srv_warp_stage_startsh',
     'srv_warp_stage_done',
+    # WARP profile import from another panel server (SNI-filtered hosts).
+    'srv_warp_import',
+    'srv_warp_import_title',
+    'srv_warp_import_hint',
+    'srv_warp_import_no_sources',
+    'srv_warp_import_source',
+    'srv_warp_import_source_protocol',
+    'srv_warp_import_target',
+    'srv_warp_import_action',
 }
 
 WARP_STAGE_KEYS = {

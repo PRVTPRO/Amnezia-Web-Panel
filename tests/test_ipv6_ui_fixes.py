@@ -275,6 +275,15 @@ SRV_WARP_NO_AWG_KEYS = {
 # Keys of later panels that were merged without registering them here; before
 # this set existed the frozen hash failed on an unchanged catalogue.
 }
+
+# WARP profile import from another panel server (hosts whose provider filters
+# TLS by SNI, so api.cloudflareclient.com is unreachable while the tunnel works).
+SRV_WARP_IMPORT_KEYS = {
+    'srv_warp_import', 'srv_warp_import_title', 'srv_warp_import_hint',
+    'srv_warp_import_no_sources', 'srv_warp_import_source',
+    'srv_warp_import_source_protocol', 'srv_warp_import_target',
+    'srv_warp_import_action',
+}
 LATER_FEATURE_KEYS = {
     'exit_awg3', 'exit_awg3_hint',
     'max_connections_per_user_hint', 'max_connections_per_user_label',
@@ -547,6 +556,7 @@ class TestC6Translations(unittest.TestCase):
                                     - TORRENT_GUARD_KEYS
                                     - TORRENT_PLUGIN_KEYS
                                     - AWG_I1_KEYS - SRV_WARP_NO_AWG_KEYS
+                                    - SRV_WARP_IMPORT_KEYS
                                     - COPY_INSTANCE_KEYS - LATER_FEATURE_KEYS
                                     - RELEASE_1811_KEYS - USER_LIMIT_KEYS - TELEGRAM_ACCOUNT_KEYS
                                     - LIFECYCLE_FENCE_KEYS - STORAGE_KEYS

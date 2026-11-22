@@ -2484,6 +2484,10 @@
                 style="flex:1">
                 {{ _('srv_warp_install') }}
             </button>
+            <button class="btn btn-secondary btn-sm" onclick="openWarpImportModal()" id="warp-import-open-btn"
+                style="flex:1">
+                {{ _('srv_warp_import') }}
+            </button>
         </div>
         <div id="warp-installed-actions" style="display:none;">
             <div class="flex gap-sm">
@@ -2527,6 +2531,32 @@
                 <button class="btn btn-secondary" onclick="resolveWarpTos(false)">{{ _('cancel') }}</button>
                 <button class="btn btn-primary" onclick="resolveWarpTos(true)" id="warpTosAcceptBtn">
                     {{ _('srv_warp_tos_accept') }}
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== WARP profile import modal ===== -->
+    <div class="modal-backdrop" id="warpImportModal">
+        <div class="modal">
+            <div class="modal-header">
+                <h2 class="modal-title">{{ _('srv_warp_import_title') }}</h2>
+                <button class="modal-close" onclick="closeModal('warpImportModal')">×</button>
+            </div>
+            <div class="form-hint" style="margin-bottom:12px;">{{ _('srv_warp_import_hint') }}</div>
+            <div id="warp-import-empty" class="form-hint hidden">{{ _('srv_warp_import_no_sources') }}</div>
+            <label class="form-label" for="warp-import-source">{{ _('srv_warp_import_source') }}</label>
+            <select id="warp-import-source" class="input" style="margin-bottom:12px;"
+                onchange="syncWarpImportForm()"></select>
+            <label class="form-label" for="warp-import-source-protocol">{{ _('srv_warp_import_source_protocol') }}</label>
+            <select id="warp-import-source-protocol" class="input" style="margin-bottom:12px;"></select>
+            <label class="form-label" for="warp-import-target">{{ _('srv_warp_import_target') }}</label>
+            <select id="warp-import-target" class="input" style="margin-bottom:12px;"></select>
+            <div id="warp-import-error" class="form-hint is-error hidden"></div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('warpImportModal')">{{ _('cancel') }}</button>
+                <button class="btn btn-primary" onclick="importWarp()" id="warp-import-btn">
+                    {{ _('srv_warp_import_action') }}
                 </button>
             </div>
         </div>
@@ -3929,6 +3959,9 @@
     // a host with no AmneziaWG instance (nothing to install WARP into) from one
     // where the app simply is not active yet.
     const SERVER_PROTOCOL_KEYS = {{ (server.get('protocols') or {}).keys()|list|tojson }};
+    // Other panel servers that can donate a WARP profile (they carry an
+    // AmneziaWG instance). The current server is excluded by the backend.
+    const WARP_IMPORT_SOURCES = {{ (warp_import_sources or []) | tojson }};
     const MARKETPLACE_APPS = [
         { proto: 'awg3', category: 'protocols', icon: '🛡', title: 'AmneziaWG 3.1', descKey: 'awg3_desc', badge: 'NEW' },
         { proto: 'awg2', category: 'protocols', icon: '✨', title: 'AmneziaWG 2.0', descKey: 'awg_desc' },
@@ -9321,6 +9354,17 @@
         srv_warp_tos_required: 'srv_warp_err_tos',
         srv_warp_job_busy: 'srv_warp_err_job_busy',
         srv_warp_no_targets: 'srv_warp_err_no_awg',
+        srv_warp_protocol_unsupported: 'srv_warp_err_protocol_unsupported',
+        srv_warp_registered_unlink_first: 'srv_warp_err_registered',
+        srv_warp_source_required: 'srv_warp_err_source_required',
+        srv_warp_source_is_self: 'srv_warp_err_source_self',
+        srv_warp_source_not_found: 'srv_warp_err_source_not_found',
+        srv_warp_source_no_targets: 'srv_warp_err_source_no_targets',
+        srv_warp_source_unreachable: 'srv_warp_err_source_unreachable',
+        srv_warp_source_register_failed: 'srv_warp_err_source_register',
+        srv_warp_handshake_failed: 'srv_warp_err_handshake',
+        srv_warp_quota_exhausted: 'srv_warp_err_quota',
+        install_in_progress: 'srv_warp_err_job_busy',
     };
 
     function warpAggregate() {

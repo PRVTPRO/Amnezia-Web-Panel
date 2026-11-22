@@ -3151,6 +3151,15 @@ class SrvWarpRequest(BaseModel):
     enable: Optional[bool] = None
 
 
+class SrvWarpImportRequest(BaseModel):
+    """Body of /warp/import: same identity/TOS fields plus the source."""
+    server_uid: Optional[str] = None
+    protocol: Optional[str] = None
+    source_server_uid: Optional[str] = None
+    source_protocol: Optional[str] = None
+    accept_tos: Optional[bool] = False
+
+
 class SmartRouteOwnSubnetsRequest(BaseModel):
     cidrs: list = []
 
@@ -4656,6 +4665,7 @@ async def server_detail(request: Request, server_id: int):
     return tpl(request, 'server.html', server=server, server_id=server_id,
                users=users_list,
                copy_targets=_instance_copy_targets(data, server_id),
+               warp_import_sources=_warp_import_sources(data, server_id),
                torrent_plugin=torrent_plugin.status(server))
 
 
@@ -6839,6 +6849,87 @@ async def _run_warp_install(op_id, server_id, uid, protocol):
                          'message': str(exc)[:500]})
 
 
+@app.post('/api/servers/{server_id}/warp/import', tags=["Servers"])
+async def api_srv_warp_import(request: Request, server_id: int,
+                              req: SrvWarpImportRequest):
+    """Queue a WARP import (a profile registered on another panel server).
+
+    Some hosts cannot reach ``api.cloudflareclient.com``: the provider filters
+    TLS by SNI, so ``wgcf register`` fails while the WARP dataplane works. The
+    account is then registered on a host that can reach the API and imported
+    here, with a live handshake check before the state is recorded.
+    """
+    actor = _request_user(request)
+    if not actor or actor.get('role') not in ('admin', 'support'):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        idx = _rkn_server_index(data, server_id, req.server_uid)
+        if idx is None:
+            raise SrvWarpError('srv_warp_identity_mismatch', 409)
+        server = data['servers'][idx]
+        uid = server.get('uid') or ''
+        if not uid:
+            raise SrvWarpError('srv_warp_identity_mismatch', 409)
+        if _warp_job_active(uid):
+            raise SrvWarpError('srv_warp_job_busy', 409)
+        source_uid = (req.source_server_uid or '').strip()
+        if not source_uid:
+            raise SrvWarpError('srv_warp_source_required', 409)
+        if source_uid == uid:
+            raise SrvWarpError('srv_warp_source_is_self', 409)
+        src_idx = _rkn_server_index(data, None, source_uid)
+        if src_idx is None:
+            raise SrvWarpError('srv_warp_source_not_found', 409)
+        protocol = _warp_named_protocol(req, server=server, required=False)
+        source_protocol = (req.source_protocol or '').strip() or None
+        if source_protocol and protocol_base(source_protocol) not in (
+                'awg', 'awg2', 'awg3'):
+            raise SrvWarpError('srv_warp_protocol_unsupported', 409)
+        await _warp_require_tos(server, bool(req.accept_tos))
+        _warp_install_guard(server, uid, protocol)
+        _install_ops_load()
+        if (idx, 'warp') in _INSTALL_ACTIVE:
+            return JSONResponse(
+                {'error': 'Cloudflare WARP installation is already running',
+                 'code': 'install_in_progress'},
+                status_code=409)
+        op = op_create(idx, 'warp', WARP_INSTALL_TOTAL)
+        asyncio.create_task(_run_warp_import(
+            op['id'], idx, uid, source_uid, protocol, source_protocol))
+        return {'operation_id': op['id']}
+    except SrvWarpError as exc:
+        return JSONResponse({'error': exc.code, 'code': exc.code},
+                            status_code=exc.http_status)
+
+
+async def _run_warp_import(op_id, server_id, uid, source_uid, protocol,
+                           source_protocol):
+    """Background worker: one WARP profile import with staged progress."""
+    op = _INSTALL_OPS.get(op_id)
+    if not op:
+        return
+    try:
+        job_id = _warp_job_begin(uid, 'import')
+        op_log(op, 'start', 'Cloudflare WARP profile import started')
+        await warp_runtime.import_profile(
+            server_id, uid, source_uid, protocol=protocol,
+            source_protocol=source_protocol, job_id=job_id,
+            progress=lambda stage, msg: op_log(op, stage, msg))
+        op_log(op, 'done', 'Cloudflare WARP profile imported')
+        op_finish(op, 'success',
+                  result={'status': 'success', 'installed': True})
+    except SrvWarpError as exc:
+        op_finish(op, 'error',
+                  error={'code': exc.code,
+                         'message': str(exc) or exc.code})
+    except Exception as exc:
+        logger.exception("Cloudflare WARP profile import failed")
+        op_finish(op, 'error',
+                  error={'code': 'install_failed',
+                         'message': str(exc)[:500]})
+
+
 @app.post('/api/servers/{server_id}/warp/uninstall', tags=["Servers"])
 async def api_srv_warp_uninstall(request: Request, server_id: int, req: SrvWarpRequest):
     return await _warp_post(
@@ -8451,7 +8542,10 @@ RKNBLOCK_INSTALL_STAGES = {'start': 1, 'preflight': 2, 'packages': 3,
 RKNBLOCK_INSTALL_TOTAL = 9
 
 WARP_INSTALL_STAGES = {'start': 1, 'arch': 2, 'download': 3, 'register': 4,
-                       'profile': 5, 'startsh': 6, 'done': 7}
+                       'profile': 5, 'startsh': 6, 'done': 7,
+                       # Import flow (a profile borrowed from another panel
+                       # server): the stages that replace download/register.
+                       'source': 2, 'handshake': 6}
 WARP_INSTALL_TOTAL = 7
 
 XRAY_UPDATE_STAGES = {'start': 1, 'host': 2, 'version': 3, 'arch': 4,
@@ -11173,6 +11267,33 @@ def _instance_copy_load():
 
 def _instance_copy_error(exc, status_code=400):
     return JSONResponse({'error': exc.message, 'code': exc.code}, status_code=status_code)
+
+
+def _warp_import_sources(data, server_id):
+    """Other panel servers that can donate a WARP profile.
+
+    Only servers with an AmneziaWG instance are useful: the profile lives
+    inside such a container. The target server itself is excluded, so the UI
+    cannot offer an import onto the same host.
+    """
+    sources = []
+    for index, server in enumerate(data.get('servers', [])):
+        if index == server_id:
+            continue
+        uid = server.get('uid') or ''
+        if not uid:
+            continue
+        awg = [proto for proto in (server.get('protocols') or {})
+               if protocol_base(proto) in ('awg', 'awg2', 'awg3')]
+        if not awg:
+            continue
+        sources.append({
+            'uid': uid,
+            'name': server.get('name') or server.get('host') or uid,
+            'host': server.get('host') or '',
+            'protocols': awg,
+        })
+    return sources
 
 
 def _instance_copy_targets(data, server_id):

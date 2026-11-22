@@ -1596,5 +1596,13 @@
   "smartroute_timer_never": "pas encore exécuté",
   "smartroute_timer_stale": "La liste de préfixes n'a pas été actualisée depuis trop longtemps",
   "smartroute_timer_armed": "Minuteur armé",
-  "smartroute_card_warn": "attention"
+  "smartroute_card_warn": "attention",
+  "srv_warp_import": "Importer depuis un autre serveur",
+  "srv_warp_import_title": "Importer un profil WARP",
+  "srv_warp_import_hint": "Certains hôtes ne peuvent pas joindre l'API d'enregistrement Cloudflare (le fournisseur filtre TLS par nom de serveur) alors que le tunnel WARP fonctionne. Enregistrez un compte sur un serveur qui y accède et copiez le profil ici. Le profil n'est accepté qu'après une poignée de main WARP réussie sur cet hôte.",
+  "srv_warp_import_no_sources": "Aucun autre serveur n'est disponible comme source.",
+  "srv_warp_import_source": "Serveur source",
+  "srv_warp_import_source_protocol": "Instance source",
+  "srv_warp_import_target": "Instance cible",
+  "srv_warp_import_action": "Importer"
 }

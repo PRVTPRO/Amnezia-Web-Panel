@@ -1596,5 +1596,13 @@
   "smartroute_timer_never": "ещё не запускался",
   "smartroute_timer_stale": "Список префиксов давно не обновлялся",
   "smartroute_timer_armed": "Таймер взведён",
-  "smartroute_card_warn": "внимание"
+  "smartroute_card_warn": "внимание",
+  "srv_warp_import": "Импортировать с другого сервера",
+  "srv_warp_import_title": "Импорт профиля WARP",
+  "srv_warp_import_hint": "Часть хостов не может достучаться до API регистрации Cloudflare (провайдер фильтрует TLS по имени сервера), хотя сам туннель WARP работает. Зарегистрируйте аккаунт на сервере, где API доступен, и скопируйте профиль сюда. Профиль принимается только после успешного WARP-хендшейка на этом хосте.",
+  "srv_warp_import_no_sources": "Нет другого сервера, который можно использовать как источник.",
+  "srv_warp_import_source": "Сервер-источник",
+  "srv_warp_import_source_protocol": "Инстанс-источник",
+  "srv_warp_import_target": "Целевой инстанс",
+  "srv_warp_import_action": "Импортировать"
 }

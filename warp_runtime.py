@@ -300,6 +300,112 @@ class WarpRuntime:
         )
         return manager.ssh.run_sudo_script(script, timeout=60)
 
+    def _write_warp_creds(self, manager, protocol, text):
+        """Write account.toml the same way as the profile: SFTP heredoc, 0600.
+
+        The wgcf account carries the WARP private key, so it must never be
+        part of a docker exec command line (those are logged by name).
+        """
+        container = manager._container_name(protocol)
+        target = '%s/account.toml' % _warp_dir(protocol)
+        payload = str(text or '').rstrip('\n')
+        script = (
+            "docker exec -i %s sh -c 'cat > %s && chmod 600 %s'"
+            " <<'__WARP_ACCOUNT_EOF__'\n%s\n__WARP_ACCOUNT_EOF__\n"
+            % (container, target, target, payload)
+        )
+        return manager.ssh.run_sudo_script(script, timeout=60)
+
+    def _read_warp_file(self, manager, protocol, name):
+        """Read a credential file out of the container.
+
+        The file name (not its content) is the only thing that reaches the
+        command line; the payload comes back over the SSH channel.
+        """
+        path = '%s/%s' % (_warp_dir(protocol), name)
+        out, _err, code = self._sh(manager, protocol, 'cat %s' % path)
+        if code != 0 or not (out or '').strip():
+            return ''
+        return out
+
+    # One polling pass per second inside the container; the probe itself runs
+    # in a single docker exec, so a stalled handshake costs one SSH round-trip.
+    HANDSHAKE_TIMEOUT = 25
+
+    _HANDSHAKE_PROBE = """IF=warp0
+CONF=__CONF_DIR__/warp0.conf
+[ -f "$CONF" ] || { echo NO_PROFILE; exit 0; }
+ip link del "$IF" 2>/dev/null || true
+if command -v amneziawg-go >/dev/null 2>&1 && [ ! -d /sys/module/amneziawg ]; then
+  amneziawg-go "$IF" >/dev/null 2>&1 || { echo NO_LINK; exit 0; }
+else
+  ip link add dev "$IF" type amneziawg >/dev/null 2>&1 \\
+    || ip link add dev "$IF" type wireguard >/dev/null 2>&1 \\
+    || { echo NO_LINK; exit 0; }
+fi
+MTU=$(sed -n "s/^MTU *= *//p" "$CONF" | head -1)
+[ -n "$MTU" ] || MTU=1280
+ip link set dev "$IF" mtu "$MTU" up >/dev/null 2>&1
+ADDR=$(sed -n "s/^Address *= *//p" "$CONF" | head -1 | cut -d, -f1 | tr -d " ")
+[ -n "$ADDR" ] && ip -4 addr add "$ADDR" dev "$IF" >/dev/null 2>&1
+QUICK=awg-quick; command -v awg-quick >/dev/null 2>&1 || QUICK=wg-quick
+WG=awg; command -v awg >/dev/null 2>&1 || WG=wg
+TMP=$(mktemp /tmp/_warp_probe.XXXXXX)
+$QUICK strip "$CONF" > "$TMP" 2>/dev/null || cp "$CONF" "$TMP"
+if ! $WG setconf "$IF" "$TMP" >/dev/null 2>&1; then
+  rm -f "$TMP"; ip link del "$IF" 2>/dev/null || true; echo SETCONF_FAILED; exit 0
+fi
+rm -f "$TMP"
+HS=0; i=0
+while [ "$i" -lt __TRIES__ ]; do
+  HS=$($WG show "$IF" latest-handshakes 2>/dev/null | awk "{print \\$2; exit}")
+  [ -n "$HS" ] && [ "$HS" != "0" ] && break
+  sleep 1; i=$((i+1))
+done
+ip link del "$IF" 2>/dev/null || true
+if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HANDSHAKE; fi
+"""
+
+    def _handshake_probe(self, manager, protocol, timeout=None):
+        """Bring warp0 up without any routes, wait for a handshake, tear it down.
+
+        The probe adds no routes, NAT or kill-switch rules: it only proves the
+        imported profile can complete a Cloudflare handshake before the panel
+        records the instance as installed.
+        """
+        tries = int(timeout or self.HANDSHAKE_TIMEOUT)
+        script = (self._HANDSHAKE_PROBE
+                  .replace('__CONF_DIR__', _warp_dir(protocol))
+                  .replace('__TRIES__', str(max(1, tries))))
+        out, err, code = self._sh(manager, protocol, script,
+                                  timeout=max(60, tries + 45))
+        text = (out or '').strip()
+        if code != 0:
+            logger.warning("warp handshake probe failed for %s: %s",
+                           protocol, (err or '')[-200:])
+            return None
+        if 'HANDSHAKE' in text and 'NO_HANDSHAKE' not in text:
+            parts = text.split('HANDSHAKE', 1)[1].split()
+            return parts[0] if parts else '0'
+        if 'NO_HANDSHAKE' not in text:
+            logger.warning("warp handshake probe: unexpected output %r for %s",
+                           text[-120:], protocol)
+        return None
+
+    def _source_target(self, source_server, source_protocol=None):
+        """AWG instance of the source server that supplies the profile."""
+        known = source_server.get('protocols') or {}
+        if source_protocol:
+            if _protocol_base(source_protocol) not in self.awg_protocols:
+                raise ws.SrvWarpError('srv_warp_protocol_unsupported', 409)
+            if source_protocol not in known:
+                raise ws.SrvWarpError('srv_warp_source_no_targets', 409)
+            return source_protocol
+        candidates = self._awg_protocols(source_server)
+        if not candidates:
+            raise ws.SrvWarpError('srv_warp_source_no_targets', 409)
+        return candidates[0]
+
     def _conf_present(self, manager, protocol):
         warp_dir = _warp_dir(protocol)
         _out, _err, cred_code = self._sh(
@@ -439,6 +545,218 @@ class WarpRuntime:
             raise
         finally:
             self._finish(uid, job_id)
+
+    def _profile_hash(self, manager, protocol):
+        out, err, code = self._sh(
+            manager, protocol, 'sha256sum %s/warp0.conf' % _warp_dir(protocol))
+        parts = (out or '').split()
+        if code != 0 or not parts:
+            logger.warning("warp0.conf sha256 failed for %s: %s",
+                           protocol, err)
+            return ''
+        return parts[0]
+
+    def _source_profile(self, manager, protocol, reuse=True):
+        """(account_toml, sanitized_profile) read from the source instance.
+
+        Registration is attempted only when the source has no usable profile:
+        a server that can reach ``api.cloudflareclient.com`` supplies the
+        account, a blocked one may already hold a previously imported one.
+        """
+        account = profile = ''
+        if reuse and self._conf_present(manager, protocol):
+            account = self._read_warp_file(manager, protocol, 'account.toml')
+            profile = self._read_warp_file(manager, protocol, 'warp0.conf')
+        if not account or not (profile or '').strip():
+            try:
+                self._ensure_wgcf(manager, protocol)
+                self._register_and_write_conf(manager, protocol, None)
+            except ws.SrvWarpError as exc:
+                # The source may be behind the same SNI filter as the target:
+                # report that instead of a generic registration failure.
+                logger.warning("warp import: source register failed for %s: %s",
+                               protocol, exc.code)
+                raise ws.SrvWarpError('srv_warp_source_register_failed', 502)
+            account = self._read_warp_file(manager, protocol, 'account.toml')
+            profile = self._read_warp_file(manager, protocol, 'warp0.conf')
+        if not account or not (profile or '').strip():
+            raise ws.SrvWarpError('srv_warp_source_register_failed', 502)
+        sanitized = ws.sanitize_warp_profile(profile)
+        if 'PrivateKey' not in sanitized or 'PublicKey' not in sanitized:
+            raise ws.SrvWarpError('srv_warp_source_register_failed', 502)
+        return account, sanitized
+
+    def _write_imported_profile(self, manager, protocol, account, profile):
+        """Persist both credential files on the target (0600, via heredoc)."""
+        self._sh(manager, protocol,
+                 'mkdir -p %s && chmod 700 %s'
+                 % (_warp_dir(protocol), _warp_dir(protocol)))
+        _out, err, code = self._write_warp_creds(manager, protocol, account)
+        if code != 0:
+            logger.warning("account.toml write failed for %s: %s",
+                           protocol, err)
+            raise ws.SrvWarpError('srv_warp_register_failed', 502)
+        _out, err, code = self._write_warp_profile(manager, protocol, profile)
+        if code != 0:
+            logger.warning("warp0.conf write failed for %s: %s",
+                           protocol, err)
+            raise ws.SrvWarpError('srv_warp_register_failed', 502)
+        conf_hash = self._profile_hash(manager, protocol)
+        if not conf_hash:
+            raise ws.SrvWarpError('srv_warp_register_failed', 502)
+        return conf_hash
+
+    async def import_profile(self, server_id, uid, source_uid, protocol=None,
+                             source_protocol=None, job_id=None,
+                             progress=None):
+        """Copy a registered WARP profile from another panel server.
+
+        Some hosts cannot reach ``api.cloudflareclient.com`` (the provider
+        filters TLS by SNI) while the WARP dataplane itself works, so the
+        account is registered elsewhere and imported here. The profile is
+        only recorded after a live handshake proves it works.
+        """
+        def report(stage, message):
+            if progress is not None:
+                try:
+                    progress(stage, message)
+                except Exception:
+                    logger.warning("warp import progress callback failed",
+                                   exc_info=True)
+
+        try:
+            report('start', 'starting Cloudflare WARP profile import')
+            data = self.load_data()
+            idx, server = self._server(data, server_id, uid)
+            if idx is None:
+                raise ws.SrvWarpError('srv_warp_identity_mismatch', 409)
+            target_uid = ws._norm_uid(uid)
+            src_uid = ws._norm_uid(source_uid)
+            if not src_uid:
+                raise ws.SrvWarpError('srv_warp_source_not_found', 409)
+            if src_uid == target_uid:
+                raise ws.SrvWarpError('srv_warp_source_is_self', 409)
+            src_idx, source_server = self._server(data, None, src_uid)
+            if src_idx is None:
+                raise ws.SrvWarpError('srv_warp_source_not_found', 409)
+
+            protocols = self._targets(server, protocol)
+            if not protocols:
+                raise ws.SrvWarpError('srv_warp_no_targets', 409)
+            source_proto = self._source_target(source_server, source_protocol)
+
+            if ws.quota_exhausted(self._registers_for(server, uid)):
+                raise ws.SrvWarpError('srv_warp_quota_exhausted', 409)
+
+            report('source', 'reading the WARP profile from the source server')
+            try:
+                source_manager = await self._awg(source_server)
+            except Exception as exc:
+                logger.warning("warp import: source ssh failed: %s", exc)
+                raise ws.SrvWarpError('srv_warp_source_unreachable', 502)
+            if not await asyncio.to_thread(
+                    self._container_running, source_manager, source_proto):
+                raise ws.SrvWarpError('srv_warp_source_unreachable', 502)
+            try:
+                account, profile = await asyncio.to_thread(
+                    self._source_profile, source_manager, source_proto)
+            except ws.SrvWarpError:
+                raise
+            except Exception as exc:
+                logger.warning("warp import: source profile failed: %s", exc)
+                raise ws.SrvWarpError('srv_warp_source_unreachable', 502)
+
+            manager = await self._awg(server)
+            imported, failed = [], []
+            for proto in protocols:
+                if not self._container_running(manager, proto):
+                    logger.info("warp import: %s/%s container is not running",
+                                target_uid, proto)
+                    report('skip', 'skipped %s: container is not running'
+                           % proto)
+                    continue
+                report('profile', 'writing the WARP profile to %s' % proto)
+                conf_hash = await asyncio.to_thread(
+                    self._write_imported_profile, manager, proto, account,
+                    profile)
+                report('handshake', 'verifying the WARP handshake on %s'
+                       % proto)
+                stamp = await asyncio.to_thread(
+                    self._handshake_probe, manager, proto)
+                if stamp is None:
+                    failed.append(proto)
+                    continue
+
+                def mark(state, proto=proto, conf_hash=conf_hash):
+                    record = ws.proto_record(state, target_uid, proto)
+                    record['warp']['conf_hash'] = conf_hash
+                    record['warp']['registered'] = True
+                    record['warp']['quarantine'] = False
+                    record['warp']['handshake_fails'] = 0
+                    record['warp']['last_handshake_fail_at'] = None
+
+                self.state_store.mutate(mark)
+                imported.append(proto)
+
+            if not imported:
+                if failed:
+                    raise ws.SrvWarpError(
+                        'srv_warp_handshake_failed', 502,
+                        message='no WARP handshake on %s'
+                                % ', '.join(failed))
+                raise ws.SrvWarpError('srv_warp_no_targets', 409)
+
+            report('startsh', 'updating the container start script')
+            for proto in imported:
+                await asyncio.to_thread(
+                    manager._write_start_script, proto,
+                    self._config_path(manager, proto), None)
+
+            now = ws.now_ts()
+            entry = {'ts': now, 'source': 'import',
+                     'source_uid': src_uid, 'protocol': source_proto}
+
+            def remember(current):
+                _idx, current_server = self._server(current, None, target_uid)
+                if current_server is None:
+                    return False
+                warp = current_server.setdefault('warp', {})
+                registers = list(warp.get('registers_ts')
+                                 or warp.get('registers') or [])
+                registers.append(dict(entry))
+                warp['registers_ts'] = ws.registers_prune(registers)
+                warp['installed'] = True
+                return True
+
+            await self._mutate_data(remember)
+            report('done', 'Cloudflare WARP profile imported')
+            if failed:
+                # Partial success: the imported instances are live, the rest
+                # must be visible in the operation log instead of silently
+                # looking installed.
+                logger.warning("warp import: no handshake on %s for %s",
+                               ', '.join(failed), target_uid)
+                report('skip', 'no WARP handshake on %s' % ', '.join(failed))
+        except ws.SrvWarpError as exc:
+            logger.warning("warp import rejected for %s: %s", uid, exc.code)
+            raise
+        except Exception:
+            logger.exception("warp import failed for %s", uid)
+            raise
+        finally:
+            self._finish(uid, job_id)
+
+    def _registers_for(self, server, uid):
+        """Registration timestamps of a server, visible to the quota gate."""
+        warp = server.get('warp') or {}
+        registers = warp.get('registers_ts')
+        if registers is None:
+            registers = warp.get('registers')
+        if registers is None:
+            record = ((self.state_store.load().get('servers') or {})
+                      .get(ws._norm_uid(uid)) or {})
+            registers = record.get('registers_ts') or record.get('registers')
+        return registers or []
 
     async def uninstall(self, server_id, uid, protocol=None, job_id=None):
         try:
