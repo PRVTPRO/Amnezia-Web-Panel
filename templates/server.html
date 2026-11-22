@@ -9575,6 +9575,96 @@
         return warpStatus;
     }
 
+    // Import a WARP profile registered on another panel server. Needed when
+    // this host cannot reach api.cloudflareclient.com (the provider filters
+    // TLS by SNI) while the WARP tunnel itself works.
+    function openWarpImportModal() {
+        const sources = Array.isArray(WARP_IMPORT_SOURCES) ? WARP_IMPORT_SOURCES : [];
+        const emptyEl = document.getElementById('warp-import-empty');
+        const sourceSel = document.getElementById('warp-import-source');
+        const protoSel = document.getElementById('warp-import-source-protocol');
+        const targetSel = document.getElementById('warp-import-target');
+        const errorEl = document.getElementById('warp-import-error');
+        const btn = document.getElementById('warp-import-btn');
+        if (errorEl) { errorEl.textContent = ''; errorEl.classList.add('hidden'); }
+        if (btn) btn.disabled = !sources.length;
+        if (emptyEl) emptyEl.classList.toggle('hidden', sources.length > 0);
+
+        if (sourceSel) {
+            sourceSel.innerHTML = sources.map(item =>
+                `<option value="${escapeHtml(item.uid)}">${escapeHtml(item.name)}</option>`
+            ).join('');
+            sourceSel.disabled = !sources.length;
+        }
+
+        // Source instances of the selected source server.
+        const fillSourceProtocols = () => {
+            if (!sourceSel || !protoSel) return;
+            const picked = sources.find(item => item.uid === sourceSel.value);
+            const protos = (picked && Array.isArray(picked.protocols)) ? picked.protocols : [];
+            protoSel.innerHTML = protos.map(proto =>
+                `<option value="${escapeHtml(proto)}">${escapeHtml(proto)}</option>`
+            ).join('');
+            protoSel.disabled = !protos.length;
+        };
+        if (sourceSel) sourceSel.onchange = fillSourceProtocols;
+        fillSourceProtocols();
+
+        // Target instances on this server: every registered AWG instance.
+        if (targetSel) {
+            const known = Array.isArray(SERVER_PROTOCOL_KEYS) ? SERVER_PROTOCOL_KEYS : [];
+            const targets = known.filter(proto =>
+                ['awg', 'awg2', 'awg3'].includes(protoBase(proto)));
+            targetSel.innerHTML = targets.map(proto =>
+                `<option value="${escapeHtml(proto)}">${escapeHtml(proto)}</option>`
+            ).join('');
+            targetSel.disabled = !targets.length;
+        }
+        openModal('warpImportModal');
+    }
+
+    async function importWarp() {
+        const sourceSel = document.getElementById('warp-import-source');
+        const protoSel = document.getElementById('warp-import-source-protocol');
+        const targetSel = document.getElementById('warp-import-target');
+        const errorEl = document.getElementById('warp-import-error');
+        const btn = document.getElementById('warp-import-btn');
+        const sourceUid = sourceSel ? sourceSel.value : '';
+        if (!sourceUid) return;
+        const body = {source_server_uid: sourceUid};
+        if (protoSel && protoSel.value) body.source_protocol = protoSel.value;
+        if (targetSel && targetSel.value) body.protocol = targetSel.value;
+
+        if (btn) btn.disabled = true;
+        if (errorEl) { errorEl.textContent = ''; errorEl.classList.add('hidden'); }
+        try {
+            const res = await warpPostWithTos('import', body);
+            if (!res) {
+                if (btn) btn.disabled = false;
+                return;
+            }
+            if (res.operation_id) {
+                closeModal('warpImportModal');
+                warpBusy = true;
+                renderWarpCard();
+                renderInstallOpProgress(res.operation_id, 'warp');
+                return;
+            }
+            await loadWarpStatus(true);
+            showToast(_('installed'), 'success');
+        } catch (err) {
+            const text = warpErrorMessage(err);
+            if (errorEl) {
+                errorEl.textContent = text;
+                errorEl.classList.remove('hidden');
+            } else {
+                showToast(_('error') + ': ' + text, 'error');
+            }
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    }
+
     async function installWarp(protocol) {
         if (warpBusy) return;
         closeModal('marketplaceModal');

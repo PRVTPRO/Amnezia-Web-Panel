@@ -6894,7 +6894,7 @@ async def api_srv_warp_import(request: Request, server_id: int,
                 {'error': 'Cloudflare WARP installation is already running',
                  'code': 'install_in_progress'},
                 status_code=409)
-        op = op_create(idx, 'warp', WARP_INSTALL_TOTAL)
+        op = op_create(idx, 'warp_import', WARP_IMPORT_TOTAL)
         asyncio.create_task(_run_warp_import(
             op['id'], idx, uid, source_uid, protocol, source_protocol))
         return {'operation_id': op['id']}
@@ -8542,11 +8542,15 @@ RKNBLOCK_INSTALL_STAGES = {'start': 1, 'preflight': 2, 'packages': 3,
 RKNBLOCK_INSTALL_TOTAL = 9
 
 WARP_INSTALL_STAGES = {'start': 1, 'arch': 2, 'download': 3, 'register': 4,
-                       'profile': 5, 'startsh': 6, 'done': 7,
-                       # Import flow (a profile borrowed from another panel
-                       # server): the stages that replace download/register.
-                       'source': 2, 'handshake': 6}
+                       'profile': 5, 'startsh': 6, 'done': 7}
 WARP_INSTALL_TOTAL = 7
+
+# A profile borrowed from another panel server: no download/register (and no
+# arch probe), so it gets its own increasing sequence instead of being wedged
+# into the install map.
+WARP_IMPORT_STAGES = {'start': 1, 'source': 2, 'profile': 3, 'handshake': 4,
+                      'startsh': 5, 'done': 6}
+WARP_IMPORT_TOTAL = 6
 
 XRAY_UPDATE_STAGES = {'start': 1, 'host': 2, 'version': 3, 'arch': 4,
                       'build': 5, 'verify': 6, 'swap': 7, 'check': 8, 'done': 9}
@@ -8557,6 +8561,7 @@ FLOW_STAGES = {
     'smartroute': SMARTROUTE_INSTALL_STAGES,
     'rknblock': RKNBLOCK_INSTALL_STAGES,
     'warp': WARP_INSTALL_STAGES,
+    'warp_import': WARP_IMPORT_STAGES,
     'xray_update': XRAY_UPDATE_STAGES,
 }
 FLOW_TOTALS = {
@@ -8564,6 +8569,7 @@ FLOW_TOTALS = {
     'smartroute': SMARTROUTE_INSTALL_TOTAL,
     'rknblock': RKNBLOCK_INSTALL_TOTAL,
     'warp': WARP_INSTALL_TOTAL,
+    'warp_import': WARP_IMPORT_TOTAL,
     'xray_update': XRAY_UPDATE_TOTAL,
 }
 
