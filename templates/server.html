@@ -7950,15 +7950,19 @@
 
     async function loadSmartRouteStatus() {
         smartRoutePending = true;
+        let probeFailed = false;
         try {
             smartRouteStatus = await apiCall(`/api/servers/${SERVER_ID}/smartroute/status`);
         } catch (err) {
             smartRouteStatus = null;
+            // Ошибка пробы — не «нет ответа»: скелетон навсегда остаётся
+            // на карточке, а в консоли только предупреждение очереди.
+            // Снимаем pending, карточка показывает «Не установлен», как
+            // это было до появления скелетона.
+            probeFailed = true;
             throw err;
         } finally {
-            // A failed probe keeps the skeleton: hiding the card would make it
-            // pop back on the next successful load (TZ P1.2).
-            smartRoutePending = smartRouteStatus === null;
+            smartRoutePending = smartRouteStatus === null && !probeFailed;
             // Every surface that reads smartRouteStatus repaints here, so the
             // card never stays in its skeleton state after the answer lands.
             applyInstalledAppsVisibility();

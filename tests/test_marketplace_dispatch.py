@@ -128,6 +128,10 @@ const refreshExitMarks=()=>{};
 // it simply refreshes the card from the (stubbed) API.
 function renderInstallOpProgress(opId, flow) { calls.push(['op', flow, opId]); rknBlockBusy = false; loadRknBlock(); }
 const setInstalledAppsLoading=()=>{},updateStatusCounts=()=>{},loadSmartRouteStatus=async()=>null;
+// Страница ставит хостовые пробы в очередь: в harness они не исполняются,
+// но факт постановки фиксируется, чтобы регрессия «карточки не обновляются»
+// не прошла незамеченной.
+const ProbeQueue={keys:[],critical:()=>Promise.resolve(),background:(key)=>{ProbeQueue.keys.push(key);return Promise.resolve();},refresh:()=>Promise.resolve(),settleCritical:()=>{}};
 window.confirm=()=>true;
 const apiCall=(url,method='GET')=>{calls.push({url,method});
  if(method==='POST') {
@@ -153,9 +157,13 @@ const apiCall=(url,method='GET')=>{calls.push({url,method});
                         page.evaluate('applyInstalledAppsVisibility(); renderMarketplace()')
                         self.assertTrue(page.locator('#proto-rknblock').is_visible())
                         page.evaluate('checkServer()')
-                        # P4: checkServer no longer starts the header probes
-                        # itself, so the RKN probe is started explicitly here
-                        # (the page queue does the same after /check answers).
+                        # Каждая обычная проверка снова наполняет хостовые
+                        # карточки — теперь через очередь (ProbeQueue), а не
+                        # напрямую: harness проверяет именно постановку в очередь.
+                        self.assertEqual(
+                            page.evaluate('ProbeQueue.keys'), ['warp', 'rkn', 'smartroute'])
+                        # Очередь в harness не исполняет задачи: проба RKN
+                        # ставится здесь руками, как это делает страница.
                         page.evaluate('() => { loadRknBlock(); }')
                         self.assertEqual(page.evaluate('pending.length'), 1)
                         self.assertIn('server_uid=fixture-node',
