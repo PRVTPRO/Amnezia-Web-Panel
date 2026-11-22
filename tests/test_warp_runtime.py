@@ -298,8 +298,8 @@ class WarpRuntimeHarness(unittest.TestCase):
                          .get('installed'))
 
     def test_an_unexpected_install_error_gets_a_stable_code(self):
-        # A class name must never become the operation error code: it would be
-        # serialized as a JSON array and the UI could not translate it.
+        # The per-instance isolation needs a translatable reason to raise: a
+        # class name would not be a code the UI could map.
         def boom(manager, proto):
             raise TimeoutError('ssh went away')
 

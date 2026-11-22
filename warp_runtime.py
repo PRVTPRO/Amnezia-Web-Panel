@@ -434,8 +434,9 @@ class WarpRuntime:
                 except Exception as exc:
                     logger.exception("warp install failed for %s/%s",
                                      uid, proto)
-                    # A stable code: the class name of an unexpected exception
-                    # must not become a JSON array in the operation result.
+                    # A stable code: the per-instance isolation below needs a
+                    # reason it can raise, and a class name would not be a code
+                    # the UI could translate.
                     failures.append((proto, 'srv_warp_install_failed'))
                     report('failed', 'failed %s: %s'
                            % (proto, exc.__class__.__name__))
