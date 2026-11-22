@@ -1597,5 +1597,9 @@
   "smartroute_timer_never": "pas encore exécuté",
   "smartroute_timer_stale": "La liste de préfixes n'a pas été actualisée depuis trop longtemps",
   "smartroute_timer_armed": "Minuteur armé",
-  "smartroute_card_warn": "attention"
+  "smartroute_card_warn": "attention",
+  "self_service_delete_unavailable": "La suppression en libre-service est temporairement indisponible. Rien n'a été modifié.",
+  "self_service_delete_ssh_failed": "Impossible de supprimer la connexion sur le serveur. Rien n'a été modifié ; réessayez plus tard.",
+  "self_service_delete_busy": "Une autre opération sur la connexion est en cours. Réessayez dans un instant.",
+  "self_service_delete_restore_required": "Le serveur n'a pas confirmé le résultat. Rien n'a été supprimé ; un administrateur doit vérifier l'état de la connexion."
 }

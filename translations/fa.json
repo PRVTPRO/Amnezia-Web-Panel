@@ -1597,5 +1597,9 @@
   "smartroute_timer_never": "هنوز اجرا نشده",
   "smartroute_timer_stale": "فهرست پیشوندها مدت زیادی به‌روزرسانی نشده است",
   "smartroute_timer_armed": "تایمر فعال است",
-  "smartroute_card_warn": "هشدار"
+  "smartroute_card_warn": "هشدار",
+  "self_service_delete_unavailable": "حذف خودکار موقتاً در دسترس نیست. هیچ تغییری اعمال نشد.",
+  "self_service_delete_ssh_failed": "حذف اتصال روی سرور ممکن نشد. هیچ تغییری اعمال نشد؛ بعداً دوباره تلاش کنید.",
+  "self_service_delete_busy": "عملیات دیگری روی اتصال در حال اجراست. لحظه‌ای بعد دوباره تلاش کنید.",
+  "self_service_delete_restore_required": "سرور نتیجه را تأیید نکرد. هیچ چیز حذف نشد؛ مدیر باید وضعیت اتصال را بررسی کند."
 }

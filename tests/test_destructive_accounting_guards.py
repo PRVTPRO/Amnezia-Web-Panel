@@ -699,14 +699,36 @@ class SelfServiceDeleteThroughEndpoint(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status_code, 409, getattr(result, 'body', result))
         body = json.loads(result.body)
         self.assertEqual(body['code'], 'peer_lifecycle_busy')
+        # The message is a translation key, not a hardcoded English string.
+        self.assertEqual(body['error'],
+                         panel._t('self_service_delete_busy', 'en'))
+
+    async def test_uncertain_lifecycle_maps_to_503_not_500(self):
+        async def uncertain(*args, **kwargs):
+            raise interlock.PeerLifecycleUncertain('peer_lifecycle_uncertain')
+
+        with patch.object(panel, '_finalize_and_remove_peer', side_effect=uncertain):
+            result = await self.delete()
+
+        self.assertEqual(result.status_code, 503, getattr(result, 'body', result))
+        body = json.loads(result.body)
+        self.assertEqual(body['code'], 'peer_lifecycle_uncertain')
+        self.assertEqual(body['error'],
+                         panel._t('self_service_delete_restore_required', 'en'))
 
     async def test_removal_ssh_failure_is_not_reported_as_success(self):
         self.remove.side_effect = RuntimeError('ssh went away')
 
         result = await self.delete()
 
-        self.assertEqual(result.status_code, 409, getattr(result, 'body', result))
-        self.assertEqual(json.loads(result.body)['code'], 'removal_ssh_failed')
+        # Same status as the admin path: the remote host failed, nothing changed.
+        self.assertEqual(result.status_code, 502, getattr(result, 'body', result))
+        body = json.loads(result.body)
+        self.assertEqual(body['code'], 'removal_ssh_failed')
+        # The remote text may carry command output and must not reach the user.
+        self.assertNotIn('ssh went away', body['error'])
+        self.assertEqual(body['error'],
+                         panel._t('self_service_delete_ssh_failed', 'en'))
         self.commit.assert_not_called()
         self.assertEqual(len(self.data['user_connections']), 1)
 

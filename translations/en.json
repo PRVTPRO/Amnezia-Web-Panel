@@ -1597,5 +1597,9 @@
   "smartroute_timer_never": "never ran yet",
   "smartroute_timer_stale": "The prefix list has not been refreshed for too long",
   "smartroute_timer_armed": "Timer is armed",
-  "smartroute_card_warn": "warning"
+  "smartroute_card_warn": "warning",
+  "self_service_delete_unavailable": "Self-service deletion is temporarily unavailable. Nothing was changed.",
+  "self_service_delete_ssh_failed": "Could not remove the connection on the server. Nothing was changed; please try again later.",
+  "self_service_delete_busy": "Another connection operation is still running. Please try again in a moment.",
+  "self_service_delete_restore_required": "The server did not confirm the result. Nothing was deleted; an administrator must check the connection state."
 }

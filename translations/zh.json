@@ -1597,5 +1597,9 @@
   "smartroute_timer_never": "尚未运行",
   "smartroute_timer_stale": "前缀列表已长时间未更新",
   "smartroute_timer_armed": "定时器已启用",
-  "smartroute_card_warn": "注意"
+  "smartroute_card_warn": "注意",
+  "self_service_delete_unavailable": "自助删除暂时不可用。未做任何更改。",
+  "self_service_delete_ssh_failed": "无法在服务器上删除连接。未做任何更改，请稍后重试。",
+  "self_service_delete_busy": "另一个连接操作仍在进行中。请稍后重试。",
+  "self_service_delete_restore_required": "服务器未确认结果。未删除任何内容，需由管理员检查连接状态。"
 }

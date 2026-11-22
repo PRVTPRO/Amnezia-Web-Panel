@@ -2533,24 +2533,41 @@ def _self_service_error_response(exc, lang='en'):
     if isinstance(exc, RateLimitError):
         return JSONResponse({'error': str(exc)}, status_code=429)
     if isinstance(exc, SelfServiceError):
+        code = getattr(exc, 'code', None)
         body = {'error': str(exc)}
-        if getattr(exc, 'code', None):
-            body['code'] = exc.code
+        if code:
+            body['code'] = code
+        # The web is the untrusted side: never echo an exception whose text may
+        # carry SSH output, host names or paths. Keep the stable code and
+        # localize the human-readable part instead.
+        if code in ('self_service_unavailable', 'removal_ssh_failed'):
+            body['error'] = _t('self_service_delete_unavailable', lang)
         return JSONResponse(body, status_code=exc.status_code)
     # A finalization refusal is a real, actionable answer, not an outage: keep
     # the machine code so the UI can explain it instead of a generic 500.
     if isinstance(exc, FinalizationError):
         body = {'error': str(exc), 'code': exc.code}
+        status_code = 409
         if exc.code == 'final_counter_read_failed':
             # The only remaining fail-closed case: nothing was removed, the
             # user just needs to retry or ask an administrator.
             body['error'] = _t('self_service_delete_counter_unavailable', lang)
-        return JSONResponse(body, status_code=409)
+        elif exc.code == 'removal_ssh_failed':
+            # Same status as the admin path; the remote text stays server-side.
+            body['error'] = _t('self_service_delete_ssh_failed', lang)
+            status_code = 502
+        return JSONResponse(body, status_code=status_code)
     if isinstance(exc, peer_lifecycle_lock.PeerLifecycleBusy):
         return JSONResponse({
-            'error': 'Another connection operation is still running. Retry in a moment.',
+            'error': _t('self_service_delete_busy', lang),
             'code': 'peer_lifecycle_busy',
         }, status_code=409)
+    if isinstance(exc, peer_lifecycle_lock.PeerLifecycleUncertain):
+        # The SSH result is unknown: nothing was deleted, an operator must look.
+        return JSONResponse({
+            'error': _t('self_service_delete_restore_required', lang),
+            'code': 'peer_lifecycle_uncertain',
+        }, status_code=503)
     logger.exception("Unexpected self-service error")
     return JSONResponse({'error': 'Internal server error'}, status_code=500)
 

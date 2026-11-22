@@ -340,7 +340,13 @@ LIFECYCLE_FENCE_KEYS = {
 
 # Self-service deletion (#402): declared here so the frozen catalogue hash
 # keeps guarding the original keys.
-SELF_SERVICE_DELETE_KEYS = {'self_service_delete_counter_unavailable'}
+SELF_SERVICE_DELETE_KEYS = {
+    'self_service_delete_counter_unavailable',
+    'self_service_delete_unavailable',
+    'self_service_delete_ssh_failed',
+    'self_service_delete_busy',
+    'self_service_delete_restore_required',
+}
 
 SECURITY_SETUP_KEYS = {
     'setup_title', 'setup_password_confirm', 'setup_submit', 'setup_creating',
