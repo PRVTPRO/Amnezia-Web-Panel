@@ -8,6 +8,8 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import telegram_bot as tg_bot
+import peer_lifecycle_lock as interlock
+from connection_service import SelfServiceError
 
 
 class TestTelegramCommandMenu(unittest.IsolatedAsyncioTestCase):
@@ -850,6 +852,50 @@ class TestUserDeleteConnection(unittest.IsolatedAsyncioTestCase):
         text = self.api.edit_message.call_args[0][2]
         self.assertNotIn('secret host path', text)
         self.assertIn('error', text.lower())
+        # A generic failure must not claim self-service is off.
+        self.assertNotIn('not available', text)
+
+    async def test_counter_failure_names_the_real_reason(self):
+        error = SelfServiceError('Could not read the final traffic counter.', status_code=409)
+        error.code = 'final_counter_read_failed'
+        self.mock_service.delete_user_connection = AsyncMock(side_effect=error)
+        ref_key = tg_bot._ref('user_delete_confirm', {'conn_id': 'conn-1'})
+        msg = _callback_update(chat_id=111, from_id=111, data_str=ref_key)
+
+        with self.assertLogs(tg_bot.logger, level='ERROR'):
+            await _dispatch_callback_with_service(self.api, msg, self.load_data, self.mock_service)
+
+        text = self.api.edit_message.call_args[0][2]
+        self.assertIn('counter', text.lower())
+        self.assertNotIn('Self-service is not available', text)
+        self.assertNotIn('Could not read the final traffic counter.', text)
+
+    async def test_busy_lifecycle_asks_to_retry(self):
+        error = interlock.PeerLifecycleBusy('peer_lifecycle_busy')
+        self.mock_service.delete_user_connection = AsyncMock(side_effect=error)
+        ref_key = tg_bot._ref('user_delete_confirm', {'conn_id': 'conn-1'})
+        msg = _callback_update(chat_id=111, from_id=111, data_str=ref_key, language_code='ru')
+
+        with self.assertLogs(tg_bot.logger, level='ERROR'):
+            await _dispatch_callback_with_service(self.api, msg, self.load_data, self.mock_service)
+
+        text = self.api.edit_message.call_args[0][2]
+        self.assertIn('Повторите через минуту', text)
+        self.assertNotIn('недоступен', text)
+
+    async def test_admin_created_connection_reports_forbidden(self):
+        error = SelfServiceError('Only self-service connections can be deleted',
+                                 status_code=403, forbidden=True)
+        self.mock_service.delete_user_connection = AsyncMock(side_effect=error)
+        ref_key = tg_bot._ref('user_delete_confirm', {'conn_id': 'conn-1'})
+        msg = _callback_update(chat_id=111, from_id=111, data_str=ref_key)
+
+        with self.assertLogs(tg_bot.logger, level='ERROR'):
+            await _dispatch_callback_with_service(self.api, msg, self.load_data, self.mock_service)
+
+        text = self.api.edit_message.call_args[0][2]
+        self.assertIn('administrator', text.lower())
+        self.assertNotIn('Only self-service connections can be deleted', text)
 
 
 class TestFindUserNumericIdOnly(unittest.IsolatedAsyncioTestCase):

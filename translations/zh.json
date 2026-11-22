@@ -170,6 +170,7 @@
   "connection_created": "连接 \"{}\" 已创建",
   "delete_connection_confirm": "确定删除此连接？配置将失效。",
   "connection_deleted": "连接已删除",
+  "self_service_delete_counter_unavailable": "无法读取最终的流量计数，因此连接未被删除。请重试；如果仍然失败，请联系管理员。",
   "self_service_title": "自助服务",
   "self_service_enabled": "启用自助服务",
   "self_service_enabled_desc": "允许用户创建和管理自己的 VPN 连接",

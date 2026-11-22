@@ -170,6 +170,7 @@
   "connection_created": "Connexion \"{}\" créée",
   "delete_connection_confirm": "Supprimer cette connexion ? Elle cessera de fonctionner.",
   "connection_deleted": "Connexion supprimée",
+  "self_service_delete_counter_unavailable": "Le dernier compteur de trafic n’a pas pu être lu, la connexion n’a donc pas été supprimée. Réessayez ; si l’erreur persiste, contactez votre administrateur.",
   "self_service_title": "Libre-service",
   "self_service_enabled": "Activer le self-service",
   "self_service_enabled_desc": "Permettre aux utilisateurs de créer et gérer leurs propres connexions VPN",

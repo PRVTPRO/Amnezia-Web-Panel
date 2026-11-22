@@ -102,6 +102,7 @@ class ConnectionService:
         manager_call,
         generate_vpn_link,
         protocol_public_endpoint=None,
+        finalize_peer=None,
     ):
         self.load_data = load_data
         self.save_data = save_data
@@ -114,6 +115,10 @@ class ConnectionService:
         # address and the instance's listen port, as it always was.
         self.protocol_public_endpoint = protocol_public_endpoint or (
             lambda server, protocol: (server.get('host', ''), None))
+        # Deletion needs the admin finalization path (last counter read, traffic
+        # commit, tombstone). Injected by app.py; a service without it cannot
+        # delete safely and says so instead of dropping an owner silently.
+        self.finalize_peer = finalize_peer
         self._provision_locks = defaultdict(asyncio.Lock)
         self._rate_events = defaultdict(list)
 
@@ -226,6 +231,12 @@ class ConnectionService:
 
     @serialize_peer_lifecycle
     async def delete_user_connection(self, user_id, connection_id, source):
+        if self.finalize_peer is None:
+            # A service built without the finalization path must not remove an
+            # owner: that is exactly the regression this guard exists for.
+            error = SelfServiceError('Self-service deletion is not configured', status_code=503)
+            error.code = 'self_service_unavailable'
+            raise error
         data = self.load_data()
         settings = self._settings(data)
         self._check_rate_limit(user_id, source, settings)
@@ -237,6 +248,10 @@ class ConnectionService:
         protocol = conn.get('protocol')
         lock = self._provision_locks[(server_id, protocol)]
         async with lock:
+            # Ownership and channel are re-checked on a fresh snapshot, then the
+            # data lock is released: finalization does SSH first and only then
+            # commits under its own lock. Holding DATA_LOCK over SSH is exactly
+            # what must not happen.
             async with self.data_lock:
                 data = self.load_data()
                 settings = self._settings(data)
@@ -244,13 +259,27 @@ class ConnectionService:
                 self._get_eligible_user(data, user_id)
                 conn = self._get_connection(data, user_id, connection_id)
                 if conn.get('created_by') != 'self_service':
-                    raise SelfServiceError('Only self-service connections can be deleted', status_code=403, forbidden=True)
-                # Keeping an owner is mandatory until stopped-peer counters can
-                # be durably settled. Disabling metadata is not such a receipt.
-                from peer_accounting import FINALIZATION_MESSAGE
-                error = SelfServiceError(FINALIZATION_MESSAGE, status_code=409)
-                error.code = 'traffic_finalization_required'
-                raise error
+                    raise SelfServiceError('Only self-service connections can be deleted',
+                                           status_code=403, forbidden=True)
+                servers = data.get('servers', [])
+                if not isinstance(server_id, int) or not 0 <= server_id < len(servers):
+                    raise SelfServiceError('Server not found', status_code=404)
+                server = servers[server_id]
+
+            # Deletion lowers the connection count, so max_connections does not
+            # apply. Forced removal stays admin-only: allow_unverified=False.
+            # owner_user_id keeps the finalization on this user's own row even
+            # if the same physical peer were linked to several users.
+            return await self.finalize_peer(
+                server,
+                conn.get('protocol'),
+                conn.get('client_id'),
+                actor=user_id,
+                kind='self_service_peer_remove',
+                server_id=server_id,
+                allow_unverified=False,
+                owner_user_id=user_id,
+            )
 
     def _settings(self, data):
         settings = dict(DEFAULT_SELF_SERVICE_SETTINGS)

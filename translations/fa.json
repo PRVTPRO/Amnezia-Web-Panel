@@ -170,6 +170,7 @@
   "connection_created": "اتصال \"{}\" ایجاد شد",
   "delete_connection_confirm": "این اتصال حذف شود؟ پیکربندی دیگر کار نخواهد کرد.",
   "connection_deleted": "اتصال حذف شد",
+  "self_service_delete_counter_unavailable": "آخرین شمارنده ترافیک خوانده نشد، بنابراین اتصال حذف نشد. دوباره تلاش کنید؛ اگر خطا ادامه یافت با مدیر تماس بگیرید.",
   "self_service_title": "سرویس خودکار",
   "self_service_enabled": "فعال‌سازی سرویس خودکار",
   "self_service_enabled_desc": "به کاربران اجازه ایجاد و مدیریت اتصال‌های VPN خود را بدهید",

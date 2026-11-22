@@ -171,6 +171,7 @@
   "connection_created": "Connection \"{}\" created",
   "delete_connection_confirm": "Delete this connection? The configuration will stop working.",
   "connection_deleted": "Connection deleted",
+  "self_service_delete_counter_unavailable": "The last traffic counter could not be read, so the connection was not deleted. Please try again; if it keeps failing, contact your administrator.",
   "self_service_title": "Self-Service",
   "self_service_enabled": "Enable self-service",
   "self_service_enabled_desc": "Allow users to create and manage their own VPN connections",
