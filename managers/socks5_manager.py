@@ -942,17 +942,24 @@ class Socks5Manager:
         }
 
     def _restore_listener(self, snap, log):
-        """Вернуть листенер к снимку. Ошибки не глотаем: пишем в лог."""
+        """Вернуть листенер к снимку: конфиг и контейнер на прежнем порту.
+
+        Контейнер после пересоздания опубликован на новом порту: restart
+        сохранил бы его, а восстановленный конфиг слушает старый порт —
+        листенер остался бы недоступен. Ошибки не глотаем: пишем в лог.
+        """
         name = snap['name']
         try:
             if snap['text']:
                 self._write_config(snap['dir'], snap['text'])
             if snap['exists'] and snap['port']:
-                if self._container_exists(name):
-                    self.ssh.run_sudo_command(f'docker restart {name}')
-                else:
-                    self._run_container(name, snap['dir'], snap['port'])
-                log.append(f'{name}: откат к прежнему конфигу на порту {snap["port"]}')
+                # Контейнер после пересоздания опубликован на новом порту:
+                # restart сохранит его, а восстановленный конфиг слушает
+                # старый порт — листенер остался бы недоступен.
+                # Пересоздаём на порту из снимка.
+                self._remove_quietly(name)
+                self._run_container(name, snap['dir'], snap['port'])
+                log.append(f'{name}: контейнер пересоздан на прежнем порту {snap["port"]}')
             elif not snap['exists'] and self._container_exists(name):
                 self._remove_quietly(name)
                 log.append(f'{name}: контейнер удалён при откате')
@@ -1129,7 +1136,7 @@ class Socks5Manager:
                 *([f'HTTP proxy listening on port {result.get("http_port")}/TCP']
                   if http_enabled else []),
                 *([f'Username: {username}'] if username else []),
-                *([f'Password: {password}'] if password else []),
+                *(['Password: скрыт из журнала'] if password else []),
                 *(['Save these credentials — the password can also be viewed later via "Change settings".']
                   if password else []),
                 *(result.get('log') or []),

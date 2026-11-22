@@ -499,7 +499,11 @@ class ApplyTest(unittest.TestCase):
         self.assertEqual(
             ssh.uploaded('/opt/amnezia/socks5proxy/3proxy.cfg')[-1],
             LEGACY_CONFIG)
-        self.assertIn('docker restart amnezia-socks5proxy', ssh.commands)
+        # Откат SOCKS пересоздаёт контейнер на порту снимка (38080).
+        self.assertTrue(any(
+            cmd.startswith('docker run') and '-p 38080:38080/tcp' in cmd
+            and '--name amnezia-socks5proxy' in cmd
+            for cmd in ssh.commands))
 
     def test_apply_rolls_back_config_when_container_dies(self):
         """Контейнер в цикле рестартов → ошибка и прежний конфиг на диске."""
@@ -512,8 +516,30 @@ class ApplyTest(unittest.TestCase):
         self.assertEqual(
             ssh.uploaded('/opt/amnezia/socks5proxy/3proxy.cfg')[-1],
             LEGACY_CONFIG)
-        # Контейнер существовал — откат возвращает его рестартом, не run.
-        self.assertIn('docker restart amnezia-socks5proxy', ssh.commands)
+        # Откат пересоздаёт контейнер: restart оставил бы новый порт.
+        self.assertTrue(any(
+            cmd.startswith('docker run') and '-p 38080:38080/tcp' in cmd
+            and '--name amnezia-socks5proxy' in cmd
+            for cmd in ssh.commands))
+
+    def test_apply_rollback_recreates_container_on_previous_port(self):
+        """Смена порта + падение health-check → откат публикует старый порт."""
+        ssh = CrashingSSH({
+            '/opt/amnezia/socks5proxy/3proxy.cfg': LEGACY_CONFIG,
+        })
+        result = manager(ssh).apply([make_account()], 1080)
+        self.assertEqual(result['status'], 'error')
+        self.assertEqual(
+            ssh.uploaded('/opt/amnezia/socks5proxy/3proxy.cfg')[-1],
+            LEGACY_CONFIG)
+        runs = [cmd for cmd in ssh.commands if cmd.startswith('docker run')]
+        self.assertTrue(any('-p 1080:1080/tcp' in cmd for cmd in runs))
+        # Недостаточно docker restart: контейнер нужно пересоздать на порту
+        # снимка, иначе восстановленный конфиг слушает другой порт.
+        self.assertTrue(any('-p 38080:38080/tcp' in cmd for cmd in runs))
+        self.assertIn(
+            'amnezia-socks5proxy: контейнер пересоздан на прежнем порту 38080',
+            result['log'])
 
     def test_remove_container_removes_both(self):
         ssh = FakeSSH()
@@ -536,6 +562,14 @@ class ApplyTest(unittest.TestCase):
         self.assertEqual(result['container_name'], 'amnezia-socks5proxy')
         runs = [cmd for cmd in ssh.commands if cmd.startswith('docker run')]
         self.assertTrue(any('-p 1080:1080/tcp' in cmd for cmd in runs))
+
+    def test_install_protocol_does_not_log_password(self):
+        ssh = FakeSSH()
+        result = manager(ssh).install_protocol(
+            port=1080, username='u1', password='VerySecret123')
+        self.assertEqual(result['status'], 'success')
+        self.assertNotIn('VerySecret123', '\n'.join(result['log']))
+        self.assertIn('Password: скрыт из журнала', result['log'])
 
     def test_install_protocol_default_port_is_1080(self):
         ssh = FakeSSH()
