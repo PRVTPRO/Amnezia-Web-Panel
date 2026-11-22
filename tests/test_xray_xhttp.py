@@ -23,7 +23,7 @@ XHTTP_CONFIG = {
             'xhttpSettings': {
                 'path': '/abc123',
                 'host': 'own.example',
-                'mode': 'auto',
+                'mode': 'stream-one',
                 'extra': {'xPaddingBytes': '100-1000',
                           'xmux': {'maxConcurrency': '8-16'}},
             },
@@ -89,7 +89,9 @@ class XhttpInstallTests(unittest.TestCase):
         for field in ('cMaxReuseTimes', 'hMaxRequestTimes', 'hMaxReusableSecs'):
             low, high = xmux[field].split('-')
             self.assertLess(int(low), int(high), field)
-        # the classic anti-DPI profile: a single connection, no multiplexing
+        # the classic anti-DPI profile: one reusable connection; a zero
+        # maxConcurrency leaves the per-connection stream cap disabled
+        # (mux.go caps only when positive) - reuse-heavy, not serial
         self.assertEqual(xmux['maxConnections'], 1)
         self.assertEqual(xmux['maxConcurrency'], 0)
         self.assertEqual(xmux['hKeepAlivePeriod'], 0)
@@ -119,8 +121,9 @@ class XhttpInstallTests(unittest.TestCase):
         random.seed(2)
         second = _xhttp_extra()
         self.assertNotEqual(first['xPaddingBytes'], second['xPaddingBytes'])
-        self.assertNotEqual(first['xmux']['hMaxRequestTimes'],
-                            second['xmux']['hMaxRequestTimes'])
+        for field in ('cMaxReuseTimes', 'hMaxRequestTimes', 'hMaxReusableSecs'):
+            self.assertNotEqual(first['xmux'][field],
+                                second['xmux'][field], field)
 
 
 class XhttpLinkTests(unittest.TestCase):
@@ -141,7 +144,8 @@ class XhttpLinkTests(unittest.TestCase):
         self.assertEqual(query['sni'], 'own.example')
         self.assertEqual(query['path'], '/abc123')
         self.assertEqual(query['host'], 'own.example')
-        self.assertEqual(query['mode'], 'auto')
+        # the installed mode reaches the client link verbatim
+        self.assertEqual(query['mode'], 'stream-one')
         self.assertEqual(json.loads(query['extra']), XHTTP_CONFIG['inbounds'][0]
                          ['streamSettings']['xhttpSettings']['extra'])
 
@@ -215,6 +219,8 @@ class XhttpClientFlowTests(unittest.TestCase):
 
 class XhttpLinkExportTests(unittest.TestCase):
     def test_xhttp_link_round_trips_into_the_client_config(self):
+        # mode 'auto' on purpose: whatever mode a link carries round-trips
+        # into the client config unchanged
         extra = {'xPaddingBytes': '100-1000', 'xmux': {'maxConcurrency': '8-16'}}
         params = {
             'type': 'xhttp', 'security': 'reality',

@@ -29,12 +29,19 @@ def _random_range(low_min, low_max, span_min, span_max):
 
 
 def _xhttp_extra():
-    """XHTTP tuning per the current classic anti-DPI profile
-    (mode stream-one, maxConnections=1), proven on weak mobile clients:
-    high multiplexing values make old phones drop the tunnel mid-session.
-    Every knob the core accepts as a range stays a range, with bounds
-    shifted per install so servers do not share one padding/muxing
-    profile. hKeepAlivePeriod is the one field that rejects ranges."""
+    """XHTTP tuning per the current classic anti-DPI profile (mode
+    stream-one, maxConnections=1), proven on weak mobile clients: the
+    wide maxConcurrency ranges of the previous profile made old phones
+    drop the tunnel mid-session.
+
+    The profile is "one connection, reuse-heavy": maxConnections=1 pins
+    a single reusable connection, and maxConcurrency=0 leaves the
+    per-connection stream cap disabled (mux.go applies the cap only when
+    the value is positive) - strictly serial requests are not expressible
+    in the core, and two positive xmux values are rejected at config
+    build. Every knob that stays tunable is a range with bounds shifted
+    per install so servers do not share one padding/muxing profile;
+    hKeepAlivePeriod is the one field that rejects ranges."""
     return {
         "xPaddingBytes": _random_range(50, 300, 500, 1200),
         "scStreamUpServerSecs": _random_range(10, 30, 40, 60),
