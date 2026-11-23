@@ -308,6 +308,8 @@
                         <div class="form-group">
                             <label class="form-label">{{ _('protocol_label') }}</label>
                             <select class="form-select" name="remnawave_protocol" id="syncProtocolSelect">
+                                <option value="awg3" {% if settings.sync.remnawave_protocol=='awg3' %}selected{% endif %}>
+                                    AmneziaWG 3.1</option>
                                 <option value="awg2" {% if settings.sync.remnawave_protocol=='awg2' %}selected{% endif %}>
                                     AmneziaWG 2.0</option>
                                 <option value="awg_legacy" {% if settings.sync.remnawave_protocol=='awg_legacy' %}selected{% endif %}>
@@ -471,7 +473,7 @@
             if (info.installed && (key !== 'awg' || info.container_running)) {
                 const opt = document.createElement('option');
                 opt.value = key;
-                opt.textContent = key === 'awg' ? 'AmneziaWG' : (key === 'awg2' ? 'AmneziaWG 2.0' : (key === 'awg_legacy' ? 'AWG Legacy' : (key === 'xray' ? 'Xray' : (key === 'webproxy' ? 'Telegram WEB Proxy' : key.toUpperCase()))));
+                opt.textContent = key === 'awg' ? 'AmneziaWG' : (key === 'awg3' ? 'AmneziaWG 3.1' : (key === 'awg2' ? 'AmneziaWG 2.0' : (key === 'awg_legacy' ? 'AWG Legacy' : (key === 'xray' ? 'Xray' : (key === 'webproxy' ? 'Telegram WEB Proxy' : key.toUpperCase())))));
                 if (key === "{{ settings.sync.remnawave_protocol }}") opt.selected = true;
                 protoSelect.appendChild(opt);
                 count++;

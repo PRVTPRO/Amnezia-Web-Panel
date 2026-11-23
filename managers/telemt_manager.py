@@ -288,11 +288,18 @@ class TelemtManager:
         if code != 0: return ""
         return out
 
+    def _reload(self):
+        """SIGHUP keeps traffic counters; restart only if HUP failed.
+        Two commands: in `a || b` under sudo, b would run without root."""
+        _, _, code = self.ssh.run_sudo_command(f"docker kill -s HUP {self.CONTAINER_NAME}")
+        if code != 0:
+            self.ssh.run_sudo_command(f"docker restart {self.CONTAINER_NAME}")
+
     def save_server_config(self, protocol_type, config_content):
         self._upload_config(config_content)
         # Use SIGHUP (HUP) to reload MTProxy config without restarting the process/container.
         # This keeps the traffic statistics (octets) in memory.
-        self.ssh.run_sudo_command(f"docker kill -s HUP {self.CONTAINER_NAME} || docker restart {self.CONTAINER_NAME}")
+        self._reload()
 
     def _parse_telemt_params(self, config_text):
         params = {}
@@ -399,7 +406,7 @@ class TelemtManager:
             for c in clients:
                 if not c['enabled']:
                      self.toggle_client(protocol_type, c['clientId'], False, restart=False)
-            self.ssh.run_sudo_command(f"docker restart {self.CONTAINER_NAME}")
+            self._reload()
 
         return clients
 
@@ -591,12 +598,28 @@ class TelemtManager:
             lines.insert(section_start + 1, line_to_insert)
         return '\n'.join(lines)
 
+    PLACEHOLDER_USER = '_telemt_init'
+
+    def _keep_users_nonempty(self, config_text):
+        """Telemt won't start with no active users: put back the init placeholder."""
+        active = [u for u in self._parse_users_from_config(config_text) if not u.startswith('#')]
+        if active:
+            return config_text
+        line = f'{self.PLACEHOLDER_USER} = "{secrets.token_hex(16)}"'
+        return self._insert_into_section(config_text, 'access.users', line)
+
     def remove_client(self, protocol_type, client_id):
         # 1. API
         self._api_request("DELETE", f"/v1/users/{client_id}")
         
         # 2. Config
         config_text = self._get_server_config()
+        users = {u.lstrip('#').strip() for u in self._parse_users_from_config(config_text)}
+        if client_id not in users:
+            # Protocol removed/reinstalled or user already gone: nothing to write.
+            logger.info("Telemt user %s not in config on %s, skip config write",
+                        client_id, getattr(self.ssh, 'host', '?'))
+            return
         lines = config_text.split('\n')
         new_lines = []
         for line in lines:
@@ -604,7 +627,7 @@ class TelemtManager:
             if stripped.startswith(f"{client_id} ") or stripped.startswith(f"{client_id}="):
                 continue
             new_lines.append(line)
-        self._upload_config('\n'.join(new_lines))
+        self._upload_config(self._keep_users_nonempty('\n'.join(new_lines)))
 
     def toggle_client(self, protocol_type, client_id, enable, restart=True):
         # API doesn't have a direct "toggle", so we either set a huge quota or remove/re-add
@@ -626,7 +649,7 @@ class TelemtManager:
                     line = base_line if enable else f"# {base_line}"
             new_lines.append(line)
         
-        self._upload_config('\n'.join(new_lines))
+        self._upload_config(self._keep_users_nonempty('\n'.join(new_lines)))
         
         if enable:
             # If enabling, we re-add via API since it might have been deleted from memory
@@ -640,7 +663,7 @@ class TelemtManager:
             self._api_request("DELETE", f"/v1/users/{client_id}")
 
         if restart:
-            self.ssh.run_sudo_command(f"docker kill -s HUP {self.CONTAINER_NAME} || docker restart {self.CONTAINER_NAME}")
+            self._reload()
 
     def get_client_config(self, protocol_type, client_id, host='', port=''):
         resp = self._api_request("GET", f"/v1/users/{client_id}")

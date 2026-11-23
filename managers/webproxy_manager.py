@@ -324,8 +324,10 @@ chmod 600 {path}
         """The relay reads profiles once at start-up: no signal reloads them,
         so a membership change costs every live session a reconnect. The
         MTProxy backend keeps its sessions on a SIGHUP."""
-        self.ssh.run_sudo_command(
-            f"docker kill -s HUP {self.BACKEND_CONTAINER} || docker restart {self.BACKEND_CONTAINER}")
+        # separate calls: in `a || b` under sudo, b would run without root
+        _, _, code = self.ssh.run_sudo_command(f"docker kill -s HUP {self.BACKEND_CONTAINER}")
+        if code != 0:
+            self.ssh.run_sudo_command(f"docker restart {self.BACKEND_CONTAINER}")
         self.ssh.run_sudo_command(f"docker restart {self.CONTAINER_NAME}", timeout=120)
 
     # ------------------------------------------------------------------

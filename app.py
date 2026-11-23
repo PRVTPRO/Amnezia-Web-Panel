@@ -12,6 +12,9 @@ import shlex
 import tempfile
 import uuid
 import asyncio
+import threading
+import time
+import functools
 from datetime import datetime
 import io
 from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse, StreamingResponse, FileResponse
@@ -31,7 +34,7 @@ except ImportError:
     CaptchaGenerator = None
 
 from managers.ssh_manager import SSHManager
-from managers.awg_manager import AWGManager
+from managers.awg_manager import AWGManager, normalize_special_junk
 from managers.xray_manager import XrayManager
 from managers.wireguard_manager import WireGuardManager
 from managers.backup_manager import BackupManager
@@ -155,8 +158,66 @@ load_translations()
 
 # ======================== Helpers ========================
 
-# Global lock for data.json access to prevent race conditions during async operations
-DATA_LOCK = asyncio.Lock()
+class _DataLock:
+    """The one lock for data.json load->save.
+
+    `with` from threads (reentrant per thread), `async with` from the event
+    loop (waits in a worker thread so the loop never blocks). Async blocks
+    must not await while holding it."""
+
+    _ASYNC = object()  # owner marker for async holders
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._owner = None
+        self._depth = 0
+
+    def __enter__(self):
+        me = threading.get_ident()
+        if self._owner == me:
+            self._depth += 1
+            return self
+        self._lock.acquire()
+        self._owner, self._depth = me, 1
+        return self
+
+    def __exit__(self, *exc):
+        self._depth -= 1
+        if self._depth == 0:
+            self._owner = None
+            self._lock.release()
+
+    def try_enter(self):
+        """Non-blocking enter; False if someone else holds it. Pair with __exit__."""
+        if self._owner == threading.get_ident():
+            self._depth += 1
+            return True
+        if not self._lock.acquire(blocking=False):
+            return False
+        self._owner, self._depth = threading.get_ident(), 1
+        return True
+
+    async def __aenter__(self):
+        if not self._lock.acquire(blocking=False):
+            fut = asyncio.ensure_future(asyncio.to_thread(self._lock.acquire))
+            try:
+                await asyncio.shield(fut)
+            except asyncio.CancelledError:
+                # the worker still gets the lock: hand it back
+                fut.add_done_callback(lambda f: self._lock.release())
+                raise
+        self._owner, self._depth = self._ASYNC, 1
+        return self
+
+    async def __aexit__(self, *exc):
+        self._owner, self._depth = None, 0
+        self._lock.release()
+
+
+# Shared by sync handlers (threadpool) and async code, so neither side can
+# save a stale copy over the other's change.
+DATA_WRITE_LOCK = _DataLock()
+DATA_LOCK = DATA_WRITE_LOCK
 
 
 def load_data():
@@ -208,8 +269,22 @@ def _derived_server_uid(srv: dict) -> str:
 
 
 def save_data(data):
-    with open(DATA_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    # Atomic replace: handlers run in the threadpool, a reader must never
+    # see a half-written file.
+    data_dir = os.path.dirname(DATA_FILE) or '.'
+    fd, tmp_path = tempfile.mkstemp(prefix='.data-', suffix='.json', dir=data_dir)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, DATA_FILE)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 async def save_data_async(data):
@@ -218,14 +293,75 @@ async def save_data_async(data):
         await asyncio.to_thread(save_data, data)
 
 
+# Long-lived SSH connections, one per (host, port, username): each command
+# is a cheap channel on an open transport instead of a full handshake.
+_SSH_POOL = {}
+_SSH_POOL_LOCK = threading.Lock()
+
+
+SSH_COOLDOWN_DEFAULT = 30.0
+
+
+def _ssh_pool_key(server):
+    return (server['host'], int(server.get('ssh_port', 22)), server['username'])
+
+
 def get_ssh(server):
-    return SSHManager(
-        host=server['host'],
-        port=server.get('ssh_port', 22),
-        username=server['username'],
-        password=server.get('password'),
-        private_key=server.get('private_key'),
-    )
+    """Pooled, already connected SSHManager for the server. Blocking."""
+    key = _ssh_pool_key(server)
+    cooldown_base = float(server.get('ssh_cooldown_base') or SSH_COOLDOWN_DEFAULT)
+    with _SSH_POOL_LOCK:
+        ssh = _SSH_POOL.get(key)
+        if ssh is None:
+            ssh = SSHManager(
+                host=server['host'],
+                port=server.get('ssh_port', 22),
+                username=server['username'],
+                password=server.get('password'),
+                private_key=server.get('private_key'),
+                connect_cooldown_base=cooldown_base,
+            )
+            ssh.pooled = True
+            _SSH_POOL[key] = ssh
+        ssh._connect_cooldown_base = cooldown_base
+    ssh.ensure_connected()
+    return ssh
+
+
+def _serialized(fn):
+    """Run a sync endpoint under DATA_WRITE_LOCK (short load->SSH->save handlers)."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with DATA_WRITE_LOCK:
+            return fn(*args, **kwargs)
+    return wrapper
+
+
+def update_server_record(server, mutate):
+    """Apply mutate(fresh_server) to the current data.json under the write lock.
+
+    For long SSH handlers: they must not hold the lock for minutes, so the
+    change is replayed on a fresh copy, located by uid (the index may shift)."""
+    uid = server.get('uid')
+    with DATA_WRITE_LOCK:
+        data = load_data()
+        fresh = next((srv for srv in data['servers'] if srv.get('uid') == uid), None)
+        if fresh is None:
+            return False
+        mutate(fresh)
+        save_data(data)
+        return True
+
+
+def drop_ssh(server):
+    """Evict and close the pooled connection (server edited or deleted)."""
+    with _SSH_POOL_LOCK:
+        ssh = _SSH_POOL.pop(_ssh_pool_key(server), None)
+    if ssh is not None:
+        try:
+            ssh.force_disconnect()
+        except Exception:
+            pass
 
 
 def get_client_host(server):
@@ -267,6 +403,27 @@ def _manager_call(manager, method, protocol, *args, **kwargs):
     if isinstance(manager, WireGuardManager):
         return fn(*args, **kwargs)
     return fn(protocol, *args, **kwargs)
+
+
+AWG_PROTOCOLS = ('awg', 'awg2', 'awg3', 'awg_legacy')
+
+
+def join_dns(dns1, dns2):
+    """Two DNS form fields -> the `a, b` form used in configs."""
+    parts = [str(v).strip() for v in (dns1, dns2) if v and str(v).strip()]
+    return ', '.join(parts) or None
+
+
+def split_dns(dns):
+    parts = [p.strip() for p in str(dns or '').split(',') if p.strip()]
+    parts += [''] * (2 - len(parts))
+    return parts[0], parts[1]
+
+
+def awg_special_junk_from(req, prefix=''):
+    """I1-I5 from a request, or None when the form sent none of them."""
+    values = {k: getattr(req, f'{prefix}{k}', None) for k in ('i1', 'i2', 'i3', 'i4', 'i5')}
+    return None if all(v is None for v in values.values()) else values
 
 
 _AWG_OBFUSCATION_KEYS = (
@@ -380,6 +537,77 @@ def _amnezia_compressed_blob(config_text: str, container: str) -> bytes:
     return struct.pack('>I', len(raw)) + zlib.compress(raw, 8)
 
 
+# AWG 3.1 keys (see managers/awg_manager.AWG3_PARAM_MAP). The native awg/awg2
+# format above has no slot for them, so awg3 goes through the client's
+# "third-party config" import instead: every key rides in last_config, which
+# is what the client builds itself from the same .conf (ported from upstream).
+_AWG_THIRD_PARTY_KEYS = _AWG_OBFUSCATION_KEYS + (
+    'HeaderProtectionKey', 'ContentPaddingAddition', 'RekeyAfterTime', 'RekeyTimeout',
+    'RejectAfterTime', 'KeepaliveTimeout', 'MaxHandshakeAttempts', 'RandomTrailers',
+    'DisableCookies',
+)
+
+
+def _amnezia_third_party_blob(config_text: str, description: str) -> bytes:
+    values = {}
+    for raw in config_text.splitlines():
+        line = raw.strip()
+        if line.startswith('[') and line.endswith(']'):
+            continue
+        key, sep, val = line.partition('=')
+        if sep and key.strip():
+            values[key.strip()] = val.strip()
+    host, _, port = values.get('Endpoint', '').rpartition(':')
+    host = host.strip('[]')
+    if not host or not port.isdigit():
+        raise ValueError('Endpoint missing')
+    last_config = {
+        'config': config_text,
+        'hostName': host,
+        'port': int(port),
+        'client_priv_key': values.get('PrivateKey', ''),
+        'client_ip': values.get('Address', ''),
+        'server_pub_key': values.get('PublicKey', ''),
+        'allowed_ips': [p.strip() for p in values.get('AllowedIPs', '').split(',') if p.strip()],
+        'mtu': values.get('MTU') or '1376',
+    }
+    if values.get('PresharedKey'):
+        last_config['psk_key'] = values['PresharedKey']
+    if values.get('PersistentKeepalive'):
+        last_config['persistent_keep_alive'] = values['PersistentKeepalive']
+    for key in _AWG_THIRD_PARTY_KEYS:
+        if values.get(key):
+            last_config[key] = values[key]
+    payload = {
+        'containers': [{
+            'container': 'amnezia-awg',
+            'awg': {
+                'last_config': json.dumps(last_config, indent=4) + '\n',
+                'isThirdPartyConfig': True,
+                'port': port,
+                'transport_proto': 'udp',
+            },
+        }],
+        'defaultContainer': 'amnezia-awg',
+        'description': description,
+        'hostName': host,
+    }
+    dns = [d.strip() for d in values.get('DNS', '').split(',') if d.strip()]
+    if len(dns) >= 2:
+        payload['dns1'], payload['dns2'] = dns[0], dns[1]
+    raw = json.dumps(payload, indent=4).encode('utf-8')
+    return struct.pack('>I', len(raw)) + zlib.compress(raw, 8)
+
+
+def _amnezia_blob_for(config_text: str, protocol: str):
+    """qCompress'd Amnezia blob for the AWG protocols, None for the rest."""
+    if protocol == 'awg3':
+        host = _parse_wg_conf(config_text).get('peer', {}).get('Endpoint', '').rpartition(':')[0]
+        return _amnezia_third_party_blob(config_text, f'AWG3 {host}'.strip())
+    container = {'awg': 'amnezia-awg', 'awg2': 'amnezia-awg2'}.get(protocol)
+    return _amnezia_compressed_blob(config_text, container) if container else None
+
+
 # Amnezia mobile QR scanner expects multi-chunk frames with this magic prefix.
 # Source: amnezia-client/client/core/utils/qrCodeUtils.{h,cpp}.
 _AMNEZIA_QR_MAGIC = 1984  # 0x07C0, qint16 big-endian
@@ -420,11 +648,9 @@ def generate_vpn_qr_chunks(config_text: str, protocol: str = '') -> list:
     callers fall back to a single QR built from `config` or `vpn_link`."""
     if not config_text:
         return []
-    container = {'awg': 'amnezia-awg', 'awg2': 'amnezia-awg2'}.get(protocol)
-    if not container:
-        return []
     try:
-        return _amnezia_qr_chunks_from_blob(_amnezia_compressed_blob(config_text, container))
+        blob = _amnezia_blob_for(config_text, protocol)
+        return _amnezia_qr_chunks_from_blob(blob) if blob else []
     except Exception:
         logger.exception("Failed to build Amnezia QR chunks for %s", protocol)
         return []
@@ -455,6 +681,12 @@ def generate_vpn_link(config_text, protocol: str = ''):
             return _build_amnezia_awg_link(config_text, 'amnezia-awg2')
         except Exception:
             logger.exception("Failed to build native Amnezia vpn:// for awg2, falling back")
+    elif protocol == 'awg3':
+        try:
+            blob = _amnezia_blob_for(config_text, 'awg3')
+            return "vpn://" + base64.urlsafe_b64encode(blob).rstrip(b'=').decode('ascii')
+        except Exception:
+            logger.exception("Failed to build Amnezia vpn:// for awg3, falling back")
     b64 = base64.b64encode(config_text.strip().encode('utf-8')).decode('utf-8')
     return f"vpn://{b64}"
 
@@ -533,7 +765,7 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
 
 
-async def perform_delete_user(data: dict, user_id: str):
+def perform_delete_user(data: dict, user_id: str):
     user = next((u for u in data['users'] if u['id'] == user_id), None)
     if not user:
         return False
@@ -545,7 +777,6 @@ async def perform_delete_user(data: dict, user_id: str):
             if sid < len(data['servers']):
                 server = data['servers'][sid]
                 ssh = get_ssh(server)
-                ssh.connect()
                 manager = get_protocol_manager(ssh, uc['protocol'])
                 _manager_call(manager, 'remove_client', uc['protocol'], uc['client_id'])
                 ssh.disconnect()
@@ -571,8 +802,7 @@ async def perform_toggle_user(data: dict, user_id: str, enable: bool) -> bool:
             if sid >= len(data['servers']):
                 continue
             server = data['servers'][sid]
-            ssh = get_ssh(server)
-            await asyncio.to_thread(ssh.connect)
+            ssh = await asyncio.to_thread(get_ssh, server)
             manager = get_protocol_manager(ssh, uc['protocol'])
             await asyncio.to_thread(
                 _manager_call, manager, 'toggle_client', uc['protocol'], uc['client_id'], enable
@@ -582,6 +812,18 @@ async def perform_toggle_user(data: dict, user_id: str, enable: bool) -> bool:
             logger.warning(f"Failed to toggle connection {uc['client_id']} during user toggle: {e}")
 
     return True
+
+
+async def set_user_enabled(user_id: str, enabled: bool) -> bool:
+    """Persist user['enabled'] on a fresh data.json (SSH side done separately)."""
+    async with DATA_LOCK:
+        fresh = load_data()
+        user = next((u for u in fresh['users'] if u['id'] == user_id), None)
+        if not user:
+            return False
+        user['enabled'] = enabled
+        save_data(fresh)
+        return True
 
 
 async def perform_mass_operations(delete_uids: List[str] = None, toggle_uids: List[tuple] = None, create_conns: List[dict] = None):
@@ -618,8 +860,7 @@ async def perform_mass_operations(delete_uids: List[str] = None, toggle_uids: Li
         srv = current_data['servers'][srv_id]
         
         try:
-            ssh = get_ssh(srv)
-            await asyncio.to_thread(ssh.connect)
+            ssh = await asyncio.to_thread(get_ssh, srv)
             
             # 1. Deletes
             for c in ops['delete']:
@@ -876,6 +1117,10 @@ class AddServerRequest(BaseModel):
     allow_vovka: bool = False
 
 
+class SshCooldownRequest(BaseModel):
+    seconds: float
+
+
 class EditServerRequest(BaseModel):
     name: str = ''
     host: str = ''
@@ -927,6 +1172,31 @@ class InstallProtocolRequest(BaseModel):
     adguard_expose_dns: Optional[bool] = None
     adguard_expose_dot: Optional[bool] = None
     adguard_expose_doh: Optional[bool] = None
+    # AmneziaWG: values that end up in the generated client configs
+    awg_mtu: Optional[str] = None
+    awg_dns1: Optional[str] = None
+    awg_dns2: Optional[str] = None
+    awg_dns6: Optional[str] = None
+    awg_i1: Optional[str] = None
+    awg_i2: Optional[str] = None
+    awg_i3: Optional[str] = None
+    awg_i4: Optional[str] = None
+    awg_i5: Optional[str] = None
+    # Build the amneziawg kernel module via DKMS (off: userspace amneziawg-go)
+    awg_kernel_module: Optional[bool] = None
+
+
+class AwgSettingsRequest(BaseModel):
+    protocol: str = 'awg2'
+    mtu: Optional[str] = None
+    dns1: Optional[str] = None
+    dns2: Optional[str] = None
+    dns6: Optional[str] = None
+    i1: Optional[str] = None
+    i2: Optional[str] = None
+    i3: Optional[str] = None
+    i4: Optional[str] = None
+    i5: Optional[str] = None
 
 
 class Socks5SettingsRequest(BaseModel):
@@ -956,6 +1226,7 @@ class AddConnectionRequest(BaseModel):
     telemt_max_conns: Optional[int] = None
     webproxy_secret: Optional[str] = None
     webproxy_carrier_mode: Optional[str] = None
+    awg_max_speed: Optional[float] = None  # Mbit/s, 0 or empty = unlimited
 
 
 class EditConnectionRequest(BaseModel):
@@ -969,11 +1240,13 @@ class EditConnectionRequest(BaseModel):
     telemt_max_conns: Optional[int] = None
     webproxy_secret: Optional[str] = None
     webproxy_carrier_mode: Optional[str] = None
+    awg_max_speed: Optional[float] = None  # Mbit/s, 0 = unlimited, None = keep
 
 
 class ConnectionActionRequest(BaseModel):
     protocol: str = 'awg'
     client_id: str = ''
+    force: bool = False  # remove: drop the panel record even if the server side fails
 
 
 class ToggleConnectionRequest(BaseModel):
@@ -1124,8 +1397,44 @@ class ShareAuthRequest(BaseModel):
 
 # ======================== Startup ========================
 
+# Connection-flood (P2P/torrent) detection: one cheap SSH roundtrip per AWG
+# instance per round - a per-IP conntrack summary aggregated inside the
+# container. get_clients() then only reads the small snapshot files.
+CONN_MONITOR_INTERVAL = 60
+CONN_MONITOR_PROTOCOLS = ('awg', 'awg2', 'awg3')
+
+
+def _conn_monitor_loop():
+    while True:
+        try:
+            for server in load_data().get('servers', []):
+                for proto in list(server.get('protocols') or {}):
+                    if proto not in CONN_MONITOR_PROTOCOLS:
+                        continue
+                    try:
+                        AWGManager(get_ssh(server)).collect_conn_stats(proto)
+                    except Exception as e:
+                        logger.warning(f"conn monitor: {server.get('host')} {proto}: {e}")
+        except Exception as e:
+            logger.warning(f"conn monitor loop: {e}")
+        time.sleep(CONN_MONITOR_INTERVAL)
+
+
+_conn_monitor_started = False
+
+
+def _start_conn_monitor():
+    global _conn_monitor_started
+    if _conn_monitor_started:
+        return
+    _conn_monitor_started = True
+    threading.Thread(target=_conn_monitor_loop, daemon=True, name='conn-monitor').start()
+    logger.info(f"Connection-flood monitor started (every {CONN_MONITOR_INTERVAL}s)")
+
+
 @app.on_event("startup")
 async def startup():
+    _start_conn_monitor()
     data = load_data()
     changed = False
     # Persist server uids that load_data derived for pre-uid installs
@@ -1210,15 +1519,14 @@ async def startup():
     tg_cfg = data.get('settings', {}).get('telegram', {})
     if tg_cfg.get('enabled') and tg_cfg.get('token'):
         logger.info("Starting Telegram bot from saved settings...")
-        tg_bot.launch_bot(tg_cfg['token'], load_data, generate_vpn_link, save_data)
+        tg_bot.launch_bot(tg_cfg['token'], load_data, generate_vpn_link, _bot_save_data)
 
 
 def _scrape_server_traffic(server, sid, my_conns):
     server_updates = []
     try:
         ssh = get_ssh(server)
-        ssh.connect()
-        for proto in ['awg', 'awg2', 'awg_legacy', 'xray', 'telemt', 'wireguard']:
+        for proto in ['awg', 'awg2', 'awg3', 'awg_legacy', 'xray', 'telemt', 'wireguard']:
             if proto in server.get('protocols', {}):
                 manager = get_protocol_manager(ssh, proto)
                 clients = _manager_call(manager, 'get_clients', proto)
@@ -1335,7 +1643,6 @@ async def _resolve_server_country(srv: dict):
         except Exception:
             return None
         try:
-            ssh.connect()
             for cmd in _EGRESS_IP_PROBES:
                 try:
                     out, _, code = ssh.run_command(cmd)
@@ -1662,6 +1969,45 @@ async def api_login(request: Request, req: LoginRequest):
 
 # ======================== SERVER API (admin/support) ========================
 
+def _persist_token_touch(entry):
+    """Best effort: skip if data.json is busy, last_used_at is not critical."""
+    if not DATA_WRITE_LOCK.try_enter():
+        return
+    try:
+        fresh = load_data()
+        for t in fresh.get('api_tokens', []):
+            if t.get('id') == entry.get('id'):
+                t['last_used_at'] = entry['last_used_at']
+                save_data(fresh)
+                break
+    finally:
+        DATA_WRITE_LOCK.__exit__(None, None, None)
+
+
+def _bot_save_data(data):
+    """Bot only persists telegramId auto-links: copy them onto a fresh data.json.
+
+    Runs on the event loop, so never blocks; if busy, the link resolves again
+    on the user's next message."""
+    if not DATA_WRITE_LOCK.try_enter():
+        return
+    try:
+        tg_ids = {u['id']: u.get('telegramId') for u in data.get('users', [])}
+        fresh = load_data()
+        changed = False
+        for u in fresh.get('users', []):
+            new_id = str(tg_ids.get(u['id']) or '')
+            cur = str(u.get('telegramId') or '').lstrip('@')
+            # only "@username placeholder -> numeric id", never undo admin edits
+            if new_id.isdigit() and cur and not cur.isdigit():
+                u['telegramId'] = new_id
+                changed = True
+        if changed:
+            save_data(fresh)
+    finally:
+        DATA_WRITE_LOCK.__exit__(None, None, None)
+
+
 def _check_admin(request):
     """Authorize an admin/support action via session cookie OR Bearer token.
 
@@ -1683,7 +2029,7 @@ def _check_admin(request):
             # disk never blocks an API call from succeeding.
             try:
                 if _touch_api_token(entry):
-                    save_data(data)
+                    _persist_token_touch(entry)
             except Exception as e:
                 logger.warning(f"Failed to touch API token last_used_at: {e}")
             return token_user
@@ -1692,7 +2038,8 @@ def _check_admin(request):
 
 
 @app.post('/api/servers/add', tags=["Servers"])
-async def api_add_server(request: Request, req: AddServerRequest):
+@_serialized
+def api_add_server(request: Request, req: AddServerRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
@@ -1733,7 +2080,8 @@ async def api_add_server(request: Request, req: AddServerRequest):
 
 
 @app.post('/api/servers/{server_id}/edit', tags=["Servers"])
-async def api_edit_server(request: Request, server_id: int, req: EditServerRequest):
+@_serialized
+def api_edit_server(request: Request, server_id: int, req: EditServerRequest):
     """Update connection details for an existing server entry. Verifies the new
     credentials by SSH-connecting before persisting, so a typo can't lock us out.
     """
@@ -1772,6 +2120,8 @@ async def api_edit_server(request: Request, server_id: int, req: EditServerReque
         except Exception as e:
             return JSONResponse({'error': f'Connection failed: {e}'}, status_code=400)
 
+        # Pool is keyed by the old endpoint and holds the old credentials.
+        drop_ssh(server)
         server['name'] = new_name
         server['host'] = new_host
         # None = keep current, otherwise overwrite (empty string clears it).
@@ -1959,24 +2309,61 @@ async def api_delete_server(request: Request, server_id: int):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
-        data = load_data()
-        if server_id >= len(data['servers']):
-            return JSONResponse({'error': 'Server not found'}, status_code=404)
-        data['servers'].pop(server_id)
-        # Clean up connections for this server
-        data['user_connections'] = [c for c in data.get('user_connections', []) if c.get('server_id') != server_id]
-        # Adjust server_ids for connections pointing to higher indices
-        for c in data.get('user_connections', []):
-            if c.get('server_id', 0) > server_id:
-                c['server_id'] -= 1
-        save_data(data)
+        async with DATA_LOCK:
+            data = load_data()
+            if server_id >= len(data['servers']):
+                return JSONResponse({'error': 'Server not found'}, status_code=404)
+            removed = data['servers'].pop(server_id)
+            # Clean up connections for this server
+            data['user_connections'] = [c for c in data.get('user_connections', []) if c.get('server_id') != server_id]
+            # Adjust server_ids for connections pointing to higher indices
+            for c in data.get('user_connections', []):
+                if c.get('server_id', 0) > server_id:
+                    c['server_id'] -= 1
+            save_data(data)
+        # may wait on a connect in progress: keep it off the event loop
+        await asyncio.to_thread(drop_ssh, removed)
         return {'status': 'success'}
     except Exception as e:
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
+@app.post('/api/servers/{server_id}/ssh_cooldown', tags=["Servers"])
+@_serialized
+def api_ssh_cooldown(request: Request, server_id: int, req: SshCooldownRequest):
+    """Per-server base cooldown (seconds) of the SSH circuit breaker."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if not (5 <= req.seconds <= 300):
+        return JSONResponse({'error': 'Value must be between 5 and 300 seconds'}, status_code=400)
+    data = load_data()
+    if server_id >= len(data['servers']):
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    data['servers'][server_id]['ssh_cooldown_base'] = req.seconds
+    save_data(data)
+    return {'ok': True, 'ssh_cooldown_base': req.seconds}
+
+
+@app.post('/api/servers/{server_id}/host_tuning', tags=["Servers"])
+def api_host_tuning(request: Request, server_id: int):
+    """Network tuning summary: host sysctls, amneziawg module, AWG containers."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        info = AWGManager(get_ssh(server)).get_host_tuning()
+        info['panel'] = {'ssh_cooldown_base': float(server.get('ssh_cooldown_base') or SSH_COOLDOWN_DEFAULT)}
+        return info
+    except Exception as e:
+        logger.exception("Error getting host tuning info")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
 @app.post('/api/servers/{server_id}/reboot', tags=["Servers"])
-async def api_reboot_server(request: Request, server_id: int):
+def api_reboot_server(request: Request, server_id: int):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
@@ -1985,7 +2372,6 @@ async def api_reboot_server(request: Request, server_id: int):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
         ssh = get_ssh(server)
-        ssh.connect()
         try:
             ssh.run_sudo_command("nohup reboot > /dev/null 2>&1 &")
         except Exception:
@@ -2001,7 +2387,7 @@ async def api_reboot_server(request: Request, server_id: int):
 
 
 @app.post('/api/servers/{server_id}/clear', tags=["Servers"])
-async def api_clear_server(request: Request, server_id: int):
+def api_clear_server(request: Request, server_id: int):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
@@ -2010,7 +2396,6 @@ async def api_clear_server(request: Request, server_id: int):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
         ssh = get_ssh(server)
-        ssh.connect()
         # Match every Amnezia container by name prefix (catches awg/awg2/awg-legacy,
         # wireguard, xray/ssxray, openvpn, dns, and any future amnezia-* protocol)
         # plus the telemt container which doesn't share that prefix.
@@ -2031,8 +2416,7 @@ rm -rf /opt/amnezia
 """
         ssh.run_sudo_script(cleanup_script, timeout=120)
 
-        server['protocols'] = {}
-        save_data(data)
+        update_server_record(server, lambda srv: srv.update(protocols={}))
         ssh.disconnect()
         return {'status': 'success'}
     except Exception as e:
@@ -2041,7 +2425,7 @@ rm -rf /opt/amnezia
 
 
 @app.post('/api/servers/{server_id}/stats', tags=["Servers"])
-async def api_server_stats(request: Request, server_id: int):
+def api_server_stats(request: Request, server_id: int):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
@@ -2050,7 +2434,6 @@ async def api_server_stats(request: Request, server_id: int):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
         ssh = get_ssh(server)
-        ssh.connect()
         stats = {}
         out, _, _ = ssh.run_command(
             "top -bn1 | grep 'Cpu(s)' | awk '{print $2}' | cut -d'%' -f1 2>/dev/null || "
@@ -2094,7 +2477,7 @@ async def api_server_stats(request: Request, server_id: int):
 
 
 @app.post('/api/servers/{server_id}/check', tags=["Servers"])
-async def api_check_server(request: Request, server_id: int):
+def api_check_server(request: Request, server_id: int):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
@@ -2103,7 +2486,6 @@ async def api_check_server(request: Request, server_id: int):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
         ssh = get_ssh(server)
-        ssh.connect()
         # Just use awg's docker checker since it uses the same command
         manager = get_protocol_manager(ssh, 'awg')
         status = {'connection': 'ok', 'docker_installed': manager.check_docker_installed(), 'protocols': {}}
@@ -2111,6 +2493,7 @@ async def api_check_server(request: Request, server_id: int):
         changed = False
         if 'protocols' not in server:
             server['protocols'] = {}
+        before = set(server['protocols'])
 
         import concurrent.futures
 
@@ -2129,7 +2512,7 @@ async def api_check_server(request: Request, server_id: int):
         # exec channel on the one connection, and going wider makes the server
         # refuse channels ("Secsh channel N open FAILED") for random protocols.
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            futures = [executor.submit(check_proto, p) for p in ['awg', 'awg2', 'awg_legacy', 'xray', 'telemt', 'webproxy', 'dns', 'wireguard', 'socks5', 'adguard']]
+            futures = [executor.submit(check_proto, p) for p in ['awg', 'awg2', 'awg3', 'awg_legacy', 'xray', 'telemt', 'webproxy', 'dns', 'wireguard', 'socks5', 'adguard']]
             for future in concurrent.futures.as_completed(futures):
                 proto, result, err = future.result()
                 if err:
@@ -2148,9 +2531,19 @@ async def api_check_server(request: Request, server_id: int):
                         if proto in server['protocols']:
                             del server['protocols'][proto]
                             changed = True
-                
+
         if changed:
-            save_data(data)
+            detected = server['protocols']
+            removed = before - set(detected)
+            added = {p: detected[p] for p in set(detected) - before}
+
+            def _apply(srv):
+                protos = srv.setdefault('protocols', {})
+                for p in removed:
+                    protos.pop(p, None)
+                for p, rec in added.items():
+                    protos.setdefault(p, rec)
+            update_server_record(server, _apply)
             
         ssh.disconnect()
         return status
@@ -2160,19 +2553,25 @@ async def api_check_server(request: Request, server_id: int):
 
 
 @app.post('/api/servers/{server_id}/install', tags=["Protocols"])
-async def api_install_protocol(request: Request, server_id: int, req: InstallProtocolRequest):
+def api_install_protocol(request: Request, server_id: int, req: InstallProtocolRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
         data = load_data()
         if server_id >= len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
-        if req.protocol not in ['awg', 'awg2', 'awg_legacy', 'xray', 'telemt', 'webproxy', 'dns', 'wireguard', 'socks5', 'adguard']:
+        if req.protocol not in ['awg', 'awg2', 'awg3', 'awg_legacy', 'xray', 'telemt', 'webproxy', 'dns', 'wireguard', 'socks5', 'adguard']:
             return JSONResponse({'error': 'Invalid protocol type'}, status_code=400)
+
+        awg_junk = awg_special_junk_from(req, 'awg_') if req.protocol in AWG_PROTOCOLS else None
+        if awg_junk is not None:
+            try:
+                normalize_special_junk(awg_junk)  # reject before touching the server
+            except ValueError as e:
+                return JSONResponse({'error': str(e)}, status_code=400)
 
         server = data['servers'][server_id]
         ssh = get_ssh(server)
-        ssh.connect()
         manager = get_protocol_manager(ssh, req.protocol)
 
         # Pass parameters to installer
@@ -2221,6 +2620,16 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
                 expose_dot=bool(req.adguard_expose_dot),
                 expose_doh=bool(req.adguard_expose_doh),
             )
+        elif req.protocol in AWG_PROTOCOLS:
+            result = manager.install_protocol(
+                req.protocol,
+                port=req.port,
+                mtu=req.awg_mtu,
+                dns=join_dns(req.awg_dns1, req.awg_dns2),
+                special_junk=awg_junk,
+                dns6=req.awg_dns6,
+                kernel_module=bool(req.awg_kernel_module),
+            )
         else:
             result = manager.install_protocol(req.protocol, port=req.port)
 
@@ -2229,13 +2638,16 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
             'port': req.port,
             'awg_params': result.get('awg_params', {}),
         }
+        for key in ('mtu', 'dns', 'dns6'):
+            if result.get(key):
+                proto_record[key] = result[key]
         if req.protocol == 'adguard':
             proto_record['mode'] = result.get('mode')
             proto_record['internal_ip'] = result.get('internal_ip')
             proto_record['web_port'] = result.get('web_port')
             proto_record['expose_web'] = result.get('expose_web')
-        server['protocols'][req.protocol] = proto_record
-        save_data(data)
+        update_server_record(
+            server, lambda srv: srv.setdefault('protocols', {}).__setitem__(req.protocol, proto_record))
         ssh.disconnect()
         return result
     except Exception as e:
@@ -2243,8 +2655,64 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
+@app.post('/api/servers/{server_id}/awg/settings', tags=["Protocols"])
+def api_awg_settings_get(request: Request, server_id: int, req: ProtocolRequest):
+    """MTU, DNS and the special junk packets I1-I5 of an AWG server."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if req.protocol not in AWG_PROTOCOLS:
+        return JSONResponse({'error': 'Not an AmneziaWG protocol'}, status_code=400)
+    try:
+        data = load_data()
+        if server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        settings = AWGManager(get_ssh(data['servers'][server_id])).get_awg_settings(req.protocol)
+        settings['dns1'], settings['dns2'] = split_dns(settings.get('dns'))
+        return settings
+    except Exception as e:
+        logger.exception("Error getting AWG settings")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/awg/settings/save', tags=["Protocols"])
+def api_awg_settings_save(request: Request, server_id: int, req: AwgSettingsRequest):
+    """Update MTU, DNS and I1-I5 and apply them to the running interface."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if req.protocol not in AWG_PROTOCOLS:
+        return JSONResponse({'error': 'Not an AmneziaWG protocol'}, status_code=400)
+    try:
+        data = load_data()
+        if server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        junk = awg_special_junk_from(req)
+        if junk is not None:
+            normalize_special_junk(junk)  # reject before opening SSH
+        # '' = clear, None = keep; join_dns() collapses two blanks to None.
+        dns = None
+        if req.dns1 is not None or req.dns2 is not None:
+            dns = join_dns(req.dns1, req.dns2) or ''
+        settings = AWGManager(get_ssh(server)).update_awg_settings(
+            req.protocol, mtu=req.mtu, dns=dns, special_junk=junk, dns6=req.dns6)
+
+        def _apply(srv):
+            rec = srv.get('protocols', {}).get(req.protocol)
+            if rec is not None:
+                rec.update(mtu=settings.get('mtu'), dns=settings.get('dns'), dns6=settings.get('dns6'))
+        update_server_record(server, _apply)
+        settings['dns1'], settings['dns2'] = split_dns(settings.get('dns'))
+        settings['status'] = 'success'
+        return settings
+    except ValueError as e:
+        return JSONResponse({'error': str(e)}, status_code=400)
+    except Exception as e:
+        logger.exception("Error saving AWG settings")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
 @app.get('/api/servers/{server_id}/socks5/credentials', tags=["Protocols"])
-async def api_socks5_get_credentials(request: Request, server_id: int):
+def api_socks5_get_credentials(request: Request, server_id: int):
     """Return the current SOCKS5 port/username/password for the panel UI."""
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -2254,7 +2722,6 @@ async def api_socks5_get_credentials(request: Request, server_id: int):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
         ssh = get_ssh(server)
-        ssh.connect()
         manager = get_protocol_manager(ssh, 'socks5')
         creds = manager.get_credentials()
         ssh.disconnect()
@@ -2265,7 +2732,8 @@ async def api_socks5_get_credentials(request: Request, server_id: int):
 
 
 @app.post('/api/servers/{server_id}/socks5/credentials', tags=["Protocols"])
-async def api_socks5_update_credentials(request: Request, server_id: int, req: Socks5SettingsRequest):
+@_serialized
+def api_socks5_update_credentials(request: Request, server_id: int, req: Socks5SettingsRequest):
     """Apply new SOCKS5 connection settings — regenerates the 3proxy config and
     reconciles the container (recreating it if the listening port changed)."""
     if not _check_admin(request):
@@ -2276,7 +2744,6 @@ async def api_socks5_update_credentials(request: Request, server_id: int, req: S
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
         ssh = get_ssh(server)
-        ssh.connect()
         manager = get_protocol_manager(ssh, 'socks5')
         result = manager.update_credentials(
             port=req.port, username=req.username, password=req.password
@@ -2296,7 +2763,7 @@ async def api_socks5_update_credentials(request: Request, server_id: int, req: S
 
 
 @app.post('/api/servers/{server_id}/uninstall', tags=["Protocols"])
-async def api_uninstall_protocol(request: Request, server_id: int, req: ProtocolRequest):
+def api_uninstall_protocol(request: Request, server_id: int, req: ProtocolRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
@@ -2305,15 +2772,12 @@ async def api_uninstall_protocol(request: Request, server_id: int, req: Protocol
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
         ssh = get_ssh(server)
-        ssh.connect()
         manager = get_protocol_manager(ssh, req.protocol)
         if req.protocol in ('xray', 'wireguard'):
             manager.remove_container()
         else:
             manager.remove_container(req.protocol)
-        if req.protocol in server.get('protocols', {}):
-            del server['protocols'][req.protocol]
-            save_data(data)
+        update_server_record(server, lambda srv: srv.get('protocols', {}).pop(req.protocol, None))
         ssh.disconnect()
         return {'status': 'success'}
     except Exception as e:
@@ -2331,6 +2795,7 @@ STACK_CONTAINERS = {
 CONTAINER_NAMES = {
     'awg': 'amnezia-awg',
     'awg2': 'amnezia-awg2',
+    'awg3': 'amnezia-awg3',
     'awg_legacy': 'amnezia-awg-legacy',
     'xray': 'amnezia-xray',
     'telemt': 'telemt',
@@ -2343,7 +2808,7 @@ CONTAINER_NAMES = {
 
 
 @app.post('/api/servers/{server_id}/backups', tags=["Protocols"])
-async def api_protocol_backups_list(request: Request, server_id: int, req: ProtocolRequest):
+def api_protocol_backups_list(request: Request, server_id: int, req: ProtocolRequest):
     """List backups created on the remote server for one protocol."""
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -2356,7 +2821,6 @@ async def api_protocol_backups_list(request: Request, server_id: int, req: Proto
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
         ssh = get_ssh(server)
-        ssh.connect()
         result = BackupManager(ssh).list_backups(req.protocol)
         if result.get('status') == 'error':
             return JSONResponse({'error': result.get('message', 'Failed to list backups')}, status_code=500)
@@ -2383,8 +2847,7 @@ async def api_protocol_backup_create(request: Request, server_id: int, req: Prot
         if server_id >= len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
-        ssh = get_ssh(server)
-        ssh.connect()
+        ssh = await asyncio.to_thread(get_ssh, server)
         # Archiving can take a while on a busy server, so keep it off the event loop.
         result = await asyncio.to_thread(BackupManager(ssh).create_backup, req.protocol, container)
         if result.get('status') == 'error':
@@ -2399,7 +2862,7 @@ async def api_protocol_backup_create(request: Request, server_id: int, req: Prot
 
 
 @app.post('/api/servers/{server_id}/backups/download', tags=["Protocols"])
-async def api_protocol_backup_download(request: Request, server_id: int, req: BackupDownloadRequest):
+def api_protocol_backup_download(request: Request, server_id: int, req: BackupDownloadRequest):
     """Download one remote protocol backup archive through the panel."""
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -2420,7 +2883,6 @@ async def api_protocol_backup_download(request: Request, server_id: int, req: Ba
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
         ssh = get_ssh(server)
-        ssh.connect()
         quoted_remote = shlex.quote(remote_path)
         quoted_tmp = shlex.quote(tmp_remote)
         # Copy to /tmp and relax the mode first: the archive is written with
@@ -2432,11 +2894,9 @@ async def api_protocol_backup_download(request: Request, server_id: int, req: Ba
             return JSONResponse({'error': err or 'Backup not found'}, status_code=404)
         fd, tmp_path = tempfile.mkstemp(prefix='amnezia-backup-', suffix='.tar.gz')
         os.close(fd)
-        sftp = ssh.client.open_sftp()
         try:
-            sftp.get(tmp_remote, tmp_path)
+            ssh.fetch_file(tmp_remote, tmp_path)
         finally:
-            sftp.close()
             ssh.run_sudo_command(f"rm -f {quoted_tmp}")
             ssh.disconnect()
             ssh = None
@@ -2460,7 +2920,7 @@ async def api_protocol_backup_download(request: Request, server_id: int, req: Ba
 
 
 @app.post('/api/servers/{server_id}/container/toggle', tags=["Protocols"])
-async def api_container_toggle(request: Request, server_id: int, req: ProtocolRequest):
+def api_container_toggle(request: Request, server_id: int, req: ProtocolRequest):
     """Start or stop a protocol Docker container."""
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -2473,7 +2933,6 @@ async def api_container_toggle(request: Request, server_id: int, req: ProtocolRe
             return JSONResponse({'error': 'Unknown protocol'}, status_code=400)
         server = data['servers'][server_id]
         ssh = get_ssh(server)
-        ssh.connect()
         # Check current state
         out, _, _ = ssh.run_sudo_command(
             f"docker inspect -f '{{{{.State.Running}}}}' {container} 2>/dev/null"
@@ -2498,7 +2957,7 @@ async def api_container_toggle(request: Request, server_id: int, req: ProtocolRe
 
 
 @app.post('/api/servers/{server_id}/server_config', tags=["Protocols"])
-async def api_server_config(request: Request, server_id: int, req: ProtocolRequest):
+def api_server_config(request: Request, server_id: int, req: ProtocolRequest):
     """Get the raw server-side WireGuard/Xray configuration."""
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -2508,7 +2967,6 @@ async def api_server_config(request: Request, server_id: int, req: ProtocolReque
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
         ssh = get_ssh(server)
-        ssh.connect()
         if req.protocol == 'xray':
             from managers.xray_manager import XrayManager
             mgr = XrayManager(ssh)
@@ -2538,7 +2996,7 @@ async def api_server_config(request: Request, server_id: int, req: ProtocolReque
 
 
 @app.post('/api/servers/{server_id}/server_config/save', tags=["Protocols"])
-async def api_server_config_save(request: Request, server_id: int, req: ServerConfigSaveRequest):
+def api_server_config_save(request: Request, server_id: int, req: ServerConfigSaveRequest):
     """Save the raw server-side WireGuard/Xray configuration and apply changes."""
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -2548,7 +3006,6 @@ async def api_server_config_save(request: Request, server_id: int, req: ServerCo
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
         ssh = get_ssh(server)
-        ssh.connect()
         if req.protocol == 'xray':
             from managers.xray_manager import XrayManager
             mgr = XrayManager(ssh)
@@ -2590,7 +3047,7 @@ async def api_server_config_save(request: Request, server_id: int, req: ServerCo
 
 
 @app.get('/api/servers/{server_id}/connections', tags=["Connections"])
-async def api_get_connections(request: Request, server_id: int, protocol: str = Query(default='awg')):
+def api_get_connections(request: Request, server_id: int, protocol: str = Query(default='awg')):
     if not protocol:
         protocol = 'awg'
     if not _check_admin(request):
@@ -2601,7 +3058,6 @@ async def api_get_connections(request: Request, server_id: int, protocol: str = 
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
         ssh = get_ssh(server)
-        ssh.connect()
         manager = get_protocol_manager(ssh, protocol)
         clients = _manager_call(manager, 'get_clients', protocol)
         ssh.disconnect()
@@ -2627,7 +3083,8 @@ async def api_get_connections(request: Request, server_id: int, protocol: str = 
 
 
 @app.post('/api/servers/{server_id}/connections/add', tags=["Connections"])
-async def api_add_connection(request: Request, server_id: int, req: AddConnectionRequest):
+@_serialized
+def api_add_connection(request: Request, server_id: int, req: AddConnectionRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
@@ -2638,7 +3095,6 @@ async def api_add_connection(request: Request, server_id: int, req: AddConnectio
         proto_info = server.get('protocols', {}).get(req.protocol, {})
         port = proto_info.get('port', '55424')
         ssh = get_ssh(server)
-        ssh.connect()
         manager = get_protocol_manager(ssh, req.protocol)
         
         if req.protocol == 'telemt':
@@ -2661,6 +3117,12 @@ async def api_add_connection(request: Request, server_id: int, req: AddConnectio
             result = manager.add_client(req.name, get_client_host(server))
         else:
             result = manager.add_client(req.protocol, req.name, get_client_host(server), port)
+            if req.protocol in AWG_PROTOCOLS and req.awg_max_speed and result.get('client_id'):
+                try:
+                    manager.set_speed_limit(req.protocol, result['client_id'], req.awg_max_speed)
+                except Exception as e:
+                    logger.warning(f"set_speed_limit failed: {e}")
+                    result['speed_warning'] = str(e)
         ssh.disconnect()
 
         if result.get('config'):
@@ -2688,25 +3150,35 @@ async def api_add_connection(request: Request, server_id: int, req: AddConnectio
 
 
 @app.post('/api/servers/{server_id}/connections/remove', tags=["Connections"])
-async def api_remove_connection(request: Request, server_id: int, req: ConnectionActionRequest):
+@_serialized
+def api_remove_connection(request: Request, server_id: int, req: ConnectionActionRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
         data = load_data()
-        if server_id >= len(data['servers']):
-            return JSONResponse({'error': 'Server not found'}, status_code=404)
-        server = data['servers'][server_id]
         if not req.client_id:
             return JSONResponse({'error': 'Client ID is required'}, status_code=400)
-        ssh = get_ssh(server)
-        ssh.connect()
-        manager = get_protocol_manager(ssh, req.protocol)
-        _manager_call(manager, 'remove_client', req.protocol, req.client_id)
-        ssh.disconnect()
+        if server_id < len(data['servers']):
+            server = data['servers'][server_id]
+            try:
+                ssh = get_ssh(server)
+                manager = get_protocol_manager(ssh, req.protocol)
+                _manager_call(manager, 'remove_client', req.protocol, req.client_id)
+                ssh.disconnect()
+            except Exception as e:
+                if not req.force:
+                    logger.exception("Error removing connection on server")
+                    # can_force: UI offers to drop only the panel record
+                    return JSONResponse({'error': str(e), 'can_force': True}, status_code=502)
+                logger.warning("Force-removing %s (%s) on server %s from panel only: %s",
+                               req.client_id, req.protocol, server_id, e)
+        elif not req.force:
+            return JSONResponse({'error': 'Server not found', 'can_force': True}, status_code=404)
         # Remove from user_connections
         data['user_connections'] = [
             c for c in data.get('user_connections', [])
-            if not (c.get('client_id') == req.client_id and c.get('server_id') == server_id)
+            if not (c.get('client_id') == req.client_id and c.get('server_id') == server_id
+                    and c.get('protocol', req.protocol) == req.protocol)
         ]
         save_data(data)
         return {'status': 'success'}
@@ -2716,7 +3188,7 @@ async def api_remove_connection(request: Request, server_id: int, req: Connectio
 
 
 @app.post('/api/servers/{server_id}/connections/edit', tags=["Connections"])
-async def api_edit_connection(request: Request, server_id: int, req: EditConnectionRequest):
+def api_edit_connection(request: Request, server_id: int, req: EditConnectionRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
@@ -2726,9 +3198,14 @@ async def api_edit_connection(request: Request, server_id: int, req: EditConnect
         server = data['servers'][server_id]
         
         ssh = get_ssh(server)
-        ssh.connect()
         manager = get_protocol_manager(ssh, req.protocol)
         
+        if req.protocol in AWG_PROTOCOLS:
+            # The only editable AWG field is the per-peer speed limit.
+            if req.awg_max_speed is None:
+                return {'status': 'success'}
+            return manager.set_speed_limit(req.protocol, req.client_id, req.awg_max_speed)
+
         edit_params = {}
         if req.protocol == 'telemt':
             edit_params['telemt_quota'] = req.telemt_quota
@@ -2749,8 +3226,26 @@ async def api_edit_connection(request: Request, server_id: int, req: EditConnect
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
+@app.post('/api/servers/{server_id}/connections/clear_warnings', tags=["Connections"])
+def api_clear_conn_warnings(request: Request, server_id: int, req: ConnectionActionRequest):
+    """Clear recorded connection-flood (torrent) warnings for one peer."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    if req.protocol not in AWG_PROTOCOLS:
+        return JSONResponse({'error': 'Not an AmneziaWG protocol'}, status_code=400)
+    try:
+        data = load_data()
+        if server_id >= len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        manager = AWGManager(get_ssh(data['servers'][server_id]))
+        return manager.clear_conn_warnings(req.protocol, req.client_id) or {}
+    except Exception as e:
+        logger.exception("Error clearing connection warnings")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
 @app.post('/api/servers/{server_id}/connections/config', tags=["Connections"])
-async def api_get_connection_config(request: Request, server_id: int, req: ConnectionActionRequest):
+def api_get_connection_config(request: Request, server_id: int, req: ConnectionActionRequest):
     user = get_current_user(request)
     if not user:
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -2772,7 +3267,6 @@ async def api_get_connection_config(request: Request, server_id: int, req: Conne
         proto_info = server.get('protocols', {}).get(req.protocol, {})
         port = proto_info.get('port', '55424')
         ssh = get_ssh(server)
-        ssh.connect()
         manager = get_protocol_manager(ssh, req.protocol)
         if req.protocol == 'wireguard':
             config = manager.get_client_config(req.client_id, get_client_host(server))
@@ -2788,7 +3282,7 @@ async def api_get_connection_config(request: Request, server_id: int, req: Conne
 
 
 @app.post('/api/servers/{server_id}/connections/toggle', tags=["Connections"])
-async def api_toggle_connection(request: Request, server_id: int, req: ToggleConnectionRequest):
+def api_toggle_connection(request: Request, server_id: int, req: ToggleConnectionRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
@@ -2799,7 +3293,6 @@ async def api_toggle_connection(request: Request, server_id: int, req: ToggleCon
         if not req.client_id:
             return JSONResponse({'error': 'Client ID is required'}, status_code=400)
         ssh = get_ssh(server)
-        ssh.connect()
         manager = get_protocol_manager(ssh, req.protocol)
         _manager_call(manager, 'toggle_client', req.protocol, req.client_id, req.enable)
         ssh.disconnect()
@@ -2874,7 +3367,8 @@ async def api_list_users(request: Request, search: str = '', page: int = 1, size
 
 
 @app.post('/api/users/add', tags=["Users"])
-async def api_add_user(request: Request, req: AddUserRequest):
+@_serialized
+def api_add_user(request: Request, req: AddUserRequest):
     # Принимаем session admin/support либо Bearer-токен (внешний бот, e.g. Вовка).
     # Согласовано с соседними /api/users/{user_id}/{update,delete,toggle} —
     # везде через _check_admin (admin/support). Bearer admin-equivalent по дизайну.
@@ -2922,7 +3416,6 @@ async def api_add_user(request: Request, req: AddUserRequest):
                 port = proto_info.get('port', '55424')
                 conn_name = req.connection_name or f"{req.username}_vpn"
                 ssh = get_ssh(server)
-                ssh.connect()
                 manager = get_protocol_manager(ssh, req.protocol)
                 if req.protocol == 'telemt':
                     conn_result = manager.add_client(
@@ -2973,35 +3466,36 @@ async def api_update_user(request: Request, user_id: str, req: UpdateUserRequest
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
-        data = load_data()
-        user = next((u for u in data['users'] if u['id'] == user_id), None)
-        if not user:
-            return JSONResponse({'error': 'User not found'}, status_code=404)
+        async with DATA_LOCK:
+            data = load_data()
+            user = next((u for u in data['users'] if u['id'] == user_id), None)
+            if not user:
+                return JSONResponse({'error': 'User not found'}, status_code=404)
             
-        if req.telegramId is not None: user['telegramId'] = req.telegramId
-        if req.email is not None: user['email'] = req.email
-        if req.description is not None: user['description'] = req.description
-        if req.traffic_limit is not None: 
-            new_limit = int(req.traffic_limit * 1024**3)
-            user['traffic_limit'] = new_limit
+            if req.telegramId is not None: user['telegramId'] = req.telegramId
+            if req.email is not None: user['email'] = req.email
+            if req.description is not None: user['description'] = req.description
+            if req.traffic_limit is not None: 
+                new_limit = int(req.traffic_limit * 1024**3)
+                user['traffic_limit'] = new_limit
         
-        if req.traffic_reset_strategy is not None:
-            user['traffic_reset_strategy'] = req.traffic_reset_strategy
-            user['last_reset_at'] = datetime.now().isoformat()
+            if req.traffic_reset_strategy is not None:
+                user['traffic_reset_strategy'] = req.traffic_reset_strategy
+                user['last_reset_at'] = datetime.now().isoformat()
             
-        if req.expiration_date is not None:
-            user['expiration_date'] = req.expiration_date or None
+            if req.expiration_date is not None:
+                user['expiration_date'] = req.expiration_date or None
 
-        if req.password:
-            user['password_hash'] = hash_password(req.password)
+            if req.password:
+                user['password_hash'] = hash_password(req.password)
             
-        save_data(data)
-        
+            save_data(data)
+
         # Auto re-enable if traffic limit increased beyond usage
         if req.traffic_limit is not None:
             if new_limit > 0 and user.get('traffic_used', 0) < new_limit and not user.get('enabled', True):
-                await perform_toggle_user(data, user_id, True)
-                save_data(data)
+                await perform_toggle_user(data, user_id, True)  # SSH on a snapshot
+                await set_user_enabled(user_id, True)
 
         return {'status': 'success'}
     except Exception as e:
@@ -3010,7 +3504,8 @@ async def api_update_user(request: Request, user_id: str, req: UpdateUserRequest
 
 
 @app.post('/api/users/{user_id}/delete', tags=["Users"])
-async def api_delete_user(request: Request, user_id: str):
+@_serialized
+def api_delete_user(request: Request, user_id: str):
     cur = get_current_user(request)
     if not cur or cur['role'] != 'admin':
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -3019,7 +3514,7 @@ async def api_delete_user(request: Request, user_id: str):
         return JSONResponse({'error': _t('cannot_delete_self', lang)}, status_code=400)
     try:
         data = load_data()
-        success = await perform_delete_user(data, user_id)
+        success = perform_delete_user(data, user_id)
         if not success:
             return JSONResponse({'error': 'User not found'}, status_code=404)
         save_data(data)
@@ -3036,10 +3531,9 @@ async def api_toggle_user(request: Request, user_id: str, req: ToggleUserRequest
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
         data = load_data()
-        success = await perform_toggle_user(data, user_id, req.enabled)
-        if not success:
+        success = await perform_toggle_user(data, user_id, req.enabled)  # SSH on a snapshot
+        if not success or not await set_user_enabled(user_id, req.enabled):
             return JSONResponse({'error': 'User not found'}, status_code=404)
-        save_data(data)
         return {'status': 'success', 'enabled': req.enabled}
     except Exception as e:
         logger.exception("Error toggling user")
@@ -3060,8 +3554,7 @@ async def api_add_user_connection(request: Request, user_id: str, req: AddUserCo
         server = data['servers'][req.server_id]
         proto_info = server.get('protocols', {}).get(req.protocol, {})
         port = proto_info.get('port', '55424')
-        ssh = get_ssh(server)
-        await asyncio.to_thread(ssh.connect)
+        ssh = await asyncio.to_thread(get_ssh, server)
         manager = get_protocol_manager(ssh, req.protocol)
         
         if req.client_id:
@@ -3103,9 +3596,10 @@ async def api_add_user_connection(request: Request, user_id: str, req: AddUserCo
                 'name': req.name,
                 'created_at': datetime.now().isoformat(),
             }
-            data = load_data()
-            data['user_connections'].append(conn)
-            save_data(data)
+            async with DATA_LOCK:
+                data = load_data()
+                data['user_connections'].append(conn)
+                save_data(data)
 
         resp = {'status': 'success'}
         if result.get('config'):
@@ -3150,7 +3644,6 @@ def _fetch_connection_payload(data: dict, conn: dict) -> dict:
     proto_info = server.get('protocols', {}).get(conn['protocol'], {})
     port = proto_info.get('port', '55424')
     ssh = get_ssh(server)
-    ssh.connect()
     try:
         manager = get_protocol_manager(ssh, conn['protocol'])
         config = _manager_call(
@@ -3191,7 +3684,7 @@ def _build_email_attachments_for_connection(payload: dict) -> List[EmailAttachme
     safe_name = re.sub(r'[^A-Za-z0-9_.-]+', '_', conn.get('name') or 'vpn') or 'vpn'
 
     # INI-style protocols → ship the actual .conf so users can import via file.
-    if protocol in ('awg', 'awg2', 'awg_legacy', 'wireguard') and config:
+    if protocol in ('awg', 'awg2', 'awg3', 'awg_legacy', 'wireguard') and config:
         attachments.append(EmailAttachment(
             filename=f"{safe_name}.conf",
             content=config.encode('utf-8'),
@@ -3203,7 +3696,7 @@ def _build_email_attachments_for_connection(payload: dict) -> List[EmailAttachme
     # (we already build it with the Qt qCompress wrapper in generate_vpn_link).
     # For everything else the QR holds the raw config/URL — which is exactly
     # what WireGuard / Xray / Telegram client scanners want.
-    qr_text = vpn_link if protocol in ('awg', 'awg2') and vpn_link else (config or vpn_link)
+    qr_text = vpn_link if protocol in ('awg', 'awg2', 'awg3') and vpn_link else (config or vpn_link)
     if qr_text:
         try:
             png = render_qr_png(qr_text)
@@ -3257,7 +3750,7 @@ def _build_email_body_html(panel_user: dict, payloads: List[dict], custom_messag
         server = p['server']
         proto = p['protocol']
         proto_label = {
-            'awg': 'AmneziaWG', 'awg2': 'AmneziaWG 2.0', 'awg_legacy': 'AmneziaWG Legacy',
+            'awg': 'AmneziaWG', 'awg2': 'AmneziaWG 2.0', 'awg3': 'AmneziaWG 3.1', 'awg_legacy': 'AmneziaWG Legacy',
             'wireguard': 'WireGuard', 'xray': 'Xray', 'telemt': 'Telemt (Telegram)',
             'webproxy': 'Telegram WEB Proxy',
         }.get(proto, proto)
@@ -3464,20 +3957,21 @@ async def api_my_connections(request: Request):
 async def api_user_share_setup(user_id: str, req: ShareSetupRequest, request: Request):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
-    data = load_data()
-    user = next((u for u in data['users'] if u['id'] == user_id), None)
-    if not user:
-        return JSONResponse({'error': 'User not found'}, status_code=404)
+    async with DATA_LOCK:
+        data = load_data()
+        user = next((u for u in data['users'] if u['id'] == user_id), None)
+        if not user:
+            return JSONResponse({'error': 'User not found'}, status_code=404)
     
-    user['share_enabled'] = req.enabled
-    if not user.get('share_token'):
-        user['share_token'] = secrets.token_urlsafe(16)
-    if req.password:
-        user['share_password_hash'] = hash_password(req.password)
-    elif req.password == "": # Clear
-        user['share_password_hash'] = None
+        user['share_enabled'] = req.enabled
+        if not user.get('share_token'):
+            user['share_token'] = secrets.token_urlsafe(16)
+        if req.password:
+            user['share_password_hash'] = hash_password(req.password)
+        elif req.password == "": # Clear
+            user['share_password_hash'] = None
         
-    save_data(data)
+        save_data(data)
     return {'status': 'success', 'share_token': user.get('share_token')}
 
 
@@ -3536,7 +4030,7 @@ async def api_share_connections(token: str, request: Request):
 
 
 @app.post('/api/share/{token}/config/{connection_id}', tags=["Sharing"])
-async def api_share_config(token: str, connection_id: str, request: Request):
+def api_share_config(token: str, connection_id: str, request: Request):
     data = load_data()
     user = next((u for u in data['users'] if u.get('share_token') == token), None)
     if not user or not user.get('share_enabled'):
@@ -3556,7 +4050,6 @@ async def api_share_config(token: str, connection_id: str, request: Request):
         proto_info = server.get('protocols', {}).get(conn['protocol'], {})
         port = proto_info.get('port', '55424')
         ssh = get_ssh(server)
-        ssh.connect()
         # Use appropriate manager for the protocol
         manager = get_protocol_manager(ssh, conn['protocol'])
         config = _manager_call(manager, 'get_client_config', conn['protocol'], conn['client_id'], get_client_host(server), port)
@@ -3570,7 +4063,7 @@ async def api_share_config(token: str, connection_id: str, request: Request):
 
 
 @app.post('/api/my/connections/{connection_id}/config', tags=["Self-service"])
-async def api_my_connection_config(request: Request, connection_id: str):
+def api_my_connection_config(request: Request, connection_id: str):
     user = get_current_user(request)
     if not user:
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -3589,7 +4082,6 @@ async def api_my_connection_config(request: Request, connection_id: str):
         proto_info = server.get('protocols', {}).get(conn['protocol'], {})
         port = proto_info.get('port', '55424')
         ssh = get_ssh(server)
-        ssh.connect()
         # Use appropriate manager for the protocol (fixes Telemt/Xray not working for users)
         manager = get_protocol_manager(ssh, conn['protocol'])
         config = _manager_call(manager, 'get_client_config', conn['protocol'], conn['client_id'], get_client_host(server), port)
@@ -3637,23 +4129,24 @@ async def api_get_settings(request: Request):
 async def save_settings(request: Request, payload: SaveSettingsRequest):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
-    data = load_data()
-    data['settings']['appearance'] = payload.appearance.dict()
-    data['settings']['sync'] = payload.sync.dict()
-    data['settings']['captcha'] = payload.captcha.dict()
-    data['settings']['telegram'] = payload.telegram.dict()
-    data['settings']['ssl'] = payload.ssl.dict()
-    if payload.email is not None:
-        # Don't blindly overwrite the password on every save: if the UI sent
-        # back an empty string and we already have one stored, preserve it.
-        # The form leaves the password input empty after save for security
-        # (a non-empty value means "rotate to this new password").
-        new_email = payload.email.dict()
-        current = data['settings'].get('email', {}) or {}
-        if not new_email.get('password') and current.get('password'):
-            new_email['password'] = current['password']
-        data['settings']['email'] = new_email
-    save_data(data)
+    async with DATA_LOCK:
+        data = load_data()
+        data['settings']['appearance'] = payload.appearance.dict()
+        data['settings']['sync'] = payload.sync.dict()
+        data['settings']['captcha'] = payload.captcha.dict()
+        data['settings']['telegram'] = payload.telegram.dict()
+        data['settings']['ssl'] = payload.ssl.dict()
+        if payload.email is not None:
+            # Don't blindly overwrite the password on every save: if the UI sent
+            # back an empty string and we already have one stored, preserve it.
+            # The form leaves the password input empty after save for security
+            # (a non-empty value means "rotate to this new password").
+            new_email = payload.email.dict()
+            current = data['settings'].get('email', {}) or {}
+            if not new_email.get('password') and current.get('password'):
+                new_email['password'] = current['password']
+            data['settings']['email'] = new_email
+        save_data(data)
     logger.info("Settings saved (including captcha, telegram, email)")
 
     # Handle bot start/stop based on new telegram settings
@@ -3661,7 +4154,7 @@ async def save_settings(request: Request, payload: SaveSettingsRequest):
     if tg_cfg.enabled and tg_cfg.token:
         if not tg_bot.is_running():
             logger.info("Starting Telegram bot (settings save)...")
-            tg_bot.launch_bot(tg_cfg.token, load_data, generate_vpn_link, save_data)
+            tg_bot.launch_bot(tg_cfg.token, load_data, generate_vpn_link, _bot_save_data)
     else:
         if tg_bot.is_running():
             logger.info("Stopping Telegram bot (settings save)...")
@@ -3683,16 +4176,17 @@ async def api_telegram_toggle(request: Request):
 
     if tg_bot.is_running():
         await tg_bot.stop_bot()
-        tg_cfg['enabled'] = False
-        data['settings']['telegram'] = tg_cfg
-        save_data(data)
-        return {'status': 'stopped', 'bot_running': False}
+        enabled = False
     else:
-        tg_bot.launch_bot(token, load_data, generate_vpn_link, save_data)
-        tg_cfg['enabled'] = True
-        data['settings']['telegram'] = tg_cfg
-        save_data(data)
+        tg_bot.launch_bot(token, load_data, generate_vpn_link, _bot_save_data)
+        enabled = True
+    async with DATA_LOCK:
+        fresh = load_data()
+        fresh.setdefault('settings', {}).setdefault('telegram', {})['enabled'] = enabled
+        save_data(fresh)
+    if enabled:
         return {'status': 'started', 'bot_running': True}
+    return {'status': 'stopped', 'bot_running': False}
 
 @app.post('/api/settings/sync_now', tags=["Settings"])
 async def api_sync_now(request: Request):
@@ -3715,7 +4209,7 @@ async def api_sync_delete(request: Request):
 
 
 @app.get('/api/servers/{server_id}/{protocol}/clients', tags=["Connections"])
-async def api_get_server_clients(request: Request, server_id: int, protocol: str):
+def api_get_server_clients(request: Request, server_id: int, protocol: str):
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
@@ -3724,7 +4218,6 @@ async def api_get_server_clients(request: Request, server_id: int, protocol: str
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
         ssh = get_ssh(server)
-        ssh.connect()
         manager = get_protocol_manager(ssh, protocol)
         clients = manager.get_clients(protocol)
         ssh.disconnect()

@@ -15,6 +15,7 @@ UI port — we do not try to script it (the JSON setup API is unstable across
 versions and trying to drive it programmatically tends to break on upgrade).
 """
 
+import shlex
 import logging
 
 logger = logging.getLogger(__name__)
@@ -152,9 +153,10 @@ class AdguardManager:
     # ===================== INSTALL / REMOVE =====================
 
     def _ensure_network(self):
+        # Both halves need root: `sudo <ls> || <create>` would create unprivileged
         self.ssh.run_sudo_command(
-            f"docker network ls | grep -q {self.NETWORK_NAME} || "
-            f"docker network create --subnet {self.NETWORK_SUBNET} {self.NETWORK_NAME}"
+            f"sh -c 'docker network ls | grep -q {self.NETWORK_NAME} || "
+            f"docker network create --subnet {self.NETWORK_SUBNET} {self.NETWORK_NAME}'"
         )
 
     def install_protocol(
@@ -232,11 +234,11 @@ class AdguardManager:
 
         # Re-attach known VPN containers to the DNS network so they can reach
         # AdGuard at target_ip (mirrors what dns_manager.py does on install).
-        for c in ('amnezia-awg', 'amnezia-awg2', 'amnezia-awg-legacy', 'amnezia-xray', 'amnezia-wireguard', 'telemt'):
-            self.ssh.run_sudo_command(
-                f"docker ps --format '{{{{.Names}}}}' | grep -q '^{c}$' && "
-                f"docker network connect {self.NETWORK_NAME} {c} 2>/dev/null || true"
-            )
+        for c in ('amnezia-awg', 'amnezia-awg2', 'amnezia-awg3', 'amnezia-awg-legacy', 'amnezia-xray', 'amnezia-wireguard', 'telemt'):
+            # One shell for the chain, or `network connect` runs unprivileged
+            chain = (f"docker ps --format '{{{{.Names}}}}' | grep -q '^{c}$' && "
+                     f"docker network connect {self.NETWORK_NAME} {c} 2>/dev/null || true")
+            self.ssh.run_sudo_command(f"sh -c {shlex.quote(chain)}")
 
         url_host = self.ssh.host if expose_web else target_ip
         admin_url = f"http://{url_host}:{web_port}"

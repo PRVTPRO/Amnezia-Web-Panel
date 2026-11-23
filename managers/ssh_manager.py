@@ -6,6 +6,7 @@ Replicates the ServerController logic from the AmneziaVPN client.
 import paramiko
 import io
 import time
+import threading
 import logging
 
 logger = logging.getLogger(__name__)
@@ -14,7 +15,8 @@ logger = logging.getLogger(__name__)
 class SSHManager:
     """Manages SSH connections and command execution on remote servers."""
 
-    def __init__(self, host, port, username, password=None, private_key=None):
+    def __init__(self, host, port, username, password=None, private_key=None,
+                 connect_cooldown_base=30.0):
         self.host = host
         self.port = int(port)
         self.username = username
@@ -22,9 +24,78 @@ class SSHManager:
         self.private_key = private_key
         self.client = None
         self._is_root = (username == 'root')
+        # Serializes connect/disconnect so concurrent threads (UI request
+        # handler + background monitor) cannot race a half-built transport.
+        self._conn_lock = threading.Lock()
+        # Serializes command/SFTP execution on the shared transport. Pooled
+        # managers are used concurrently by request handlers and background
+        # threads (traffic sync, conn monitor); without this a failed
+        # exec on one side triggers a reconnect that closes the client the
+        # other side is mid-command on ('NoneType open_session', EOFError
+        # in open_sftp, bursts of 500s followed by the connect cooldown).
+        # RLock because run_command retries by calling itself.
+        self._exec_lock = threading.RLock()
+        # Circuit breaker: after a failed connect, do not hammer the dead
+        # server on every request (each attempt costs up to `timeout` seconds
+        # and can exhaust the web worker pool when several servers are down).
+        # Consecutive failures grow the cooldown base -> 2x -> 4x -> ... up
+        # to 300s; the first successful connect resets it back to base.
+        # Base is configurable per server (data.json: ssh_cooldown_base).
+        self._connect_cooldown_base = float(connect_cooldown_base or 30.0)
+        self._last_connect_fail = 0.0
+        self._connect_cooldown = self._connect_cooldown_base
+        self._connect_fail_count = 0
+        self._connect_cooldown_max = 300.0
+        # Pooled managers (shared via app.get_ssh) must ignore the legacy
+        # per-request disconnect() calls scattered across endpoints —
+        # otherwise every API request kills the shared transport.
+        self.pooled = False
 
     def connect(self):
-        """Establish SSH connection to the server."""
+        """(Re)establish SSH connection to the server, dropping the current one."""
+        with self._conn_lock:
+            return self._connect_locked()
+
+    def _connect_locked(self):
+        self._disconnect_locked()
+        # One retry on TCP connect timeout: links with random SYN loss
+        # (e.g. transcontinental/DPI-filtered routes) drop ~half of the
+        # first attempts while the retry succeeds in milliseconds.
+        last_exc = None
+        for attempt in (1, 2):
+            try:
+                self._connect_once()
+                last_exc = None
+                break
+            except (TimeoutError, OSError) as e:
+                last_exc = e
+                logger.warning(
+                    f"SSH connect to {self.host} attempt {attempt} "
+                    f"failed: {e}")
+                self._disconnect_locked()
+        if last_exc is not None:
+            self._record_connect_failure()
+            raise last_exc
+        self._reset_connect_failures()
+        return True
+
+    def _record_connect_failure(self):
+        """Feed the breaker from any failed connect path (caller holds
+        _conn_lock): bump the streak and grow the cooldown exponentially."""
+        self._connect_fail_count += 1
+        self._last_connect_fail = time.time()
+        self._connect_cooldown = min(
+            self._connect_cooldown_base * (2 ** (self._connect_fail_count - 1)),
+            self._connect_cooldown_max)
+
+    def _reset_connect_failures(self):
+        """First successful connect closes the breaker again."""
+        self._connect_fail_count = 0
+        self._connect_cooldown = self._connect_cooldown_base
+        self._last_connect_fail = 0.0
+
+    def _connect_once(self):
+        """Single TCP+SSH handshake attempt (caller holds _conn_lock)."""
         self.client = paramiko.SSHClient()
         self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
@@ -53,48 +124,135 @@ class SSHManager:
             kwargs['password'] = self.password
 
         self.client.connect(**kwargs)
-        return True
+        # Keep NAT/stateful firewalls from silently dropping the idle
+        # long-lived transport between command bursts.
+        try:
+            self.client.get_transport().set_keepalive(15)
+        except Exception:
+            pass
 
-    def disconnect(self):
-        """Close SSH connection."""
+    def _disconnect_locked(self):
+        """Close SSH connection (caller must hold _conn_lock)."""
         if self.client:
-            self.client.close()
+            try:
+                self.client.close()
+            except Exception:
+                pass
             self.client = None
 
-    def run_command(self, command, timeout=60):
-        """Execute command on remote server."""
-        if not self.client:
-            raise ConnectionError("Not connected to server")
+    def disconnect(self):
+        """Close SSH connection.
+
+        No-op for pooled managers: legacy endpoints call disconnect() in
+        finally-blocks after every request, which would destroy the shared
+        long-lived transport. Use force_disconnect() to really close it.
+        """
+        if self.pooled:
+            return
+        with self._conn_lock:
+            self._disconnect_locked()
+
+    def force_disconnect(self):
+        """Unconditionally close SSH connection (pool eviction etc.)."""
+        with self._conn_lock:
+            self._disconnect_locked()
+
+    def _transport_alive(self):
+        try:
+            transport = self.client.get_transport() if self.client else None
+            return bool(transport and transport.is_active())
+        except Exception:
+            return False
+
+    def ensure_connected(self):
+        """Connect only if there is no live transport.
+
+        Lets the panel keep one long-lived connection per server and run
+        commands as cheap channels on it instead of paying a full TCP+SSH
+        handshake for every API request (a major source of UI timeouts on
+        high-latency servers).
+        """
+        if self._transport_alive():
+            return True
+        with self._conn_lock:
+            # Re-check: parallel requests queue here on a cold pool entry and
+            # must reuse the connection the first one opened, not replace it.
+            if self._transport_alive():
+                return True
+            # Cooldown after a recent failed attempt: fail fast instead of
+            # blocking the worker on another 15s connect to a dead server.
+            if time.time() - self._last_connect_fail < self._connect_cooldown:
+                raise ConnectionError(
+                    f"SSH to {self.host} recently failed, backing off "
+                    f"{int(self._connect_cooldown)}s")
+            # _connect_locked() feeds the breaker on failure and resets it on
+            # success, so reconnect-and-retry paths are covered too.
+            self._connect_locked()
+        return True
+
+    def run_command(self, command, timeout=60, _retried=False, stdin_input=None):
+        """Execute command on remote server.
+
+        stdin_input, when given, is written to the channel's stdin right after
+        exec and the write side is closed (same semantics as a shell pipe).
+        Used to feed the sudo password without putting it on the command line.
+        """
+        with self._exec_lock:
+            return self._run_command_locked(command, timeout, _retried, stdin_input)
+
+    @staticmethod
+    def _reason(exc):
+        """Text for an exception that often carries none: paramiko raises bare
+        EOFError/SSHException when the transport dies mid-command, and an empty
+        string travels all the way to the UI as "... failed: "."""
+        return str(exc).strip() or type(exc).__name__
+
+    def _run_command_locked(self, command, timeout, _retried, stdin_input=None):
+        self.ensure_connected()
 
         logger.info(f"Running command: {command[:100]}...")
-        stdin, stdout, stderr = self.client.exec_command(command, timeout=timeout)
-        
+        try:
+            stdin, stdout, stderr = self.client.exec_command(command, timeout=timeout)
+        except Exception as e:
+            # Transport can be dead while is_active() still claims otherwise
+            # (silent NAT drop). Reconnect once and retry before giving up.
+            if not _retried:
+                logger.warning(f"exec failed ({e}); reconnecting and retrying once")
+                try:
+                    self.connect()
+                except Exception as ce:
+                    logger.error(f"reconnect failed: {ce}")
+                    return "", self._reason(ce), -1
+                return self.run_command(command, timeout=timeout, _retried=True, stdin_input=stdin_input)
+            logger.error(f"exec failed after retry: {e}")
+            return "", self._reason(e), -1
+
+        if stdin_input is not None:
+            try:
+                stdin.write(stdin_input)
+                stdin.flush()
+                # Signal EOF so consumers of stdin (e.g. docker exec -i)
+                # behave exactly as with the old `echo ... |` pipe.
+                stdin.channel.shutdown_write()
+            except Exception as e:
+                logger.warning(f"failed to write command stdin: {e}")
+
         # Crucial: set timeout on the channel to prevent hanging indefinitely
         stdout.channel.settimeout(timeout)
         stderr.channel.settimeout(timeout)
-        
+
         try:
             exit_code = stdout.channel.recv_exit_status()
             out = stdout.read().decode('utf-8', errors='replace').strip()
             err = stderr.read().decode('utf-8', errors='replace').strip()
         except Exception as e:
             logger.error(f"Command timed out or failed to read: {e}")
-            out, err, exit_code = "", str(e), -1
+            out, err, exit_code = "", f"SSH connection lost while running the command ({self._reason(e)})", -1
 
         if exit_code != 0:
             logger.warning(f"Command exited with code {exit_code}: {err}")
 
         return out, err, exit_code
-
-    def _sudo_prefix(self):
-        """Get the sudo command prefix with password handling."""
-        if self._is_root:
-            return ''
-        if self.password:
-            # Use sudo -S to read password from stdin
-            escaped_pass = self.password.replace("'", "'\\''")
-            return f"echo '{escaped_pass}' | sudo -S "
-        return 'sudo '
 
     def run_sudo_command(self, command, timeout=60):
         """
@@ -111,14 +269,14 @@ class SSHManager:
             return self.run_command(clean_cmd, timeout=timeout)
 
         if self.password:
-            escaped_pass = self.password.replace("'", "'\\''")
-            # Pipe password directly to sudo -S, preserving original command quoting
-            # 2>/dev/null on echo suppresses '[sudo] password for...' prompt noise
-            full_cmd = f"echo '{escaped_pass}' | sudo -S -p '' {clean_cmd}"
-        else:
-            full_cmd = f"sudo {clean_cmd}"
+            # Feed the password via channel stdin: keeping it out of the
+            # command line hides it from both the panel log (logged above)
+            # and the remote process list.
+            return self.run_command(
+                f"sudo -S -p '' {clean_cmd}", timeout=timeout,
+                stdin_input=self.password + '\n')
 
-        return self.run_command(full_cmd, timeout=timeout)
+        return self.run_command(f"sudo {clean_cmd}", timeout=timeout)
 
     def run_sudo_script(self, script, timeout=120):
         """
@@ -134,14 +292,13 @@ class SSHManager:
         tmp_script = f"/tmp/_amnz_script_{script_hash}.sh"
         self.upload_file(script, tmp_script)
 
-        # Run with sudo
+        # Run with sudo (password via stdin, never on the command line)
         if self.password:
-            escaped_pass = self.password.replace("'", "'\\''")
-            full_cmd = f"echo '{escaped_pass}' | sudo -S -p '' bash {tmp_script}; rm -f {tmp_script}"
-        else:
-            full_cmd = f"sudo bash {tmp_script}; rm -f {tmp_script}"
+            return self.run_command(
+                f"sudo -S -p '' bash {tmp_script}; rm -f {tmp_script}",
+                timeout=timeout, stdin_input=self.password + '\n')
 
-        return self.run_command(full_cmd, timeout=timeout)
+        return self.run_command(f"sudo bash {tmp_script}; rm -f {tmp_script}", timeout=timeout)
 
     def run_script(self, script, timeout=120):
         """Execute a multi-line script on remote server."""
@@ -149,8 +306,11 @@ class SSHManager:
 
     def upload_file(self, content, remote_path):
         """Upload text content to a remote file via SFTP."""
-        if not self.client:
-            raise ConnectionError("Not connected to server")
+        with self._exec_lock:
+            return self._upload_file_locked(content, remote_path)
+
+    def _upload_file_locked(self, content, remote_path):
+        self.ensure_connected()
 
         # Normalize line endings (Windows CRLF -> Unix LF)
         content = content.replace('\r\n', '\n')
@@ -168,8 +328,7 @@ class SSHManager:
         Uses SFTP to write to /tmp, then sudo mv to the target path.
         Also normalizes line endings to Unix-style (LF).
         """
-        if not self.client:
-            raise ConnectionError("Not connected to server")
+        self.ensure_connected()
 
         # Normalize line endings (Windows CRLF -> Unix LF)
         content = content.replace('\r\n', '\n')
@@ -186,8 +345,11 @@ class SSHManager:
 
     def download_file(self, remote_path):
         """Download text content from a remote file."""
-        if not self.client:
-            raise ConnectionError("Not connected to server")
+        with self._exec_lock:
+            return self._download_file_locked(remote_path)
+
+    def _download_file_locked(self, remote_path):
+        self.ensure_connected()
 
         sftp = self.client.open_sftp()
         try:
@@ -196,10 +358,23 @@ class SSHManager:
         finally:
             sftp.close()
 
+    def fetch_file(self, remote_path, local_path):
+        """Copy a remote file (binary-safe) to a local path via SFTP."""
+        with self._exec_lock:
+            self.ensure_connected()
+            sftp = self.client.open_sftp()
+            try:
+                sftp.get(remote_path, local_path)
+            finally:
+                sftp.close()
+
     def file_exists(self, remote_path):
         """Check if a remote file exists."""
-        if not self.client:
-            raise ConnectionError("Not connected to server")
+        with self._exec_lock:
+            return self._file_exists_locked(remote_path)
+
+    def _file_exists_locked(self, remote_path):
+        self.ensure_connected()
 
         sftp = self.client.open_sftp()
         try:

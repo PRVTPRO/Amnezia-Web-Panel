@@ -1380,6 +1380,10 @@ a:hover {
     color: var(--danger);
 }
 
+.log-line.warning {
+    color: var(--warning);
+}
+
 .log-line.info {
     color: var(--text-secondary);
 }
@@ -1860,4 +1864,88 @@ body,
 
 .gap-md {
     gap: var(--space-md);
+}
+.mt-xs {
+    margin-top: var(--space-xs);
+}
+
+/* ===== Peer meta: fixed-width badges, live speed, online pulse ===== */
+.client-meta span {
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+
+.meta-handshake {
+    display: inline-block;
+    min-width: 88px;
+}
+
+.meta-handshake.meta-online {
+    color: #22c55e;
+}
+
+.traffic-down,
+.traffic-up {
+    min-width: 96px;
+    justify-content: flex-start;
+}
+
+.speed-badge {
+    min-width: 172px;
+    justify-content: flex-start;
+    background: rgba(128, 128, 128, 0.12);
+    color: var(--text-muted);
+    border: 1px solid transparent;
+}
+
+.speed-badge.speed-active {
+    background: rgba(16, 185, 129, 0.15);
+    color: #10b981;
+    border-color: rgba(16, 185, 129, 0.25);
+}
+
+.client-avatar {
+    position: relative;
+}
+
+.avatar-online::after {
+    content: '';
+    position: absolute;
+    top: -2px;
+    right: -2px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #22c55e;
+    border: 2px solid var(--bg-card, #fff);
+    animation: awp-peer-pulse 2s infinite;
+}
+
+@keyframes awp-peer-pulse {
+    0% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.5); }
+    70% { box-shadow: 0 0 0 7px rgba(34, 197, 94, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+}
+
+/* Peer internal IP next to the client name */
+.client-ip {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+/* Connection-flood warnings (P2P/torrent detection) */
+.conn-warnings {
+    margin-top: 4px;
+}
+
+.conn-warning {
+    font-size: 0.75rem;
+    color: #f59e0b;
+    background: rgba(245, 158, 11, 0.12);
+    border: 1px solid rgba(245, 158, 11, 0.35);
+    border-radius: var(--radius-sm, 6px);
+    padding: 3px 8px;
+    margin-top: 3px;
+    font-variant-numeric: tabular-nums;
 }

@@ -230,9 +230,24 @@
             const data = await res.json();
 
             if (!res.ok) {
-                throw new Error(data.error || 'Unknown error');
+                const err = new Error(data.error || 'Unknown error');
+                err.data = data;
+                throw err;
             }
             return data;
+        }
+
+        /* Delete a connection; if the server side fails (server/protocol gone),
+           offer to drop just the panel record. Returns null when the user declines. */
+        async function removeConnectionRequest(serverId, protocol, clientId) {
+            const url = `/api/servers/${serverId}/connections/remove`;
+            try {
+                return await apiCall(url, 'POST', { protocol, client_id: clientId });
+            } catch (err) {
+                if (!err.data || !err.data.can_force) throw err;
+                if (!confirm(`${_('delete_connection_force_confirm')}\n\n${err.message}`)) return null;
+                return await apiCall(url, 'POST', { protocol, client_id: clientId, force: true });
+            }
         }
 
         /* ===== Copy to clipboard ===== */

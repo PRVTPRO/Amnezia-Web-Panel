@@ -48,7 +48,7 @@ class BackupManager:
         def inst_path(path, suffix_fmt='-{idx}'):
             return path if idx <= 1 else f"{path}{suffix_fmt.format(idx=idx)}"
 
-        if base in ('awg', 'awg2', 'awg_legacy'):
+        if base in ('awg', 'awg2', 'awg3', 'awg_legacy'):
             paths['host'] = ['/opt/amnezia/awg', f'/opt/amnezia/{container_name}']
             paths['container'] = ['/opt/amnezia/awg', '/opt/amnezia/start.sh']
         elif base == 'wireguard':

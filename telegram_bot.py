@@ -290,6 +290,9 @@ async def _handle_get_config(
 
         proto_info = server.get("protocols", {}).get(proto, {})
         port = proto_info.get("port", "55424")
+        # Same rule as app.get_client_host: NAT'ed servers are reached by
+        # clients on client_host, SSH stays on host.
+        client_host = (server.get("client_host") or "").strip() or server["host"]
 
         def _get_cfg():
             ssh.connect()
@@ -298,23 +301,23 @@ async def _handle_get_config(
 
             if proto == "xray":
                 mgr = XrayManager(ssh)
-                cfg = mgr.get_client_config(proto, conn["client_id"], server["host"], port)
+                cfg = mgr.get_client_config(proto, conn["client_id"], client_host, port)
             elif proto == "wireguard":
                 mgr = WireGuardManager(ssh)
-                cfg = mgr.get_client_config(conn["client_id"], server["host"])
+                cfg = mgr.get_client_config(conn["client_id"], client_host)
             elif proto == "telemt":
                 mgr = TelemtManager(ssh)
-                cfg = mgr.get_client_config(proto, conn["client_id"], server["host"], port)
+                cfg = mgr.get_client_config(proto, conn["client_id"], client_host, port)
             elif proto == "webproxy":
                 from managers.webproxy_manager import WebProxyManager
                 mgr = WebProxyManager(ssh)
                 # host/port are ignored there: the link carries the relay's own
                 # public hostname and always port 443.
-                cfg = mgr.get_client_config(proto, conn["client_id"], server["host"], port)
+                cfg = mgr.get_client_config(proto, conn["client_id"], client_host, port)
             else:
-                # awg, awg2, awg_legacy
+                # awg, awg2, awg3, awg_legacy
                 mgr = AWGManager(ssh)
-                cfg = mgr.get_client_config(proto, conn["client_id"], server["host"], port)
+                cfg = mgr.get_client_config(proto, conn["client_id"], client_host, port)
             ssh.disconnect()
             return cfg
 

@@ -20,8 +20,8 @@
                     <div class="client-meta">
                         <span>🖥 {{ c.server_name }}</span>
                         <span class="badge badge-info" style="font-size:0.65rem;">
-                            {{ 'AmneziaWG' if c.protocol == 'awg' else ('AmneziaWG 2.0' if c.protocol == 'awg2' else ('AWG Legacy' if c.protocol == 'awg_legacy' else
-                            ('Xray' if c.protocol == 'xray' else c.protocol | upper))) }}
+                            {{ 'AmneziaWG' if c.protocol == 'awg' else ('AmneziaWG 3.1' if c.protocol == 'awg3' else ('AmneziaWG 2.0' if c.protocol == 'awg2' else ('AWG Legacy' if c.protocol == 'awg_legacy' else
+                            ('Xray' if c.protocol == 'xray' else c.protocol | upper)))) }}
                         </span>
                         {% if c.created_at %}
                         <span>📅 {{ c.created_at[:10] }}</span>
