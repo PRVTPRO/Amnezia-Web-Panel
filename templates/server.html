@@ -3508,6 +3508,28 @@
     </div>
 </div>
 
+<!-- ===== Per-instance Cloudflare WARP exit ===== -->
+<div class="modal-backdrop" id="warpInstanceModal">
+    <div class="modal" style="max-width:560px;">
+        <div class="modal-header">
+            <h2 class="modal-title" id="warpInstanceTitle">{{ _('srv_warp_instance_title') }}</h2>
+            <button class="modal-close" onclick="closeModal('warpInstanceModal')">×</button>
+        </div>
+        <div class="form-hint" id="warpInstanceHint" style="margin-bottom:var(--space-md);"></div>
+        <div class="form-group" id="warpInstanceToggleGroup">
+            <label class="form-label" style="display:flex;align-items:center;gap:var(--space-sm);">
+                <input type="checkbox" id="warpInstanceToggle" onchange="onWarpInstanceToggle(this)">
+                <span>{{ _('srv_warp_instance_toggle') }}</span>
+            </label>
+        </div>
+        <div id="warpInstanceState" style="margin-bottom:var(--space-md);"></div>
+        <div id="warpInstanceDetails"></div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="closeModal('warpInstanceModal')">{{ _('done') }}</button>
+        </div>
+    </div>
+</div>
+
 <!-- ===== Smart Route Modal ===== -->
 <div class="modal-backdrop" id="smartRouteAckModal">
     <div class="modal">
@@ -5931,6 +5953,11 @@
                     const exitBtn = AWG_PROTOCOLS.includes(protoBase(proto))
                         ? `<button class="btn btn-secondary btn-sm exit-link-btn" onclick="openExitLinkModal('${proto}')" title="${_('exit_link_title')}">🚪${info.exit_link ? ' ' + escapeHtml(info.exit_link.exit_name || '') + smartRouteMark(info.exit_link) : ''}</button>`
                         : '';
+                    // WARP supports awg/awg2/awg3 only (not awg_legacy), and the
+                    // button is revealed once /warp/status reports the plugin.
+                    const warpExitBtn = ['awg', 'awg2', 'awg3'].includes(protoBase(proto))
+                        ? `<button class="btn btn-secondary btn-sm warp-exit-btn hidden" data-warp-proto="${escapeHtml(proto)}" onclick="openWarpInstanceModal('${proto}')" title="${_('srv_warp_instance_btn_title')}">☁️</button>`
+                        : '';
                     const ep = PUBLIC_ENDPOINTS[proto];
                     const endpointBtn = ENDPOINT_PROTOCOLS.includes(protoBase(proto))
                         ? `<button class="btn btn-secondary btn-sm" onclick="openPublicEndpointModal('${proto}')" title="${_('public_endpoint_title')}">🌐${ep ? ' ' + escapeHtml(publicEndpointLabel(ep)) : ''}</button>`
@@ -5950,6 +5977,7 @@
                     ctrlEl.innerHTML = `
                         ${awgBtn}
                         ${exitBtn}
+                        ${warpExitBtn}
                         ${endpointBtn}
                         ${selfstealBtn}
                         ${vlessEncBtn}
@@ -6020,6 +6048,9 @@
             }
             pencil.dataset.proto = proto;
         }
+        // /check rebuilds the control row from scratch: re-apply the WARP cloud
+        // button state so a late status response cannot leave it hidden.
+        applyWarpInstanceButtons();
     }
 
     // Toggle Docker container start/stop
@@ -9321,6 +9352,7 @@
         srv_warp_tos_required: 'srv_warp_err_tos',
         srv_warp_job_busy: 'srv_warp_err_job_busy',
         srv_warp_no_targets: 'srv_warp_err_no_awg',
+        srv_warp_in_use: 'srv_warp_in_use_err',
     };
 
     function warpAggregate() {
@@ -9375,6 +9407,124 @@
         return instances.find(item => item && item.protocol === proto) || null;
     }
 
+    // ===== Per-instance WARP exit: cloud button on every AWG instance =====
+    // The button lives in the protocol control row, which /check rebuilds from
+    // scratch, so its visibility and label are refreshed from warpStatus here
+    // instead of being baked into the row markup.
+    let warpInstanceProto = '';
+
+    function applyWarpInstanceButtons() {
+        const installed = warpIsInstalled();
+        const busy = warpBusy || warpJobs().length > 0;
+        document.querySelectorAll('.warp-exit-btn[data-warp-proto]').forEach(btn => {
+            const proto = btn.dataset.warpProto || '';
+            const inst = warpInstanceFor(proto);
+            btn.classList.toggle('hidden', !installed);
+            btn.textContent = (inst && inst.link_active) ? '☁️ WARP EXIT' : '☁️';
+            btn.disabled = busy;
+        });
+        const modal = document.getElementById('warpInstanceModal');
+        if (modal && modal.classList.contains('active')) renderWarpInstanceModal();
+    }
+
+    function warpInstanceBadgeClass(state) {
+        if (state === 'connected') return 'badge-success';
+        if (state === 'connecting') return 'badge-warn';
+        if (state === 'error' || state === 'unreachable') return 'badge-danger';
+        return 'badge-warn';
+    }
+
+    function renderWarpInstanceModal() {
+        const proto = warpInstanceProto;
+        if (!proto) return;
+        const titleEl = document.getElementById('warpInstanceTitle');
+        const hintEl = document.getElementById('warpInstanceHint');
+        const toggle = document.getElementById('warpInstanceToggle');
+        const stateEl = document.getElementById('warpInstanceState');
+        const detailsEl = document.getElementById('warpInstanceDetails');
+        const installed = warpIsInstalled();
+        const inst = warpInstanceFor(proto);
+        const busy = warpBusy || warpJobs().length > 0;
+        if (titleEl) {
+            titleEl.textContent = _('srv_warp_instance_title').replace('{proto}', proto);
+        }
+        if (hintEl) {
+            hintEl.textContent = installed
+                ? _('srv_warp_instance_hint')
+                : _('srv_warp_instance_not_available');
+        }
+        if (toggle) {
+            toggle.checked = !!(inst && inst.link_active);
+            toggle.disabled = !installed || !inst || busy;
+        }
+        if (!stateEl) return;
+        if (!installed || !inst) {
+            stateEl.innerHTML = '';
+            if (detailsEl) detailsEl.innerHTML = '';
+            return;
+        }
+        const stateKey = WARP_STATE_KEYS[inst.state] || 'srv_warp_state_error';
+        let html = `<span class="badge ${warpInstanceBadgeClass(inst.state)}"><span class="badge-dot"></span> ${escapeHtml(_(stateKey))}</span>`;
+        if (busy) html += ` <span class="form-hint">${escapeHtml(_('srv_warp_instance_busy'))}</span>`;
+        stateEl.innerHTML = html;
+        if (!detailsEl) return;
+        const yesNo = value => escapeHtml(_(value ? 'srv_warp_instance_yes' : 'srv_warp_instance_no'));
+        const stateLabel = escapeHtml(_(stateKey));
+        const rows = [
+            [_('srv_warp_instance_proto'), escapeHtml(proto)],
+            [_('srv_warp_instance_state_label'), stateLabel],
+            [_('srv_warp_instance_mtu'), inst.client_mtu ? escapeHtml(String(inst.client_mtu)) : '—'],
+            [_('srv_warp_instance_dns'), yesNo(inst.dns_via_warp)],
+            [_('srv_warp_instance_registered'), yesNo(inst.registered)],
+            [_('srv_warp_instance_quarantine'), yesNo(inst.quarantine)],
+            [_('srv_warp_instance_stale'), yesNo(inst.state_stale)],
+        ];
+        const table = rows.map(([label, value]) =>
+            `<div class="protocol-info-item"><span class="protocol-info-label">${escapeHtml(label)}</span><span class="protocol-info-value">${value}</span></div>`
+        ).join('');
+        const warnings = [];
+        if (inst.quarantine) warnings.push(_('srv_warp_instance_quarantine'));
+        if (inst.state_stale) warnings.push(_('srv_warp_instance_stale'));
+        detailsEl.innerHTML = `<div class="form-label">${escapeHtml(_('srv_warp_instance_details'))}</div>`
+            + `<div class="protocol-info" style="margin-top:var(--space-sm);">${table}</div>`
+            + warnings.map(text => `<div class="form-hint" style="color:var(--warning, #fbbf24)">⚠ ${escapeHtml(text)}</div>`).join('');
+    }
+
+    function openWarpInstanceModal(proto) {
+        warpInstanceProto = proto;
+        openModal('warpInstanceModal');
+        renderWarpInstanceModal();
+        // Force-fetch so the modal never shows a stale projection.
+        loadWarpStatus(true).then(() => {
+            if (warpInstanceProto === proto) renderWarpInstanceModal();
+        });
+    }
+
+    async function onWarpInstanceToggle(input) {
+        if (warpBusy) return;
+        const proto = warpInstanceProto;
+        if (!proto) return;
+        const want = !!input.checked;
+        warpBusy = true;
+        input.disabled = true;
+        renderWarpInstanceModal();
+        try {
+            const res = want
+                ? await warpPostWithTos('link', {protocol: proto})
+                : await warpPost('unlink', {protocol: proto});
+            if (!res) return;  // ToS declined: keep the factual state.
+            if (res.job_id) await pollWarpJob(res.job_id);
+            await loadWarpStatus(true);
+            showToast(_('done'), 'success');
+        } catch (err) {
+            showToast(_('error') + ': ' + warpErrorMessage(err), 'error');
+        } finally {
+            warpBusy = false;
+            renderWarpInstanceModal();
+            applyWarpInstanceButtons();
+        }
+    }
+
     function syncWarpLinkButtons() {
         const linkBtn = document.getElementById('warp-link-btn');
         const unlinkBtn = document.getElementById('warp-unlink-btn');
@@ -9387,6 +9537,8 @@
     }
 
     function renderWarpCard() {
+        // Buttons live in the per-instance control rows and outlive this card.
+        applyWarpInstanceButtons();
         const statusEl = document.getElementById('warp-status');
         if (!statusEl) return;
         const d = warpStatus || {};
@@ -9573,6 +9725,14 @@
         // Delete on the host card removes every instance; Update passes the
         // selected protocol explicitly.
         const proto = protocol || '';
+        const inUse = Array.isArray(warpStatus && warpStatus.instances)
+            && warpStatus.instances.some(item => item && item.link_active);
+        // Explicit "Delete" never reaches the server while a tunnel is live.
+        // Update uses the same POST with skipConfirm and relies on the 409 below.
+        if (!options.skipConfirm && inUse) {
+            alert(_('srv_warp_in_use_alert'));
+            return false;
+        }
         if (!options.skipConfirm && !confirm(_('srv_warp_delete') + '?')) return false;
         warpBusy = true;
         const btn = document.getElementById('warp-uninstall-btn');
@@ -9586,6 +9746,11 @@
             if (!options.silent) showToast(_('done'), 'success');
             return true;
         } catch (err) {
+            if (warpErrorCode(err) === 'srv_warp_in_use') {
+                if (!options.skipConfirm) alert(_('srv_warp_in_use_alert'));
+                else showToast(_('error') + ': ' + warpErrorMessage(err), 'error');
+                return false;
+            }
             showToast(_('error') + ': ' + warpErrorMessage(err), 'error');
             return false;
         } finally {
@@ -9654,7 +9819,12 @@
     window.addEventListener('load', function () { loadIpStatus(); });
     let ipStatusPoller = null;
     if (!ipStatusPoller) {
-        ipStatusPoller = setInterval(() => { if (!document.hidden) loadIpStatus(); }, 60000);
+        ipStatusPoller = setInterval(() => {
+            if (document.hidden) return;
+            loadIpStatus();
+            // Keep the per-instance WARP cloud button in sync with reality.
+            if (typeof loadWarpStatus === 'function') loadWarpStatus();
+        }, 60000);
     }
     document.addEventListener('visibilitychange', () => { if (!document.hidden) loadIpStatus(); });
 </script>

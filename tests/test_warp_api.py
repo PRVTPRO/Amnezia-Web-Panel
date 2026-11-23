@@ -308,6 +308,75 @@ class WarpApiTests(unittest.TestCase):
         instance = status.json()['instances'][0]
         self.assertTrue(instance['link_active'])
 
+    # ----- plugin delete guard --------------------------------------------
+
+    def seed_link_for(self, proto):
+        def mutate(state):
+            rec = panel.proto_record(state, 'srv-uid', proto)
+            rec['warp_link'] = {
+                'active': True, 'dns_via_warp': False, 'applied_at': 1,
+                'stale': None, 'server_uid': 'srv-uid',
+                'entry_uid': 'srv-uid', 'protocol': proto,
+            }
+            rec['client_mtu_warp'] = 1220
+
+        panel.warp_state_store.mutate(mutate)
+
+    def test_uninstall_is_409_while_any_instance_is_linked(self):
+        self.seed_link()
+        response = self.post('uninstall', {'server_uid': 'srv-uid'})
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()['code'], 'srv_warp_in_use')
+        # Refused before a job could be queued.
+        self.assertFalse(panel._warp_job_active('srv-uid'))
+
+    def test_uninstall_is_409_when_another_instance_is_linked(self):
+        self.write_data({'awg': {'installed': True, 'base_protocol': 'awg',
+                                 'port': '55424'},
+                         'awg3': {'installed': True, 'base_protocol': 'awg3',
+                                  'port': '55425', 'instance': 2}})
+        self.seed_link_for('awg3')
+        # Target the unlinked instance: the guard is server-wide by design.
+        response = self.post('uninstall', {'server_uid': 'srv-uid',
+                                           'protocol': 'awg'})
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()['code'], 'srv_warp_in_use')
+
+    def test_uninstall_allowed_when_registered_but_not_linked(self):
+        def mutate(state):
+            rec = panel.proto_record(state, 'srv-uid', 'awg')
+            rec['warp']['registered'] = True
+
+        panel.warp_state_store.mutate(mutate)
+        with mock.patch.object(panel.warp_runtime, 'uninstall',
+                               new=mock.AsyncMock(return_value=None)) as uninst:
+            response = self.post('uninstall', {'server_uid': 'srv-uid'})
+        self.assertEqual(response.status_code, 202, response.text)
+        uninst.assert_called_once()
+
+    def test_uninstall_ignores_links_on_other_servers(self):
+        with open(panel.DATA_FILE, encoding='utf-8') as handle:
+            data = json.load(handle)
+        other = server_record({'awg': {'installed': True,
+                                       'base_protocol': 'awg',
+                                       'port': '55426'}})
+        other['uid'] = 'other-uid'
+        data['servers'].append(other)
+        with open(panel.DATA_FILE, 'w', encoding='utf-8') as handle:
+            json.dump(data, handle)
+
+        def mutate(state):
+            rec = panel.proto_record(state, 'other-uid', 'awg')
+            rec['warp_link'] = {'active': True, 'protocol': 'awg',
+                                'server_uid': 'other-uid',
+                                'entry_uid': 'other-uid'}
+
+        panel.warp_state_store.mutate(mutate)
+        with mock.patch.object(panel.warp_runtime, 'uninstall',
+                               new=mock.AsyncMock(return_value=None)):
+            response = self.post('uninstall', {'server_uid': 'srv-uid'})
+        self.assertEqual(response.status_code, 202, response.text)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -60,6 +60,24 @@ SRV_WARP_KEYS = {
     'srv_warp_stage_profile',
     'srv_warp_stage_startsh',
     'srv_warp_stage_done',
+    'srv_warp_instance_btn_title',
+    'srv_warp_instance_title',
+    'srv_warp_instance_hint',
+    'srv_warp_instance_toggle',
+    'srv_warp_instance_details',
+    'srv_warp_instance_proto',
+    'srv_warp_instance_state_label',
+    'srv_warp_instance_mtu',
+    'srv_warp_instance_dns',
+    'srv_warp_instance_registered',
+    'srv_warp_instance_quarantine',
+    'srv_warp_instance_stale',
+    'srv_warp_instance_not_available',
+    'srv_warp_instance_busy',
+    'srv_warp_instance_yes',
+    'srv_warp_instance_no',
+    'srv_warp_in_use_alert',
+    'srv_warp_in_use_err',
 }
 
 WARP_STAGE_KEYS = {
@@ -190,6 +208,46 @@ class WarpStoreInstallTemplateTests(unittest.TestCase):
             "!warpHasTargetInstance();", self.page)
         self.assertIn('warpNoTarget ? _(\'srv_warp_no_awg\')', self.page)
         self.assertIn("srv_warp_no_targets: 'srv_warp_err_no_awg'", self.page)
+
+
+class WarpInstanceExitTemplateTests(unittest.TestCase):
+    """Per-instance cloud button + WARP egress popup on every AWG instance."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.page = (ROOT / 'templates' / 'server.html').read_text(encoding='utf-8')
+
+    def test_cloud_button_markup_is_present(self):
+        self.assertIn('class="modal-backdrop" id="warpInstanceModal"', self.page)
+        self.assertIn('id="warpInstanceToggle"', self.page)
+        self.assertIn('onchange="onWarpInstanceToggle(this)"', self.page)
+        self.assertIn('data-warp-proto="${escapeHtml(proto)}"', self.page)
+        self.assertIn('openWarpInstanceModal(\'${proto}\')', self.page)
+
+    def test_cloud_button_uses_the_warp_protocol_set(self):
+        # WARP registry only supports awg/awg2/awg3; AWG_PROTOCOLS also lists
+        # awg_legacy, where /warp/link would answer 409.
+        start = self.page.index('const warpExitBtn =')
+        block = self.page[start:self.page.index(';', start) + 1]
+        self.assertIn("['awg', 'awg2', 'awg3'].includes(protoBase(proto))", block)
+        self.assertNotIn('AWG_PROTOCOLS', block)
+
+    def test_cloud_button_state_is_refreshed_on_every_render(self):
+        self.assertIn('function applyWarpInstanceButtons()', self.page)
+        # renderWarpCard and updateProtocolCard rebuild the control row, so
+        # both must re-apply the button state.
+        self.assertGreaterEqual(self.page.count('applyWarpInstanceButtons();'), 2)
+        self.assertIn("function renderWarpCard() {\n        // Buttons live",
+                      self.page)
+
+    def test_modal_functions_are_declared_in_this_page(self):
+        for name in ('openWarpInstanceModal', 'onWarpInstanceToggle',
+                     'renderWarpInstanceModal', 'applyWarpInstanceButtons'):
+            self.assertIn('function %s(' % name, self.page)
+
+    def test_plugin_delete_guard_wiring(self):
+        self.assertIn("srv_warp_in_use: 'srv_warp_in_use_err'", self.page)
+        self.assertIn("alert(_('srv_warp_in_use_alert'))", self.page)
 
 
 class WarpTranslationsTests(unittest.TestCase):

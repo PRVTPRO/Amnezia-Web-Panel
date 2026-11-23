@@ -6606,6 +6606,26 @@ def _warp_awg_protocols(server):
             if protocol_base(proto) in ('awg', 'awg2', 'awg3')]
 
 
+def _warp_linked_instances(server, state):
+    """Protocols of this server whose WARP link is up or still coming up.
+
+    A link record exists from the moment ``warp/link`` starts, so this also
+    covers the ``connecting`` phase. Used to refuse deleting the WARP plugin
+    while any instance of the server still egresses through it.
+    """
+    uid = server.get('uid') or ''
+    linked = []
+    protocols = set(_warp_awg_protocols(server))
+    protocols.update(((state.get('servers') or {}).get(str(uid), {})
+                      .get('protocols') or {}).keys())
+    for proto in protocols:
+        if protocol_base(proto) not in ('awg', 'awg2', 'awg3'):
+            continue
+        if warp_link(proto_record(state, uid, proto)):
+            linked.append(proto)
+    return linked
+
+
 def _warp_named_protocol(req, server=None, required=False):
     protocol = (req.protocol or '').strip()
     if not protocol and server is not None:
@@ -6723,7 +6743,8 @@ def _warp_link_preflight(data, server_id, server, uid, protocol):
 
 
 async def _warp_post(actor, request, server_id, req, kind, runner, *, tos=False,
-                     install_guard=False, link_preflight=False):
+                     install_guard=False, link_preflight=False,
+                     uninstall_guard=False):
     """Shared POST pre-flight: auth -> identity -> registry -> ToS -> XOR -> 202."""
     if not actor or actor.get('role') not in ('admin', 'support'):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -6752,6 +6773,9 @@ async def _warp_post(actor, request, server_id, req, kind, runner, *, tos=False,
             _warp_install_guard(server, uid, protocol)
         if link_preflight:
             _warp_link_preflight(data, idx, server, uid, protocol)
+        if (uninstall_guard and kind == 'uninstall'
+                and _warp_linked_instances(server, warp_state_store.load())):
+            raise SrvWarpError('srv_warp_in_use', 409)
 
         job_id = _warp_job_begin(uid, kind)
         task = asyncio.create_task(runner(server_id, uid, protocol, job_id))
@@ -6844,7 +6868,8 @@ async def api_srv_warp_uninstall(request: Request, server_id: int, req: SrvWarpR
     return await _warp_post(
         _request_user(request), request, server_id, req, 'uninstall',
         lambda sid, uid, protocol, job_id: warp_runtime.uninstall(
-            sid, uid, protocol=protocol, job_id=job_id))
+            sid, uid, protocol=protocol, job_id=job_id),
+        uninstall_guard=True)
 
 
 @app.post('/api/servers/{server_id}/warp/repair', tags=["Servers"])

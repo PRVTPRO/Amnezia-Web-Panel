@@ -329,6 +329,20 @@ SMARTROUTE_TIMER_KEYS = {
     'smartroute_timer_stale', 'smartroute_timer_armed', 'smartroute_card_warn',
 }
 
+# Per-instance WARP exit (cloud button + popup): a later addition, declared
+# here so the frozen catalogue hash keeps guarding the original keys.
+SRV_WARP_INSTANCE_KEYS = {
+    'srv_warp_instance_btn_title', 'srv_warp_instance_title',
+    'srv_warp_instance_hint', 'srv_warp_instance_toggle',
+    'srv_warp_instance_details', 'srv_warp_instance_proto',
+    'srv_warp_instance_state_label', 'srv_warp_instance_mtu',
+    'srv_warp_instance_dns', 'srv_warp_instance_registered',
+    'srv_warp_instance_quarantine', 'srv_warp_instance_stale',
+    'srv_warp_instance_not_available', 'srv_warp_instance_busy',
+    'srv_warp_instance_yes', 'srv_warp_instance_no',
+    'srv_warp_in_use_alert', 'srv_warp_in_use_err',
+}
+
 # Lifecycle fence banner (#341): a later addition, declared here so the frozen
 # catalogue hash keeps guarding the original keys.
 LIFECYCLE_FENCE_KEYS = {
@@ -552,6 +566,7 @@ class TestC6Translations(unittest.TestCase):
                                     - LIFECYCLE_FENCE_KEYS - STORAGE_KEYS
                                     - SUBSCRIPTION_KEYS - CLOSE_KEYS
                                     - SSH_HELP_KEYS - SMARTROUTE_TIMER_KEYS
+                                    - SRV_WARP_INSTANCE_KEYS
                                     - IPV4_POLICY_KEYS))
         self.assertEqual(hashlib.sha256(previous.encode('utf-8')).hexdigest(),
                          PRE_PANEL_ACCESS_KEYS_SHA256,
@@ -563,7 +578,8 @@ class TestC6Translations(unittest.TestCase):
             for key in (NEW_KEYS | PANEL_ACCESS_KEYS | PROTOCOL_UNINSTALL_KEYS
                         | TORRENT_GUARD_KEYS | TORRENT_PLUGIN_KEYS | AWG_I1_KEYS | USER_LIMIT_KEYS | TELEGRAM_ACCOUNT_KEYS
                         | LIFECYCLE_FENCE_KEYS | SUBSCRIPTION_KEYS | CLOSE_KEYS
-                        | SMARTROUTE_TIMER_KEYS | IPV4_POLICY_KEYS):
+                        | SMARTROUTE_TIMER_KEYS | IPV4_POLICY_KEYS
+                        | SRV_WARP_INSTANCE_KEYS):
                 self.assertIn(key, data)
                 self.assertTrue(str(data[key]).strip(), "%s empty in %s" % (key, locale))
 
