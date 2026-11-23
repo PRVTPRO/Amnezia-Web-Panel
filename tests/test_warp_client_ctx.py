@@ -204,6 +204,34 @@ class ClientConfigWarpCtxTests(unittest.TestCase):
         self.assertEqual(dns_line(result['config']), 'DNS = 1.1.1.1')
 
 
+    def test_saved_custom_config_follows_the_warp_budget(self):
+        mgr = FakeManager()
+        mgr.clients = [{
+            'clientId': 'peer',
+            'userData': {
+                'clientPrivateKey': 'priv',
+                'customConfig': '[Interface]\nAddress = 10.8.1.6/32\n'
+                                'MTU = 1220\nDNS = 8.8.4.4\n\n[Peer]\n'
+                                'AllowedIPs = 0.0.0.0/0, ::/0\n',
+            },
+        }]
+        config = mgr.get_client_config(
+            'awg', 'peer', '203.0.113.9', 55424, warp_ctx=WARP_CTX)
+
+        self.assertIn('MTU = 1280', config)
+        self.assertNotIn('MTU = 1220', config)
+        self.assertIn('AllowedIPs = 0.0.0.0/0, ::/0', config)
+        # Only the served copy is normalized; the stored config stays intact.
+        self.assertIn('MTU = 1220', mgr.clients[0]['userData']['customConfig'])
+
+        narrow = mgr.get_client_config(
+            'awg', 'peer', '203.0.113.9', 55424,
+            warp_ctx=dict(WARP_CTX, client_mtu=1220))
+        self.assertIn('MTU = 1220', narrow)
+        self.assertIn('AllowedIPs = 0.0.0.0/0\n', narrow)
+        self.assertNotIn('::/0', narrow)
+
+
 class SaveClientConfigBudgetTests(unittest.TestCase):
     def make_manager(self):
         mgr = FakeManager()

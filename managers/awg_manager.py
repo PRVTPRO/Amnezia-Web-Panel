@@ -557,6 +557,28 @@ def warp_peer_allowed_ips(warp_ctx):
     return '0.0.0.0/0, ::/0'
 
 
+def warp_fix_saved_config(config_text, warp_ctx):
+    """Bring a saved customConfig in line with an active WARP budget.
+
+    Saved configs are returned verbatim by ``get_client_config``, so clients
+    linked under the old 1220 cap would keep handing out a config that
+    Windows/Apple refuse to import even after the cap was corrected. The
+    stored text stays untouched; only the served copy is normalized.
+    """
+    if not (warp_ctx and warp_ctx.get('active')):
+        return config_text
+    try:
+        budget = int(warp_ctx.get('client_mtu') or 0)
+    except (TypeError, ValueError):
+        return config_text
+    if not budget:
+        return config_text
+    fixed = re.sub(r'(?m)^[ \t]*MTU[ \t]*=[ \t]*\d+[ \t]*$',
+                   'MTU = %d' % budget, config_text or '')
+    return re.sub(r'(?m)^[ \t]*AllowedIPs[ \t]*=.*$',
+                  'AllowedIPs = ' + warp_peer_allowed_ips(warp_ctx), fixed)
+
+
 def safe_client_mtu(awg_params, link_mtu=DEFAULT_LINK_MTU):
     """Largest client MTU whose worst-case data packet still fits the link.
 
@@ -5197,7 +5219,8 @@ PersistentKeepalive = 25
 
         ud = client.get('userData', {})
         if ud.get('customConfig'):
-            return split_tunnel.apply_to_config(ud['customConfig'])
+            return split_tunnel.apply_to_config(
+                warp_fix_saved_config(ud['customConfig'], warp_ctx))
         client_priv_key = ud.get('clientPrivateKey', '')
         client_ip = ud.get('clientIp', '')
         psk = ud.get('psk', '')
