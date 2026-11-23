@@ -146,6 +146,95 @@ class PooledConnectTests(unittest.TestCase):
         manager._connect_once.assert_not_called()
         self.assertIs(manager.client, stale)
 
+    def test_protocol_banner_ssh_error_does_not_force_reconnect(self):
+        """SSHException без маркера канала — не повод рвать живую сессию."""
+        manager = SSHManager('example.test', 22, 'root', password='secret')
+        manager.pooled = True
+        transport = Mock()
+        transport.is_active.return_value = True
+        stale = Mock()
+        stale.get_transport.return_value = transport
+        stale.exec_command.side_effect = paramiko.SSHException(
+            'Error reading SSH protocol banner')
+        manager.client = stale
+        manager._connect_once = Mock()
+        manager.run_command = Mock(return_value=('', 'err', -1))
+
+        manager._run_command_locked('whoami', 10, False)
+
+        stale.close.assert_not_called()
+        manager._connect_once.assert_not_called()
+
+    def test_bare_eof_error_does_not_force_reconnect(self):
+        """Пустой EOFError также не содержит признаков отказа канала."""
+        manager = SSHManager('example.test', 22, 'root', password='secret')
+        manager.pooled = True
+        transport = Mock()
+        transport.is_active.return_value = True
+        stale = Mock()
+        stale.get_transport.return_value = transport
+        stale.exec_command.side_effect = EOFError()
+        manager.client = stale
+        manager._connect_once = Mock()
+        manager.run_command = Mock(return_value=('', 'err', -1))
+
+        manager._run_command_locked('whoami', 10, False)
+
+        stale.close.assert_not_called()
+        manager._connect_once.assert_not_called()
+
+    def test_disconnect_clears_transport_bound_caches(self):
+        """После смены transports старые docker/AWG-снапшоты недействительны."""
+        manager = SSHManager('example.test', 22, 'root', password='secret')
+        manager.client = Mock()
+        manager._docker_ps_cache = (1.0, {'amnezia-awg3': 'running'})
+        manager._awg_batch = {'_ts': 1.0, 'containers': {}}
+
+        manager._disconnect_locked()
+
+        self.assertIsNone(manager._docker_ps_cache)
+        self.assertIsNone(manager._awg_batch)
+
+    def test_channel_is_closed_after_successful_command(self):
+        """Канал должен закрываться в finally, чтобы не занимать MaxSessions."""
+        manager = SSHManager('example.test', 22, 'root', password='secret')
+        manager.ensure_connected = Mock(return_value=True)
+        channel = Mock()
+        channel.recv_exit_status.return_value = 0
+        channel.status_event.wait.return_value = True
+        stdout = Mock()
+        stdout.channel = channel
+        stdout.read.return_value = b'ok'
+        stderr = Mock()
+        stderr.channel = Mock()
+        stderr.read.return_value = b''
+        manager.client = Mock()
+        manager.client.exec_command.return_value = (Mock(), stdout, stderr)
+
+        out, err, code = manager._run_command_locked('echo ok', 10, False)
+
+        self.assertEqual((out.strip(), code), ('ok', 0))
+        channel.close.assert_called_once_with()
+
+    def test_channel_is_closed_on_read_failure(self):
+        manager = SSHManager('example.test', 22, 'root', password='secret')
+        manager.ensure_connected = Mock(return_value=True)
+        channel = Mock()
+        channel.status_event.wait.return_value = True
+        stdout = Mock()
+        stdout.channel = channel
+        stdout.read.side_effect = OSError('broken pipe')
+        stderr = Mock()
+        stderr.channel = Mock()
+        stderr.read.return_value = b''
+        manager.client = Mock()
+        manager.client.exec_command.return_value = (Mock(), stdout, stderr)
+
+        out, err, code = manager._run_command_locked('echo ok', 10, False)
+
+        self.assertEqual((out, code), ('', -1))
+        self.assertGreaterEqual(channel.close.call_count, 1)
+
     def test_second_failed_exec_does_not_reconnect_again(self):
         """Один реконнект на команду: повторный отказ отдаёт -1, без цикла."""
         manager = SSHManager('example.test', 22, 'root', password='secret')
