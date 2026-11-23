@@ -107,6 +107,45 @@ class PooledConnectTests(unittest.TestCase):
         manager._connect_once.assert_not_called()
         self.assertIs(manager.client, stale)
 
+    def test_no_more_sessions_marker_forces_reconnect(self):
+        """Текст 'no more sessions' — тот же отказ канала, даже без ChannelException."""
+        manager = SSHManager('example.test', 22, 'root', password='secret')
+        manager.pooled = True
+        transport = Mock()
+        transport.is_active.return_value = True
+        stale = Mock()
+        stale.get_transport.return_value = transport
+        stale.exec_command.side_effect = OSError('error: no more sessions')
+        fresh = Mock()
+        manager.client = stale
+        manager._connect_once = Mock(side_effect=lambda: setattr(manager, 'client', fresh))
+        manager.run_command = Mock(return_value=('ok', '', 0))
+
+        out, err, code = manager._run_command_locked('whoami', 10, False)
+
+        self.assertEqual((out, code), ('ok', 0))
+        stale.close.assert_called_once_with()
+        manager._connect_once.assert_called_once_with()
+
+    def test_generic_ssh_exception_keeps_pooled_transport(self):
+        """SSHException без признаков отказа канала не должен рвать сессию."""
+        manager = SSHManager('example.test', 22, 'root', password='secret')
+        manager.pooled = True
+        transport = Mock()
+        transport.is_active.return_value = True
+        stale = Mock()
+        stale.get_transport.return_value = transport
+        stale.exec_command.side_effect = paramiko.SSHException('bad auth type')
+        manager.client = stale
+        manager._connect_once = Mock()
+        manager.run_command = Mock(return_value=('', 'err', -1))
+
+        manager._run_command_locked('whoami', 10, False)
+
+        stale.close.assert_not_called()
+        manager._connect_once.assert_not_called()
+        self.assertIs(manager.client, stale)
+
     def test_second_failed_exec_does_not_reconnect_again(self):
         """Один реконнект на команду: повторный отказ отдаёт -1, без цикла."""
         manager = SSHManager('example.test', 22, 'root', password='secret')

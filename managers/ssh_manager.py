@@ -510,7 +510,7 @@ class SSHManager:
         до удалённого хоста она не дошла. Ошибки чтения/записи уже запущенной
         команды сюда не относятся: их реконнект не лечит.
         """
-        if isinstance(exc, (paramiko.SSHException, EOFError)):
+        if isinstance(exc, (paramiko.ChannelException, EOFError)):
             return True
         text = str(exc).lower()
         return any(marker in text for marker in (
