@@ -134,8 +134,14 @@ class SSHManager:
         # otherwise every API request kills the shared transport.
         self.pooled = False
 
-    def connect(self):
-        """Establish SSH connection to the server."""
+    def connect(self, force=False):
+        """Establish SSH connection to the server.
+
+        ``force=True`` обходит идемпотентный pooled-шорткат: транспорт может
+        оставаться ``is_active()`` и при этом отклонять открытие новых каналов
+        (sshd исчерпал MaxSessions) или быть зависшим mux. Вызвавший после
+        отказа канала должен получить новое соединение, а не ту же сессию.
+        """
         # Legacy endpoints still call connect() after get_ssh() has returned a
         # pooled manager.  Reconnecting there used to close the shared
         # transport underneath another request (stats/background checks),
@@ -147,7 +153,7 @@ class SSHManager:
                 raise SSHBusy(
                     f"SSH to {self.host} is still busy with another operation")
             with self._conn_lock:
-                if self.pooled:
+                if self.pooled and not force:
                     try:
                         transport = self.client.get_transport() if self.client else None
                         if transport and transport.is_active():
@@ -495,6 +501,24 @@ class SSHManager:
         return str(exc).strip() or type(exc).__name__
 
     @staticmethod
+    def _channel_open_failure(exc):
+        """Отказ до запуска команды: канал открыть не удалось.
+
+        sshd с исчерпанным MaxSessions держит TCP/SSH-транспорт активным, но
+        не даёт открыть session channel; paramiko сообщает об этом как
+        ChannelException(2, 'Connect failed'). Повтор такой команды безопасен —
+        до удалённого хоста она не дошла. Ошибки чтения/записи уже запущенной
+        команды сюда не относятся: их реконнект не лечит.
+        """
+        if isinstance(exc, (paramiko.SSHException, EOFError)):
+            return True
+        text = str(exc).lower()
+        return any(marker in text for marker in (
+            'no more sessions', 'connect failed', 'open failed',
+            'unable to open channel',
+        ))
+
+    @staticmethod
     def _drain_streams(stdout, stderr, backstop):
         """Read stdout and stderr concurrently, bounded by the kill switch.
 
@@ -554,8 +578,15 @@ class SSHManager:
             # дважды. Забор (fence) в этом случае ставится выше.
             if not _retried and not lifecycle_active():
                 logger.warning(f"exec failed ({e}); reconnecting and retrying once")
+                # is_active() не показывает, что sshd отказал в новом канале:
+                # обычный connect() вернул бы True на том же транспорте, и
+                # повтор снова упал бы с ChannelException (issue #408).
+                forced = self._channel_open_failure(e)
+                logger.info(
+                    f"SSH exec failed on {self.host}; "
+                    f"forced reconnect={forced}, pooled={self.pooled}")
                 try:
-                    self.connect()
+                    self.connect(force=forced)
                 except Exception as ce:
                     logger.error(f"reconnect failed: {ce}")
                     return "", self._reason(ce), -1
