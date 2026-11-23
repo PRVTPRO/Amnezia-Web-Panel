@@ -89,6 +89,7 @@
   "xray_desc": "将流量伪装成普通网页流量 (XTLS-Reality)，抗封锁能力强。⚠️ Xray ≥ 26.9.8 需 Hiddify 5.1.0+（旧版无法连接）。",
   "not_checked": "未检查",
   "connections": "连接",
+  "container": "容器",
   "add": "添加",
   "loading_connections": "正在加载连接...",
   "no_connections": "无连接",

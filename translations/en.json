@@ -90,6 +90,7 @@
   "wireguard_desc": "Standard and fastest VPN protocol. Supported natively on all modern OS, but easily detected by DPI.",
   "not_checked": "Not checked",
   "connections": "Connections",
+  "container": "Container",
   "add": "Add",
   "loading_connections": "Loading connections...",
   "no_connections": "No connections",
