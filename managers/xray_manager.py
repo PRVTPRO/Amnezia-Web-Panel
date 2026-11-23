@@ -30,31 +30,31 @@ def _random_range(low_min, low_max, span_min, span_max):
 
 def _xhttp_extra():
     """XHTTP tuning per the current classic anti-DPI profile (mode
-    stream-one, maxConnections=1), proven on weak mobile clients: the
-    wide maxConcurrency ranges of the previous profile made old phones
-    drop the tunnel mid-session. Keeping maxConnections in the 1-2
-    range is also a popular DPI-evasion choice in its own right - a
-    single long-lived connection looks like an ordinary browser HTTP/2
-    session instead of a multiplexed tunnel.
+    stream-one), proven on weak mobile clients: the wide maxConcurrency
+    ranges of the previous profile made old phones drop the tunnel
+    mid-session. Keeping the connection count in the 1-2 band is also a
+    popular DPI-evasion choice in its own right - one or two long-lived
+    connections look like an ordinary browser HTTP/2 session instead of
+    a multiplexed tunnel.
 
-    The profile is "one connection, reuse-heavy": maxConnections=1 pins
-    a single reusable connection, and maxConcurrency=0 leaves the
-    per-connection stream cap disabled (mux.go applies the cap only when
-    the value is positive) - strictly serial requests are not expressible
-    in the core, and two positive xmux values are rejected at config
-    build. Every knob that stays tunable is a range with bounds shifted
-    per install so servers do not share one padding/muxing profile;
-    hKeepAlivePeriod is the one field that rejects ranges."""
+    xmux deliberately carries a single connection knob: some clients
+    reject an xmux object with two knobs at once, even when one is 0.
+    maxConnections is a band rather than a fixed count (the core draws
+    it once per client session), so the connection count is not a fixed
+    pattern. maxConcurrency stays absent, which means no per-connection
+    stream cap (mux.go caps only when the value is positive) - the
+    profile is reuse-heavy, not serial. hKeepAlivePeriod stays absent
+    too: that is the core default keepalive, exactly what an explicit
+    0 meant. The remaining knobs are ranges with bounds shifted per
+    install so servers do not share one padding/muxing profile."""
     return {
         "xPaddingBytes": _random_range(50, 300, 500, 1200),
         "scStreamUpServerSecs": _random_range(10, 30, 40, 60),
         "xmux": {
-            "maxConcurrency": 0,
-            "maxConnections": 1,
+            "maxConnections": "1-2",
             "cMaxReuseTimes": _random_range(64, 128, 10, 20),
             "hMaxRequestTimes": _random_range(400, 600, 50, 100),
             "hMaxReusableSecs": _random_range(1200, 1800, 150, 350),
-            "hKeepAlivePeriod": 0,
         },
     }
 

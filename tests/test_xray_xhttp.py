@@ -86,15 +86,18 @@ class XhttpInstallTests(unittest.TestCase):
         low, high = extra['scStreamUpServerSecs'].split('-')
         self.assertLess(int(low), int(high))
         xmux = extra['xmux']
-        for field in ('cMaxReuseTimes', 'hMaxRequestTimes', 'hMaxReusableSecs'):
+        for field in ('maxConnections', 'cMaxReuseTimes', 'hMaxRequestTimes',
+                      'hMaxReusableSecs'):
             low, high = xmux[field].split('-')
-            self.assertLess(int(low), int(high), field)
-        # the classic anti-DPI profile: one reusable connection; a zero
-        # maxConcurrency leaves the per-connection stream cap disabled
-        # (mux.go caps only when positive) - reuse-heavy, not serial
-        self.assertEqual(xmux['maxConnections'], 1)
-        self.assertEqual(xmux['maxConcurrency'], 0)
-        self.assertEqual(xmux['hKeepAlivePeriod'], 0)
+            self.assertLessEqual(int(low), int(high), field)
+        # the classic anti-DPI profile: a small band of reusable connections
+        # (no fixed connection count) and no stream cap - reuse-heavy, not
+        # serial. A single connection knob only: some clients reject an
+        # xmux object carrying two at once, even when one is 0.
+        self.assertEqual(xmux['maxConnections'], '1-2')
+        self.assertEqual(set(xmux),
+                         {'maxConnections', 'cMaxReuseTimes', 'hMaxRequestTimes',
+                          'hMaxReusableSecs'})
 
         reality = stream['realitySettings']
         self.assertEqual(reality['dest'], 'own.example:443')
