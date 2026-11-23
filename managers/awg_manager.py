@@ -538,6 +538,25 @@ def transport_overhead(awg_params):
             + _param_max(params.get('content_padding_addition')))
 
 
+def warp_peer_allowed_ips(warp_ctx):
+    """Client ``AllowedIPs`` for a warp-linked instance.
+
+    Both default routes are advertised by default: AmneziaVPN treats
+    AllowedIPs without ``::/0`` as a non-full-tunnel server and disables split
+    tunneling in the UI (#158/#193). A warp budget below 1280 cannot carry
+    IPv6 at all (RFC 8200) and strict clients refuse such a config, so that
+    case asks for IPv4 only instead of advertising a route that cannot work.
+    """
+    if warp_ctx and warp_ctx.get('active'):
+        try:
+            budget = int(warp_ctx.get('client_mtu') or 0)
+        except (TypeError, ValueError):
+            budget = 0
+        if 0 < budget < MIN_CLIENT_MTU:
+            return '0.0.0.0/0'
+    return '0.0.0.0/0, ::/0'
+
+
 def safe_client_mtu(awg_params, link_mtu=DEFAULT_LINK_MTU):
     """Largest client MTU whose worst-case data packet still fits the link.
 
@@ -5136,12 +5155,11 @@ AllowedIPs = {allowed_ips}
                     continue
                 config_lines.append(f"{config_key} = {val}")
 
-        # Always advertise both default routes in the *client* config.
-        # AmneziaVPN treats AllowedIPs without ::/0 as a non-full-tunnel
-        # server and disables split tunneling in the UI (#158/#193).
+        # Always advertise both default routes in the *client* config unless
+        # the warp budget is too small for IPv6; see warp_peer_allowed_ips.
         # This does not assign the client an IPv6 address or enable AWG_IPV6;
         # server-side peer AllowedIPs stay IPv4-only unless client_ipv6 is set.
-        peer_allowed_ips = "0.0.0.0/0, ::/0"
+        peer_allowed_ips = warp_peer_allowed_ips(warp_ctx)
 
         client_config = "[Interface]\n" + "\n".join(config_lines) + f"""
 
@@ -5258,8 +5276,9 @@ PersistentKeepalive = 25
                     continue
                 config_lines.append(f"{config_key} = {val}")
 
-        # See the client-creation path: always include ::/0 for Amnezia split tunneling.
-        peer_allowed_ips = "0.0.0.0/0, ::/0"
+        # See the client-creation path: both default routes for Amnezia split
+        # tunneling, IPv4 only once the warp budget drops under the IPv6 floor.
+        peer_allowed_ips = warp_peer_allowed_ips(warp_ctx)
 
         config = "[Interface]\n" + "\n".join(config_lines) + f"""
 

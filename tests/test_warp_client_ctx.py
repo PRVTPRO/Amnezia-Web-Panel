@@ -31,7 +31,7 @@ def run_coro(coro):
 WARP_CTX = {
     'active': True,
     'dns_via_warp': True,
-    'client_mtu': 1220,
+    'client_mtu': 1280,
     'dns_ips': ['1.1.1.1'],
     'transit_cidr': '',
     'transit_gateway': '',
@@ -126,7 +126,7 @@ class ClientConfigWarpCtxTests(unittest.TestCase):
             'awg', 'phone', '203.0.113.9', '55424', warp_ctx=WARP_CTX)
         config = result['config']
 
-        self.assertIn('MTU = 1220', config)
+        self.assertIn('MTU = 1280', config)
         self.assertEqual(dns_line(config), 'DNS = 1.1.1.1')
         # No IPv6 resolver may ride through warp0.
         self.assertNotIn('fd42:8:1::1', config)
@@ -137,9 +137,21 @@ class ClientConfigWarpCtxTests(unittest.TestCase):
         config = mgr.add_client(
             'awg', 'phone', '203.0.113.9', '55424', warp_ctx=ctx)['config']
 
-        self.assertIn('MTU = 1220', config)
+        self.assertIn('MTU = 1280', config)
         self.assertEqual(dns_line(config), 'DNS = 9.9.9.9')
         self.assertNotIn('fd42:8:1::1', config)
+
+    def test_budget_below_ipv6_floor_drops_the_six_route(self):
+        # 1220 < 1280: the client cannot carry IPv6, so ::/0 must not be
+        # advertised — Windows/Apple clients refuse such a config.
+        mgr = FakeManager()
+        ctx = dict(WARP_CTX, client_mtu=1220)
+        config = mgr.add_client(
+            'awg', 'phone', '203.0.113.9', '55424', warp_ctx=ctx)['config']
+
+        self.assertIn('MTU = 1220', config)
+        self.assertIn('AllowedIPs = 0.0.0.0/0\n', config)
+        self.assertNotIn('::/0', config)
 
     def test_get_client_config_ignores_per_client_overrides(self):
         mgr = FakeManager()
@@ -156,7 +168,7 @@ class ClientConfigWarpCtxTests(unittest.TestCase):
         config = mgr.get_client_config(
             'awg', 'peer', '203.0.113.9', '55424', warp_ctx=WARP_CTX)
 
-        self.assertIn('MTU = 1220', config)
+        self.assertIn('MTU = 1280', config)
         self.assertEqual(dns_line(config), 'DNS = 1.1.1.1')
         self.assertNotIn('8.8.4.4', config)
 
@@ -188,7 +200,7 @@ class ClientConfigWarpCtxTests(unittest.TestCase):
             'awg', str(uuid.uuid4()), 'phone', private, public,
             '203.0.113.9', '55424', warp_ctx=WARP_CTX)
 
-        self.assertIn('MTU = 1220', result['config'])
+        self.assertIn('MTU = 1280', result['config'])
         self.assertEqual(dns_line(result['config']), 'DNS = 1.1.1.1')
 
 
@@ -278,7 +290,7 @@ class ReissueTests(unittest.TestCase):
                 'entry_uid': 'srv-1',
                 'protocol': 'awg',
             }
-            rec['client_mtu_warp'] = 1220
+            rec['client_mtu_warp'] = 1280
 
         self.store.mutate(mutate)
         self.runtime = WarpRuntime(
@@ -296,10 +308,10 @@ class ReissueTests(unittest.TestCase):
         ud = self.manager.clients[0]['userData']
         self.assertIn('customConfig', ud)
         self.assertNotIn('MTU = 1376', ud['customConfig'])
-        self.assertIn('MTU = 1220', ud['customConfig'])
+        self.assertIn('MTU = 1280', ud['customConfig'])
         self.assertIn('DNS = 1.1.1.1', ud['customConfig'])
         self.assertNotEqual(ud.get('dns'), '8.8.4.4')
-        self.assertEqual(ud.get('mtu'), '1220')
+        self.assertEqual(ud.get('mtu'), '1280')
 
         record = ws.proto_record(self.store.load(), 'srv-1', 'awg')
         self.assertIsNotNone(record['warp']['last_reissue_at'])
@@ -319,7 +331,7 @@ class ReissueTests(unittest.TestCase):
         run_coro(self.runtime.reissue(0, 'srv-1', 'awg'))
 
         for client in self.manager.clients:
-            self.assertIn('MTU = 1220', client['userData']['customConfig'])
+            self.assertIn('MTU = 1280', client['userData']['customConfig'])
             self.assertNotIn('MTU = 1376', client['userData']['customConfig'])
 
 

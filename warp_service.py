@@ -41,7 +41,14 @@ import time
 
 WARP_TABLE = 210
 WARP_IFACE_MTU = 1280
-WARP_CLIENT_MTU_CAP = 1220
+# warp0 runs at 1280 and the entry decapsulates the client packet before it
+# reaches warp0, so a full 1280-byte inner packet still fits. Going lower is
+# not an option while the client config advertises ::/0: IPv6 needs 1280
+# (RFC 8200) and Windows/Apple clients refuse to set up an IPv6 interface
+# under that floor. A narrower uplink budget is still accepted, but then the
+# generated client config drops ::/0 instead of advertising a route it cannot
+# carry (see warp_peer_allowed_ips in awg_manager).
+WARP_CLIENT_MTU_CAP = 1280
 WARP_MIN_CLIENT_MTU = 1200
 WARP_TRANSPORT_OVERHEAD = 60
 WARP_DEFAULT_LINK_MTU = 1500
@@ -271,10 +278,10 @@ def warp_client_mtu(raw_conf_mtu, transport_overhead, warped_b=False,
                     b_regen_mtu=None):
     """Client MTU budget for a warp-linked instance.
 
-    The inner client packet must fit the WARP interface (1280 minus the
-    transport margin) and the awg uplink (DEFAULT_LINK_MTU minus the client
-    obfuscation overhead). ``safe_client_mtu`` is intentionally not used:
-    its RFC-8200 floor (1280) is exactly what WARP cannot carry.
+    The inner client packet stops at warp0, whose MTU is 1280, so 1280 is the
+    ceiling; it is also the RFC-8200 floor for IPv6. The awg uplink adds its
+    own obfuscation overhead on the wire, which is what the second candidate
+    accounts for.
 
     Returns ``(mtu, reason)`` where ``mtu`` is None when the budget falls
     below ``WARP_MIN_CLIENT_MTU`` and ``reason`` explains a refusal.

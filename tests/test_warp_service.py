@@ -12,9 +12,12 @@ import warp_service as ws
 
 
 class WarpClientMtuTests(unittest.TestCase):
+    def test_cap_matches_warp0_mtu(self):
+        self.assertEqual(ws.WARP_CLIENT_MTU_CAP, ws.WARP_IFACE_MTU)
+
     def test_cap_wins_over_large_raw(self):
         mtu, reason = ws.warp_client_mtu(1376, 60)
-        self.assertEqual(mtu, 1220)
+        self.assertEqual(mtu, 1280)
         self.assertIsNone(reason)
 
     def test_uplink_budget_wins_with_big_overhead(self):
@@ -38,7 +41,7 @@ class WarpClientMtuTests(unittest.TestCase):
 
     def test_missing_raw_still_caps(self):
         mtu, _ = ws.warp_client_mtu(None, 60)
-        self.assertEqual(mtu, 1220)
+        self.assertEqual(mtu, 1280)
 
 
 class DnsTargetTests(unittest.TestCase):

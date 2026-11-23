@@ -122,7 +122,7 @@ class WarpApiTests(unittest.TestCase):
                 'entry_uid': 'srv-uid',
                 'protocol': 'awg',
             }
-            rec['client_mtu_warp'] = 1220
+            rec['client_mtu_warp'] = 1280
 
         panel.warp_state_store.mutate(mutate)
 
@@ -297,7 +297,7 @@ class WarpApiTests(unittest.TestCase):
         self.assertFalse(link['dns_via_warp'])
         state = panel.warp_state_store.load()
         record = state['servers']['srv-uid']['protocols']['awg']
-        self.assertEqual(record['client_mtu_warp'], 1220)
+        self.assertEqual(record['client_mtu_warp'], 1280)
         self.assertTrue(any(call[0] == 'write' and call[2]['active']
                             for call in seen))
         self.assertTrue(any(call[0] == 'upload' and call[2]['active']
@@ -318,7 +318,7 @@ class WarpApiTests(unittest.TestCase):
                 'stale': None, 'server_uid': 'srv-uid',
                 'entry_uid': 'srv-uid', 'protocol': proto,
             }
-            rec['client_mtu_warp'] = 1220
+            rec['client_mtu_warp'] = 1280
 
         panel.warp_state_store.mutate(mutate)
 
