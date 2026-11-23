@@ -231,6 +231,13 @@ class ClientConfigWarpCtxTests(unittest.TestCase):
         self.assertIn('AllowedIPs = 0.0.0.0/0\n', narrow)
         self.assertNotIn('::/0', narrow)
 
+        mgr.clients[0]['userData']['customConfig'] = narrow.replace(
+            'AllowedIPs = 0.0.0.0/0\n', 'AllowedIPs = 10.0.0.0/8\n')
+        custom = mgr.get_client_config(
+            'awg', 'peer', '203.0.113.9', 55424,
+            warp_ctx=dict(WARP_CTX, client_mtu=1220))
+        self.assertIn('AllowedIPs = 10.0.0.0/8', custom)
+
 
 class SaveClientConfigBudgetTests(unittest.TestCase):
     def make_manager(self):
