@@ -50,6 +50,10 @@ WARP_IFACE_MTU = 1280
 # carry (see warp_peer_allowed_ips in awg_manager).
 WARP_CLIENT_MTU_CAP = 1280
 WARP_MIN_CLIENT_MTU = 1200
+# Links created before the cap was corrected stored that old cap verbatim.
+# They must be lifted to the current cap when read, otherwise every existing
+# instance keeps handing out a config that Windows/Apple refuse to import.
+_LEGACY_CLIENT_MTU_CAP = 1220
 WARP_TRANSPORT_OVERHEAD = 60
 WARP_DEFAULT_LINK_MTU = 1500
 WARP_DNS_SLOTS = 7
@@ -442,7 +446,12 @@ def _authoritative_client_mtu(record, link, regen):
     if regen and regen.get('mtu'):
         return int(regen['mtu'])
     stored = (record or {}).get('client_mtu_warp')
-    return int(stored) if stored else None
+    if stored:
+        stored = int(stored)
+        if stored == _LEGACY_CLIENT_MTU_CAP:
+            return WARP_CLIENT_MTU_CAP
+        return stored
+    return None
 
 
 # --- quota -------------------------------------------------------------------

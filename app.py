@@ -6674,7 +6674,7 @@ def _warp_status_payload(server, state):
         instance_state = classify_instance_state(
             installed=installed, link_active=bool(link),
             rate_limited=rate_limited)
-        client_mtu = record.get('client_mtu_warp')
+        client_mtu = warp_ctx_for(state, uid, proto)['client_mtu']
         if client_mtu:
             budgets.append(int(client_mtu))
         instances.append({

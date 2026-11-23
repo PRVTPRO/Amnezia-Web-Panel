@@ -132,6 +132,22 @@ class WarpStateStoreTests(unittest.TestCase):
         self.assertEqual(ctx['prefix'], '/opt/amnezia/awg/warp/awg')
 
 
+    def test_ctx_lifts_legacy_default_budget(self):
+        store = ws.WarpStateStore(self.path)
+
+        def build(state):
+            rec = ws.proto_record(state, 'uid-1', 'awg')
+            rec['warp_link'] = {'active': True, 'dns_via_warp': False,
+                                'server_uid': 'uid-1', 'entry_uid': 'uid-1',
+                                'protocol': 'awg'}
+            rec['client_mtu_warp'] = 1220
+
+        state = store.load()
+        build(state)
+        ctx = ws.warp_ctx_for(state, 'uid-1', 'awg')
+        self.assertEqual(ctx['client_mtu'], ws.WARP_CLIENT_MTU_CAP)
+
+
 class QuotaTests(unittest.TestCase):
     NOW = 1_700_000_000
 
