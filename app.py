@@ -2550,6 +2550,8 @@ def _self_service_error_response(exc, lang='en'):
         # localize the human-readable part instead.
         if code in ('self_service_unavailable', 'removal_ssh_failed'):
             body['error'] = _t('self_service_delete_unavailable', lang)
+        elif code in ('connection_not_found', 'server_not_found'):
+            body['error'] = _t('self_service_delete_not_found', lang)
         return JSONResponse(body, status_code=exc.status_code)
     # A finalization refusal is a real, actionable answer, not an outage: keep
     # the machine code so the UI can explain it instead of a generic 500.

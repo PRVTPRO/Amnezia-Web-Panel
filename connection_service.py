@@ -263,7 +263,9 @@ class ConnectionService:
                                            status_code=403, forbidden=True)
                 servers = data.get('servers', [])
                 if not isinstance(server_id, int) or not 0 <= server_id < len(servers):
-                    raise SelfServiceError('Server not found', status_code=404)
+                    error = SelfServiceError('Server not found', status_code=404)
+                    error.code = 'server_not_found'
+                    raise error
                 server = servers[server_id]
 
             # Deletion lowers the connection count, so max_connections does not
@@ -372,7 +374,9 @@ class ConnectionService:
             None,
         )
         if not conn:
-            raise SelfServiceError('Connection not found', status_code=404)
+            error = SelfServiceError('Connection not found', status_code=404)
+            error.code = 'connection_not_found'
+            raise error
         return conn
 
     def _check_rate_limit(self, user_id, source, settings):
