@@ -275,6 +275,8 @@ SRV_WARP_NO_AWG_KEYS = {
 # Keys of later panels that were merged without registering them here; before
 # this set existed the frozen hash failed on an unchanged catalogue.
 }
+# VPN-карточка на странице сервера подписывает ключ инстанса полем «Контейнер».
+SRV_CARD_CONTAINER_KEYS = {'container'}
 LATER_FEATURE_KEYS = {
     'exit_awg3', 'exit_awg3_hint',
     'max_connections_per_user_hint', 'max_connections_per_user_label',
@@ -552,7 +554,7 @@ class TestC6Translations(unittest.TestCase):
                                     - LIFECYCLE_FENCE_KEYS - STORAGE_KEYS
                                     - SUBSCRIPTION_KEYS - CLOSE_KEYS
                                     - SSH_HELP_KEYS - SMARTROUTE_TIMER_KEYS
-                                    - IPV4_POLICY_KEYS))
+                                    - IPV4_POLICY_KEYS - SRV_CARD_CONTAINER_KEYS))
         self.assertEqual(hashlib.sha256(previous.encode('utf-8')).hexdigest(),
                          PRE_PANEL_ACCESS_KEYS_SHA256,
                          'Existing catalogue changed outside the declared additions')
@@ -563,7 +565,8 @@ class TestC6Translations(unittest.TestCase):
             for key in (NEW_KEYS | PANEL_ACCESS_KEYS | PROTOCOL_UNINSTALL_KEYS
                         | TORRENT_GUARD_KEYS | TORRENT_PLUGIN_KEYS | AWG_I1_KEYS | USER_LIMIT_KEYS | TELEGRAM_ACCOUNT_KEYS
                         | LIFECYCLE_FENCE_KEYS | SUBSCRIPTION_KEYS | CLOSE_KEYS
-                        | SMARTROUTE_TIMER_KEYS | IPV4_POLICY_KEYS):
+                        | SMARTROUTE_TIMER_KEYS | IPV4_POLICY_KEYS
+                        | SRV_CARD_CONTAINER_KEYS):
                 self.assertIn(key, data)
                 self.assertTrue(str(data[key]).strip(), "%s empty in %s" % (key, locale))
 
