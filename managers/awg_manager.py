@@ -541,6 +541,56 @@ def transport_overhead(awg_params):
             + _param_max(params.get('content_padding_addition')))
 
 
+def warp_peer_allowed_ips(warp_ctx):
+    """Client ``AllowedIPs`` for a warp-linked instance.
+
+    Both default routes are advertised by default: AmneziaVPN treats
+    AllowedIPs without ``::/0`` as a non-full-tunnel server and disables split
+    tunneling in the UI (#158/#193). A warp budget below 1280 cannot carry
+    IPv6 at all (RFC 8200) and strict clients refuse such a config, so that
+    case asks for IPv4 only instead of advertising a route that cannot work.
+    """
+    if warp_ctx and warp_ctx.get('active'):
+        try:
+            budget = int(warp_ctx.get('client_mtu') or 0)
+        except (TypeError, ValueError):
+            budget = 0
+        if 0 < budget < MIN_CLIENT_MTU:
+            return '0.0.0.0/0'
+    return '0.0.0.0/0, ::/0'
+
+
+def warp_fix_saved_config(config_text, warp_ctx):
+    """Bring a saved customConfig in line with an active WARP budget.
+
+    Saved configs are returned verbatim by ``get_client_config``, so clients
+    linked under the old 1220 cap would keep handing out a config that
+    Windows/Apple refuse to import even after the cap was corrected. The
+    stored text stays untouched; only the served copy is normalized.
+    """
+    if not (warp_ctx and warp_ctx.get('active')):
+        return config_text
+    try:
+        budget = int(warp_ctx.get('client_mtu') or 0)
+    except (TypeError, ValueError):
+        return config_text
+    if not budget:
+        return config_text
+    # Saved configs may be CRLF (they are stored verbatim); Python's `$` in
+    # MULTILINE mode stops before `\n`, leaving `\r` in the matched line.
+    crlf = '\r\n' in config_text
+    text = config_text.replace('\r\n', '\n').replace('\r', '\n')
+    fixed = re.sub(r'(?m)^[ \t]*MTU[ \t]*=[ \t]*\d+[ \t]*$',
+                   'MTU = %d' % budget, text)
+    if 0 < budget < MIN_CLIENT_MTU:
+        # Only the panel's own full-tunnel line is safe to narrow; a manually
+        # edited AllowedIPs list must stay as the operator wrote it.
+        fixed = re.sub(
+            r'(?m)^([ \t]*AllowedIPs[ \t]*=[ \t]*)0\.0\.0\.0/0[ \t]*,[ \t]*::/0[ \t]*$',
+            r'\g<1>0.0.0.0/0', fixed)
+    return fixed.replace('\n', '\r\n') if crlf else fixed
+
+
 def safe_client_mtu(awg_params, link_mtu=DEFAULT_LINK_MTU):
     """Largest client MTU whose worst-case data packet still fits the link.
 
@@ -5283,12 +5333,11 @@ AllowedIPs = {allowed_ips}
                     continue
                 config_lines.append(f"{config_key} = {val}")
 
-        # Always advertise both default routes in the *client* config.
-        # AmneziaVPN treats AllowedIPs without ::/0 as a non-full-tunnel
-        # server and disables split tunneling in the UI (#158/#193).
+        # Always advertise both default routes in the *client* config unless
+        # the warp budget is too small for IPv6; see warp_peer_allowed_ips.
         # This does not assign the client an IPv6 address or enable AWG_IPV6;
         # server-side peer AllowedIPs stay IPv4-only unless client_ipv6 is set.
-        peer_allowed_ips = "0.0.0.0/0, ::/0"
+        peer_allowed_ips = warp_peer_allowed_ips(warp_ctx)
 
         client_config = "[Interface]\n" + "\n".join(config_lines) + f"""
 
@@ -5326,7 +5375,8 @@ PersistentKeepalive = 25
 
         ud = client.get('userData', {})
         if ud.get('customConfig'):
-            return split_tunnel.apply_to_config(ud['customConfig'])
+            return split_tunnel.apply_to_config(
+                warp_fix_saved_config(ud['customConfig'], warp_ctx))
         client_priv_key = ud.get('clientPrivateKey', '')
         client_ip = ud.get('clientIp', '')
         psk = ud.get('psk', '')
@@ -5405,8 +5455,9 @@ PersistentKeepalive = 25
                     continue
                 config_lines.append(f"{config_key} = {val}")
 
-        # See the client-creation path: always include ::/0 for Amnezia split tunneling.
-        peer_allowed_ips = "0.0.0.0/0, ::/0"
+        # See the client-creation path: both default routes for Amnezia split
+        # tunneling, IPv4 only once the warp budget drops under the IPv6 floor.
+        peer_allowed_ips = warp_peer_allowed_ips(warp_ctx)
 
         config = "[Interface]\n" + "\n".join(config_lines) + f"""
 

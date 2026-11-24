@@ -12,9 +12,12 @@ import warp_service as ws
 
 
 class WarpClientMtuTests(unittest.TestCase):
+    def test_cap_matches_warp0_mtu(self):
+        self.assertEqual(ws.WARP_CLIENT_MTU_CAP, ws.WARP_IFACE_MTU)
+
     def test_cap_wins_over_large_raw(self):
         mtu, reason = ws.warp_client_mtu(1376, 60)
-        self.assertEqual(mtu, 1220)
+        self.assertEqual(mtu, 1280)
         self.assertIsNone(reason)
 
     def test_uplink_budget_wins_with_big_overhead(self):
@@ -38,7 +41,7 @@ class WarpClientMtuTests(unittest.TestCase):
 
     def test_missing_raw_still_caps(self):
         mtu, _ = ws.warp_client_mtu(None, 60)
-        self.assertEqual(mtu, 1220)
+        self.assertEqual(mtu, 1280)
 
 
 class DnsTargetTests(unittest.TestCase):
@@ -127,6 +130,26 @@ class WarpStateStoreTests(unittest.TestCase):
         self.assertEqual(ctx['client_mtu'], 1205)
         self.assertEqual(ctx['transit_cidr'], '10.9.0.0/24')
         self.assertEqual(ctx['prefix'], '/opt/amnezia/awg/warp/awg')
+
+
+    def test_one_time_migration_lifts_only_legacy_records(self):
+        store = ws.WarpStateStore(self.path)
+        state = store.load()
+        rec = ws.proto_record(state, 'uid-1', 'awg')
+        rec['client_mtu_warp'] = 1220
+        rec['warp_egress_regen'] = {'uid-1:awg': {'mtu': 1220}}
+
+        self.assertEqual(ws.migrate_legacy_client_mtu(state), 2)
+        self.assertEqual(rec['client_mtu_warp'], ws.WARP_CLIENT_MTU_CAP)
+        self.assertEqual(rec['warp_egress_regen']['uid-1:awg']['mtu'],
+                         ws.WARP_CLIENT_MTU_CAP)
+        self.assertEqual(ws.migrate_legacy_client_mtu(state), 0)
+
+        # A real 1220 budget written after the migration must stay 1220.
+        rec['warp_egress_regen'] = {}
+        rec['client_mtu_warp'] = 1220
+        ctx = ws.warp_ctx_for(state, 'uid-1', 'awg')
+        self.assertEqual(ctx['client_mtu'], 1220)
 
 
 class QuotaTests(unittest.TestCase):

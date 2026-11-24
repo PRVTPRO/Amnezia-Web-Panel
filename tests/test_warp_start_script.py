@@ -12,7 +12,7 @@ from managers.exit_manager import ExitManager
 ENTRY_CTX = {
     'active': True,
     'dns_via_warp': False,
-    'client_mtu': 1220,
+    'client_mtu': 1280,
     'dns_ips': ['1.1.1.1', '8.8.8.8'],
     'transit_cidr': '',
     'transit_gateway': '',
@@ -24,7 +24,7 @@ ENTRY_CTX = {
 EXIT_CTX = {
     'active': True,
     'dns_via_warp': False,
-    'client_mtu': 1220,
+    'client_mtu': 1280,
     'dns_ips': [],
     'transit_cidr': '10.9.0.0/24',
     'transit_gateway': '10.9.0.1',

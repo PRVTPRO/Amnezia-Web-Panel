@@ -41,8 +41,20 @@ import time
 
 WARP_TABLE = 210
 WARP_IFACE_MTU = 1280
-WARP_CLIENT_MTU_CAP = 1220
+# warp0 runs at 1280 and the entry decapsulates the client packet before it
+# reaches warp0, so a full 1280-byte inner packet still fits. Going lower is
+# not an option while the client config advertises ::/0: IPv6 needs 1280
+# (RFC 8200) and Windows/Apple clients refuse to set up an IPv6 interface
+# under that floor. A narrower uplink budget is still accepted, but then the
+# generated client config drops ::/0 instead of advertising a route it cannot
+# carry (see warp_peer_allowed_ips in awg_manager).
+WARP_CLIENT_MTU_CAP = 1280
 WARP_MIN_CLIENT_MTU = 1200
+# Links created before the cap was corrected stored that old cap verbatim.
+# A one-time state migration (migrate_legacy_client_mtu) rewrites them; a
+# budget of 1220 written afterwards is a real constraint and must be kept.
+_LEGACY_CLIENT_MTU_CAP = 1220
+WARP_MTU_MIGRATION_KEY = 'client_mtu_cap_1280_migrated'
 WARP_TRANSPORT_OVERHEAD = 60
 WARP_DEFAULT_LINK_MTU = 1500
 WARP_DNS_SLOTS = 7
@@ -271,10 +283,10 @@ def warp_client_mtu(raw_conf_mtu, transport_overhead, warped_b=False,
                     b_regen_mtu=None):
     """Client MTU budget for a warp-linked instance.
 
-    The inner client packet must fit the WARP interface (1280 minus the
-    transport margin) and the awg uplink (DEFAULT_LINK_MTU minus the client
-    obfuscation overhead). ``safe_client_mtu`` is intentionally not used:
-    its RFC-8200 floor (1280) is exactly what WARP cannot carry.
+    The inner client packet stops at warp0, whose MTU is 1280, so 1280 is the
+    ceiling; it is also the RFC-8200 floor for IPv6. The awg uplink adds its
+    own obfuscation overhead on the wire, which is what the second candidate
+    accounts for.
 
     Returns ``(mtu, reason)`` where ``mtu`` is None when the budget falls
     below ``WARP_MIN_CLIENT_MTU`` and ``reason`` explains a refusal.
@@ -429,6 +441,30 @@ def warp_ctx_for(state, server_uid, protocol):
         'protocol': protocol,
         'entry_uid': _norm_uid((link or {}).get('entry_uid') or server_uid),
     }
+
+
+def migrate_legacy_client_mtu(state):
+    """One-time persistent rewrite of budgets stored with the old cap.
+
+    Deciding by value on every read would silently inflate a *legitimate*
+    1220 budget (a narrow uplink or an instance whose own MTU is 1220). The
+    marker makes the rewrite happen exactly once, at startup, so budgets
+    written later are never touched. Regen records are migrated too.
+    """
+    if state.get(WARP_MTU_MIGRATION_KEY):
+        return 0
+    changed = 0
+    for srv in (state.get('servers') or {}).values():
+        for rec in (srv.get('protocols') or {}).values():
+            if rec.get('client_mtu_warp') == _LEGACY_CLIENT_MTU_CAP:
+                rec['client_mtu_warp'] = WARP_CLIENT_MTU_CAP
+                changed += 1
+            for entry in (rec.get('warp_egress_regen') or {}).values():
+                if isinstance(entry, dict) and entry.get('mtu') == _LEGACY_CLIENT_MTU_CAP:
+                    entry['mtu'] = WARP_CLIENT_MTU_CAP
+                    changed += 1
+    state[WARP_MTU_MIGRATION_KEY] = True
+    return changed
 
 
 def _authoritative_client_mtu(record, link, regen):

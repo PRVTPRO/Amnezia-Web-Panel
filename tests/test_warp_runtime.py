@@ -410,7 +410,7 @@ class WarpRuntimeHarness(unittest.TestCase):
                 'entry_uid': 'srv-1',
                 'protocol': 'awg',
             },
-            client_mtu=1220,
+            client_mtu=1280,
         )
         self.ssh.account_present = True
         self.ssh.conf_present = True
@@ -422,7 +422,7 @@ class WarpRuntimeHarness(unittest.TestCase):
         self.assertEqual(len(self.manager.uploads), 1)
         ctx = self.manager.uploads[0]['warp_ctx']
         self.assertTrue(ctx['active'])
-        self.assertEqual(ctx['client_mtu'], 1220)
+        self.assertEqual(ctx['client_mtu'], 1280)
         self.assertEqual(self.manager.writes[0]['warp_ctx'], ctx)
 
     # ----- uninstall -------------------------------------------------------
@@ -449,7 +449,7 @@ class WarpRuntimeHarness(unittest.TestCase):
         self.assertFalse(self.record('awg2')['warp']['registered'])
 
     def test_uninstall_removes_artifacts_and_clears_state(self):
-        self.seed_state(registered=True, link=None, client_mtu=1220)
+        self.seed_state(registered=True, link=None, client_mtu=1280)
         self.data['servers'][0]['warp'] = {'installed': True}
 
         run_coro(self.runtime.uninstall(
