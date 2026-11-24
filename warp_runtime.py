@@ -284,6 +284,82 @@ class WarpRuntime:
         if code != 0 or not (out or '').strip():
             raise ws.SrvWarpError('srv_warp_register_failed', 502)
 
+    @staticmethod
+    def _warp_probe_script(protocol):
+        """Shell snippet that reports the live facts of the WARP dataplane.
+
+        Mirrors the fatal checks of ``x_warp_up`` in start.sh: a link that is
+        only half applied leaves client traffic in a table that holds nothing
+        but a blackhole.
+        """
+        table = int(ws.WARP_TABLE)
+        return (
+            "if ip link show warp0 >/dev/null 2>&1; then echo WARP_IF=up;"
+            " else echo WARP_IF=down; fi\n"
+            "if ip -4 route show table %d 2>/dev/null"
+            " | grep -q '^default dev warp0'; then echo WARP_ROUTE=ok;"
+            " else echo WARP_ROUTE=missing; fi\n"
+            "if ip -4 rule show 2>/dev/null | grep -q '^%d:';"
+            " then echo WARP_RULE=ok; else echo WARP_RULE=missing; fi\n"
+            "if [ -f %s ]; then echo WARP_MARKER=ok;"
+            " else echo WARP_MARKER=missing; fi\n"
+        ) % (table, table, ws.marker_path(protocol))
+
+    def _warp_dataplane(self, manager, protocol):
+        """Read the WARP dataplane facts of one instance container."""
+        try:
+            out, err, code = self._sh(
+                manager, protocol, self._warp_probe_script(protocol))
+        except Exception as exc:
+            return {'up': False, 'facts': {}, 'detail': str(exc)[:200]}
+        facts = {}
+        for line in (out or '').splitlines():
+            key, _, value = line.strip().partition('=')
+            if key.startswith('WARP_'):
+                facts[key] = value
+        up = (code == 0 and facts.get('WARP_IF') == 'up'
+              and all(facts.get(key) == 'ok'
+                      for key in ('WARP_ROUTE', 'WARP_RULE', 'WARP_MARKER')))
+        return {'up': up, 'facts': facts, 'detail': (err or '').strip()[:200]}
+
+    async def _wait_warp_dataplane(self, manager, protocol, attempts=5,
+                                   delay=2.0):
+        """Give start.sh a moment to raise warp0, then decide on the facts."""
+        last = {'up': False, 'facts': {}, 'detail': 'not probed'}
+        for attempt in range(max(1, attempts)):
+            last = await asyncio.to_thread(
+                self._warp_dataplane, manager, protocol)
+            if last['up']:
+                return last
+            if attempt + 1 < attempts:
+                await asyncio.sleep(delay)
+        return last
+
+    async def _sibling_warp_source(self, manager, server, uid, protocol):
+        """Find a live WARP profile on another instance of the same server.
+
+        A neighbour qualifies only when its state says registered and linked
+        *and* its dataplane is really up. Copying a dead profile would give the
+        new instance a tunnel that never handshakes, which is the failure this
+        helper is meant to avoid.
+        """
+        state = self.state_store.load()
+        for sibling in self._awg_protocols(server):
+            if sibling == protocol:
+                continue
+            rec = ws.proto_record(state, uid, sibling)
+            if not (rec.get('warp') or {}).get('registered'):
+                continue
+            if not ws.warp_link(rec):
+                continue
+            probe = await asyncio.to_thread(
+                self._warp_dataplane, manager, sibling)
+            if probe['up']:
+                return sibling
+            logger.info("warp source %s/%s dataplane is down: %s",
+                        uid, sibling, probe.get('facts') or probe.get('detail'))
+        return None
+
     def _write_warp_profile(self, manager, protocol, text):
         """Write warp0.conf without leaking the private key into the SSH log.
 
@@ -1031,6 +1107,14 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
                             manager._write_start_script, proto, config_path, ctx)
                         await asyncio.to_thread(
                             manager._upload_start_script, proto, warp_ctx=ctx)
+                        # start.sh only *tries* to raise warp0; the link counts
+                        # as repaired when the dataplane is actually in place.
+                        probe = await self._wait_warp_dataplane(manager, proto)
+                        if not probe['up']:
+                            logger.warning(
+                                "warp repair: %s/%s dataplane is down: %s",
+                                uid, proto, probe.get('facts'))
+                            raise ws.SrvWarpError('srv_warp_link_failed', 502)
                 except ws.SrvWarpError as exc:
                     logger.warning("warp repair failed for %s/%s: %s",
                                    uid, proto, exc.code)
@@ -1044,25 +1128,25 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
 
             if repaired or failed:
                 def mark(current):
-                    for proto in repaired:
+                    for proto in targets:
                         rec = ws.proto_record(current, uid, proto)
+                        error = failed.get(proto)
                         rec['warp']['repair_state'] = {
-                            'state': 'ok',
-                            'last_error': None,
+                            'state': 'error' if error else 'ok',
+                            'last_error': error,
                             'queue_reason': None,
                         }
-                        rec['warp']['quarantine'] = False
-                    # A failed instance used to vanish from the state entirely:
-                    # the job log was the only trace. Record why it failed.
-                    for proto, code in failed.items():
-                        rec = ws.proto_record(current, uid, proto)
-                        rec['warp']['repair_state'] = {
-                            'state': 'error',
-                            'last_error': code,
-                            'queue_reason': None,
-                        }
+                        if not error:
+                            rec['warp']['quarantine'] = False
 
                 self.state_store.mutate(mark)
+
+            if failed:
+                raise ws.SrvWarpError(
+                    failed[sorted(failed)[0]], 502,
+                    message='warp repair failed: %s'
+                            % ', '.join('%s=%s' % item
+                                        for item in sorted(failed.items())))
         except ws.SrvWarpError as exc:
             logger.warning("warp repair rejected for %s: %s", uid, exc.code)
         except Exception:
@@ -1072,6 +1156,7 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
 
     async def link(self, server_id, uid, protocol, dns_via_warp=False,
                    job_id=None):
+        applied = False
         try:
             data = self.load_data()
             idx, server = self._server(data, server_id, uid)
@@ -1094,6 +1179,38 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
                     message='client MTU above warp budget: %s'
                             % ', '.join(over_budget))
 
+            # The start.sh of a linked instance is fail-closed: it blackholes
+            # client traffic until warp0 is up. A missing profile therefore
+            # used to leave clients with no internet while the panel claimed
+            # the link was active. Prepare the profile first, announce the
+            # link second. A working neighbour on this server is preferred:
+            # Cloudflare registration is often blocked by SNI filtering while
+            # the WARP dataplane itself works fine (MRAK, 2026-11-24).
+            if not await asyncio.to_thread(
+                    self._conf_present, manager, protocol):
+                sibling = await self._sibling_warp_source(
+                    manager, server, uid, protocol)
+                if sibling:
+                    account, profile = await asyncio.to_thread(
+                        self._source_profile, manager, sibling, True)
+                    conf_hash = await asyncio.to_thread(
+                        self._write_imported_profile, manager, protocol,
+                        account, profile)
+
+                    def mark_copy(state):
+                        rec = ws.proto_record(state, uid, protocol)
+                        rec['warp']['conf_hash'] = conf_hash
+                        rec['warp']['registered'] = True
+                        rec['warp']['imported_from_protocol'] = sibling
+
+                    self.state_store.mutate(mark_copy)
+                    logger.info("warp profile %s copied from %s/%s",
+                                protocol, uid, sibling)
+                else:
+                    await asyncio.to_thread(self._ensure_wgcf, manager, protocol)
+                    await asyncio.to_thread(
+                        self._register_and_write_conf, manager, protocol, uid)
+
             now = ws.now_ts()
 
             def apply(state):
@@ -1112,13 +1229,31 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
                 rec['client_mtu_warp'] = int(mtu)
 
             self.state_store.mutate(apply)
+            applied = True
             ctx = ws.warp_ctx_for(self.state_store.load(), uid, protocol)
             config_path = manager._config_path(protocol)
-            # TODO(S4): prepare warp0/routes/NAT, verify egress, marker, reissue.
             await asyncio.to_thread(
                 manager._write_start_script, protocol, config_path, ctx)
             await asyncio.to_thread(
                 manager._upload_start_script, protocol, warp_ctx=ctx)
+
+            probe = await self._wait_warp_dataplane(manager, protocol)
+            if not probe['up']:
+                raise ws.SrvWarpError(
+                    'srv_warp_link_failed', 502,
+                    message='warp0 is not carrying traffic: %s'
+                            % (probe.get('facts') or probe.get('detail') or ''))
+
+            def mark_ok(state):
+                rec = ws.proto_record(state, uid, protocol)
+                rec['warp']['repair_state'] = {
+                    'state': 'ok',
+                    'last_error': None,
+                    'queue_reason': None,
+                }
+                rec['warp']['quarantine'] = False
+
+            self.state_store.mutate(mark_ok)
             # Existing client configs must move onto the new budget. A failure
             # here is logged only: the link itself is already applied.
             try:
@@ -1127,12 +1262,54 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
                 logger.exception(
                     "warp reissue after link failed for %s/%s", uid, protocol)
         except ws.SrvWarpError as exc:
-            logger.warning("warp link rejected for %s/%s: %s",
-                           uid, protocol, exc.code)
+            logger.warning("warp link rejected for %s/%s: %s %s",
+                           uid, protocol, exc.code, str(exc))
+            if applied:
+                await self._undo_link(server_id, uid, protocol, exc.code)
         except Exception:
             logger.exception("warp link failed for %s/%s", uid, protocol)
+            if applied:
+                await self._undo_link(server_id, uid, protocol,
+                                      'srv_warp_link_failed')
         finally:
             self._finish(uid, job_id)
+
+    async def _undo_link(self, server_id, uid, protocol, error_code):
+        """Drop a link that could not be brought up and restore direct egress.
+
+        Leaving the kill-switch start.sh behind is worse than the original
+        problem: clients would keep a tunnel to a server that cannot forward
+        their traffic at all.
+        """
+        def clear(state):
+            rec = ws.proto_record(state, uid, protocol)
+            rec['warp_link'] = None
+            rec['client_mtu_warp'] = None
+            rec['warp']['repair_state'] = {
+                'state': 'error',
+                'last_error': error_code,
+                'queue_reason': None,
+            }
+
+        try:
+            self.state_store.mutate(clear)
+        except Exception:
+            logger.exception("warp link rollback state failed for %s/%s",
+                             uid, protocol)
+        try:
+            data = self.load_data()
+            idx, _server = self._server(data, server_id, uid)
+            if idx is None:
+                return
+            manager = await self._awg(_server)
+            config_path = manager._config_path(protocol)
+            await asyncio.to_thread(
+                manager._write_start_script, protocol, config_path, None)
+            await asyncio.to_thread(
+                manager._upload_start_script, protocol, warp_ctx=None)
+        except Exception:
+            logger.exception("warp link rollback failed for %s/%s",
+                             uid, protocol)
 
     async def unlink(self, server_id, uid, protocol, job_id=None):
         await self._clear_link(server_id, uid, protocol, job_id=job_id)

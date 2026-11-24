@@ -13,6 +13,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 import warp_service as ws
 from warp_runtime import WarpRuntime
@@ -323,6 +324,129 @@ class WarpRuntimeHarness(unittest.TestCase):
         self.assertTrue(self.record('awg')['warp']['registered'])
         self.assertFalse(self.record('awg2')['warp']['registered'])
         self.assertTrue(self.data['servers'][0]['warp']['installed'])
+
+    # ----- link ------------------------------------------------------------
+
+    def test_link_registers_missing_profile_before_the_killswitch(self):
+        # The start.sh of a linked instance blackholes client traffic until
+        # warp0 is up, so an unregistered instance must never be announced as
+        # linked: that is what left awg3__3 without internet.
+        self.seed_state(registered=False)
+        self.ssh.account_present = False
+        self.ssh.conf_present = False
+        probes = []
+
+        async def up(self, manager, protocol, attempts=5, delay=2.0):
+            probes.append(protocol)
+            return {'up': True, 'facts': {}, 'detail': ''}
+
+        with mock.patch.object(type(self.runtime), '_wait_warp_dataplane', up):
+            run_coro(self.runtime.link(0, 'srv-1', 'awg', job_id='job-link'))
+
+        commands = '\n'.join(self.ssh.commands)
+        self.assertIn('wgcf register --accept-tos', commands)
+        rec = self.record()
+        self.assertTrue(rec['warp']['registered'])
+        self.assertIsNotNone(ws.warp_link(rec))
+        self.assertEqual(rec['client_mtu_warp'], 1280)
+        self.assertEqual(rec['warp']['repair_state']['state'], 'ok')
+        self.assertEqual(len(self.manager.uploads), 1)
+        self.assertTrue(self.manager.uploads[0]['warp_ctx']['active'])
+        self.assertEqual(probes, ['awg'])
+
+    def test_link_rolls_back_when_warp0_never_comes_up(self):
+        self.seed_state(registered=True)
+        self.ssh.account_present = True
+        self.ssh.conf_present = True
+
+        async def down(self, manager, protocol, attempts=5, delay=2.0):
+            return {'up': False, 'facts': {'WARP_ROUTE': 'missing'},
+                    'detail': ''}
+
+        with mock.patch.object(type(self.runtime), '_wait_warp_dataplane',
+                               down):
+            run_coro(self.runtime.link(0, 'srv-1', 'awg',
+                                       job_id='job-link-down'))
+
+        rec = self.record()
+        self.assertIsNone(ws.warp_link(rec))
+        self.assertIsNone(rec['client_mtu_warp'])
+        self.assertEqual(rec['warp']['repair_state']['state'], 'error')
+        self.assertEqual(rec['warp']['repair_state']['last_error'],
+                         'srv_warp_link_failed')
+        # The kill-switch must be removed again: start.sh is re-rendered
+        # without the warp block and the container is restarted.
+        self.assertEqual(len(self.manager.uploads), 2)
+        self.assertTrue(self.manager.uploads[0]['warp_ctx']['active'])
+        self.assertIsNone(self.manager.uploads[1]['warp_ctx'])
+
+    def test_link_copies_profile_from_a_live_sibling(self):
+        # MRAK's Cloudflare registration API is SNI-filtered, but awg3__2 has
+        # a working profile: linking awg3__3 must copy it instead of calling
+        # wgcf register.
+        def seed_sibling(state):
+            rec = ws.proto_record(state, 'srv-1', 'awg')
+            rec['warp']['registered'] = True
+            rec['warp_link'] = {'active': True}
+
+        self.state_store.mutate(seed_sibling)
+        self.ssh.conf_present = False
+        sources = []
+
+        def source(self, manager, protocol, reuse=True):
+            sources.append(protocol)
+            return 'account body', 'profile body'
+
+        def write(self, manager, protocol, account, profile):
+            return 'copied-hash'
+
+        async def up(self, manager, protocol, attempts=5, delay=2.0):
+            return {'up': True, 'facts': {}, 'detail': ''}
+
+        with mock.patch.object(type(self.runtime), '_warp_dataplane',
+                               lambda self, manager, protocol:
+                               {'up': True, 'facts': {}, 'detail': ''}), \
+             mock.patch.object(type(self.runtime), '_wait_warp_dataplane', up), \
+             mock.patch.object(type(self.runtime), '_source_profile', source), \
+             mock.patch.object(type(self.runtime), '_write_imported_profile',
+                               write):
+            run_coro(self.runtime.link(0, 'srv-1', 'awg2',
+                                       job_id='job-link-copy'))
+
+        commands = '\n'.join(self.ssh.commands)
+        self.assertNotIn('wgcf register --accept-tos', commands)
+        self.assertEqual(sources, ['awg'])
+        rec = self.record('awg2')
+        self.assertTrue(rec['warp']['registered'])
+        self.assertEqual(rec['warp']['conf_hash'], 'copied-hash')
+        self.assertEqual(rec['warp']['imported_from_protocol'], 'awg')
+        self.assertIsNotNone(ws.warp_link(rec))
+        self.assertTrue(self.manager.uploads[-1]['warp_ctx']['active'])
+
+    def test_link_registers_when_sibling_dataplane_is_down(self):
+        def seed_sibling(state):
+            rec = ws.proto_record(state, 'srv-1', 'awg')
+            rec['warp']['registered'] = True
+            rec['warp_link'] = {'active': True}
+
+        self.state_store.mutate(seed_sibling)
+        self.ssh.conf_present = False
+
+        async def up(self, manager, protocol, attempts=5, delay=2.0):
+            return {'up': True, 'facts': {}, 'detail': ''}
+
+        with mock.patch.object(type(self.runtime), '_warp_dataplane',
+                               lambda self, manager, protocol:
+                               {'up': False, 'facts': {}, 'detail': ''}), \
+             mock.patch.object(type(self.runtime), '_wait_warp_dataplane', up):
+            run_coro(self.runtime.link(0, 'srv-1', 'awg2',
+                                       job_id='job-link-register'))
+
+        self.assertIn('wgcf register --accept-tos',
+                      '\n'.join(self.ssh.commands))
+        rec = self.record('awg2')
+        self.assertTrue(rec['warp']['registered'])
+        self.assertNotIn('imported_from_protocol', rec['warp'])
 
     # ----- sanitizer -------------------------------------------------------
 

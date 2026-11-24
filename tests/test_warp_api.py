@@ -19,6 +19,11 @@ from managers.awg_manager import AWGManager
 from warp_service import WarpStateStore
 
 
+async def _warp_up_stub(self, manager, protocol, attempts=5, delay=2.0):
+    """Dataplane probe stub: the SSH transport is mocked."""
+    return {'up': True, 'facts': {}, 'detail': ''}
+
+
 def server_record(protocols, warp=None):
     server = {
         'name': 'Warp box',
@@ -471,9 +476,16 @@ class WarpApiTests(unittest.TestCase):
         def upload_script(manager, protocol_type=None, warp_ctx=None):
             seen.append(('upload', protocol_type, warp_ctx))
 
+        runtime_cls = type(panel.warp_runtime)
         with mock.patch.object(AWGManager, '_read_config_key_live', read_mtu), \
              mock.patch.object(AWGManager, '_write_start_script', write_script), \
              mock.patch.object(AWGManager, '_upload_start_script', upload_script), \
+             mock.patch.object(runtime_cls, '_ensure_wgcf',
+                               lambda self, manager, protocol: None), \
+             mock.patch.object(runtime_cls, '_conf_present',
+                               lambda self, manager, protocol: True), \
+             mock.patch.object(runtime_cls, '_wait_warp_dataplane',
+                               _warp_up_stub), \
              mock.patch.object(panel, 'get_ssh', return_value=mock.Mock()):
             response = self.post('link', {'server_uid': 'srv-uid',
                                           'protocol': 'awg'})
