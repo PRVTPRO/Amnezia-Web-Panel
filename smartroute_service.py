@@ -354,11 +354,19 @@ class SmartRouteService:
         server = self._server(data, server_id)
         sm = server.get('smartroute') or {}
         smartr = await self._smartr(server)
-        host = await asyncio.to_thread(smartr.host_status)
-        host['installed'] = host['installed'] and sm.get('installed', host['installed'])
+        # Cheap path: without the data.json flag the top-level answer is
+        # already "not installed" (it is ANDed with bool(sm.get('installed'))),
+        # and the UI never reads `host` in that state (renderSmartRouteCard
+        # returns early). Skipping the probe saves five SSH round-trips on
+        # every page load for servers that do not run Smart Route.
+        if sm.get('installed'):
+            host = await asyncio.to_thread(smartr.host_status)
+            host['installed'] = host['installed'] and sm.get('installed', host['installed'])
+        else:
+            host = {}
         return {
             'status': 'success',
-            'installed': bool(sm.get('installed')) and host['installed'],
+            'installed': bool(sm.get('installed')) and bool(host.get('installed')),
             'enabled': bool(sm.get('enabled', True)),
             'host': host,
             'own_subnets': sm.get('own_subnets', []),

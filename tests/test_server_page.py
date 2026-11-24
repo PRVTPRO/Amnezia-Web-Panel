@@ -218,6 +218,25 @@ class RknBlockUiWiringTests(unittest.TestCase):
     def test_card_not_shown_via_container_status(self):
         self.assertIn("if (app.proto === 'rknblock') return;", self.page)
 
+    def test_rknblock_and_torrent_guard_tiles_match_exit_node(self):
+        # Обе плитки получают тот же квадратный фон, что у Exit Node.
+        css = read('static', 'css', 'style.css')
+        gradient = ('linear-gradient(135deg, rgb(145 0 255 / 31%), '
+                    'rgba(234, 179, 8, 0.1))')
+        start = css.index('.protocol-rknblock .protocol-icon,')
+        block = css[start:css.index('}', start)]
+        self.assertIn('.tp-grid-card .protocol-icon', block)
+        self.assertIn(gradient, block)
+        # Форма — общая для всех иконок: квадрат 56x56 со скруглением.
+        self.assertIn('.protocol-icon {\n'
+                      '    width: 56px;\n'
+                      '    height: 56px;\n'
+                      '    border-radius: var(--radius-md);', css)
+        # Exit Node — эталон, его правило не тронуто.
+        self.assertIn('.protocol-exit .protocol-icon {\n'
+                      '    background: linear-gradient(135deg, rgba(249, 115, 22, 0.2), '
+                      'rgba(234, 179, 8, 0.1));', css)
+
 
 
 class ProtocolUninstallAccountingUiTests(unittest.TestCase):
@@ -296,8 +315,10 @@ class SmartRouteUiWiringTests(unittest.TestCase):
         self.assertIn('smartRouteMark(info.exit_link)', button)
         self.assertIn('function smartRouteMark(', self.page)
         self.assertIn('function smartRouteMarkState(', self.page)
-        # painted after the parallel probe settles, repainted after actions
-        self.assertIn('smartRouteStatus = await smartRouteProbe;', self.page)
+        # The probe must never be a gate for the grid: its answer is applied
+        # in its own task, and the marks are repainted there.
+        self.assertNotIn('smartRouteStatus = await smartRouteProbe;', self.page)
+        self.assertIn("ProbeQueue.background('smartroute'", self.page)
         self.assertIn('refreshExitMarks();', self.page)
         self.assertIn('refreshExitMark(currentExitLinkProto, state);', self.page)
         self.assertIn('smart_route_lost = true;', self.page)

@@ -620,6 +620,7 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
             manager = await self._awg(server)
 
             done = []
+            failures = []
             for proto in protocols:
                 if not self._container_running(manager, proto):
                     logger.info("warp install: %s/%s container is not running",
@@ -627,21 +628,46 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
                     report('skip', 'skipped %s: container is not running'
                            % proto)
                     continue
-                report('download', 'downloading the wgcf client')
-                await asyncio.to_thread(self._ensure_wgcf, manager, proto)
-                report('register', 'registering with Cloudflare')
-                await asyncio.to_thread(
-                    self._register_and_write_conf, manager, proto, uid)
-                report('profile', 'preparing the sanitized WARP profile')
-                # No restart on install: the running container keeps its
-                # current dataplane until the operator links WARP.
-                config_path = self._config_path(manager, proto)
-                report('startsh', 'updating the container start script')
-                await asyncio.to_thread(
-                    manager._write_start_script, proto, config_path, None)
+                # A host-level install covers several instances: one broken
+                # instance must not abort the others (the target list used to
+                # be a single instance, so this loop never had to isolate).
+                try:
+                    report('download', 'downloading the wgcf client')
+                    await asyncio.to_thread(self._ensure_wgcf, manager, proto)
+                    report('register', 'registering with Cloudflare')
+                    await asyncio.to_thread(
+                        self._register_and_write_conf, manager, proto, uid)
+                    report('profile', 'preparing the sanitized WARP profile')
+                    # No restart on install: the running container keeps its
+                    # current dataplane until the operator links WARP.
+                    config_path = self._config_path(manager, proto)
+                    report('startsh', 'updating the container start script')
+                    await asyncio.to_thread(
+                        manager._write_start_script, proto, config_path, None)
+                except ws.SrvWarpError as exc:
+                    logger.warning("warp install failed for %s/%s: %s",
+                                   uid, proto, exc.code)
+                    failures.append((proto, exc.code))
+                    report('failed', 'failed %s: %s' % (proto, exc.code))
+                    continue
+                except Exception as exc:
+                    logger.exception("warp install failed for %s/%s",
+                                     uid, proto)
+                    # A stable code: the per-instance isolation below needs a
+                    # reason it can raise, and a class name would not be a code
+                    # the UI could translate.
+                    failures.append((proto, 'srv_warp_install_failed'))
+                    report('failed', 'failed %s: %s'
+                           % (proto, exc.__class__.__name__))
+                    continue
                 done.append(proto)
 
             if not done:
+                # Nothing was registered: report the first concrete reason
+                # instead of a generic "no targets", so a partial failure is
+                # not disguised as an empty target list.
+                if failures:
+                    raise ws.SrvWarpError(failures[0][1], 502)
                 # Every target container is stopped: no profile was registered,
                 # so this is not an install and must not be reported as one.
                 raise ws.SrvWarpError('srv_warp_no_targets', 409)
@@ -899,6 +925,16 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
             if idx is None:
                 raise ws.SrvWarpError('srv_warp_identity_mismatch', 409)
             protocols = self._targets(server, protocol)
+            if protocol is None:
+                # A record can outlive its instance (deleted as a protocol while
+                # unlinked). Uninstall must still be able to clear it, or the
+                # card keeps showing a phantom "installed" instance forever.
+                stored = ((self.state_store.load().get('servers') or {})
+                          .get(str(uid)) or {}).get('protocols') or {}
+                for proto in stored:
+                    if (_protocol_base(proto) in self.awg_protocols
+                            and proto not in protocols):
+                        protocols.append(proto)
             manager = await self._awg(server) if protocols else None
 
             state = self.state_store.load()
@@ -915,18 +951,25 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
                         current, uid, protocols))
 
             for proto in protocols:
-                warp_dir = _warp_dir(proto)
-                await asyncio.to_thread(
-                    self._sh, manager, proto, 'rm -rf %s' % warp_dir)
-                await asyncio.to_thread(
-                    self._sh, manager, proto,
-                    'rm -f %s' % ws.marker_path(proto))
-                config_path = self._config_path(manager, proto)
-                await asyncio.to_thread(
-                    manager._write_start_script, proto, config_path, None)
-                if active.get(proto):
+                # One missing container must not abort the state cleanup below:
+                # the record is what keeps the card stuck, not the container.
+                try:
+                    warp_dir = _warp_dir(proto)
                     await asyncio.to_thread(
-                        manager._upload_start_script, proto, warp_ctx=None)
+                        self._sh, manager, proto, 'rm -rf %s' % warp_dir)
+                    await asyncio.to_thread(
+                        self._sh, manager, proto,
+                        'rm -f %s' % ws.marker_path(proto))
+                    config_path = self._config_path(manager, proto)
+                    await asyncio.to_thread(
+                        manager._write_start_script, proto, config_path, None)
+                    if active.get(proto):
+                        await asyncio.to_thread(
+                            manager._upload_start_script, proto, warp_ctx=None)
+                except Exception:
+                    logger.exception(
+                        "warp uninstall: container cleanup failed for %s/%s",
+                        uid, proto)
 
             def clear(state):
                 for proto in protocols:
@@ -969,24 +1012,39 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
             manager = await self._awg(server) if targets else None
 
             # Repair order from the TZ: (1) creds, (2) start.sh, (3) restart.
+            repaired = []
+            failed = {}
             for proto in targets:
-                await asyncio.to_thread(self._ensure_wgcf, manager, proto)
-                if not await asyncio.to_thread(
-                        self._conf_present, manager, proto):
-                    await asyncio.to_thread(
-                        self._register_and_write_conf, manager, proto, uid)
-                current = self.state_store.load()
-                if ws.warp_link(ws.proto_record(current, uid, proto)):
-                    ctx = ws.warp_ctx_for(current, uid, proto)
-                    config_path = self._config_path(manager, proto)
-                    await asyncio.to_thread(
-                        manager._write_start_script, proto, config_path, ctx)
-                    await asyncio.to_thread(
-                        manager._upload_start_script, proto, warp_ctx=ctx)
+                # Host-level repair covers every registered instance: isolate
+                # each one, so a broken instance cannot cancel the rest.
+                try:
+                    await asyncio.to_thread(self._ensure_wgcf, manager, proto)
+                    if not await asyncio.to_thread(
+                            self._conf_present, manager, proto):
+                        await asyncio.to_thread(
+                            self._register_and_write_conf, manager, proto, uid)
+                    current = self.state_store.load()
+                    if ws.warp_link(ws.proto_record(current, uid, proto)):
+                        ctx = ws.warp_ctx_for(current, uid, proto)
+                        config_path = self._config_path(manager, proto)
+                        await asyncio.to_thread(
+                            manager._write_start_script, proto, config_path, ctx)
+                        await asyncio.to_thread(
+                            manager._upload_start_script, proto, warp_ctx=ctx)
+                except ws.SrvWarpError as exc:
+                    logger.warning("warp repair failed for %s/%s: %s",
+                                   uid, proto, exc.code)
+                    failed[proto] = exc.code
+                    continue
+                except Exception:
+                    logger.exception("warp repair failed for %s/%s", uid, proto)
+                    failed[proto] = 'srv_warp_repair_failed'
+                    continue
+                repaired.append(proto)
 
-            if targets:
+            if repaired or failed:
                 def mark(current):
-                    for proto in targets:
+                    for proto in repaired:
                         rec = ws.proto_record(current, uid, proto)
                         rec['warp']['repair_state'] = {
                             'state': 'ok',
@@ -994,6 +1052,15 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
                             'queue_reason': None,
                         }
                         rec['warp']['quarantine'] = False
+                    # A failed instance used to vanish from the state entirely:
+                    # the job log was the only trace. Record why it failed.
+                    for proto, code in failed.items():
+                        rec = ws.proto_record(current, uid, proto)
+                        rec['warp']['repair_state'] = {
+                            'state': 'error',
+                            'last_error': code,
+                            'queue_reason': None,
+                        }
 
                 self.state_store.mutate(mark)
         except ws.SrvWarpError as exc:

@@ -53,6 +53,9 @@ SRV_WARP_KEYS = {
     'srv_warp_err_job_busy',
     'srv_warp_err_generic',
     'srv_warp_err_no_awg',
+    'srv_warp_err_registered',
+    'srv_warp_err_install_failed',
+    'srv_warp_err_repair_failed',
     'srv_warp_no_awg',
     'srv_warp_stage_start',
     'srv_warp_stage_download',
@@ -302,6 +305,12 @@ class WarpStoreInstallTemplateTests(unittest.TestCase):
         self.assertIn('warpNoTarget ? _(\'srv_warp_no_awg\')', self.page)
         self.assertIn("srv_warp_no_targets: 'srv_warp_err_no_awg'", self.page)
 
+    def test_instance_row_shows_a_failed_repair(self):
+        # A repair runs in the background; its outcome is only visible in the
+        # instance line, so both the payload field and the condition matter.
+        self.assertIn('item.repair_state', self.page)
+        self.assertIn("repair.state === 'error'", self.page)
+
 
 class WarpTranslationsTests(unittest.TestCase):
     @classmethod
@@ -336,6 +345,7 @@ class WarpTranslationsTests(unittest.TestCase):
         entry, so the card showed `srv_warp_err_source_unreachable` instead of
         a sentence.
         """
+        """A mapped value that is missing prints the raw key in the card."""
         page = (ROOT / 'templates' / 'server.html').read_text(encoding='utf-8')
         block = re.search(r'const WARP_ERROR_KEYS = \{(.*?)\};', page, re.S)
         self.assertIsNotNone(block, 'WARP_ERROR_KEYS not found')
@@ -345,6 +355,15 @@ class WarpTranslationsTests(unittest.TestCase):
         for lang, table in self.locales.items():
             with self.subTest(lang=lang):
                 self.assertEqual(sorted(keys - set(table)), [])
+
+    def test_per_instance_error_codes_are_mapped(self):
+        page = (ROOT / 'templates' / 'server.html').read_text(encoding='utf-8')
+        block = re.search(r'const WARP_ERROR_KEYS = \{(.*?)\};', page, re.S)
+        self.assertIsNotNone(block, 'WARP_ERROR_KEYS not found')
+        self.assertIn("srv_warp_install_failed: 'srv_warp_err_install_failed'",
+                      block.group(1))
+        self.assertIn("srv_warp_repair_failed: 'srv_warp_err_repair_failed'",
+                      block.group(1))
 
 
 class ProjectCompileTests(unittest.TestCase):

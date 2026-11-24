@@ -179,6 +179,138 @@ SSH_HELP_KEYS = {
     'enroll_error_trust_readonly',
 }
 
+PROXY_KEYS = {
+    'list_search_placeholder',
+    'proxy_account_created',
+    'proxy_account_deleted',
+    'proxy_account_disabled',
+    'proxy_account_enabled',
+    'proxy_account_missing',
+    'proxy_account_name',
+    'proxy_account_name_placeholder',
+    'proxy_account_saved',
+    'proxy_account_title_create',
+    'proxy_account_title_edit',
+    'proxy_accounts_btn',
+    'proxy_accounts_empty',
+    'proxy_accounts_empty_desc',
+    'proxy_accounts_title',
+    'proxy_acl_add',
+    'proxy_acl_hint',
+    'proxy_acl_remove',
+    'proxy_acl_title',
+    'proxy_add_account',
+    'proxy_advanced',
+    'proxy_any_ip',
+    'proxy_applying',
+    'proxy_bind_user',
+    'proxy_check_port',
+    'proxy_conns_hint',
+    'proxy_conns_label',
+    'proxy_copy',
+    'proxy_copy_failed',
+    'proxy_creating',
+    'proxy_delete_confirm',
+    'proxy_deleting',
+    'proxy_disable_btn',
+    'proxy_dns_hint',
+    'proxy_dns_label',
+    'proxy_dns_server',
+    'proxy_dns_servers',
+    'proxy_edit_btn',
+    'proxy_enable_btn',
+    'proxy_gb',
+    'proxy_gen_login',
+    'proxy_hide_password',
+    'proxy_http_disabled',
+    'proxy_http_enabled',
+    'proxy_http_enabled_hint',
+    'proxy_http_off_key',
+    'proxy_http_port',
+    'proxy_install_http_enabled',
+    'proxy_install_http_enabled_hint',
+    'proxy_install_http_port',
+    'proxy_install_http_port_hint',
+    'proxy_key_btn',
+    'proxy_key_copied',
+    'proxy_key_hint',
+    'proxy_key_note',
+    'proxy_key_title',
+    'proxy_key_unavailable',
+    'proxy_limits_title',
+    'proxy_listener_http_off',
+    'proxy_listener_socks_off',
+    'proxy_listener_type',
+    'proxy_listener_type_hint',
+    'proxy_listening',
+    'proxy_load_error',
+    'proxy_log_days',
+    'proxy_log_days_hint',
+    'proxy_log_format',
+    'proxy_log_format_hint',
+    'proxy_log_format_vars',
+    'proxy_login',
+    'proxy_login_invalid',
+    'proxy_maxconn_hint',
+    'proxy_maxconn_label',
+    'proxy_maxconn_placeholder',
+    'proxy_mbps',
+    'proxy_name_required',
+    'proxy_no_bind',
+    'proxy_no_limit',
+    'proxy_none',
+    'proxy_not_set',
+    'proxy_password',
+    'proxy_password_hint',
+    'proxy_password_invalid',
+    'proxy_period_day',
+    'proxy_period_month',
+    'proxy_period_week',
+    'proxy_port_busy_msg',
+    'proxy_port_busy_unknown',
+    'proxy_port_check_failed',
+    'proxy_port_checking',
+    'proxy_port_free_msg',
+    'proxy_port_invalid_msg',
+    'proxy_port_not_checked',
+    'proxy_quota',
+    'proxy_quota_label',
+    'proxy_quota_period',
+    'proxy_rate_in',
+    'proxy_rate_out',
+    'proxy_recreate_btn',
+    'proxy_recreate_sub',
+    'proxy_recreate_text',
+    'proxy_recreate_title',
+    'proxy_regen_password',
+    'proxy_saving',
+    'proxy_settings_btn',
+    'proxy_settings_saved',
+    'proxy_settings_title',
+    'proxy_settings_warning',
+    'proxy_show_password',
+    'proxy_socks_port',
+    'proxy_socks_port_hint',
+    'proxy_speed',
+    'proxy_status_active',
+    'proxy_status_conn_limit',
+    'proxy_status_disabled',
+    'proxy_status_quota_exhausted',
+    'proxy_type_both',
+    'proxy_type_hint',
+    'proxy_type_http',
+    'proxy_type_label',
+    'proxy_type_socks5',
+    'proxy_upstream',
+    'proxy_upstream_hint',
+    'proxy_upstream_host',
+    'proxy_upstream_login',
+    'proxy_upstream_pass',
+    'proxy_upstream_port',
+    'proxy_upstream_title',
+    'proxy_upstream_type',
+}
+
 PRE_PANEL_ACCESS_KEYS_SHA256 = 'c70dff505a825b0a8506b2d1ca7d76fca9378e3f9514cc44231f7fd2a847af36'
 # Keys of the "Copy instance" panel: a later addition, declared here so the
 # frozen catalogue hash keeps guarding the original keys.
@@ -250,6 +382,9 @@ IPV4_POLICY_KEYS = {
     'ipv4_recreate_confirm', 'ipv4_ingress_saved',
 }
 
+# Lazy CodeMirror loader (P6): the one user-visible failure message.
+LAZY_EDITOR_KEYS = {'editor_load_failed'}
+
 # I1 masking block (per-instance special-junk packet): install and settings.
 AWG_I1_KEYS = {
     'awg_i1_ascii_only', 'awg_i1_auto_badge', 'awg_i1_bad_tag',
@@ -272,6 +407,10 @@ AWG_I1_KEYS = {
 # marketplace badge and the operation error share this wording.
 SRV_WARP_NO_AWG_KEYS = {
     'srv_warp_no_awg', 'srv_warp_err_no_awg',
+    # The host-level install refusal now has its own sentence.
+    'srv_warp_err_registered',
+    # Per-instance background failures shown in the WARP card line.
+    'srv_warp_err_install_failed', 'srv_warp_err_repair_failed',
 # Keys of later panels that were merged without registering them here; before
 # this set existed the frozen hash failed on an unchanged catalogue.
 }
@@ -357,6 +496,18 @@ LIFECYCLE_FENCE_KEYS = {
     'lifecycle_fence_scope_global', 'lifecycle_fence_server',
     'lifecycle_fence_operation', 'lifecycle_fence_reason',
     'lifecycle_fence_since',
+}
+
+# Self-service deletion (#402): declared here so the frozen catalogue hash
+# keeps guarding the original keys.
+SELF_SERVICE_DELETE_KEYS = {
+    'self_service_delete_counter_unavailable',
+    'self_service_delete_unavailable',
+    'self_service_delete_ssh_failed',
+    'self_service_delete_busy',
+    'self_service_delete_restore_required',
+    'self_service_delete_link_disappeared',
+    'self_service_delete_not_found',
 }
 
 SECURITY_SETUP_KEYS = {
@@ -574,7 +725,8 @@ class TestC6Translations(unittest.TestCase):
                                     - LIFECYCLE_FENCE_KEYS - STORAGE_KEYS
                                     - SUBSCRIPTION_KEYS - CLOSE_KEYS
                                     - SSH_HELP_KEYS - SMARTROUTE_TIMER_KEYS
-                                    - IPV4_POLICY_KEYS))
+                                    - SELF_SERVICE_DELETE_KEYS
+                                    - IPV4_POLICY_KEYS - PROXY_KEYS))
         self.assertEqual(hashlib.sha256(previous.encode('utf-8')).hexdigest(),
                          PRE_PANEL_ACCESS_KEYS_SHA256,
                          'Existing catalogue changed outside the declared additions')
@@ -585,7 +737,8 @@ class TestC6Translations(unittest.TestCase):
             for key in (NEW_KEYS | PANEL_ACCESS_KEYS | PROTOCOL_UNINSTALL_KEYS
                         | TORRENT_GUARD_KEYS | TORRENT_PLUGIN_KEYS | AWG_I1_KEYS | USER_LIMIT_KEYS | TELEGRAM_ACCOUNT_KEYS
                         | LIFECYCLE_FENCE_KEYS | SUBSCRIPTION_KEYS | CLOSE_KEYS
-                        | SMARTROUTE_TIMER_KEYS | IPV4_POLICY_KEYS):
+                        | SMARTROUTE_TIMER_KEYS | IPV4_POLICY_KEYS
+                        | SELF_SERVICE_DELETE_KEYS | PROXY_KEYS):
                 self.assertIn(key, data)
                 self.assertTrue(str(data[key]).strip(), "%s empty in %s" % (key, locale))
 

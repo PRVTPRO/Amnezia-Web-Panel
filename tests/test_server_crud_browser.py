@@ -28,6 +28,8 @@ class InventoryBrowserTests(unittest.TestCase):
     const SERVER_ID=0,calls=[],toasts=[];let fail=false,serverConfigFilename='';
     const _=v=>v,getProtoTitle=v=>v,openModal=()=>{},closeModal=()=>{},refreshConfigEditor=()=>{},editorModeFor=()=>'';
     const showToast=(...args)=>toasts.push(args),setEditorValue=(id,text)=>document.getElementById(id).value=text,getEditorValue=id=>document.getElementById(id).value;
+    // CodeMirror is lazy now: the loader is a no-op in this harness.
+    const withCodeMirror=async task=>task();
     const apiCall=async(url,method,body)=>{calls.push({url,method,body});if(fail)throw new Error('counter restart blocked');return {config:'synthetic-config',unchanged:true};};
     ''' + '\n'.join(functions))
                     page.evaluate("showServerConfig('awg3')")
