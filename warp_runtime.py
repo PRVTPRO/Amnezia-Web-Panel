@@ -352,6 +352,14 @@ class WarpRuntime:
                 continue
             if not ws.warp_link(rec):
                 continue
+            # A live warp0 with no readable credentials would make
+            # _source_profile fall back to wgcf register *in the sibling's
+            # container*, replacing the identity of a healthy neighbour.
+            # Never mutate the source: skip incomplete profiles.
+            if not await asyncio.to_thread(self._has_profile, manager, sibling):
+                logger.info("warp source %s/%s has no complete profile",
+                            uid, sibling)
+                continue
             probe = await asyncio.to_thread(
                 self._warp_dataplane, manager, sibling)
             if probe['up']:
@@ -806,19 +814,25 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
         self._sh(manager, protocol,
                  'mkdir -p %s && chmod 700 %s'
                  % (_warp_dir(protocol), _warp_dir(protocol)))
-        _out, err, code = self._write_warp_creds(manager, protocol, account)
-        if code != 0:
-            logger.warning("account.toml write failed for %s: %s",
-                           protocol, err)
-            raise ws.SrvWarpError('srv_warp_register_failed', 502)
-        _out, err, code = self._write_warp_profile(manager, protocol, profile)
-        if code != 0:
-            logger.warning("warp0.conf write failed for %s: %s",
-                           protocol, err)
-            raise ws.SrvWarpError('srv_warp_register_failed', 502)
-        conf_hash = self._profile_hash(manager, protocol)
-        if not conf_hash:
-            raise ws.SrvWarpError('srv_warp_register_failed', 502)
+        try:
+            _out, err, code = self._write_warp_creds(manager, protocol, account)
+            if code != 0:
+                logger.warning("account.toml write failed for %s: %s",
+                               protocol, err)
+                raise ws.SrvWarpError('srv_warp_register_failed', 502)
+            _out, err, code = self._write_warp_profile(
+                manager, protocol, profile)
+            if code != 0:
+                logger.warning("warp0.conf write failed for %s: %s",
+                               protocol, err)
+                raise ws.SrvWarpError('srv_warp_register_failed', 502)
+            conf_hash = self._profile_hash(manager, protocol)
+            if not conf_hash:
+                raise ws.SrvWarpError('srv_warp_register_failed', 502)
+        except Exception:
+            # A half-written profile must not be picked up by a later link.
+            self._remove_imported_profile(manager, protocol)
+            raise
         return conf_hash
 
     def _remove_imported_profile(self, manager, protocol):
