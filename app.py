@@ -102,9 +102,12 @@ from warp_service import (
     WarpStateStore,
     WARP_CLIENT_MTU_CAP,
     WARP_REGISTER_LIMIT,
+    STALE_CONTAINER_RECREATED,
+    STALE_CONTAINER_RESTART,
     migrate_legacy_client_mtu,
     aggregate_state,
     classify_instance_state,
+    mark_warp_links_stale,
     proto_record,
     quota_exhausted,
     register_timestamps,
@@ -7489,9 +7492,13 @@ def _warp_status_payload(server, state):
         # No live SSH probes in the status endpoint: the projection is the
         # authoritative signal until the supervisor supplies handshake data.
         installed = bool(warp_record.get('registered'))
+        # Подтверждённый датаплейн — это уже установленное соединение; без
+        # подтверждения линк остаётся «подключаемым» (см. PR #403).
+        handshake_age = (0 if link and link.get('dataplane_ok')
+                         and not link.get('stale') else None)
         instance_state = classify_instance_state(
             installed=installed, link_active=bool(link),
-            rate_limited=rate_limited)
+            rate_limited=rate_limited, handshake_age=handshake_age)
         client_mtu = warp_ctx_for(state, uid, proto)['client_mtu']
         if client_mtu:
             budgets.append(int(client_mtu))
@@ -7503,12 +7510,14 @@ def _warp_status_payload(server, state):
             'link_active': bool(link),
             'client_mtu': client_mtu,
             'dns_via_warp': bool((link or {}).get('dns_via_warp')),
+            'dataplane_ok': bool((link or {}).get('dataplane_ok')),
             'quarantine': bool(warp_record.get('quarantine')),
             'state_stale': bool((link or {}).get('stale')),
             # Repair runs as a background task, so its outcome is only
             # observable here: without this field a failed repair left no
             # trace anywhere the panel could show.
             'repair_state': warp_record.get('repair_state') or None,
+            'last_error': (warp_record.get('repair_state') or {}).get('last_error') or '',
         })
 
     active_job = _WARP_JOBS.get(str(uid))
@@ -11505,6 +11514,18 @@ async def _run_awg_plugin_update(op_id, server_id, component, target, allow_inte
         # waiting for the next periodic pass: until then RU traffic leaves
         # through the exit node. Never let this delay the operation result.
         if op.get('state') in ('success', 'manual_step_required'):
+            # Обновление пересоздаёт контейнеры: подтверждение warp0 от
+            # предыдущей версии больше не гарантирует работающий датаплейн.
+            try:
+                data = load_data()
+                if 0 <= server_id < len(data.get('servers') or []):
+                    uid = data['servers'][server_id].get('uid')
+                    if uid:
+                        warp_state_store.mutate(
+                            lambda state: mark_warp_links_stale(
+                                state, uid, None, STALE_CONTAINER_RECREATED))
+            except Exception:
+                logger.exception("Не удалось пометить warp-линки после обновления плагина")
             asyncio.create_task(_smartroute_reconcile_after(server_id))
 
 
@@ -13258,6 +13279,16 @@ def api_container_toggle(request: Request, server_id: int, req: ContainerToggleR
         if hasattr(ssh, 'docker_ps_invalidate'):
             ssh.docker_ps_invalidate()
         ssh.disconnect()
+        # Контейнер перезапущен: warp0 внутри него поднимается заново, поэтому
+        # старое подтверждение датаплейна больше не описывает линк.
+        try:
+            uid = server.get('uid')
+            if uid:
+                warp_state_store.mutate(
+                    lambda state: mark_warp_links_stale(
+                        state, uid, None, STALE_CONTAINER_RESTART))
+        except Exception:
+            logger.exception("Не удалось пометить warp-линки после перезапуска контейнера")
         _invalidate_ip_status(server.get('uid') or f'#{server_id}')
         return {'status': 'success', 'action': action, 'container': container}
     except Exception as e:

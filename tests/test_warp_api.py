@@ -232,6 +232,89 @@ class WarpApiTests(unittest.TestCase):
         self.assertEqual(instance['repair_state']['last_error'],
                          'srv_warp_repair_failed')
 
+    def test_status_confirmed_link_is_connected(self):
+        """Линк с подтверждённым датаплейном отдаётся как подключённый."""
+        self.seed_link()
+
+        def confirm(state):
+            rec = panel.proto_record(state, 'srv-uid', 'awg')
+            rec['warp']['registered'] = True
+            rec['warp_link']['dataplane_ok'] = True
+            rec['warp_link']['dataplane_ok_at'] = 1
+
+        panel.warp_state_store.mutate(confirm)
+        response = self.client.get(
+            '/api/servers/0/warp/status?server_uid=srv-uid')
+        self.assertEqual(response.status_code, 200, response.text)
+        instance = response.json()['instances'][0]
+        self.assertEqual(instance['state'], 'connected')
+        self.assertTrue(instance['dataplane_ok'])
+
+    def test_status_payload_exposes_dataplane_and_error_fields(self):
+        """Модалке нужны все три поля, чтобы показать ошибку, а не «Установлен»."""
+        def seed(state):
+            rec = panel.proto_record(state, 'srv-uid', 'awg')
+            rec['warp']['registered'] = True
+            rec['warp']['repair_state'] = {
+                'state': 'error',
+                'last_error': 'srv_warp_repair_failed',
+                'queue_reason': None,
+            }
+
+        panel.warp_state_store.mutate(seed)
+        server = panel.load_data()['servers'][0]
+        body = panel._warp_status_payload(server, panel.warp_state_store.load())
+        instance = next(item for item in body['instances']
+                        if item['protocol'] == 'awg')
+        for key in ('dataplane_ok', 'last_error', 'repair_state'):
+            self.assertIn(key, instance)
+        self.assertFalse(instance['dataplane_ok'])
+        self.assertEqual(instance['last_error'], 'srv_warp_repair_failed')
+        self.assertEqual(instance['repair_state']['state'], 'error')
+
+    def test_status_stale_link_is_not_connected(self):
+        """Даже с dataplane_ok=True устаревший линк не считается подключённым."""
+        self.seed_link()
+
+        def mark(state):
+            rec = panel.proto_record(state, 'srv-uid', 'awg')
+            rec['warp']['registered'] = True
+            link = panel.warp_link(rec)
+            link['dataplane_ok'] = True
+            link['stale'] = 'dataplane_down'
+
+        panel.warp_state_store.mutate(mark)
+        response = self.client.get(
+            '/api/servers/0/warp/status?server_uid=srv-uid')
+        self.assertEqual(response.status_code, 200, response.text)
+        instance = response.json()['instances'][0]
+        self.assertEqual(instance['state'], 'connecting')
+        self.assertTrue(instance['state_stale'])
+
+    def test_container_toggle_marks_active_links_stale(self):
+        """Перезапуск контейнера снимает подтверждение датаплейна."""
+        self.seed_link()
+
+        def confirm(state):
+            rec = panel.proto_record(state, 'srv-uid', 'awg')
+            rec['warp']['registered'] = True
+            panel.warp_link(rec)['dataplane_ok'] = True
+
+        panel.warp_state_store.mutate(confirm)
+        ssh = mock.Mock()
+        ssh.run_sudo_command.return_value = ('false', '', '')
+        with mock.patch.object(panel, 'get_ssh', return_value=ssh):
+            response = self.client.post(
+                '/api/servers/0/container/toggle', json={'protocol': 'awg'})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['action'], 'started')
+
+        rec = panel.proto_record(panel.warp_state_store.load(),
+                                 'srv-uid', 'awg')
+        link = panel.warp_link(rec)
+        self.assertEqual(link['stale'], 'container_restart')
+        self.assertFalse(link['dataplane_ok'])
+
     def test_status_uid_mismatch_is_404(self):
         response = self.client.get('/api/servers/0/warp/status?server_uid=other')
         self.assertEqual(response.status_code, 404, response.text)

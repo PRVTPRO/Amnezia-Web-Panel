@@ -1106,6 +1106,11 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
             # Repair order from the TZ: (1) creds, (2) start.sh, (3) restart.
             repaired = []
             failed = {}
+            # Подтверждённые датаплейном линки: только им можно выставлять
+            # dataplane_ok (успех без активного линка проверки не делал).
+            confirmed = set()
+            # Активные линки, у которых проба dataplane закончилась провалом.
+            dataplane_down = set()
             for proto in targets:
                 # Host-level repair covers every registered instance: isolate
                 # each one, so a broken instance cannot cancel the rest.
@@ -1130,7 +1135,11 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
                             logger.warning(
                                 "warp repair: %s/%s dataplane is down: %s",
                                 uid, proto, probe.get('facts'))
+                            # Причина запоминается до mark: ошибка не должна
+                            # оставлять мёртвый линк подтверждённым.
+                            dataplane_down.add(proto)
                             raise ws.SrvWarpError('srv_warp_link_failed', 502)
+                        confirmed.add(proto)
                 except ws.SrvWarpError as exc:
                     logger.warning("warp repair failed for %s/%s: %s",
                                    uid, proto, exc.code)
@@ -1152,8 +1161,21 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
                             'last_error': error,
                             'queue_reason': None,
                         }
-                        if not error:
+                        if error and proto in dataplane_down:
+                            # Проба активного линка провалилась: снимаем
+                            # подтверждение датаплейна и помечаем причину.
+                            ws.mark_warp_links_stale(
+                                current, uid, [proto], ws.STALE_DATAPLANE_DOWN)
+                        elif not error:
                             rec['warp']['quarantine'] = False
+                            ws.clear_warp_links_stale(current, uid, [proto])
+                            # Сохраняем факт подтверждённого датаплейна, не
+                            # затирая остальные поля существующего линка.
+                            if proto in confirmed:
+                                link = ws.warp_link(rec)
+                                if link:
+                                    link['dataplane_ok'] = True
+                                    link['dataplane_ok_at'] = ws.now_ts()
 
                 self.state_store.mutate(mark)
 
@@ -1268,6 +1290,13 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
                     'queue_reason': None,
                 }
                 rec['warp']['quarantine'] = False
+                # Dataplane уже подтверждён пробой: фиксируем это в линке,
+                # чтобы /warp/status мог отличить успех от «подключения».
+                ws.clear_warp_links_stale(state, uid, [protocol])
+                link = ws.warp_link(rec)
+                if link:
+                    link['dataplane_ok'] = True
+                    link['dataplane_ok_at'] = ws.now_ts()
 
             self.state_store.mutate(mark_ok)
             # Existing client configs must move onto the new budget. A failure
@@ -1379,7 +1408,10 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
                 if not link.get('active'):
                     raise ws.SrvWarpError('srv_warp_xor_conflict', 409)
                 link['applied_at'] = now
-                link['stale'] = None
+                # S4: сама смена маршрутизации ещё не реализована и пробы
+                # dataplane здесь нет, поэтому старое подтверждение снимаем.
+                link['stale'] = ws.STALE_EGRESS_SWITCH
+                link['dataplane_ok'] = False
                 rec['warp_link'] = link
 
             self.state_store.mutate(mark)

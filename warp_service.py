@@ -19,6 +19,7 @@ State layout (``<DATA_FILE>.srv_warp_state.json``)::
                        first_seen_stopped},
               "client_mtu_warp": int | null,
               "warp_link": {active, dns_via_warp, applied_at, stale,
+                            dataplane_ok, dataplane_ok_at,
                             server_uid, entry_uid, protocol},
               "warp_egress_regen": {"<uid>:<proto>": {mtu, done, ts}}
             }
@@ -61,6 +62,12 @@ WARP_DNS_SLOTS = 7
 WARP_REGISTER_LIMIT = 3
 WARP_REGISTER_WINDOW_SECONDS = 7 * 24 * 3600
 WARP_REGISTERS_KEEP = 20
+
+# Причины устаревания активного линка: короткие машинные строки в state.
+STALE_DATAPLANE_DOWN = 'dataplane_down'
+STALE_CONTAINER_RESTART = 'container_restart'
+STALE_CONTAINER_RECREATED = 'container_recreated'
+STALE_EGRESS_SWITCH = 'egress_switch'
 
 WARP_PREF_ENTRY_C2C = 181
 WARP_PREF_ENTRY_DNS_NET = 182
@@ -402,6 +409,50 @@ def proto_record(state, server_uid, protocol):
 def warp_link(record):
     link = (record or {}).get('warp_link') or {}
     return link if link.get('active') else None
+
+
+def mark_warp_links_stale(state, server_uid, protocols=None,
+                          reason=STALE_DATAPLANE_DOWN):
+    """Пометить активные линки сервера устаревшими.
+
+    Вызывается внутри ``warp_state_store.mutate``: мутатор меняет только
+    ``stale`` и ``dataplane_ok``, остальные поля записи линка сохраняет.
+    ``protocols=None`` означает все протоколы сервера, отсутствующие записи
+    не создаются. Возвращает число затронутых линков.
+    """
+    server = (state.get('servers') or {}).get(_norm_uid(server_uid)) or {}
+    records = server.get('protocols') or {}
+    selected = records if protocols is None else protocols
+    changed = 0
+    for proto in selected:
+        rec = records.get(proto)
+        link = warp_link(rec)
+        if not link:
+            continue
+        link['stale'] = reason
+        link['dataplane_ok'] = False
+        changed += 1
+    return changed
+
+
+def clear_warp_links_stale(state, server_uid, protocols=None):
+    """Снять метку устаревания с активных линков сервера.
+
+    Подтверждение dataplane_ok выставляется вызывающей стороной только после
+    реальной пробы; здесь сбрасывается исключительно ``stale``.
+    """
+    server = (state.get('servers') or {}).get(_norm_uid(server_uid)) or {}
+    records = server.get('protocols') or {}
+    selected = records if protocols is None else protocols
+    changed = 0
+    for proto in selected:
+        rec = records.get(proto)
+        link = warp_link(rec)
+        if not link:
+            continue
+        link['stale'] = None
+        changed += 1
+    return changed
 
 
 def exit_record(state, server_uid):

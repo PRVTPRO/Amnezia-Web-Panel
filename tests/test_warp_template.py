@@ -372,6 +372,55 @@ class WarpInstanceExitTemplateTests(unittest.TestCase):
         self.assertIn("srv_warp_in_use: 'srv_warp_in_use_err'", self.page)
         self.assertIn("alert(_('srv_warp_in_use_alert'))", self.page)
 
+    def test_modal_shows_localized_error_after_failed_link(self):
+        # Неудачный link оставляет repair_state.error без линка: модалка
+        # обязана показать «Ошибка» и причину, а не «Установлен».
+        start = self.page.index('function renderWarpInstanceModal()')
+        end = self.page.index('function openWarpInstanceModal', start)
+        block = self.page[start:end]
+        for token in (
+            "!inst.link_active && repair.state === 'error' && !!inst.last_error",
+            'badge-danger',
+            "_('srv_warp_state_error')",
+            "WARP_ERROR_KEYS[inst.last_error] || 'srv_warp_err_generic'",
+            'var(--danger',
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, block)
+        # Причина не должна дублироваться жёлтой строкой в деталях:
+        # предупреждение про last_error допустимо только вне ветки ошибки.
+        lines = block.splitlines()
+        for index, line in enumerate(lines):
+            if 'warnings.push' in line and 'last_error' in line:
+                context = '\n'.join(lines[max(0, index - 3):index + 1])
+                with self.subTest(warning=line.strip()):
+                    self.assertIn('!repairFailed', context)
+        # Новая ветка не ломает разбор inline-JS (полный node --check — в
+        # WarpTemplateJsSyntaxTests).
+        self.assertIn('function renderWarpInstanceModal()', inline_js(self.page))
+
+    def test_modal_shows_stale_badge_for_active_link(self):
+        # Активный, но устаревший линк обязан выглядеть как ошибка: красный
+        # бейдж и причина, без дублирования жёлтым предупреждением.
+        start = self.page.index('function renderWarpInstanceModal()')
+        end = self.page.index('function openWarpInstanceModal', start)
+        block = self.page[start:end]
+        for token in (
+            'const staleActive = !!(inst.link_active && inst.state_stale);',
+            "if (staleActive) {",
+            "_('srv_warp_state_error')",
+            "_('srv_warp_instance_stale')",
+            'var(--danger',
+            "if (inst.state_stale && !staleActive) warnings.push",
+            "[_('srv_warp_instance_stale'), yesNo(inst.state_stale)]",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, block)
+        # Ветка stale идёт до обычного бейджа и до repairFailed.
+        self.assertLess(block.index('if (staleActive)'),
+                        block.index('} else if (repairFailed)'))
+        self.assertIn('function renderWarpInstanceModal()', inline_js(self.page))
+
 
 class WarpTranslationsTests(unittest.TestCase):
     @classmethod
