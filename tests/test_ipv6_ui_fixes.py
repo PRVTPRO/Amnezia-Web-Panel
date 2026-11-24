@@ -414,6 +414,27 @@ SRV_WARP_NO_AWG_KEYS = {
 # Keys of later panels that were merged without registering them here; before
 # this set existed the frozen hash failed on an unchanged catalogue.
 }
+
+# WARP profile import from another panel server (hosts whose provider filters
+# TLS by SNI, so api.cloudflareclient.com is unreachable while the tunnel works).
+SRV_WARP_IMPORT_KEYS = {
+    'srv_warp_import', 'srv_warp_import_title', 'srv_warp_import_hint',
+    'srv_warp_import_no_sources', 'srv_warp_import_source',
+    'srv_warp_import_source_protocol', 'srv_warp_import_target',
+    'srv_warp_import_action',
+    'srv_warp_stage_source', 'srv_warp_stage_handshake',
+    'srv_warp_import_check', 'srv_warp_import_checking',
+    'srv_warp_import_no_usable', 'srv_warp_import_copy_hint',
+    'srv_warp_source_status_ready', 'srv_warp_source_status_can_register',
+    'srv_warp_source_status_blocked', 'srv_warp_source_status_unreachable',
+    'srv_warp_source_status_no_instance', 'srv_warp_source_status_unknown',
+    'srv_warp_err_api_unreachable',
+    'srv_warp_err_registered', 'srv_warp_err_protocol_unsupported',
+    'srv_warp_err_source_required', 'srv_warp_err_source_self',
+    'srv_warp_err_source_not_found', 'srv_warp_err_source_no_targets',
+    'srv_warp_err_source_unreachable', 'srv_warp_err_source_register',
+    'srv_warp_err_handshake', 'srv_warp_err_quota',
+}
 LATER_FEATURE_KEYS = {
     'exit_awg3', 'exit_awg3_hint',
     'max_connections_per_user_hint', 'max_connections_per_user_label',
@@ -698,6 +719,7 @@ class TestC6Translations(unittest.TestCase):
                                     - TORRENT_GUARD_KEYS
                                     - TORRENT_PLUGIN_KEYS
                                     - AWG_I1_KEYS - SRV_WARP_NO_AWG_KEYS
+                                    - SRV_WARP_IMPORT_KEYS
                                     - COPY_INSTANCE_KEYS - LATER_FEATURE_KEYS
                                     - RELEASE_1811_KEYS - USER_LIMIT_KEYS - TELEGRAM_ACCOUNT_KEYS
                                     - LIFECYCLE_FENCE_KEYS - STORAGE_KEYS

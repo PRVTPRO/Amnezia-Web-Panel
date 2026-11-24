@@ -63,6 +63,40 @@ SRV_WARP_KEYS = {
     'srv_warp_stage_profile',
     'srv_warp_stage_startsh',
     'srv_warp_stage_done',
+    'srv_warp_stage_source',
+    'srv_warp_stage_handshake',
+    # WARP profile import from another panel server (SNI-filtered hosts).
+    'srv_warp_import',
+    'srv_warp_import_title',
+    'srv_warp_import_hint',
+    'srv_warp_import_no_sources',
+    'srv_warp_import_source',
+    'srv_warp_import_source_protocol',
+    'srv_warp_import_target',
+    'srv_warp_import_action',
+    # Source capability check: tells the user which server can donate a
+    # profile and which one the provider blocks.
+    'srv_warp_import_check',
+    'srv_warp_import_checking',
+    'srv_warp_import_no_usable',
+    'srv_warp_import_copy_hint',
+    'srv_warp_source_status_ready',
+    'srv_warp_source_status_can_register',
+    'srv_warp_source_status_blocked',
+    'srv_warp_source_status_unreachable',
+    'srv_warp_source_status_no_instance',
+    'srv_warp_source_status_unknown',
+    'srv_warp_err_api_unreachable',
+    'srv_warp_err_registered',
+    'srv_warp_err_protocol_unsupported',
+    'srv_warp_err_source_required',
+    'srv_warp_err_source_self',
+    'srv_warp_err_source_not_found',
+    'srv_warp_err_source_no_targets',
+    'srv_warp_err_source_unreachable',
+    'srv_warp_err_source_register',
+    'srv_warp_err_handshake',
+    'srv_warp_err_quota',
 }
 
 WARP_STAGE_KEYS = {
@@ -72,6 +106,8 @@ WARP_STAGE_KEYS = {
     'srv_warp_stage_profile',
     'srv_warp_stage_startsh',
     'srv_warp_stage_done',
+    'srv_warp_stage_source',
+    'srv_warp_stage_handshake',
 }
 
 INLINE_SCRIPT_RE = re.compile(r'<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>', re.S)
@@ -153,10 +189,85 @@ class WarpTemplateRenderTests(unittest.TestCase):
         self.assertNotIn("openInstallModal('warp'", page)
 
 
+class WarpImportUiGlobalsTests(unittest.TestCase):
+    """Every handler the WARP markup calls must be declared on the same page."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.page = (ROOT / 'templates' / 'server.html').read_text(encoding='utf-8')
+
+    def test_warp_handlers_are_declared(self):
+        handlers = set(re.findall(r'on(?:click|change)="(\w+)\(', self.page))
+        warp_handlers = {name for name in handlers if 'arp' in name}
+        self.assertTrue(warp_handlers, 'no WARP handlers found in markup')
+        for name in sorted(warp_handlers):
+            self.assertIn('function %s' % name, self.page,
+                          '%s is called by markup but not declared' % name)
+
+    def test_the_source_check_is_wired_up(self):
+        self.assertIn('id="warp-import-check-btn"', self.page)
+        self.assertIn('function checkWarpImportSources', self.page)
+        self.assertIn('function renderWarpImportSources', self.page)
+        self.assertIn('function onWarpImportSourceChange', self.page)
+        # A failed install must be able to offer the import directly.
+        self.assertIn('id="installWarpCta"', self.page)
+        self.assertIn("'srv_warp_register_api_unreachable'", self.page)
+        # The old closure-based handler is gone: a dangling onchange callback
+        # throws a ReferenceError the moment the select changes.
+        self.assertNotIn('syncWarpImportForm', self.page)
+
+    def test_import_uses_the_import_stage_map(self):
+        # Scope to importWarp's body: installWarp legitimately renders the
+        # 'warp' map a few lines below, and must not be matched here.
+        match = re.search(r'async function importWarp\(\)(.*?)\n    async function ',
+                          self.page, re.S)
+        self.assertIsNotNone(match, 'importWarp body not found')
+        body = match.group(1)
+        self.assertIn("renderInstallOpProgress(res.operation_id, 'warp_import')",
+                      body)
+        self.assertNotIn("renderInstallOpProgress(res.operation_id, 'warp')",
+                         body)
+
+    def test_poller_prefers_the_flow_from_the_payload(self):
+        match = re.search(
+            r'async function pollInstallOp\(\)(.*?)\n    (?:async )?function ',
+            self.page, re.S)
+        self.assertIsNotNone(match, 'pollInstallOp body not found')
+        self.assertIn('if (data.flow) installOp.flow = data.flow;',
+                      match.group(1))
+
+    def test_the_import_stage_map_declares_source_and_handshake(self):
+        block = re.search(r'\n        warp_import: \{(.*?)\n        \}',
+                          self.page, re.S)
+        self.assertIsNotNone(block, 'warp_import stage map not found')
+        for entry in ("source: 'srv_warp_stage_source'",
+                      "handshake: 'srv_warp_stage_handshake'"):
+            self.assertIn(entry, block.group(1))
+
+
 class WarpStoreInstallTemplateTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.page = (ROOT / 'templates' / 'server.html').read_text(encoding='utf-8')
+
+    def test_warp_import_flow_is_handled_like_warp_everywhere(self):
+        """The import flow must not fall through the generic WARP branches.
+
+        A flow value the page does not recognise silently skips the terminal
+        handling: the card is never refreshed, `warpBusy` stays true and the
+        error code is printed raw instead of translated.
+        """
+        page = self.page
+        # Shared progress endpoint.
+        self.assertIn("installOp.flow === 'warp' || installOp.flow === 'warp_import'",
+                      page)
+        # Terminal handling (success and error) + busy reset.
+        self.assertIn("flow === 'warp' || flow === 'warp_import'", page)
+        # Stage translations for the import-only stages.
+        self.assertIn("source: 'srv_warp_stage_source'", page)
+        self.assertIn("handshake: 'srv_warp_stage_handshake'", page)
+        # The modal title must be the WARP one, not the protocol picker.
+        self.assertIn("isWarpFlow", page)
 
     def test_warp_card_is_not_forced_visible(self):
         self.assertNotIn("warpCard.classList.remove('installed-app-hidden')",
@@ -228,6 +339,12 @@ class WarpTranslationsTests(unittest.TestCase):
                 self.assertEqual(WARP_STAGE_KEYS - set(table), set())
 
     def test_every_mapped_error_code_has_a_translation(self):
+        """WARP_ERROR_KEYS values must resolve, or the UI prints the raw key.
+
+        Ten of these were mapped in the page while the catalogue had no such
+        entry, so the card showed `srv_warp_err_source_unreachable` instead of
+        a sentence.
+        """
         """A mapped value that is missing prints the raw key in the card."""
         page = (ROOT / 'templates' / 'server.html').read_text(encoding='utf-8')
         block = re.search(r'const WARP_ERROR_KEYS = \{(.*?)\};', page, re.S)
