@@ -246,7 +246,7 @@ for c in {containers_words}; do
   for p in {container_paths}; do copy_container_path "$c" "$p"; done
 done
 for root in "$work_dir/host" "$work_dir/container"; do
-  rm -rf "$root/opt/amnezia/awg/warp" "$root/opt/amnezia/exit/warp"
+  rm -rf "$root/opt/amnezia/awg/warp" "$root/opt/amnezia/exit/warp" "$root"/opt/amnezia/xray*/warp
   rm -f "$root/opt/amnezia/awg/"warp-link-*
 done
 for c in {containers_words}; do
