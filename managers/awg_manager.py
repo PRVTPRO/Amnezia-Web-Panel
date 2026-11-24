@@ -576,7 +576,7 @@ def warp_fix_saved_config(config_text, warp_ctx):
     # Saved configs may be CRLF (they are stored verbatim); Python's `$` in
     # MULTILINE mode stops before `\n`, leaving `\r` in the matched line.
     crlf = '\r\n' in config_text
-    text = config_text.replace('\r\n', '\n')
+    text = config_text.replace('\r\n', '\n').replace('\r', '\n')
     fixed = re.sub(r'(?m)^[ \t]*MTU[ \t]*=[ \t]*\d+[ \t]*$',
                    'MTU = %d' % budget, text)
     if 0 < budget < MIN_CLIENT_MTU:

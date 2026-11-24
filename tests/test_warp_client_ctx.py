@@ -261,6 +261,23 @@ class ClientConfigWarpCtxTests(unittest.TestCase):
         self.assertNotIn('::/0', narrow)
 
 
+    def test_saved_lone_cr_config_is_normalized(self):
+        mgr = FakeManager()
+        mgr.clients = [{
+            'clientId': 'peer',
+            'userData': {
+                'clientPrivateKey': 'priv',
+                'customConfig': '[Interface]\rAddress = 10.8.1.6/32\r'
+                                'MTU = 1220\r',
+            },
+        }]
+        config = mgr.get_client_config(
+            'awg', 'peer', '203.0.113.9', 55424, warp_ctx=WARP_CTX)
+        self.assertIn('MTU = 1280', config)
+        self.assertNotIn('MTU = 1220', config)
+        self.assertNotIn('\r', config)
+
+
 class SaveClientConfigBudgetTests(unittest.TestCase):
     def make_manager(self):
         mgr = FakeManager()
