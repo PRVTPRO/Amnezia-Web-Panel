@@ -1291,6 +1291,17 @@ a:hover {
     color: #38bdf8;
 }
 
+/* RKN Block и TorrentGuard — та же квадратная плитка, что у Exit Node:
+   .protocol-icon задаёт 56x56 со скруглением, здесь только фон.
+   flex: 0 0 auto обязателен: в flex-строке с длинным названием («Блокировка
+   РКН») иконка иначе сжималась в 37px и плитка переставала быть квадратом.
+   Один и тот же градиент по требованию владельца. */
+.protocol-rknblock .protocol-icon,
+.tp-grid-card .protocol-icon {
+    flex: 0 0 auto;
+    background: linear-gradient(135deg, rgb(145 0 255 / 31%), rgba(234, 179, 8, 0.1));
+}
+
 /* ============================================================
    Promo blocks — locked teasers for not-yet-shipped features.
    They live inside .protocol-cards (a CSS grid) and span every
