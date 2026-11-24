@@ -33,7 +33,7 @@ def make_manager(vlessenc_output, config=None):
     manager = XrayManager(ssh)
     manager._get_server_json = lambda: config
     uploads = []
-    ssh.upload_file_sudo = lambda content, path: uploads.append((content, path))
+    ssh.upload_file_sudo = lambda content, path, mode=None: uploads.append((content, path))
     manager.uploads = uploads
     manager.sudo = []
     real_sudo = ssh.run_sudo_command
@@ -89,7 +89,9 @@ class ToggleTests(unittest.TestCase):
         key_file = [path for _, path in manager.uploads
                     if path.endswith(VLESS_ENC_KEY_FILE)]
         self.assertEqual(key_file, [f'/opt/amnezia/xray/{VLESS_ENC_KEY_FILE}'])
-        self.assertTrue(any('docker restart' in cmd for cmd in manager.sudo))
+        # the core is stopped and started again (and watched until it is back)
+        self.assertTrue(any(cmd.startswith('docker stop ') for cmd in manager.sudo))
+        self.assertTrue(any(cmd.startswith('docker start ') for cmd in manager.sudo))
 
     def test_enable_requires_the_xhttp_transport(self):
         config = json.loads(json.dumps(XHTTP_CONFIG))

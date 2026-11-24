@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import app as panel
+from managers.xray_manager import XrayConfigRejected, XrayManager
 
 CONFIG = json.dumps({
     'log': {'loglevel': 'error'},
@@ -87,11 +88,13 @@ class CounterPreservingApplyTests(unittest.IsolatedAsyncioTestCase):
             result = await self.call()
 
         self.assertEqual(result, {'status': 'success'})
-        # The new config was written and applied (restart included): the
+        # The new config was written and applied (the core restarted): the
         # write path builds a real XrayManager, so assert via its SSH calls.
-        restarts = [str(c) for c in self.ssh.run_sudo_command.call_args_list
-                    if 'docker restart' in str(c)]
-        self.assertTrue(restarts, 'the core must be restarted')
+        commands = [str(c) for c in self.ssh.run_sudo_command.call_args_list]
+        self.assertTrue(any('docker stop ' in c for c in commands),
+                        'the core must be stopped')
+        self.assertTrue(any('docker start ' in c for c in commands),
+                        'the core must be started again')
         self.assertTrue(any('8443' in str(c)
                             for c in self.ssh.upload_file_sudo.call_args_list))
         # The owned peer's counters were finalized against its baseline
@@ -102,6 +105,20 @@ class CounterPreservingApplyTests(unittest.IsolatedAsyncioTestCase):
         # The restarted core reports zero counters: baselines moved to zero.
         final = self.saved[-1]['user_connections'][0]
         self.assertEqual(final['last_bytes'], 0)
+
+    async def test_a_config_the_core_refuses_is_a_bad_request(self):
+        # Nothing is applied and the core is not restarted, so the
+        # finalized counters keep their baselines.
+        with patch.object(panel, 'read_peer_state', return_value=(120, False)), \
+             patch.object(XrayManager, '_save_server_json', side_effect=XrayConfigRejected(
+                 'Xray rejected the configuration: boom')):
+            result = await self.call()
+
+        self.assertEqual(result.status_code, 400)
+        self.assertIn('boom', json.loads(result.body)['error'])
+        self.assertEqual(self.saved[-1]['user_connections'][0]['last_bytes'], 120)
+        self.assertFalse(any('docker sto' in str(c) or 'docker start ' in str(c)
+                             for c in self.ssh.run_sudo_command.call_args_list))
 
     async def test_absent_peer_is_rebased_without_a_final_sample(self):
         with patch.object(panel, 'read_peer_state', return_value=(None, True)):

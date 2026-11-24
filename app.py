@@ -74,6 +74,7 @@ from managers.awg_plugin_updater import (
     stage_step as awg_plugin_stage_step,
 )
 from managers.xray_manager import (
+    XrayConfigRejected,
     XrayManager,
     XRAY_DEFAULT_FINGERPRINT,
     XRAY_FINGERPRINTS,
@@ -14150,6 +14151,11 @@ def api_server_config_save(request: Request, server_id: int, req: ServerConfigSa
                 mgr.save_server_config(req.protocol, req.config)
         _invalidate_ip_status(server.get('uid'))
         return {'status': 'success'}
+    except XrayConfigRejected as e:
+        # The core refused the submitted configuration; nothing on the
+        # server changed, so this is not a server fault.
+        logger.warning("Xray rejected the configuration for server %s: %s", server_id, e)
+        return JSONResponse({'error': str(e)}, status_code=400)
     except SrvWarpError:
         raise
     except Exception as e:

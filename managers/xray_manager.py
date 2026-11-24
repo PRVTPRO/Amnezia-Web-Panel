@@ -111,6 +111,39 @@ VLESS_ENC_KEY_FILE = 'xray_vlessenc.key'
 # (field-tested; see the 2026 censorship-research synthesis).
 XRAY_DEFAULT_FINGERPRINT = 'firefox'
 
+# ---- safe configuration apply --------------------------------------------
+# server.json carries the Reality private key and the VLESS Encryption
+# secret: it is staged and stored readable by root only.
+CONFIG_MODE = 0o600
+# How the throwaway validation container sees a staged candidate.
+_CANDIDATE = '/tmp/.server.json.candidate'
+# What a core container is granted; the validation container gets the same,
+# so that it can prove exactly what a start of the real one would do.
+PRIVILEGES = '--privileged --cap-add=NET_ADMIN'
+# Restart verification: one poll per second; the core counts as back after
+# START_STABLE consecutive "running" polls with an unmoved restart counter.
+START_POLLS = 6
+START_STABLE = 2
+_CRASH_STATES = ('restarting', 'exited', 'dead', 'removing')
+
+
+class XrayConfigRejected(RuntimeError):
+    """The core cannot build a configuration; nothing was changed."""
+
+
+class XrayStartError(RuntimeError):
+    """The core did not come back after its container was restarted."""
+
+
+def _core_verdict(text, limit=400):
+    """The core's own last word from `xray run -test` output or the
+    container log: the line that says why it refused to start."""
+    lines = [line.strip() for line in (text or '').splitlines() if line.strip()]
+    for line in reversed(lines):
+        if 'Failed to start' in line:
+            return line[-limit:]
+    return lines[-1][-limit:] if lines else 'no error output'
+
 class XrayManager:
     """Manages Xray (VLESS-Reality) protocol installation and client management."""
     
@@ -446,8 +479,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         bind = f"{ingress_ip}:" if ingress_ip else ""
         return f"""docker run -d \\
 --restart always \\
---privileged \\
---cap-add=NET_ADMIN \\
+{PRIVILEGES} \\
 -p {bind}{port}:{port}/tcp \\
 -p {bind}{port}:{port}/udp \\
 -v {self._config_dir()}:{self._config_dir()} \\
@@ -625,12 +657,16 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         }
         
         self.ssh.run_sudo_command(f"mkdir -p {config_dir}")
-        self.ssh.upload_file_sudo(json.dumps(server_json, indent=2), f"{config_dir}/server.json")
+        # server.json carries the Reality private key, and the key file is
+        # the key itself: root-only from the moment they land.
+        self.ssh.upload_file_sudo(json.dumps(server_json, indent=2),
+                                  f"{config_dir}/server.json", mode=CONFIG_MODE)
         # Native layout — separate key files matching the official Amnezia client install.
         # Everything lands in THIS instance's config_dir: a second instance
         # (xray__2 -> /opt/amnezia/xray-2) must not share the base keys.
         # See client/server_scripts/xray/configure_container.sh for the canonical layout.
-        self.ssh.upload_file_sudo(priv_key + '\n', f"{config_dir}/xray_private.key")
+        self.ssh.upload_file_sudo(priv_key + '\n', f"{config_dir}/xray_private.key",
+                                  mode=CONFIG_MODE)
         self.ssh.upload_file_sudo(pub_key + '\n', f"{config_dir}/xray_public.key")
         self.ssh.upload_file_sudo(short_id + '\n', f"{config_dir}/xray_short_id.key")
         # xray_uuid.key marks the install-time "default" client whose ID gets skipped on
@@ -645,6 +681,9 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         results.append("Applying host network tuning (BBR)...")
         AWGManager(self.ssh).setup_host_tuning()
         results.append("Host network tuning applied")
+
+        results.append("Checking the configuration with the core...")
+        self._prove_config(f"{config_dir}/server.json")
 
         results.append("Starting container...")
         run_cmd = self._container_run_cmd(port, ingress_ip)
@@ -708,19 +747,160 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
     def _save_server_json(self, data):
         return self._write_server_json(data, restart=True)
 
+    def _stage_config(self, text):
+        """Put `text` beside the live server.json as a private staging file
+        (mode 600, unique name). Nothing is replaced yet."""
+        stage = f'{self._config_dir()}/.server.json.{uuid.uuid4().hex}.tmp'
+        self.ssh.upload_file_sudo(text, stage, mode=CONFIG_MODE)
+        return stage
+
+    def _config_test_command(self, host_file):
+        """`xray run -test` for a config file, in a throwaway container built
+        from the live image with the live privileges and config directory.
+        Its own network namespace makes the proof match what a start of the
+        real container would do, and lets a kernel-tun outbound be built
+        without colliding with the running core."""
+        return (
+            f'docker run --rm {PRIVILEGES} '
+            f'-v {shlex.quote(self._config_dir())}:{shlex.quote(self._config_dir())}:ro '
+            f'-v {shlex.quote(host_file)}:{_CANDIDATE}:ro '
+            f'--entrypoint="" {self.image_name} '
+            f'/usr/bin/xray run -test -c {_CANDIDATE}')
+
+    def _prove_config(self, host_file):
+        """Refuse a configuration the core cannot build, before anything
+        live is touched. `xray run -test` reports a build failure on
+        stdout and exits with a code of its own."""
+        out, err, code = self.ssh.run_sudo_command(self._config_test_command(host_file))
+        if code != 0:
+            raise XrayConfigRejected(
+                'Xray rejected the configuration: '
+                + _core_verdict((err or '') + '\n' + (out or '')))
+
+    def _config_dir_mounted(self):
+        """Whether the container reads its config from the host directory
+        (every container the panel creates does)."""
+        out, _, code = self.ssh.run_sudo_command(
+            f"docker inspect -f '{{{{range .Mounts}}}}{{{{.Destination}}}}"
+            f"{{{{println}}}}{{{{end}}}}' {shlex.quote(self.container_name)} 2>/dev/null")
+        return code == 0 and self._config_dir() in (out or '').split()
+
+    def _commit_config(self, stage):
+        """Move the staged file over the live one with a rename, so a failed
+        write can never leave a truncated config behind."""
+        try:
+            if not self._config_dir_mounted():
+                # A container keeping its own copy needs it updated as well.
+                out, err, code = self.ssh.run_sudo_command(
+                    f'docker cp -- {shlex.quote(stage)} '
+                    f'{shlex.quote(self.container_name + ":" + self._config_path())}')
+                if code != 0:
+                    raise RuntimeError(
+                        'Could not copy the configuration into the container: '
+                        + ((err or out or '').strip() or f'exit code {code}'))
+            _, err, code = self.ssh.run_sudo_command(
+                f'mv -f -- {shlex.quote(stage)} {shlex.quote(self._config_path())}')
+            if code != 0:
+                raise RuntimeError(
+                    'Could not install the new configuration: '
+                    + ((err or '').strip() or f'exit code {code}'))
+        except Exception:
+            self.ssh.run_sudo_command(f'rm -f -- {shlex.quote(stage)}')
+            raise
+
+    def _read_config_text(self):
+        out, _, code = self.ssh.run_sudo_command(
+            f'cat {shlex.quote(self._config_path())} 2>/dev/null')
+        return out if code == 0 and (out or '').strip() else None
+
+    def _container_state(self):
+        """(status, restart count) of the container, or (None, None) when
+        docker reports nothing."""
+        out, _, code = self.ssh.run_sudo_command(
+            f"docker inspect -f '{{{{.State.Status}}}} {{{{.RestartCount}}}}' "
+            f"{shlex.quote(self.container_name)} 2>/dev/null")
+        parts = (out or '').split()
+        if code != 0 or len(parts) != 2 or not parts[1].isdigit():
+            return None, None
+        return parts[0], int(parts[1])
+
+    def _restart_core(self):
+        """Stop the container, start it again and make sure the core came
+        back. A config the core cannot start makes the container crash-loop
+        under --restart always, so "running" alone proves nothing: the
+        restart counter has to stay put as well. An explicit stop also
+        breaks a crash-loop the instance may already be in, which is the
+        state it is in when a broken config gets fixed."""
+        self.ssh.run_sudo_command(f'docker stop {shlex.quote(self.container_name)}')
+        status, seen = self._container_state()
+        if status in ('running', 'paused', 'restarting'):
+            raise RuntimeError(
+                'Could not stop the Xray container: the new configuration is '
+                'saved and takes effect at the next start')
+        _, err, code = self.ssh.run_sudo_command(
+            f'docker start {shlex.quote(self.container_name)}')
+        if code != 0:
+            raise RuntimeError(
+                'Could not start the Xray container ('
+                + ((err or '').strip() or f'exit code {code}')
+                + '): the new configuration stays on disk')
+        stable = 0
+        for _ in range(START_POLLS):
+            self.ssh.run_sudo_command('sleep 1')
+            status, count = self._container_state()
+            if status is None:
+                return  # docker reports no state: nothing to verify against
+            if (status in _CRASH_STATES
+                    or (count is not None and seen is not None and count > seen)):
+                out, _, _ = self.ssh.run_sudo_command(
+                    f'docker logs --tail 30 {shlex.quote(self.container_name)} 2>&1')
+                raise XrayStartError(
+                    'Xray did not come back (' + _core_verdict(out) + ')')
+            seen = count if count is not None else seen
+            stable = stable + 1 if status == 'running' else 0
+            if stable >= START_STABLE:
+                return
+        raise XrayStartError('Xray did not come back (still starting)')
+
+    def _restore_config(self, text):
+        """Put back a configuration that was running a moment ago - it needs
+        no proof - and bring the core up on it."""
+        self._commit_config(self._stage_config(text))
+        self._restart_core()
+
     def _write_server_json(self, data, restart=True):
-        """Write server.json into container via docker cp AND sync to host path."""
-        tmp_file = "/tmp/_xray_server.json"
-        self.ssh.upload_file_sudo(json.dumps(data, indent=2), tmp_file)
-        self.ssh.run_sudo_command(
-            f"docker cp {tmp_file} {self.container_name}:{self._config_path()}"
-        )
-        # Also keep host copy in sync (handles both volume-mount and no-mount installs)
-        self.ssh.run_sudo_command(
-            f"cp {tmp_file} {self._config_path()} 2>/dev/null || true"
-        )
-        if restart:
-            self.ssh.run_sudo_command(f"docker restart {self.container_name}")
+        """Apply a new server.json without ever leaving the instance worse
+        off. The candidate is staged as a private file, proven against the
+        core with `xray run -test`, renamed over the live file and - when
+        the core must restart - watched until it is back. A core that does
+        not come back gets the previous configuration restored before the
+        error surfaces."""
+        stage = self._stage_config(json.dumps(data, indent=2))
+        try:
+            self._prove_config(stage)
+        except Exception:
+            self.ssh.run_sudo_command(f'rm -f -- {shlex.quote(stage)}')
+            raise
+        # A core that was down before the write has nothing to fall back
+        # to: the config being replaced is the broken one.
+        was_running = self._container_state()[0] if restart else None
+        previous = self._read_config_text() if restart else None
+        self._commit_config(stage)
+        if not restart:
+            return
+        try:
+            self._restart_core()
+        except XrayStartError as exc:
+            detail = str(exc)
+            if was_running in (None, 'running') and previous is not None:
+                try:
+                    self._restore_config(previous)
+                except XrayStartError as restore_exc:
+                    raise RuntimeError(
+                        'Xray came back with neither the new nor the previous '
+                        'configuration (' + str(restore_exc) + ')') from exc
+                detail += '; the previous configuration was restored and is running'
+            raise RuntimeError(detail) from exc
 
     def _get_vless_inbound(self, config):
         for inbound in config.get('inbounds', []):
@@ -872,7 +1052,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         self.ssh.upload_file_sudo(
             json.dumps({'decryption': decryption,
                         'encryption': encryption}, indent=2),
-            f"{self._config_dir()}/{VLESS_ENC_KEY_FILE}")
+            f"{self._config_dir()}/{VLESS_ENC_KEY_FILE}", mode=CONFIG_MODE)
 
     def _get_clients_table(self, strict=False):
         """Read clientsTable, trying both layout filenames.
@@ -1046,7 +1226,13 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
                 raise RuntimeError('Xray live config is unavailable')
             return []
 
-        self._upgrade_config_for_stats(config, restart=False)
+        try:
+            self._upgrade_config_for_stats(config, restart=False)
+        except Exception:
+            # A read must not fail on the write side: the in-memory config
+            # is upgraded either way, and the next real change reports why
+            # the file could not be persisted.
+            logger.warning("Xray config upgrade could not be persisted", exc_info=True)
 
         # Collect all client IDs currently registered in the Xray server config
         xray_clients = []
@@ -1332,6 +1518,23 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         self._write_server_json(config, restart=True)
         return {'dest': dest, 'sni': domain, 'network': stream.get('network', 'tcp')}
 
+    def _persist_clients_change(self, config, added=(), removed=()):
+        """Write the config after a hot client change made through the
+        runtime API. Should the write fail, the live change is taken back
+        so the running core and the config file stay in step."""
+        try:
+            self._write_server_json(config, restart=False)
+        except Exception:
+            for client in added:
+                if not self._xray_api_remove_user(config, client['id']):
+                    logger.warning("Xray client %s stays live after a failed config write",
+                                   client['id'][:8])
+            for client in removed:
+                if not self._xray_api_add_user(config, client):
+                    logger.warning("Xray client %s stays disabled after a failed config write",
+                                   client['id'][:8])
+            raise
+
     @_serialized_table_write
     def add_client(self, protocol, client_name, server_host, port, public_port=None,
                    warp_ctx=None, fingerprint=None):
@@ -1360,7 +1563,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
                 "Restart the Xray container manually and try again."
             )
         clients_node.append(client)
-        self._write_server_json(config, restart=False)
+        self._persist_clients_change(config, added=[client])
 
         # Update table
         clients_table = self._get_clients_table(strict=True)
@@ -1388,6 +1591,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         if not inbound:
             raise RuntimeError("Xray VLESS inbound not found.")
         clients_node = inbound.setdefault('settings', {}).setdefault('clients', [])
+        added, removed = [], []
 
         # If toggling on and not present, we can re-add it from clientsTable
         if enable:
@@ -1400,12 +1604,14 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
                 if not self._xray_api_add_user(config, client):
                     raise RuntimeError("Xray runtime API failed to enable the client without restarting the container.")
                 clients_node.append(client)
+                added.append(client)
         else:
             if not self._xray_api_remove_user(config, client_id):
                 raise RuntimeError("Xray runtime API failed to disable the client without restarting the container.")
+            removed = [c for c in clients_node if c['id'] == client_id]
             inbound['settings']['clients'] = [c for c in clients_node if c['id'] != client_id]
 
-        self._write_server_json(config, restart=False)
+        self._persist_clients_change(config, added, removed)
 
         clients_table = self._get_clients_table(strict=True)
         for c in clients_table:
@@ -1421,10 +1627,11 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         if not inbound:
             raise RuntimeError("Xray VLESS inbound not found.")
         clients_node = inbound.setdefault('settings', {}).setdefault('clients', [])
+        removed = [c for c in clients_node if c['id'] == client_id]
         if not self._xray_api_remove_user(config, client_id):
             raise RuntimeError("Xray runtime API failed to remove the client without restarting the container.")
         inbound['settings']['clients'] = [c for c in clients_node if c['id'] != client_id]
-        self._write_server_json(config, restart=False)
+        self._persist_clients_change(config, removed=removed)
 
         clients_table = self._get_clients_table(strict=True)
         clients_table = [c for c in clients_table if c['clientId'] != client_id]
