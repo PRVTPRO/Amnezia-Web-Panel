@@ -477,6 +477,18 @@ LIFECYCLE_FENCE_KEYS = {
     'lifecycle_fence_since',
 }
 
+# Self-service deletion (#402): declared here so the frozen catalogue hash
+# keeps guarding the original keys.
+SELF_SERVICE_DELETE_KEYS = {
+    'self_service_delete_counter_unavailable',
+    'self_service_delete_unavailable',
+    'self_service_delete_ssh_failed',
+    'self_service_delete_busy',
+    'self_service_delete_restore_required',
+    'self_service_delete_link_disappeared',
+    'self_service_delete_not_found',
+}
+
 SECURITY_SETUP_KEYS = {
     'setup_title', 'setup_password_confirm', 'setup_submit', 'setup_creating',
     'setup_error', 'setup_username_invalid', 'setup_password_short',
@@ -691,6 +703,7 @@ class TestC6Translations(unittest.TestCase):
                                     - LIFECYCLE_FENCE_KEYS - STORAGE_KEYS
                                     - SUBSCRIPTION_KEYS - CLOSE_KEYS
                                     - SSH_HELP_KEYS - SMARTROUTE_TIMER_KEYS
+                                    - SELF_SERVICE_DELETE_KEYS
                                     - IPV4_POLICY_KEYS - PROXY_KEYS))
         self.assertEqual(hashlib.sha256(previous.encode('utf-8')).hexdigest(),
                          PRE_PANEL_ACCESS_KEYS_SHA256,
@@ -702,7 +715,8 @@ class TestC6Translations(unittest.TestCase):
             for key in (NEW_KEYS | PANEL_ACCESS_KEYS | PROTOCOL_UNINSTALL_KEYS
                         | TORRENT_GUARD_KEYS | TORRENT_PLUGIN_KEYS | AWG_I1_KEYS | USER_LIMIT_KEYS | TELEGRAM_ACCOUNT_KEYS
                         | LIFECYCLE_FENCE_KEYS | SUBSCRIPTION_KEYS | CLOSE_KEYS
-                        | SMARTROUTE_TIMER_KEYS | IPV4_POLICY_KEYS | PROXY_KEYS):
+                        | SMARTROUTE_TIMER_KEYS | IPV4_POLICY_KEYS
+                        | SELF_SERVICE_DELETE_KEYS | PROXY_KEYS):
                 self.assertIn(key, data)
                 self.assertTrue(str(data[key]).strip(), "%s empty in %s" % (key, locale))
 

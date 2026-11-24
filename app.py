@@ -2893,6 +2893,143 @@ peer_creates = PeerCreateService(
 )
 
 
+async def _finalize_and_remove_peer(server, protocol, client_id, *, actor, kind,
+                                    server_id, allow_unverified=False,
+                                    owner_user_id=None):
+    """Remove one peer and settle its last observable traffic counters.
+
+    Shared by the admin removal endpoint and by self-service deletion, so both
+    paths use the same finalization instead of a second implementation. Order
+    matters and is the whole point of this helper:
+
+    * SSH (connect, read the final counter, remove the peer) runs strictly
+      outside ``DATA_LOCK`` — a slow remote host must not block data writes;
+    * only the reload -> finalize -> commit window is taken under the lock.
+
+    ``owner_user_id`` narrows the ownership record: a user deleting their own
+    connection must never settle somebody else's counters, while an admin
+    removal keeps working on the physical peer scope.
+
+    Every refusal raises ``FinalizationError`` with a stable ``.code``; the
+    callers map it to their own response body.
+    """
+    data = load_data()
+    if server_id is None or server_id < 0 or server_id >= len(data.get('servers', [])):
+        raise FinalizationError('server_not_found', 'Server not found')
+
+    conn = find_connection(data, server_id, protocol, client_id,
+                           user_id=owner_user_id)
+    if conn is None:
+        if owner_user_id is not None:
+            # A self-service caller must never fall back to raw removal: the row
+            # it owns vanished between the ownership check and this lookup (an
+            # admin removal or an unlink won the race), and another user's row
+            # may share the physical peer. Raw removal would drop that peer
+            # without settling the other row.
+            raise FinalizationError('connection_link_disappeared',
+                                    'Connection link disappeared during removal')
+        # An unowned peer has no baselines to settle: remove it raw. The panel
+        # keeps no accounting record for it, so there is nothing to lose.
+        ssh = None
+        try:
+            ssh = get_ssh(server)
+            await asyncio.to_thread(ssh.connect)
+            manager = get_protocol_manager(ssh, protocol)
+            await asyncio.to_thread(_manager_call, manager, 'remove_client',
+                                    protocol, client_id)
+        finally:
+            if ssh:
+                try:
+                    ssh.disconnect()
+                except Exception:
+                    pass
+        _invalidate_ip_status(server.get('uid'))
+        return {'status': 'success', 'finalized': False}
+
+    scope = connection_scope(conn, server)
+    intent = make_intent(scope, 'remove')
+    operation_id = uuid.uuid4().hex
+
+    observed_bytes = None
+    quiescent = False
+    ssh = None
+    try:
+        ssh = get_ssh(server)
+        await asyncio.to_thread(ssh.connect)
+        manager = get_protocol_manager(ssh, protocol)
+        observed_bytes, quiescent = await asyncio.to_thread(
+            read_peer_state, manager, protocol, client_id)
+
+        if observed_bytes is None and not quiescent and not allow_unverified:
+            # The only remaining fail-closed case: the last counter is unknown
+            # on a peer that can still forward traffic.
+            raise FinalizationError('final_counter_read_failed',
+                                    'Could not read the final traffic counter.',
+                                    can_force=True)
+
+        await asyncio.to_thread(_manager_call, manager, 'remove_client',
+                               protocol, client_id)
+    except FinalizationError:
+        raise
+    except Exception as exc:
+        logger.exception("Error during peer removal SSH")
+        raise FinalizationError('removal_ssh_failed', str(exc)) from None
+    finally:
+        if ssh:
+            try:
+                ssh.disconnect()
+            except Exception:
+                pass
+
+    async with DATA_LOCK:
+        before = pathlib_read_data_bytes() if os.path.exists(DATA_FILE) else b''
+        data = load_data()
+        if server_id is None or server_id < 0 or server_id >= len(data.get('servers', [])):
+            raise FinalizationError('server_not_found', 'Server not found')
+        server_now = data['servers'][server_id]
+        conn = find_connection(data, server_id, protocol, client_id,
+                               user_id=owner_user_id)
+        if conn is None:
+            raise FinalizationError('connection_link_disappeared',
+                                    'Connection link disappeared during removal')
+        mode = 'delete_unverified' if observed_bytes is None else 'delete_finalized'
+        accounting = finalize_connection_record(
+            data, conn, server_now, observed_bytes, time.time(), mode,
+            operation_id, quiescent)
+        result = await asyncio.to_thread(
+            commit_finalize, DATA_FILE, operation_id, actor, kind, intent,
+            before, data)
+        result['accounting'] = accounting
+        result['finalized'] = True
+        _invalidate_ip_status(server_now.get('uid'))
+        return result
+
+
+def _finalization_error_response(exc):
+    """Admin-facing body for a refused peer removal (unchanged contract)."""
+    if exc.code == 'removal_ssh_failed':
+        return JSONResponse({'error': str(exc), 'code': 'removal_ssh_failed'},
+                            status_code=502)
+    if exc.code == 'connection_link_disappeared':
+        return JSONResponse({'error': str(exc)}, status_code=409)
+    return JSONResponse({'error': str(exc), 'code': exc.code,
+                         'can_force': exc.can_force}, status_code=409)
+
+
+async def _self_service_finalize_peer(server, protocol, client_id, *, actor, kind,
+                                      server_id, allow_unverified=False,
+                                      owner_user_id=None):
+    """Late-bound adapter injected into ConnectionService.
+
+    Resolved on every call so patching the panel helpers (tests, hot fixes)
+    keeps working, and so self-service and admin removal cannot drift apart.
+    """
+    return await _finalize_and_remove_peer(
+        server, protocol, client_id, actor=actor, kind=kind,
+        server_id=server_id, allow_unverified=allow_unverified,
+        owner_user_id=owner_user_id)
+
+
 self_service_connections = ConnectionService(
     load_data=load_data,
     save_data=save_data,
@@ -2902,6 +3039,7 @@ self_service_connections = ConnectionService(
     manager_call=_manager_call,
     generate_vpn_link=generate_vpn_link,
     protocol_public_endpoint=protocol_public_endpoint,
+    finalize_peer=_self_service_finalize_peer,
 )
 
 
@@ -2964,14 +3102,53 @@ warp_runtime = WarpRuntime(
 )
 
 
-def _self_service_error_response(exc):
+def _self_service_error_response(exc, lang='en'):
     if isinstance(exc, RateLimitError):
         return JSONResponse({'error': str(exc)}, status_code=429)
     if isinstance(exc, SelfServiceError):
+        code = getattr(exc, 'code', None)
         body = {'error': str(exc)}
-        if getattr(exc, 'code', None):
-            body['code'] = exc.code
+        if code:
+            body['code'] = code
+        # The web is the untrusted side: never echo an exception whose text may
+        # carry SSH output, host names or paths. Keep the stable code and
+        # localize the human-readable part instead.
+        if code in ('self_service_unavailable', 'removal_ssh_failed'):
+            body['error'] = _t('self_service_delete_unavailable', lang)
+        elif code in ('connection_not_found', 'server_not_found'):
+            body['error'] = _t('self_service_delete_not_found', lang)
         return JSONResponse(body, status_code=exc.status_code)
+    # A finalization refusal is a real, actionable answer, not an outage: keep
+    # the machine code so the UI can explain it instead of a generic 500.
+    if isinstance(exc, FinalizationError):
+        body = {'error': str(exc), 'code': exc.code}
+        status_code = 409
+        if exc.code == 'final_counter_read_failed':
+            # The only remaining fail-closed case: nothing was removed, the
+            # user just needs to retry or ask an administrator.
+            body['error'] = _t('self_service_delete_counter_unavailable', lang)
+        elif exc.code == 'removal_ssh_failed':
+            # Same status as the admin path; the remote text stays server-side.
+            body['error'] = _t('self_service_delete_ssh_failed', lang)
+            status_code = 502
+        elif exc.code == 'connection_link_disappeared':
+            # The row changed under us: nothing to settle, nothing removed.
+            body['error'] = _t('self_service_delete_link_disappeared', lang)
+        elif exc.code in ('server_not_found', 'connection_not_found'):
+            body['error'] = _t('self_service_delete_not_found', lang)
+            status_code = 404
+        return JSONResponse(body, status_code=status_code)
+    if isinstance(exc, peer_lifecycle_lock.PeerLifecycleBusy):
+        return JSONResponse({
+            'error': _t('self_service_delete_busy', lang),
+            'code': 'peer_lifecycle_busy',
+        }, status_code=409)
+    if isinstance(exc, peer_lifecycle_lock.PeerLifecycleUncertain):
+        # The SSH result is unknown: nothing was deleted, an operator must look.
+        return JSONResponse({
+            'error': _t('self_service_delete_restore_required', lang),
+            'code': 'peer_lifecycle_uncertain',
+        }, status_code=503)
     logger.exception("Unexpected self-service error")
     return JSONResponse({'error': 'Internal server error'}, status_code=500)
 
@@ -13997,75 +14174,13 @@ async def api_remove_connection(request: Request, server_id: int, req: Connectio
             return JSONResponse({'error': 'Client ID is required'}, status_code=400)
 
         actor = _actor_id(request, admin)
-        operation_id = uuid.uuid4().hex
-
-        # An owned peer must be finalized; an unowned peer can be removed raw.
-        conn = find_connection(data, server_id, req.protocol, req.client_id)
-        if conn is None:
-            ssh = get_ssh(server)
-            await asyncio.to_thread(ssh.connect)
-            manager = get_protocol_manager(ssh, req.protocol)
-            await asyncio.to_thread(_manager_call, manager, 'remove_client',
-                                    req.protocol, req.client_id)
-            ssh.disconnect()
-            _invalidate_ip_status(server.get('uid'))
-            return {'status': 'success', 'finalized': False}
-
-        scope = connection_scope(conn, server)
-        kind = 'peer_remove'
-        intent = make_intent(scope, 'remove')
-
-        observed_bytes = None
-        quiescent = False
-        ssh = None
         try:
-            ssh = get_ssh(server)
-            await asyncio.to_thread(ssh.connect)
-            manager = get_protocol_manager(ssh, req.protocol)
-            observed_bytes, quiescent = await asyncio.to_thread(
-                read_peer_state, manager, req.protocol, req.client_id)
-
-            if observed_bytes is None and not quiescent and not req.allow_unverified:
-                return JSONResponse({
-                    'error': 'Could not read the final traffic counter.',
-                    'code': 'final_counter_read_failed',
-                    'can_force': True,
-                }, status_code=409)
-
-            await asyncio.to_thread(_manager_call, manager, 'remove_client',
-                                    req.protocol, req.client_id)
+            return await _finalize_and_remove_peer(
+                server, req.protocol, req.client_id, actor=actor,
+                kind='peer_remove', server_id=server_id,
+                allow_unverified=req.allow_unverified)
         except FinalizationError as exc:
-            return JSONResponse({'error': str(exc), 'code': exc.code,
-                                 'can_force': exc.can_force}, status_code=409)
-        except Exception as exc:
-            logger.exception("Error during peer removal SSH")
-            return JSONResponse({'error': str(exc), 'code': 'removal_ssh_failed'},
-                                status_code=502)
-        finally:
-            if ssh:
-                try:
-                    ssh.disconnect()
-                except Exception:
-                    pass
-
-        async with DATA_LOCK:
-            before = pathlib_read_data_bytes() if os.path.exists(DATA_FILE) else b''
-            data = load_data()
-            conn = find_connection(data, server_id, req.protocol, req.client_id)
-            if conn is None:
-                return JSONResponse({'error': 'Connection link disappeared during removal'},
-                                    status_code=409)
-            mode = 'delete_unverified' if observed_bytes is None else 'delete_finalized'
-            accounting = finalize_connection_record(
-                data, conn, server, observed_bytes, time.time(), mode,
-                operation_id, quiescent)
-            result = await asyncio.to_thread(
-                commit_finalize, DATA_FILE, operation_id, actor, kind, intent,
-                before, data)
-            result['accounting'] = accounting
-            result['finalized'] = True
-            _invalidate_ip_status(data['servers'][server_id].get('uid'))
-            return result
+            return _finalization_error_response(exc)
     except Exception as e:
         logger.exception("Error removing connection")
         return JSONResponse({'error': str(e)}, status_code=500)
@@ -15341,7 +15456,7 @@ async def api_my_connection_delete(request: Request, connection_id: str):
     try:
         return await self_service_connections.delete_user_connection(user['id'], connection_id, 'web')
     except Exception as exc:
-        return _self_service_error_response(exc)
+        return _self_service_error_response(exc, request.cookies.get('lang', 'en'))
 
 
 @app.post('/api/users/{user_id}/share/setup', tags=["Users"])
