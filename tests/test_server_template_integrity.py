@@ -161,6 +161,25 @@ class TestServerTemplateIntegrity(unittest.TestCase):
             missing = [key for key in keys if key not in data]
             self.assertEqual(missing, [], '%s misses %s' % (lang, missing))
 
+    def test_vpn_card_grid_names_the_instance_as_container(self):
+        """VPN-карточка показывает ключ инстанса (awg3__2): без него не видно,
+        какой контейнер на карточке. Сервисные карточки поле не получают."""
+        source = SERVER_TEMPLATE.read_text(encoding="utf-8")
+        card_start = source.index("function updateProtocolCard(")
+        block_start = source.index("let grid = '';", card_start)
+        block_end = source.index("if (!isService && info.clients_count", block_start)
+        block = source[block_start:block_end]
+        self.assertIn("grid = buildServiceInfoGrid(proto, info);", block)
+        # поле живёт в не-сервисной ветке и рядом с портом
+        self.assertIn("} else {\n                    if (info.port) {", block)
+        self.assertIn("${_('container')}", block)
+        self.assertIn("${escapeHtml(proto)}", block)
+
+        import json as _json
+        for lang in ('en', 'ru', 'fr', 'zh', 'fa'):
+            data = _json.loads((ROOT / 'translations' / ('%s.json' % lang)).read_text(encoding='utf-8'))
+            self.assertTrue(str(data.get('container') or '').strip(), '%s misses container label' % lang)
+
     def test_awg_plugin_template_uses_only_known_translation_keys(self):
         source = SERVER_TEMPLATE.read_text(encoding="utf-8")
         used = set(re.findall(r"awg_plugin_[a-z_]+", source))

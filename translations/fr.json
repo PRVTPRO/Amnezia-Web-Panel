@@ -89,6 +89,7 @@
   "xray_desc": "Masque le trafic en trafic web normal (XTLS-Reality). Résiste au DPI. ⚠️ Hiddify 5.1.0+ requis pour Xray ≥ 26.9.8 (versions plus anciennes ne se connecteront pas).",
   "not_checked": "Non vérifié",
   "connections": "Connexions",
+  "container": "Conteneur",
   "add": "Ajouter",
   "loading_connections": "Chargement des connexions...",
   "no_connections": "Aucune connexion",

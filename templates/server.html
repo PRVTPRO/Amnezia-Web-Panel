@@ -6682,8 +6682,13 @@
                 let grid = '';
                 if (isService) {
                     grid = buildServiceInfoGrid(proto, info);
-                } else if (info.port) {
-                    grid += `<div class="protocol-info-item"><span class="protocol-info-label">${_('port')}</span><span class="protocol-info-value">${info.port}/${(['xray', 'telemt'].includes(protoBase(proto))) ? 'TCP' : 'UDP'}</span></div>`;
+                } else {
+                    if (info.port) {
+                        grid += `<div class="protocol-info-item"><span class="protocol-info-label">${_('port')}</span><span class="protocol-info-value">${info.port}/${(['xray', 'telemt'].includes(protoBase(proto))) ? 'TCP' : 'UDP'}</span></div>`;
+                    }
+                    // Ключ инстанса (awg3, awg3__2, ...): по нему видно,
+                    // какой контейнер соответствует карточке.
+                    grid += `<div class="protocol-info-item"><span class="protocol-info-label">${_('container')}</span><span class="protocol-info-value">${escapeHtml(proto)}</span></div>`;
                 }
                 if (protoBase(proto) === 'xray' && info.fingerprint) {
                     grid += `<div class="protocol-info-item"><span class="protocol-info-label">${_('xray_fingerprint_label')}</span><span class="protocol-info-value">${escapeHtml(info.fingerprint)}</span></div>`;
