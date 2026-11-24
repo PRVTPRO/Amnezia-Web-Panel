@@ -137,21 +137,14 @@ function card(proto, info) {
     const ctrl = elementById(`${protoKey}-ctrl`);
     actions.innerHTML = '';
     ctrl.innerHTML = '';
-    const section = elementById('connectionsSection');
-    // The template ships the section as style="display:none" without the hidden
-    // class. `.hidden` is display:none !important, so visibility needs both:
-    // a non-none display and no hidden class left on the element.
-    section.style = { display: 'none' };
-    section.classList = makeClassList();
     if (typeof context.updateProtocolCard !== 'function') {
         failures.push(`${proto}: updateProtocolCard is not defined`);
-        return { html: '', ctrl: '', visible: false };
+        return { html: '', ctrl: '' };
     }
     context.updateProtocolCard(proto, info);
     return {
         html: String(actions.innerHTML || ''),
         ctrl: String(ctrl.innerHTML || ''),
-        visible: section.style.display !== 'none' && !section.classList.contains('hidden'),
     };
 }
 
@@ -175,17 +168,16 @@ const running = { container_running: true, port: 51820, clients_count: 4 };
     const result = card(proto, running);
     expect(
         proto, result,
-        ['selectProtocolForConns(', 'showProtocolBackups(', 'uninstallProtocol('], ['openInstallModal('],
+        ['showEntityList(', 'showProtocolBackups(', 'uninstallProtocol('], ['openInstallModal('],
         ['showServerConfig(', 'toggleContainer('], []
     );
-    if (!result.visible) failures.push(`${proto}: the Connections section stayed hidden`);
 });
 
 // A running instance can report no port and no peer count (container just
 // started, status probe partially failed); the action row must appear anyway.
 expect(
     'awg3', card('awg3', { container_running: true }),
-    ['selectProtocolForConns(', 'uninstallProtocol('], ['openInstallModal('],
+    ['showEntityList(', 'uninstallProtocol('], ['openInstallModal('],
     ['toggleContainer('], []
 );
 
@@ -212,7 +204,7 @@ expect(
 );
 expect(
     'socks5', card('socks5', running),
-    ['openSocks5Settings(', 'uninstallProtocol('], ['openInstallModal('],
+    ["showEntityList('proxy'", 'openProxySettings(', 'uninstallProtocol('], ['openInstallModal('],
     ['toggleContainer('], []
 );
 expect(

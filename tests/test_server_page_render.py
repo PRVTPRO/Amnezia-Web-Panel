@@ -98,6 +98,19 @@ class ServerPageRenderTests(unittest.TestCase):
             self.assertIn('dataset.serverUid = ' + json.dumps(uid), self.render(client, '/server/0'))
             self.assertEqual(panel.load_data(), migrated)
 
+    def test_failed_smartroute_probe_does_not_leave_a_permanent_skeleton(self):
+        """Ошибка пробы Smart Route снимает скелетон: иначе карточка «грузится»
+        навсегда, а в консоли остаётся только предупреждение очереди."""
+        with TestClient(panel.app) as client:
+            self.assertEqual(client.post('/api/auth/login', json={'username': 'admin', 'password': 'admin'}).status_code, 200)
+            page = self.render(client, '/server/0')
+        self.assertIn('let probeFailed = false;', page)
+        # Присваивание pending в finally учитывает ошибку пробы.
+        pending_line = re.search(
+            r'smartRoutePending = smartRouteStatus === null[^;]*;', page)
+        self.assertIsNotNone(pending_line, 'pending is not recomputed in finally')
+        self.assertIn('!probeFailed', pending_line.group(0))
+
 
 if __name__ == '__main__':
     unittest.main()

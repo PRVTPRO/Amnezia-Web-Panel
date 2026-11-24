@@ -236,6 +236,9 @@ EXIT_CONF = f'{EXIT_DIR}/exit0.conf'
 EXIT_CONF_BACKUP = f'{EXIT_DIR}/exit0.conf.failover-bak'
 EXIT_KEY = f'{EXIT_DIR}/exit_private.key'
 EXIT_IFACE = 'exit0'
+# Sentinel: "the prefetch has no exit block for this instance", distinct from
+# None ("the instance has no exit link file"), so the caller falls back to SSH.
+_EXIT_MISS = object()
 EXIT_TABLE = 200
 EXIT_MTU = 1420
 
@@ -2209,14 +2212,20 @@ docker --version
 
     # ----- batched status prefetch: one SSH command for every AWG container -----
 
-    def prefetch_awg_state(self, protocol_types):
-        """Populate ssh._awg_batch with configs and clients tables.
+    def prefetch_awg_state(self, protocol_types, exit_protocols=None):
+        """Populate ssh._awg_batch with configs, clients tables and exit links.
 
         A /check used to spend 3-4 SSH round trips per running AWG instance
-        (config, awg params, clientsTable). On high-latency servers this was
-        the bulk of the wait. Here a single command dumps everything for all
-        running AWG containers; _get_server_config/_get_clients_table then
-        read from the cache. The cache lives only for this request (TTL)."""
+        (config, awg params, clientsTable) plus one `exit_link_status` per
+        linked instance. On high-latency servers this was the bulk of the wait.
+        Here a single command dumps everything for all running AWG containers;
+        _get_server_config/_get_clients_table/_batched_exit_link then read from
+        the cache. The cache lives only for this request (TTL).
+
+        `exit_protocols` is the subset that has an exit link in data.json; only
+        those containers get the extra `wg show exit0` block. The manager has no
+        access to the panel data, so the caller passes it explicitly.
+        """
         containers = []
         for proto in protocol_types:
             cname = self._container_name(proto)
@@ -2235,6 +2244,48 @@ docker --version
         # Unique marker per call so concurrent/interleaved prefetches
         # cannot confuse each other's split boundaries.
         clients_marker = '@@CLIENTS_' + uuid.uuid4().hex + '@@'
+        # Exit-link sections: one block per instance that has a link. The
+        # three `show` outputs are separated by `---` INSIDE their own block,
+        # and the block is delimited by unique markers, so `_parse_wg_peer_lists`
+        # never sees the `---` of another container.
+        exit_marker = '@@EXIT_' + uuid.uuid4().hex + '@@'
+        exit_rc_marker = '@@EXITRC_' + uuid.uuid4().hex + '@@'
+        # container name -> wg binary. _wg_binary keys on the protocol, while
+        # the loop walks container names, so the map is built up front.
+        bin_by_container = {}
+        exit_containers = []
+        exit_set = set(exit_protocols or ())
+        for proto in protocol_types:
+            cname = self._container_name(proto)
+            if cname not in containers:
+                continue
+            bin_by_container[cname] = self._wg_binary(proto)
+            if proto in exit_set:
+                exit_containers.append(cname)
+        exit_script = ''
+        for cname in exit_containers:
+            wg_bin = bin_by_container.get(cname) or 'awg'
+            # `rc=$?` right after the test: inside the outer loop the shell
+            # only reports the loop's status, so "file missing" (9) and "show
+            # failed" (non-zero) would both be lost. An `echo` follows every
+            # payload so a file without a trailing newline cannot glue its
+            # last line to the marker.
+            exit_script += (
+                # The exit block is emitted after the container loop, so the
+                # container name must be literal here: `$c` is unset there.
+                'echo "' + exit_marker + ' ' + cname + '"; '
+                'docker exec "' + cname + '" sh -c \''
+                # `test -f` answers 1, while the direct path uses `|| exit 9`:
+                # map it to 9 so both paths report "no link file" identically.
+                f'if [ -f {EXIT_CONF} ]; then rc=0; else rc=9; fi; echo; '
+                'echo "' + exit_rc_marker + ' $rc"; '
+                '[ "$rc" = 0 ] || exit 0; '
+                f'{wg_bin} show {EXIT_IFACE} latest-handshakes; echo; '
+                'echo ---; '
+                f'{wg_bin} show {EXIT_IFACE} transfer; echo; '
+                'echo ---; '
+                f'{wg_bin} show {EXIT_IFACE} endpoints; echo\'; '
+            )
         # The trailing `echo` inside sh -c matters: when awg0.conf or
         # clientsTable has no trailing newline, `cat` leaves the cursor
         # mid-line and the next marker gets glued to the payload's last
@@ -2246,7 +2297,8 @@ docker --version
             'docker exec "$c" sh -c \'cat /opt/amnezia/awg/awg0.conf 2>/dev/null; '
             'echo; echo "' + clients_marker + '"; '
             'cat /opt/amnezia/awg/clientsTable 2>/dev/null; echo\'; '
-            'done'
+            'done; '
+            + exit_script
         )
         out, err, code = self._run_script(cmd, timeout=60)
         if code != 0:
@@ -2256,12 +2308,23 @@ docker --version
             with _awg_batch_lock_of(self.ssh):
                 self.ssh._awg_batch = None
             return
+        # Exit blocks are appended AFTER the container loop, so they must be
+        # cut off before the clients split runs: otherwise the last
+        # container's clientsTable would swallow the whole exit tail and stop
+        # being valid JSON, dropping its batch entry on every check.
+        container_out = out or ''
+        exit_out = ''
+        if exit_containers:
+            exit_at = container_out.find(exit_marker)
+            if exit_at != -1:
+                exit_out = container_out[exit_at:]
+                container_out = container_out[:exit_at]
         batch = {}
         current = None
         # Belt and braces: split on markers found anywhere in the stream,
         # not only at line start, so even a glued marker still separates
         # sections (the payload fragment before it stays with its owner).
-        for piece in re.split(r'(@@CONTAINER@@ [^\n]+|' + re.escape(clients_marker) + ')', out or ''):
+        for piece in re.split(r'(@@CONTAINER@@ [^\n]+|' + re.escape(clients_marker) + ')', container_out):
             if piece.startswith('@@CONTAINER@@ '):
                 current = piece.split(' ', 1)[1].strip()
                 batch[current] = {'config': [], 'clients': [], 'part': 'config'}
@@ -2269,6 +2332,32 @@ docker --version
                 batch[current]['part'] = 'clients'
             elif current:
                 batch[current][batch[current]['part']].extend(piece.splitlines())
+        # Exit-link blocks live after all container dumps, each opened by its
+        # own marker with the container name. `---` separators stay inside the
+        # block: the block is cut on markers, never on `---`.
+        exit_data = {}
+        exit_current = None
+        if exit_containers and exit_out:
+            exit_chunks = re.split(
+                r'(' + re.escape(exit_marker) + r' [^\n]+)', exit_out)
+            for chunk in exit_chunks:
+                if chunk.startswith(exit_marker + ' '):
+                    exit_current = chunk.split(' ', 1)[1].strip()
+                    exit_data[exit_current] = {'raw': [], 'link_rc': None}
+                    continue
+                if not exit_data or exit_current is None:
+                    continue
+                entry = exit_data[exit_current]
+                # Pull the rc marker out first: it may sit glued to the payload
+                # line (the composite echoes a newline before it, but a file
+                # without a trailing newline still merges them).
+                text = chunk
+                rc_match = re.search(
+                    re.escape(exit_rc_marker) + r' (-?\d+)', text)
+                if rc_match:
+                    entry['link_rc'] = int(rc_match.group(1))
+                    text = (text[:rc_match.start()] + text[rc_match.end():])
+                entry['raw'].extend(text.splitlines())
         with _awg_batch_lock_of(self.ssh):
             self.ssh._awg_batch = {
                 '_ts': time.time(),
@@ -2277,7 +2366,54 @@ docker --version
                            'clients': '\n'.join(parts['clients'])}
                     for name, parts in batch.items()
                 },
+                'exit': {
+                    name: {'raw': '\n'.join(parts['raw']),
+                           'link_rc': parts['link_rc']}
+                    for name, parts in exit_data.items()
+                },
             }
+
+    def _batched_exit_link(self, protocol_type, now=None):
+        """Exit-link state from the /check prefetch, or _EXIT_MISS when absent.
+
+        Returns the same shape as `exit_link_status`; "file absent" (rc 9)
+        answers None (exactly like the direct path), a failed `wg show` answers
+        an error dict. _EXIT_MISS means "no batched answer", so the caller
+        falls back to the direct SSH read instead of inventing a state.
+        """
+        with _awg_batch_lock_of(self.ssh):
+            batch = getattr(self.ssh, '_awg_batch', None)
+            if not isinstance(batch, dict):
+                return _EXIT_MISS
+            stamp = batch.get('_ts', 0)
+            if not isinstance(stamp, (int, float)) or time.time() - stamp > 15:
+                return _EXIT_MISS
+            entries = batch.get('exit')
+            entry = entries.get(self._container_name(protocol_type)) if isinstance(entries, dict) else None
+        if not isinstance(entry, dict):
+            return _EXIT_MISS
+        link_rc = entry.get('link_rc')
+        if link_rc == 9:
+            return None
+        if link_rc not in (0, None):
+            detail = (entry.get('raw') or '').strip()
+            return {'up': False, 'handshake_age': None, 'rx_bytes': 0,
+                    'tx_bytes': 0, 'endpoint': '',
+                    'error': detail or f'exit-link probe failed (rc {link_rc})'}
+        raw = entry.get('raw') or ''
+        if not raw.strip():
+            return _EXIT_MISS
+        peers = self._parse_wg_peer_lists(raw)
+        peer = next(iter(peers.values()), {})
+        handshake = peer.get('latest_handshake', 0)
+        age = int((now or time.time()) - handshake) if handshake else None
+        return {
+            'up': age is not None and 0 <= age < EXIT_HANDSHAKE_UP_SECONDS,
+            'handshake_age': age,
+            'rx_bytes': peer.get('rx_bytes', 0),
+            'tx_bytes': peer.get('tx_bytes', 0),
+            'endpoint': peer.get('endpoint', ''),
+        }
 
     @staticmethod
     def _parse_exit_link_output(out):
@@ -3892,6 +4028,11 @@ x_warp_up() {
         """Live state of the link: None when the container has no link file,
         otherwise up/handshake age/transfer/endpoint of the exit peer."""
         container_name = self._container_name(protocol_type)
+        # A /check prefetch may already have this instance's exit block; use it
+        # instead of spending another SSH round trip.
+        batched = self._batched_exit_link(protocol_type, now=now)
+        if batched is not _EXIT_MISS:
+            return batched
         wg_bin = self._wg_binary(protocol_type)
         out, err, code = self.ssh.run_sudo_command(
             f"docker exec -i {container_name} sh -c 'test -f {EXIT_CONF} || exit 9; "
@@ -4090,8 +4231,14 @@ x_warp_up() {
                     conf_text = batch.get('config') or ''
                     pubkeys = set(re.findall(
                         r'^\s*PublicKey\s*=\s*(\S+)', conf_text, re.MULTILINE))
+                    # A disabled peer is deliberately absent from awg0.conf
+                    # (toggle_client rewrites the file without its [Peer]), so
+                    # it must not fail the integrity check for the whole
+                    # instance. Strictly `is False`: an absent flag means the
+                    # peer is enabled and must still be verified.
                     missing = [c.get('clientId', '') for c in data
-                               if c.get('clientId', '') not in pubkeys]
+                               if c.get('clientId', '') not in pubkeys
+                               and (c.get('userData') or {}).get('enabled') is not False]
                     if missing:
                         logger.warning(
                             f"clientsTable {container_name} from prefetch is "
