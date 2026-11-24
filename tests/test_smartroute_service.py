@@ -365,6 +365,44 @@ class SmartRouteServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.svc.is_enabled_in_data(self.store['data'], 0))
         self.assertFalse(self.svc.is_enabled_in_data(self.store['data'], 42))
 
+    async def test_status_skips_host_probe_when_not_installed(self):
+        # Cheap path (P1): without the data.json flag the answer is already
+        # "not installed", and the UI never reads `host` in that state.
+        # The five SSH round trips of host_status must not run.
+        self.store['data']['servers'][0]['smartroute']['installed'] = False
+        with mock.patch.object(FakeSRM, 'host_status',
+                               side_effect=AssertionError('host_status must not run')) as probe:
+            out = await self.svc.status(0)
+        self.assertEqual(probe.call_count, 0)
+        self.assertEqual(out['host'], {})
+        self.assertFalse(out['installed'])
+        # Every other field keeps its current shape.
+        self.assertIn('enabled', out)
+        self.assertIn('own_subnets', out)
+        self.assertIn('dns_via_exit', out)
+        self.assertIn('direct_dns', out)
+        self.assertIn('exit_dns', out)
+        self.assertIn('split_instances', out)
+
+    async def test_status_skips_host_probe_when_flag_missing(self):
+        self.store['data']['servers'][0]['smartroute'].pop('installed')
+        with mock.patch.object(FakeSRM, 'host_status',
+                               side_effect=AssertionError('host_status must not run')) as probe:
+            out = await self.svc.status(0)
+        self.assertEqual(probe.call_count, 0)
+        self.assertEqual(out['host'], {})
+        self.assertFalse(out['installed'])
+
+    async def test_status_probes_host_when_installed(self):
+        original = FakeSRM.host_status
+
+        with mock.patch.object(FakeSRM, 'host_status', autospec=True,
+                               side_effect=lambda self_: original(self_)) as probe:
+            out = await self.svc.status(0)
+        self.assertEqual(probe.call_count, 1)
+        self.assertTrue(out['installed'])
+        self.assertEqual(out['host']['prefixes_v4'], 8000)
+
     async def test_set_own_subnets_validates(self):
         with self.assertRaises(SmartRouteError) as ctx:
             await self.svc.set_own_subnets(0, ['not-a-cidr'])

@@ -342,7 +342,9 @@ class AwgPluginProgressTests(unittest.TestCase):
         """A failed or cancelled update must show its reason without a click."""
         html = TEMPLATE.read_text(encoding='utf-8')
         start = html.index('async function pollAwgPluginUpdate(component)')
-        end = html.index("document.addEventListener('DOMContentLoaded'", start)
+        # Boundary: the init block below the plugin helpers. (The old marker was
+        # the DOMContentLoaded listener; probes are queued now, so it is gone.)
+        end = html.index('// ========== Init ==========', start)
         body = html[start:end]
 
         branch_at = body.index("if (data.state === 'failed' || data.state === 'cancelled')")
