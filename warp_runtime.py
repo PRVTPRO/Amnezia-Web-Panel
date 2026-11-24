@@ -338,10 +338,12 @@ class WarpRuntime:
     async def _sibling_warp_source(self, manager, server, uid, protocol):
         """Find a live WARP profile on another instance of the same server.
 
-        A neighbour qualifies only when its state says registered and linked
-        *and* its dataplane is really up. Copying a dead profile would give the
-        new instance a tunnel that never handshakes, which is the failure this
-        helper is meant to avoid.
+        A neighbour qualifies only when its state says registered and linked,
+        it holds a complete credential pair, and its dataplane is really up.
+        Copying a dead or incomplete profile would either give the new
+        instance a tunnel that never handshakes or make _source_profile fall
+        back to registration inside the healthy neighbour's container,
+        replacing its identity. Both are failures this helper avoids.
         """
         state = self.state_store.load()
         for sibling in self._awg_protocols(server):
