@@ -23,7 +23,7 @@ XHTTP_CONFIG = {
             'xhttpSettings': {
                 'path': '/abc123',
                 'host': 'own.example',
-                'mode': 'auto',
+                'mode': 'stream-one',
                 'extra': {'xPaddingBytes': '100-1000',
                           'xmux': {'maxConcurrency': '8-16'}},
             },
@@ -78,7 +78,7 @@ class XhttpInstallTests(unittest.TestCase):
         settings = stream['xhttpSettings']
         self.assertTrue(settings['path'].startswith('/') and len(settings['path']) > 1)
         self.assertEqual(settings['host'], 'own.example')
-        self.assertEqual(settings['mode'], 'auto')
+        self.assertEqual(settings['mode'], 'stream-one')
 
         extra = settings['extra']
         low, high = extra['xPaddingBytes'].split('-')
@@ -86,12 +86,18 @@ class XhttpInstallTests(unittest.TestCase):
         low, high = extra['scStreamUpServerSecs'].split('-')
         self.assertLess(int(low), int(high))
         xmux = extra['xmux']
-        for field in ('maxConcurrency', 'hMaxRequestTimes', 'hMaxReusableSecs'):
+        for field in ('maxConnections', 'cMaxReuseTimes', 'hMaxRequestTimes',
+                      'hMaxReusableSecs'):
             low, high = xmux[field].split('-')
-            self.assertLess(int(low), int(high), field)
-        self.assertEqual(xmux['maxConnections'], 0)
-        self.assertEqual(xmux['cMaxReuseTimes'], 0)
-        self.assertEqual(xmux['hKeepAlivePeriod'], 0)
+            self.assertLessEqual(int(low), int(high), field)
+        # the classic anti-DPI profile: a small band of reusable connections
+        # (no fixed connection count) and no stream cap - reuse-heavy, not
+        # serial. A single connection knob only: some clients reject an
+        # xmux object carrying two at once, even when one is 0.
+        self.assertEqual(xmux['maxConnections'], '1-2')
+        self.assertEqual(set(xmux),
+                         {'maxConnections', 'cMaxReuseTimes', 'hMaxRequestTimes',
+                          'hMaxReusableSecs'})
 
         reality = stream['realitySettings']
         self.assertEqual(reality['dest'], 'own.example:443')
@@ -118,8 +124,9 @@ class XhttpInstallTests(unittest.TestCase):
         random.seed(2)
         second = _xhttp_extra()
         self.assertNotEqual(first['xPaddingBytes'], second['xPaddingBytes'])
-        self.assertNotEqual(first['xmux']['maxConcurrency'],
-                            second['xmux']['maxConcurrency'])
+        for field in ('cMaxReuseTimes', 'hMaxRequestTimes', 'hMaxReusableSecs'):
+            self.assertNotEqual(first['xmux'][field],
+                                second['xmux'][field], field)
 
 
 class XhttpLinkTests(unittest.TestCase):
@@ -140,7 +147,8 @@ class XhttpLinkTests(unittest.TestCase):
         self.assertEqual(query['sni'], 'own.example')
         self.assertEqual(query['path'], '/abc123')
         self.assertEqual(query['host'], 'own.example')
-        self.assertEqual(query['mode'], 'auto')
+        # the installed mode reaches the client link verbatim
+        self.assertEqual(query['mode'], 'stream-one')
         self.assertEqual(json.loads(query['extra']), XHTTP_CONFIG['inbounds'][0]
                          ['streamSettings']['xhttpSettings']['extra'])
 
@@ -214,6 +222,8 @@ class XhttpClientFlowTests(unittest.TestCase):
 
 class XhttpLinkExportTests(unittest.TestCase):
     def test_xhttp_link_round_trips_into_the_client_config(self):
+        # mode 'auto' on purpose: whatever mode a link carries round-trips
+        # into the client config unchanged
         extra = {'xPaddingBytes': '100-1000', 'xmux': {'maxConcurrency': '8-16'}}
         params = {
             'type': 'xhttp', 'security': 'reality',

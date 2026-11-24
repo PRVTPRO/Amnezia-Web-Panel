@@ -42,7 +42,7 @@ _pending_inputs = {}
 
 _EXTRA_PROTOCOL_DISPLAY_NAMES = {
     "dns": "AmneziaDNS",
-    "socks5": "SOCKS5",
+    "socks5": "3proxy",
     "exit": "Exit Node",
     "adguard": "AdGuard Home",
     "nginx": "NGINX",
@@ -115,6 +115,11 @@ TG_TRANSLATIONS = {
         "self_service_no_servers": "No servers are available for self-service connection creation.\nPlease contact your administrator.",
         "self_service_disabled_contact": "Self-service is disabled. Contact your administrator.",
         "self_service_unavailable": "Self-service is not available.",
+        "self_service_delete_counter_unavailable": "The last traffic counter could not be read, so the connection was not deleted. Try again, or contact your administrator.",
+        "self_service_delete_busy": "Another connection operation is still running. Try again in a minute.",
+        "self_service_delete_failed": "The connection could not be deleted. Try again, or contact your administrator.",
+        "self_service_delete_forbidden": "This connection was created by an administrator and can only be deleted by an administrator.",
+        "self_service_delete_restore_required": "The server did not confirm the result. Nothing was deleted; an administrator must check the connection state.",
         "max_connections_reached": "You have reached your connection limit. Delete an existing connection or contact your administrator.",
         "server_not_self_service": "This server is not available for self-service.",
         "no_protocols_available": "No protocols available on this server.",
@@ -270,6 +275,11 @@ TG_TRANSLATIONS = {
         "self_service_no_servers": "هیچ سروری برای ساخت اتصال به‌صورت سلف‌سرویس در دسترس نیست.\nلطفاً با مدیر تماس بگیرید.",
         "self_service_disabled_contact": "سلف‌سرویس غیرفعال است. با مدیر تماس بگیرید.",
         "self_service_unavailable": "سلف‌سرویس در دسترس نیست.",
+        "self_service_delete_counter_unavailable": "آخرین شمارنده ترافیک خوانده نشد، بنابراین اتصال حذف نشد. دوباره تلاش کنید یا با مدیر تماس بگیرید.",
+        "self_service_delete_busy": "عملیات دیگری روی اتصال‌ها در حال اجراست. یک دقیقه بعد دوباره تلاش کنید.",
+        "self_service_delete_failed": "اتصال حذف نشد. دوباره تلاش کنید یا با مدیر تماس بگیرید.",
+        "self_service_delete_forbidden": "این اتصال توسط مدیر ساخته شده و فقط مدیر می‌تواند آن را حذف کند.",
+        "self_service_delete_restore_required": "سرور نتیجه را تأیید نکرد. چیزی حذف نشد؛ مدیر باید وضعیت اتصال را بررسی کند.",
         "max_connections_reached": "به سقف تعداد اتصال‌ها رسیده‌اید. برای ادامه یک اتصال قبلی را حذف کنید یا با مدیر تماس بگیرید.",
         "server_not_self_service": "این سرور برای سلف‌سرویس در دسترس نیست.",
         "no_protocols_available": "هیچ پروتکلی روی این سرور در دسترس نیست.",
@@ -425,6 +435,11 @@ TG_TRANSLATIONS = {
         "self_service_no_servers": "Aucun serveur n’est disponible pour créer une connexion en libre-service.\nContactez votre administrateur.",
         "self_service_disabled_contact": "Le libre-service est désactivé. Contactez votre administrateur.",
         "self_service_unavailable": "Le libre-service n’est pas disponible.",
+        "self_service_delete_counter_unavailable": "Le dernier compteur de trafic n’a pas pu être lu, la connexion n’a donc pas été supprimée. Réessayez ou contactez votre administrateur.",
+        "self_service_delete_busy": "Une autre opération sur les connexions est en cours. Réessayez dans une minute.",
+        "self_service_delete_failed": "La connexion n’a pas pu être supprimée. Réessayez ou contactez votre administrateur.",
+        "self_service_delete_forbidden": "Cette connexion a été créée par un administrateur et seul un administrateur peut la supprimer.",
+        "self_service_delete_restore_required": "Le serveur n'a pas confirmé le résultat. Rien n'a été supprimé ; un administrateur doit vérifier l'état de la connexion.",
         "max_connections_reached": "Vous avez atteint la limite de connexions. Supprimez une connexion existante ou contactez votre administrateur.",
         "server_not_self_service": "Ce serveur n’est pas disponible en libre-service.",
         "no_protocols_available": "Aucun protocole disponible sur ce serveur.",
@@ -580,6 +595,11 @@ TG_TRANSLATIONS = {
         "self_service_no_servers": "Нет серверов, доступных для создания подключений через self-service.\nОбратитесь к администратору.",
         "self_service_disabled_contact": "Self-service отключён. Обратитесь к администратору.",
         "self_service_unavailable": "Self-service недоступен.",
+        "self_service_delete_counter_unavailable": "Не удалось прочитать итоговый счётчик трафика, поэтому подключение не удалено. Попробуйте ещё раз или обратитесь к администратору.",
+        "self_service_delete_busy": "Другая операция с подключениями ещё выполняется. Повторите через минуту.",
+        "self_service_delete_failed": "Не удалось удалить подключение. Попробуйте ещё раз или обратитесь к администратору.",
+        "self_service_delete_forbidden": "Это подключение создал администратор, удалить его может только администратор.",
+        "self_service_delete_restore_required": "Сервер не подтвердил результат. Ничего не удалено; администратор должен проверить состояние подключения.",
         "max_connections_reached": "Достигнут лимит подключений. Удалите одно из существующих подключений или обратитесь к администратору.",
         "server_not_self_service": "Этот сервер недоступен для self-service.",
         "no_protocols_available": "На этом сервере нет доступных протоколов.",
@@ -735,6 +755,11 @@ TG_TRANSLATIONS = {
         "self_service_no_servers": "目前没有可用于自助创建连接的服务器。\n请联系管理员。",
         "self_service_disabled_contact": "自助服务已禁用。请联系管理员。",
         "self_service_unavailable": "自助服务不可用。",
+        "self_service_delete_counter_unavailable": "无法读取最终的流量计数，因此连接未被删除。请重试或联系管理员。",
+        "self_service_delete_busy": "另一项连接操作仍在进行。请稍后再试。",
+        "self_service_delete_failed": "无法删除该连接。请重试或联系管理员。",
+        "self_service_delete_forbidden": "该连接由管理员创建，只有管理员才能删除。",
+        "self_service_delete_restore_required": "服务器未确认结果。未删除任何内容;管理员需要检查连接状态。",
         "max_connections_reached": "已达到连接数量上限。请删除一个现有连接，或联系管理员。",
         "server_not_self_service": "此服务器不支持自助服务。",
         "no_protocols_available": "此服务器没有可用协议。",
@@ -994,6 +1019,31 @@ def _tg_lang(from_user: Optional[dict]) -> str:
 def _tt(lang: str, key: str, **kwargs) -> str:
     text = TG_TRANSLATIONS.get(lang, TG_TRANSLATIONS["en"]).get(key, TG_TRANSLATIONS["en"].get(key, key))
     return text.format(**kwargs) if kwargs else text
+
+
+_DELETE_FAILURE_KEYS = {
+    'final_counter_read_failed': 'self_service_delete_counter_unavailable',
+    'peer_lifecycle_busy': 'self_service_delete_busy',
+    'peer_lifecycle_still_running': 'self_service_delete_busy',
+    # An uncertain SSH result leaves a durable fence: a retry is refused, so
+    # "try again in a moment" would be a lie and an operator must look.
+    'peer_lifecycle_uncertain': 'self_service_delete_restore_required',
+}
+
+
+def _delete_failure_reason(error, lang: str) -> str:
+    """Localized, non-leaking reason for a failed self-service deletion.
+
+    Never forwards the exception text: it can contain host names, paths or
+    command output. Only the stable machine code, when one is present, picks
+    the wording; anything unknown gets the generic "could not delete" line.
+    """
+    code = str(getattr(error, 'code', '') or '')
+    if code in _DELETE_FAILURE_KEYS:
+        return _tt(lang, _DELETE_FAILURE_KEYS[code])
+    if getattr(error, 'forbidden', False):
+        return _tt(lang, 'self_service_delete_forbidden')
+    return _tt(lang, 'self_service_delete_failed')
 
 
 _LANGUAGE_LABELS = {
@@ -2520,7 +2570,7 @@ async def _user_delete_confirm(api: TelegramAPI, chat_id: int, message_id: int, 
         await self_service_svc.delete_user_connection(panel_user["id"], conn_id, "telegram")
     except Exception as e:
         logger.exception("Bot: self-service delete failed")
-        await api.edit_message(chat_id, message_id, f"❌ {_tt(lang, 'error')}: {_tt(lang, 'self_service_unavailable')}")
+        await api.edit_message(chat_id, message_id, f"❌ {_tt(lang, 'error')}: {_delete_failure_reason(e, lang)}")
         return
 
     data = load_data_fn()

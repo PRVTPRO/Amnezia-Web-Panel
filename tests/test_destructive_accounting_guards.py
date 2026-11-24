@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi import UploadFile
 import app as panel
+import peer_lifecycle_lock as interlock
 import telegram_bot
 from connection_service import SelfServiceError
 from peer_accounting import FINALIZATION_MESSAGE, TrafficFinalizationRequired, require_unowned, serialize_peer_lifecycle
@@ -461,18 +462,56 @@ class DestructiveAccountingGuards(unittest.IsolatedAsyncioTestCase):
                         panel.ConnectionActionRequest(protocol=protocol, client_id='peer'))
                 self.assertEqual(result.status_code if hasattr(result, 'status_code') else 200, 200, getattr(result, 'body', result))
 
-    async def test_self_service_delete_cannot_drop_baselines(self):
+    async def test_self_service_delete_finalizes_instead_of_dropping_baselines(self):
+        """Self-service deletion goes through finalization, not a hard 409.
+
+        The old guard refused every self-service delete with a hard-coded 409,
+        which broke "delete my connection" from v1.7.9 on. It must now remove
+        the peer, drop the link row and leave a tombstone, so a baseline can
+        never vanish without a final sample.
+        """
         data = fixtures.base_data()
         data['user_connections'] = [dict(id='self', user_id='user-1', server_id=0,
             protocol='awg', client_id='peer', created_by='self_service', last_bytes=10)]
         helper = fixtures.ConnectionServiceTest()
         service, saved, manager = helper.make_service(data)
-        before = copy.deepcopy(saved)
-        with self.assertRaises(SelfServiceError) as error:
-            await service.delete_user_connection('user-1', 'self', 'web')
-        self.assertEqual(error.exception.status_code, 409)
-        self.assertEqual(saved, before)
-        self.assertEqual(manager.removed, [])
+
+        result = await service.delete_user_connection('user-1', 'self', 'web')
+
+        self.assertEqual(result['status'], 'success')
+        self.assertTrue(result['finalized'])
+        self.assertEqual(manager.removed, [('awg', 'peer')])
+        self.assertEqual(saved['user_connections'], [])
+        self.assertEqual(len(saved['accounting_recoveries']), 1)
+
+    async def test_self_service_delete_delegates_with_self_service_scope(self):
+        data = fixtures.base_data()
+        data['user_connections'] = [dict(id='self', user_id='user-1', server_id=0,
+            protocol='awg', client_id='peer', created_by='self_service', last_bytes=10)]
+        calls = []
+
+        async def finalize(server, protocol, client_id, *, actor, kind,
+                           server_id, allow_unverified=False, owner_user_id=None):
+            calls.append({'protocol': protocol, 'client_id': client_id,
+                          'actor': actor, 'kind': kind, 'server_id': server_id,
+                          'allow_unverified': allow_unverified,
+                          'owner_user_id': owner_user_id})
+            return {'status': 'success', 'finalized': True}
+
+        helper = fixtures.ConnectionServiceTest()
+        service, saved, _ = helper.make_service(data, finalize_peer=finalize)
+        await service.delete_user_connection('user-1', 'self', 'web')
+
+        self.assertEqual(calls, [{'protocol': 'awg', 'client_id': 'peer',
+                                  'actor': 'user-1',
+                                  'kind': 'self_service_peer_remove',
+                                  'server_id': 0,
+                                  'allow_unverified': False,
+                                  'owner_user_id': 'user-1'}])
+        # Forced removal stays admin-only and the service never drops the row
+        # itself: the finalizer owns that pivot.
+        self.assertFalse(calls[0]['allow_unverified'])
+        self.assertEqual(len(saved['user_connections']), 1)
 
     async def test_telegram_remove_cannot_bypass_http_guard(self):
         api = SimpleNamespace(edit_message=AsyncMock())
@@ -528,6 +567,201 @@ class DestructiveAccountingGuards(unittest.IsolatedAsyncioTestCase):
         self.assertIn('get_client_config', calls)
         self.assertIn('remove_client', calls)
         self.assertEqual(self.data['users'][0]['traffic_used'], 451)
+
+
+class SelfServiceDeleteThroughEndpoint(unittest.IsolatedAsyncioTestCase):
+    """The user-facing delete endpoint, end to end against the real helper."""
+
+    async def asyncSetUp(self):
+        self.data = {
+            'settings': {'self_service': {
+                'enabled': True, 'web_enabled': True, 'telegram_enabled': True,
+                'max_connections_per_user': 5, 'rate_limit_count': 10,
+                'rate_limit_window_seconds': 60, 'allowed_protocols': ['awg', 'awg3'],
+            }},
+            'servers': [dict(uid='node-a', host='192.0.2.1', self_service_enabled=True,
+                             protocols={'awg3': {}})],
+            'users': [dict(id='u', enabled=True, traffic_used=450, traffic_total=700)],
+            'user_connections': [dict(id='link', user_id='u', server_id=0,
+                                      protocol='awg3', client_id='peer',
+                                      created_by='self_service', last_bytes=10)],
+        }
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self._data_file = panel.DATA_FILE
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        panel.DATA_FILE = str(Path(self._tmp.name) / 'data.json')
+        Path(panel.DATA_FILE).write_text(json.dumps(self.data), encoding='utf-8')
+        self.addCleanup(setattr, panel, 'DATA_FILE', self._data_file)
+        self.stack.enter_context(patch.object(
+            panel, 'get_current_user', return_value={'id': 'u', 'role': 'user'}))
+        self.stack.enter_context(patch.object(
+            panel, 'load_data', side_effect=lambda: copy.deepcopy(self.data)))
+        # The service instance holds its own load_data reference from import
+        # time, so it must be pointed at the synthetic state as well.
+        self.stack.enter_context(patch.object(
+            panel.self_service_connections, 'load_data',
+            side_effect=lambda: copy.deepcopy(self.data)))
+        self.commit = self.stack.enter_context(patch.object(
+            panel, 'commit_finalize',
+            side_effect=lambda data_file, operation_id, actor, kind, intent, before, after:
+                {'status': 'success', 'operation_id': operation_id,
+                 'replayed': False, 'counters_verified_final': False}))
+        self.ssh = Mock()
+        self.stack.enter_context(patch.object(panel, 'get_ssh', return_value=self.ssh))
+        self.manager = Mock()
+        self.stack.enter_context(patch.object(
+            panel, 'get_protocol_manager', return_value=self.manager))
+        self.remove = self.stack.enter_context(
+            patch.object(panel, '_manager_call', return_value=True))
+        self.read = self.stack.enter_context(
+            patch.object(panel, 'read_peer_state', return_value=(12, True)))
+        self.request = SimpleNamespace(cookies={})
+
+    async def delete(self, connection_id='link'):
+        return await panel.api_my_connection_delete(self.request, connection_id)
+
+    def committed(self):
+        return self.commit.call_args.args[6] if self.commit.call_args else None
+
+    async def test_own_connection_is_removed_and_finalized(self):
+        result = await self.delete()
+
+        self.assertEqual(getattr(result, 'status_code', 200), 200,
+                         getattr(result, 'body', result))
+        self.assertEqual(result['status'], 'success')
+        self.assertTrue(result['finalized'])
+        self.remove.assert_called_once()
+        self.assertEqual(self.remove.call_args.args[1:], ('remove_client', 'awg3', 'peer'))
+        after = self.committed()
+        self.assertEqual(after['user_connections'], [])
+        self.assertEqual(len(after.get('accounting_recoveries', [])), 1)
+        tombstone = after['accounting_recoveries'][0]
+        self.assertEqual(tombstone['scope']['server_uid'], 'node-a')
+        self.assertEqual(tombstone['connection']['client_id'], 'peer')
+        # The final sample is committed: bytes are not lost with the row.
+        self.assertEqual(after['users'][0]['traffic_total'], 702)
+        self.assertEqual(self.commit.call_args.args[2], 'u')
+        self.assertEqual(self.commit.call_args.args[3], 'self_service_peer_remove')
+
+    async def test_repeated_self_service_delete_is_404_without_second_ssh(self):
+        # commit_finalize is stubbed in this fixture; persist its committed
+        # snapshot so the second request sees the real post-delete state.
+        def persist(data_file, operation_id, actor, kind, intent, before, after):
+            self.data.clear()
+            self.data.update(copy.deepcopy(after))
+            return {'status': 'success', 'operation_id': operation_id,
+                    'replayed': False, 'counters_verified_final': False}
+
+        self.commit.side_effect = persist
+
+        first = await self.delete()
+
+        self.assertEqual(getattr(first, 'status_code', 200), 200,
+                         getattr(first, 'body', first))
+        self.assertEqual(first['status'], 'success')
+        self.remove.assert_called_once()
+        self.assertEqual(self.remove.call_args.args[1:], ('remove_client', 'awg3', 'peer'))
+        self.assertEqual(self.ssh.connect.call_count, 1)
+        self.assertEqual(self.commit.call_count, 1)
+
+        second = await self.delete()
+
+        self.assertEqual(second.status_code, 404, getattr(second, 'body', second))
+        self.assertNotIn('finalized', json.loads(second.body))
+        # The peer was already removed: no second SSH round, no second commit.
+        self.assertEqual(self.ssh.connect.call_count, 1)
+        self.assertEqual(self.read.call_count, 1)
+        self.assertEqual(self.remove.call_count, 1)
+        self.assertEqual(self.commit.call_count, 1)
+
+    async def test_admin_created_connection_is_refused_untouched(self):
+        self.data['user_connections'][0]['created_by'] = 'admin'
+
+        result = await self.delete()
+
+        self.assertEqual(result.status_code, 403, getattr(result, 'body', result))
+        self.remove.assert_not_called()
+        self.commit.assert_not_called()
+        self.assertEqual(len(self.data['user_connections']), 1)
+
+    async def test_unreadable_counter_fails_closed_with_machine_code(self):
+        self.read.return_value = (None, False)
+
+        result = await self.delete()
+
+        self.assertEqual(result.status_code, 409, getattr(result, 'body', result))
+        body = json.loads(result.body)
+        self.assertEqual(body['code'], 'final_counter_read_failed')
+        self.assertNotIn('finalized', body)
+        # Fail-closed: the peer stays, the row stays, nothing is committed.
+        self.remove.assert_not_called()
+        self.commit.assert_not_called()
+        self.assertEqual(len(self.data['user_connections']), 1)
+
+    async def test_counter_message_uses_the_localized_string(self):
+        self.read.return_value = (None, False)
+        self.request = SimpleNamespace(cookies={'lang': 'ru'})
+
+        result = await self.delete()
+
+        body = json.loads(result.body)
+        self.assertEqual(body['code'], 'final_counter_read_failed')
+        self.assertIn('счётчик', body['error'])
+        self.assertNotIn('self_service_delete_counter_unavailable', body['error'])
+
+    async def test_foreign_connection_id_is_not_found(self):
+        self.data['user_connections'][0]['user_id'] = 'someone-else'
+
+        result = await self.delete()
+
+        self.assertEqual(result.status_code, 404, getattr(result, 'body', result))
+        self.remove.assert_not_called()
+        self.commit.assert_not_called()
+
+    async def test_busy_lifecycle_maps_to_409_not_500(self):
+        async def busy(*args, **kwargs):
+            raise interlock.PeerLifecycleBusy('peer_lifecycle_busy')
+
+        with patch.object(panel, '_finalize_and_remove_peer', side_effect=busy):
+            result = await self.delete()
+
+        self.assertEqual(result.status_code, 409, getattr(result, 'body', result))
+        body = json.loads(result.body)
+        self.assertEqual(body['code'], 'peer_lifecycle_busy')
+        # The message is a translation key, not a hardcoded English string.
+        self.assertEqual(body['error'],
+                         panel._t('self_service_delete_busy', 'en'))
+
+    async def test_uncertain_lifecycle_maps_to_503_not_500(self):
+        async def uncertain(*args, **kwargs):
+            raise interlock.PeerLifecycleUncertain('peer_lifecycle_uncertain')
+
+        with patch.object(panel, '_finalize_and_remove_peer', side_effect=uncertain):
+            result = await self.delete()
+
+        self.assertEqual(result.status_code, 503, getattr(result, 'body', result))
+        body = json.loads(result.body)
+        self.assertEqual(body['code'], 'peer_lifecycle_uncertain')
+        self.assertEqual(body['error'],
+                         panel._t('self_service_delete_restore_required', 'en'))
+
+    async def test_removal_ssh_failure_is_not_reported_as_success(self):
+        self.remove.side_effect = RuntimeError('ssh went away')
+
+        result = await self.delete()
+
+        # Same status as the admin path: the remote host failed, nothing changed.
+        self.assertEqual(result.status_code, 502, getattr(result, 'body', result))
+        body = json.loads(result.body)
+        self.assertEqual(body['code'], 'removal_ssh_failed')
+        # The remote text may carry command output and must not reach the user.
+        self.assertNotIn('ssh went away', body['error'])
+        self.assertEqual(body['error'],
+                         panel._t('self_service_delete_ssh_failed', 'en'))
+        self.commit.assert_not_called()
+        self.assertEqual(len(self.data['user_connections']), 1)
 
 
 class InterlockCancellation(unittest.IsolatedAsyncioTestCase):

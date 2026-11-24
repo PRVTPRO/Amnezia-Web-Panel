@@ -5,8 +5,6 @@
 {% block page_class %}page page--server-detail{% endblock %}
 
 {% block head_extra %}
-<link rel="stylesheet" href="/static/vendor/codemirror/codemirror.min.css">
-<link rel="stylesheet" href="/static/vendor/codemirror/theme/material-darker.min.css">
 <style>
     .marketplace-grid {
         display: grid;
@@ -352,12 +350,21 @@
         border-color: var(--border-color);
         animation: serverStatsPulse 1.2s ease-in-out infinite;
     }
+    /* Smart Route card: same skeleton while the first probe is in flight, so
+       the card does not pop in a round-trip after the grid. */
+    .protocol-card .badge.is-skeleton {
+        color: transparent;
+        background: var(--bg-secondary);
+        border-color: var(--border-color);
+        animation: serverStatsPulse 1.2s ease-in-out infinite;
+    }
     @media (prefers-reduced-motion: reduce) {
         .srv-header .srv-status-btn[data-state="loading"] .ssh-trust-dot,
         .srv-header .srv-status-btn[data-state="loading"] .awg-plugin-dot,
         .srv-header .srv-status-btn[data-state="loading"] .cheburcheck-dot,
         .srv-header .badge.is-skeleton,
-        .srv-header .ip-chip.is-skeleton { animation: none; }
+        .srv-header .ip-chip.is-skeleton,
+        .protocol-card .badge.is-skeleton { animation: none; }
     }
     @media (max-width: 520px) {
         .server-stats-popover {
@@ -666,6 +673,305 @@
         box-shadow: 0 0 0 3px var(--accent-glow);
     }
 
+    /* ===== Прокси: учётные записи, вёрстка строки как у пиров ===== */
+    .btn-grow { flex: 1 1 auto; }
+    .visually-hidden {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+        border: 0;
+    }
+    .proxy-spin { animation: spin .7s linear infinite; }
+    .client-item[data-state="disabled"] { opacity: .55; }
+    .client-item[data-state="blocked"] { border-color: var(--danger-border); background: var(--danger-bg); }
+    .client-avatar.is-off {
+        background: var(--bg-secondary);
+        color: var(--text-muted);
+        border: 1px solid var(--border-color);
+    }
+    .client-avatar.is-danger { background: linear-gradient(135deg, #b91c1c, #7f1d1d); }
+    .client-name { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+    .client-name .client-ip {
+        font-size: .8rem;
+        color: var(--text-muted);
+        font-weight: 400;
+        overflow-wrap: anywhere;
+    }
+    .client-meta .badge { font-size: .65rem; padding: 2px 8px; }
+    .badge-case { text-transform: none; letter-spacing: 0; }
+    .badge-type-socks5 {
+        background: var(--info-bg);
+        color: var(--info);
+        border: 1px solid var(--info-border);
+    }
+    .badge-type-http {
+        background: rgba(255, 255, 255, .06);
+        color: var(--text-secondary);
+        border: 1px solid var(--border-color);
+    }
+    [data-theme="light"] .badge-type-http { background: rgba(0, 0, 0, .04); }
+    .badge-type-both {
+        background: var(--accent-glow);
+        color: var(--accent-light);
+        border: 1px solid var(--border-color);
+    }
+    [data-theme="light"] .badge-type-both { color: var(--accent); }
+    .acc-quota { display: flex; flex-direction: column; gap: 3px; min-width: 116px; }
+    .quota-text {
+        display: flex;
+        gap: 6px;
+        font-size: .72rem;
+        color: var(--text-secondary);
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+    }
+    .quota-text b { color: var(--text-primary); font-weight: 600; }
+    .quota-pct { font-weight: 700; }
+    .quota-pct.is-warn { color: var(--warning); }
+    .quota-pct.is-danger { color: var(--danger); }
+    .acc-quota .progress {
+        display: block;
+        height: 5px;
+        background: var(--bg-primary);
+        border-radius: var(--radius-full);
+        overflow: hidden;
+        border: 1px solid var(--border-color);
+    }
+    .acc-quota .progress-fill {
+        display: block;
+        height: 100%;
+        background: var(--accent-gradient);
+        border-radius: var(--radius-full);
+        transition: width .4s ease;
+    }
+    .acc-quota .progress-fill::after { content: none; }
+    .progress-fill.is-warn { background: linear-gradient(135deg, #d97706, #f59e0b); }
+    .progress-fill.is-danger { background: linear-gradient(135deg, #b91c1c, #ef4444); }
+    .pct-0 { width: 0; }
+    .pct-5 { width: 5%; }
+    .pct-10 { width: 10%; }
+    .pct-15 { width: 15%; }
+    .pct-20 { width: 20%; }
+    .pct-25 { width: 25%; }
+    .pct-30 { width: 30%; }
+    .pct-35 { width: 35%; }
+    .pct-40 { width: 40%; }
+    .pct-45 { width: 45%; }
+    .pct-50 { width: 50%; }
+    .pct-55 { width: 55%; }
+    .pct-60 { width: 60%; }
+    .pct-65 { width: 65%; }
+    .pct-70 { width: 70%; }
+    .pct-75 { width: 75%; }
+    .pct-80 { width: 80%; }
+    .pct-85 { width: 85%; }
+    .pct-90 { width: 90%; }
+    .pct-95 { width: 95%; }
+    .pct-100 { width: 100%; }
+    .acc-acl { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
+    .acl-chip {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 10.5px;
+        padding: 1px 6px;
+        border-radius: 4px;
+        background: var(--bg-secondary);
+        border: 1px solid var(--border-color);
+        color: var(--text-secondary);
+        white-space: nowrap;
+    }
+    .acl-any { font-size: .72rem; color: var(--text-muted); white-space: nowrap; }
+    .acc-upstream {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 11px;
+        color: var(--text-secondary);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 170px;
+    }
+    .acc-meta-label {
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: .07em;
+        color: var(--text-muted);
+        font-weight: 700;
+        margin-right: 5px;
+    }
+    .acc-check {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        font-size: .72rem;
+        color: var(--text-secondary);
+    }
+    .acc-check b { color: var(--text-primary); }
+    .modal-section {
+        border-top: 1px solid var(--border-color);
+        padding-top: var(--space-md);
+        margin-top: var(--space-md);
+    }
+    .modal-section-title {
+        font-size: .8rem;
+        font-weight: 700;
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        margin-bottom: var(--space-md);
+        flex-wrap: wrap;
+    }
+    .modal-section-title .hint { font-weight: 400; color: var(--text-muted); font-size: .72rem; }
+    .input-inline { display: flex; gap: var(--space-sm); align-items: center; }
+    .input-inline .form-input { flex: 1 1 auto; min-width: 0; }
+    .form-row-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-md); }
+    .modal.modal-wide { max-width: 720px; }
+    .modal.modal-sm { max-width: 460px; }
+    .check-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 13px 14px;
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-md);
+        background: var(--bg-secondary);
+    }
+    .check-row .check-text { font-size: .8rem; font-weight: 600; }
+    .check-row .check-hint {
+        display: block;
+        margin-top: 2px;
+        font-size: .72rem;
+        color: var(--text-muted);
+        font-weight: 400;
+    }
+    .check-inline { margin-top: var(--space-sm); align-items: flex-start; }
+    .acl-editor { display: flex; flex-direction: column; gap: var(--space-sm); }
+    .acl-line { display: flex; align-items: center; gap: var(--space-sm); }
+    .acl-line .form-input {
+        grid-column: auto;
+        padding-block: 8px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: .8rem;
+    }
+    .acl-add { margin-top: var(--space-sm); }
+    .key-list { display: flex; flex-direction: column; gap: var(--space-sm); }
+    .key-row {
+        display: flex;
+        align-items: center;
+        gap: var(--space-sm);
+        padding: 9px 10px 9px 12px;
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-md);
+        background: var(--bg-secondary);
+    }
+    .key-proto {
+        font-size: 10px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: .06em;
+        padding: 2px 6px;
+        border-radius: 4px;
+        flex: 0 0 auto;
+    }
+    .key-proto.is-socks {
+        color: var(--info);
+        background: var(--info-bg);
+        border: 1px solid var(--info-border);
+    }
+    .key-proto.is-http {
+        color: var(--accent-light);
+        background: var(--accent-glow);
+        border: 1px solid var(--border-color);
+    }
+    .key-value {
+        flex: 1 1 auto;
+        min-width: 0;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: .72rem;
+        white-space: nowrap;
+        overflow-x: auto;
+        scrollbar-width: thin;
+    }
+    .key-note { font-size: .72rem; color: var(--text-muted); margin-top: var(--space-sm); }
+    .key-hint-box {
+        display: flex;
+        align-items: flex-start;
+        gap: 9px;
+        padding: 12px 14px;
+        border: 1px dashed var(--border-hover);
+        border-radius: var(--radius-md);
+        background: var(--bg-secondary);
+        font-size: .8rem;
+        color: var(--text-muted);
+        line-height: 1.5;
+    }
+    .key-off {
+        display: flex;
+        align-items: flex-start;
+        gap: 7px;
+        padding: 9px 12px;
+        border: 1px dashed var(--border-hover);
+        border-radius: var(--radius-md);
+        background: var(--bg-card);
+        font-size: .72rem;
+        color: var(--text-muted);
+        line-height: 1.5;
+    }
+    .port-field { display: grid; grid-template-columns: 1fr auto; gap: var(--space-sm); align-items: start; }
+    .port-check-msg {
+        grid-column: 1 / -1;
+        display: flex;
+        align-items: flex-start;
+        gap: 6px;
+        font-size: .72rem;
+        line-height: 1.45;
+    }
+    .port-check-msg.is-free { color: var(--success); }
+    .port-check-msg.is-busy { color: var(--danger); }
+    .port-check-msg.is-invalid { color: var(--warning); }
+    .port-check-msg.is-idle { color: var(--text-muted); }
+    .port-check-msg b { font-weight: 700; }
+    .proxy-actions-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: var(--space-sm);
+    }
+    .proxy-actions-grid .btn { width: 100%; }
+    details.proxy-advanced {
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-md);
+        background: var(--bg-secondary);
+        overflow: hidden;
+    }
+    details.proxy-advanced > summary {
+        list-style: none;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 11px 14px;
+        font-size: .8rem;
+        font-weight: 600;
+        color: var(--text-secondary);
+    }
+    details.proxy-advanced > summary::-webkit-details-marker { display: none; }
+    details.proxy-advanced > summary .chev {
+        margin-inline-start: auto;
+        transition: transform var(--transition-base);
+        color: var(--text-muted);
+    }
+    details.proxy-advanced[open] > summary .chev { transform: rotate(180deg); }
+    details.proxy-advanced .advanced-body { padding: 0 14px 14px; }
+    @media (max-width: 900px) {
+        .form-row-3 { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 768px) {
+        .client-actions.proxy-actions { justify-content: flex-start; }
+    }
+
 </style>
 {% endblock %}
 
@@ -787,7 +1093,6 @@
             document.getElementById('ssh-trust-details').textContent = error.message;
         } finally { button.disabled = false; }
     }
-    document.addEventListener('DOMContentLoaded', loadSSHTrustStatus);
 </script>
 
 <!-- ===== Copy one AWG instance to another server ===== -->
@@ -1069,7 +1374,7 @@
 </div>
 <script>
     let awgPluginStatus = null;
-    const awgPluginOps = {};
+    let awgPluginLoading = false;    const awgPluginOps = {};
 
     const xrayStageLabels = {{ {
         'start': _('xray_update_stage_start'),
@@ -1104,6 +1409,7 @@
             'manual': _('awg_plugin_manual_step'),
             'no_update': _('awg_plugin_no_update'),
             'error': _('awg_plugin_check_failed'),
+            'loading': _('awg_plugin_loading'),
             'log': _('awg_plugin_log'),
             'rollback': _('awg_plugin_rollback_failed'),
             'cancel': _('awg_plugin_cancel'),
@@ -1250,12 +1556,18 @@
 
     function openAwgPluginModal() {
         openModal('awgPluginModal');
+        // While the real probe runs, the modal must say "checking", not
+        // "failed": no answer yet is not an error.
+        awgPluginLoading = true;
         renderAwgPluginModal();
         // The badge is fed from a 12-hour cache so a page load does not probe
         // every server over SSH. The modal is where the operator decides, so
         // it always reads the real state: a module installed outside the panel
         // must not keep looking absent for half a day.
-        loadAwgPluginStatus(true).then(renderAwgPluginModal);
+        loadAwgPluginStatus(true).then(() => {
+            awgPluginLoading = false;
+            renderAwgPluginModal();
+        });
         if (xrayProtocols.length) {
             // The user is looking at the update dialog: re-probe the core
             // for real. A cached badge may lag a core that was updated
@@ -1285,7 +1597,9 @@
         host.textContent = '';
         const labels = awgPluginLabel();
         if (!awgPluginStatus) {
-            host.appendChild(awgPluginElement('p', 'text-muted', labels.error));
+            host.appendChild(awgPluginElement('p', 'text-muted',
+                awgPluginLoading ? labels.loading : labels.error));
+            return;
         }
         const descriptions = {kernel_module: labels.kernel_desc, userspace: labels.userspace_desc};
         const titles = {kernel_module: labels.kernel, userspace: labels.userspace};
@@ -1796,6 +2110,14 @@
             download: 'srv_warp_stage_download', register: 'srv_warp_stage_register',
             profile: 'srv_warp_stage_profile', startsh: 'srv_warp_stage_startsh',
             done: 'srv_warp_stage_done', error: 'error'
+        },
+        // Profile import: no download/register, the account comes from another
+        // server; 'source' and 'handshake' are its own stages.
+        warp_import: {
+            start: 'srv_warp_stage_start', source: 'srv_warp_stage_source',
+            profile: 'srv_warp_stage_profile', handshake: 'srv_warp_stage_handshake',
+            startsh: 'srv_warp_stage_startsh',
+            done: 'srv_warp_stage_done', error: 'error'
         }
     };
 
@@ -1805,6 +2127,8 @@
         installOp = {opId, flow, offset: 0, timer: null, creep: null, creepRunning: false, display: 0, cap: 0, step: 0, total: 0};
         document.getElementById('installForm').classList.add('hidden');
         document.getElementById('installDone').style.display = 'none';
+        const warpCta = document.getElementById('installWarpCta');
+        if (warpCta) warpCta.classList.add('hidden');
         const progressDiv = document.getElementById('installProgress');
         progressDiv.classList.remove('hidden');
         const logEl = document.getElementById('installLog');
@@ -1824,15 +2148,17 @@
             protocol: 'install_starting',
             smartroute: 'smartroute_stage_start',
             rknblock: 'rknblock_stage_start',
-            warp: 'srv_warp_stage_start'
+            warp: 'srv_warp_stage_start',
+            warp_import: 'srv_warp_stage_start'
         };
+        const isWarpFlow = flow === 'warp' || flow === 'warp_import';
         if (stageEl) stageEl.textContent = _(initialStageMap[flow] || 'install_starting');
         // Set modal title based on flow
         const titleEl = document.getElementById('installModalTitle');
         if (titleEl) {
             if (flow === 'smartroute') titleEl.textContent = _('smartroute_install');
             else if (flow === 'rknblock') titleEl.textContent = _('rkn_block_title');
-            else if (flow === 'warp') titleEl.textContent = 'Cloudflare WARP';
+            else if (isWarpFlow) titleEl.textContent = 'Cloudflare WARP';
             else titleEl.textContent = _('install_protocol');
         }
         openModal('installModal');
@@ -1895,11 +2221,16 @@
         if (!installOp) return;
         const logEl = document.getElementById('installLog');
         try {
-            const url = installOp.flow === 'warp'
+            // Both the WARP app install and the profile import share the
+            // generic progress endpoint; the other flows have their own.
+            const url = (installOp.flow === 'warp' || installOp.flow === 'warp_import')
                 ? `/api/servers/${SERVER_ID}/install/progress?operation_id=${encodeURIComponent(installOp.opId)}&offset=${installOp.offset}`
                 : `/api/servers/${SERVER_ID}/${installOp.flow}/install/${encodeURIComponent(installOp.opId)}?offset=${installOp.offset}`;
             const data = await apiCall(url, 'GET');
             installOp.offset = data.next_offset || installOp.offset;
+            // The backend echoes the flow: trust it over the caller's guess,
+            // so a stage map can never be looked up under the wrong key.
+            if (data.flow) installOp.flow = data.flow;
             setInstallOpProgress(data.step, data.total, data.percent, data.state === 'running', data.stage);
             appendInstallOpLines(data.lines);
             if (data.state === 'running') {
@@ -1937,7 +2268,7 @@
                     await loadRknBlock();
                     applyInstalledAppsVisibility();
                     renderMarketplace();
-                } else if (flow === 'warp') {
+                } else if (flow === 'warp' || flow === 'warp_import') {
                     warpBusy = false;
                     await loadWarpStatus(true);
                     applyInstalledAppsVisibility();
@@ -1949,10 +2280,11 @@
             } else if (data.state === 'failed' || data.state === 'error') {
                 if (flow === 'smartroute') smartRouteBusy = false;
                 else if (flow === 'rknblock') rknBlockBusy = false;
-                else if (flow === 'warp') warpBusy = false;
+                else if (flow === 'warp' || flow === 'warp_import') warpBusy = false;
                 // WARP failures carry a stable code: show the translated text
                 // instead of the raw srv_warp_* code in the log and the toast.
-                const opErrorText = flow === 'warp' && data.error?.code
+                const opErrorText = (flow === 'warp' || flow === 'warp_import')
+                    && data.error?.code
                     ? warpErrorMessage({payload: data.error})
                     : (data.error?.message || _('install_error'));
                 if (stageEl) {
@@ -1969,10 +2301,18 @@
                 logEl.appendChild(errDiv);
                 logEl.scrollTop = logEl.scrollHeight;
                 showToast(_('install_error') + ': ' + opErrorText, 'error');
-                if (flow === 'warp') {
+                if (flow === 'warp' || flow === 'warp_import') {
                     await loadWarpStatus(true);
                     applyInstalledAppsVisibility();
                     renderMarketplace();
+                }
+                // An SNI-filtered host can never register: offer the import
+                // straight from the failure instead of leaving a dead end.
+                const cta = document.getElementById('installWarpCta');
+                if (cta) {
+                    cta.classList.toggle(
+                        'hidden',
+                        data.error?.code !== 'srv_warp_register_api_unreachable');
                 }
                 document.getElementById('installDone').style.display = '';
             } else if (data.state === 'cancelled') {
@@ -1988,7 +2328,6 @@
     }
 
     // Статус плагина тоже дорогой (16 SSH-команд): грузим последним.
-    window.addEventListener('load', () => loadAwgPluginStatus());
 </script>
 {% endif %}
 <a href="/" class="back-link page-back-link">{{ _('back_to_servers') }}</a>
@@ -2342,7 +2681,7 @@
     <div class="card card-hover protocol-card protocol-socks5" id="proto-socks5">
         <div class="protocol-card-head">
             <div class="protocol-icon">🧦</div>
-            <div class="protocol-name">SOCKS5 Proxy</div>
+            <div class="protocol-name">3proxy</div>
         </div>
         <div class="flex gap-sm protocol-ctrl" id="socks5-ctrl" style="display:none!important;"></div>
         <div class="protocol-desc">
@@ -2484,6 +2823,10 @@
                 style="flex:1">
                 {{ _('srv_warp_install') }}
             </button>
+            <button class="btn btn-secondary btn-sm" onclick="openWarpImportModal()" id="warp-import-open-btn"
+                style="flex:1">
+                {{ _('srv_warp_import') }}
+            </button>
         </div>
         <div id="warp-installed-actions" style="display:none;">
             <div class="flex gap-sm">
@@ -2527,6 +2870,41 @@
                 <button class="btn btn-secondary" onclick="resolveWarpTos(false)">{{ _('cancel') }}</button>
                 <button class="btn btn-primary" onclick="resolveWarpTos(true)" id="warpTosAcceptBtn">
                     {{ _('srv_warp_tos_accept') }}
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== WARP profile import modal ===== -->
+    <div class="modal-backdrop" id="warpImportModal">
+        <div class="modal">
+            <div class="modal-header">
+                <h2 class="modal-title">{{ _('srv_warp_import_title') }}</h2>
+                <button class="modal-close" onclick="closeModal('warpImportModal')">×</button>
+            </div>
+            <div class="form-hint" style="margin-bottom:10px;">{{ _('srv_warp_import_hint') }}</div>
+            <button class="btn btn-secondary btn-sm" id="warp-import-check-btn"
+                onclick="checkWarpImportSources()" style="width:100%; margin-bottom:10px;">
+                {{ _('srv_warp_import_check') }}
+            </button>
+            <div id="warp-import-sources" class="hidden" style="margin-bottom:12px;"></div>
+            <div id="warp-import-no-usable" class="form-hint is-error hidden">
+                {{ _('srv_warp_import_no_usable') }}
+            </div>
+            <div id="warp-import-empty" class="form-hint hidden">{{ _('srv_warp_import_no_sources') }}</div>
+            <label class="form-label" for="warp-import-source">{{ _('srv_warp_import_source') }}</label>
+            <select id="warp-import-source" class="input" style="margin-bottom:12px;"
+                onchange="onWarpImportSourceChange()"></select>
+            <label class="form-label" for="warp-import-source-protocol">{{ _('srv_warp_import_source_protocol') }}</label>
+            <select id="warp-import-source-protocol" class="input" style="margin-bottom:12px;"></select>
+            <label class="form-label" for="warp-import-target">{{ _('srv_warp_import_target') }}</label>
+            <select id="warp-import-target" class="input" style="margin-bottom:12px;"></select>
+            <div id="warp-import-error" class="form-hint is-error hidden"></div>
+            <div class="form-hint" style="margin-top:10px;">{{ _('srv_warp_import_copy_hint') }}</div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('warpImportModal')">{{ _('cancel') }}</button>
+                <button class="btn btn-primary" onclick="importWarp()" id="warp-import-btn">
+                    {{ _('srv_warp_import_action') }}
                 </button>
             </div>
         </div>
@@ -2638,7 +3016,7 @@
         role="button" tabindex="0" onclick="TorrentPlugin.open()"
         onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); TorrentPlugin.open(); }">
         <div class="protocol-card-head">
-            <div class="protocol-icon">{{ ui_icon('shield', 18) }}</div>
+            <div class="protocol-icon">{{ ui_icon('torrent-guard', 35) }}</div>
             <div class="protocol-name">{{ _('tp_name') }}</div>
         </div>
         <div class="protocol-desc">{{ _('tp_desc') }}</div>
@@ -2700,12 +3078,15 @@
     </div>
 </div>
 
-<!-- Connections Section (renamed from Clients) -->
-<div class="clients-section" id="connectionsSection" style="display:none;">
+<!-- Универсальный список: клиенты выбранного инстанса или учётки прокси.
+     Одна шапка (заголовок, сортировка, поиск, кнопка действия) и один
+     список — источник выбирает showEntityList('vpn'|'proxy'). -->
+<div class="clients-section hidden" id="entityListSection">
     <div class="clients-header page-header page-header--secondary">
         <h2 class="section-title page-header__title">
-            <span class="icon">🔗</span>
-            {{ _('connections') }}
+            <span class="icon" id="entityListIcon">{{ ui_icon('network', 16) }}</span>
+            <span id="entityListTitle">{{ _('connections') }}</span>
+            <span class="badge badge-secondary hidden" id="entityListCount">0</span>
         </h2>
         <div class="page-header__actions">
             <details class="connection-sort">
@@ -2731,6 +3112,10 @@
                     </select>
                 </div>
             </details>
+            <input type="search" class="form-input page-header__search" id="entityListSearch"
+                placeholder="{{ _('list_search_placeholder') }}"
+                aria-label="{{ _('list_search_placeholder') }}"
+                oninput="applyEntitySearch()">
             <select class="form-select connection-protocol-select" id="connProtoSelect" onchange="loadConnections()">
                 <option value="awg">AmneziaWG</option>
                 <option value="awg2">AmneziaWG 2.0</option>
@@ -2740,24 +3125,22 @@
                 <option value="telemt">Telemt</option>
                 <option value="wireguard">WireGuard</option>
             </select>
-            <button class="btn btn-primary btn-sm" onclick="openAddConnectionModal()">
-                <span>＋</span> {{ _('add') }}
+            <button class="btn btn-primary btn-sm" id="entityListAddBtn"
+                onclick="openAddConnectionModal()">
+                <span>＋</span> <span id="entityListAddText">{{ _('add') }}</span>
             </button>
         </div>
     </div>
 
-    <div id="connectionsList">
-        <div class="loading-overlay" id="connectionsLoading" style="display:none;">
-            <div class="loading-spinner"></div>
-            <span>{{ _('loading_connections') }}</span>
-        </div>
-        <div id="connectionsEmpty" class="empty-state hidden" style="padding: var(--space-xl) 0;">
-            <div class="empty-icon">🔗</div>
-            <div class="empty-title">{{ _('no_connections') }}</div>
-            <div class="empty-desc">{{ _('no_connections_desc') }}</div>
-        </div>
-        <div class="clients-list" id="connectionsListInner"></div>
+    <div class="loading-overlay hidden" id="entityListLoading">
+        <div class="loading-spinner"></div>
+        <span>{{ _('loading_connections') }}</span>
     </div>
+    <div id="entityListEmpty" class="empty-state hidden">
+        <div class="empty-title" id="entityListEmptyTitle">{{ _('no_connections') }}</div>
+        <div class="empty-desc" id="entityListEmptyDesc">{{ _('no_connections_desc') }}</div>
+    </div>
+    <div class="clients-list" id="entityListInner"></div>
 </div>
 
 <!-- ===== Marketplace Modal ===== -->
@@ -3073,6 +3456,23 @@
                     <input class="form-input" type="text" id="installSocks5Pass" placeholder="{{ _('socks5_password_placeholder') }}">
                     <div class="form-hint">{{ _('socks5_password_hint') }}</div>
                 </div>
+                <div class="form-group">
+                    <label class="form-label">{{ _('proxy_install_http_port') }}</label>
+                    <input class="form-input" type="number" id="installSocks5HttpPort" min="1" max="65535" value="8312">
+                    <div class="form-hint">{{ _('proxy_install_http_port_hint') }}</div>
+                </div>
+                <div class="form-group">
+                    <label class="check-row" for="installSocks5HttpEnabled">
+                        <span class="switch">
+                            <input type="checkbox" id="installSocks5HttpEnabled" checked>
+                            <span class="slider"></span>
+                        </span>
+                        <span>
+                            <span class="check-text">{{ _('proxy_install_http_enabled') }}</span>
+                            <span class="check-hint">{{ _('proxy_install_http_enabled_hint') }}</span>
+                        </span>
+                    </label>
+                </div>
             </div>
 
             <div id="adguardOptions"
@@ -3178,6 +3578,15 @@
             <div class="awg-plugin-stage" id="installStage"></div>
             <div class="log-output" id="installLog"></div>
             <div class="mt-md" id="installDone" style="display:none;">
+                <div id="installWarpCta" class="hidden" style="margin-bottom:10px;">
+                    <div class="form-hint is-error" style="margin-bottom:8px;">
+                        {{ _('srv_warp_err_api_unreachable') }}
+                    </div>
+                    <button class="btn btn-secondary" style="width:100%"
+                        onclick="openWarpImportModal(true)">
+                        {{ _('srv_warp_import') }}
+                    </button>
+                </div>
                 <button class="btn btn-primary" onclick="closeModal('installModal'); window.location.reload();"
                     style="width:100%">
                     {{ _('done') }}
@@ -3656,6 +4065,344 @@
     </div>
 </div>
 
+<!-- ===== Прокси: ключ учётки ===== -->
+<div class="modal-backdrop" id="proxyKeyModal">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="proxyKeyTitle">
+        <div class="modal-header">
+            <div>
+                <h2 class="modal-title" id="proxyKeyTitle">{{ ui_icon('key', 18) }} {{ _('proxy_key_title') }}</h2>
+                <div class="text-muted text-sm" id="proxyKeySub"></div>
+            </div>
+            <button class="modal-close" onclick="closeModal('proxyKeyModal')"
+                aria-label="{{ _('close') }}">{{ ui_icon('x', 17) }}</button>
+        </div>
+        <div class="key-list" id="proxyKeyList"></div>
+        <div class="key-off hidden" id="proxyKeyHttpOff">
+            {{ ui_icon('alert', 13) }} <span>{{ _('proxy_http_off_key') }}</span>
+        </div>
+        <div class="key-note">{{ _('proxy_key_note') }}</div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="closeModal('proxyKeyModal')">{{ _('close') }}</button>
+            <button class="btn btn-primary" id="proxyKeyEditBtn" onclick="editProxyAccountFromKey()">
+                {{ ui_icon('settings', 15) }} {{ _('proxy_edit_btn') }}
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- ===== Прокси: новая / изменить учётку ===== -->
+<div class="modal-backdrop" id="proxyAccountModal">
+    <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="proxyAccountTitle">
+        <div class="modal-header">
+            <div>
+                <h2 class="modal-title" id="proxyAccountTitle">
+                    {{ ui_icon('key', 18) }} <span id="proxyAccountTitleText">{{ _('proxy_account_title_create') }}</span>
+                </h2>
+                <div class="text-muted text-sm hidden" id="proxyAccountSub"></div>
+            </div>
+            <button class="modal-close" onclick="closeModal('proxyAccountModal')"
+                aria-label="{{ _('close') }}">{{ ui_icon('x', 17) }}</button>
+        </div>
+
+        <div class="form-group">
+            <label class="form-label" for="proxyAccName">{{ _('proxy_account_name') }} <span class="req">*</span></label>
+            <input class="form-input" id="proxyAccName" type="text" maxlength="120"
+                placeholder="{{ _('proxy_account_name_placeholder') }}">
+        </div>
+
+        <div class="form-row">
+            <div class="form-group">
+                <label class="form-label" for="proxyAccLogin">{{ _('proxy_login') }}</label>
+                <div class="input-inline">
+                    <input class="form-input" id="proxyAccLogin" type="text" spellcheck="false"
+                        autocomplete="off" placeholder="user_7f3a">
+                    <button class="btn btn-secondary btn-icon" type="button"
+                        onclick="regenerateProxyLogin()" title="{{ _('proxy_gen_login') }}"
+                        aria-label="{{ _('proxy_gen_login') }}">{{ ui_icon('refresh', 15) }}</button>
+                </div>
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="proxyAccPassword">{{ _('proxy_password') }}</label>
+                <div class="input-inline">
+                    <input class="form-input" id="proxyAccPassword" type="password" spellcheck="false"
+                        autocomplete="new-password">
+                    <button class="btn btn-secondary btn-icon" type="button" id="proxyAccPwToggle"
+                        onclick="toggleProxyPassword()" title="{{ _('proxy_show_password') }}"
+                        aria-label="{{ _('proxy_show_password') }}">{{ ui_icon('key', 15) }}</button>
+                    <button class="btn btn-secondary btn-icon" type="button"
+                        onclick="regenerateProxyPassword()" title="{{ _('proxy_regen_password') }}"
+                        aria-label="{{ _('proxy_regen_password') }}">{{ ui_icon('refresh', 15) }}</button>
+                </div>
+                <div class="form-hint">{{ _('proxy_password_hint') }}</div>
+            </div>
+        </div>
+
+        <div class="form-group">
+            <span class="form-label">{{ _('proxy_type_label') }}</span>
+            <div class="seg-group">
+                <input type="radio" name="proxyAccType" id="proxyTypeSocks" value="socks5">
+                <label class="seg-btn" for="proxyTypeSocks">{{ _('proxy_type_socks5') }}</label>
+                <input type="radio" name="proxyAccType" id="proxyTypeHttp" value="http">
+                <label class="seg-btn" for="proxyTypeHttp">{{ _('proxy_type_http') }}</label>
+                <input type="radio" name="proxyAccType" id="proxyTypeBoth" value="both" checked>
+                <label class="seg-btn" for="proxyTypeBoth">{{ _('proxy_type_both') }}</label>
+            </div>
+            <div class="form-hint">{{ _('proxy_type_hint') }}</div>
+        </div>
+
+        <div class="form-group">
+            <label class="form-label" for="proxyAccUser">{{ _('proxy_bind_user') }}</label>
+            <select class="form-select" id="proxyAccUser">
+                <option value="">{{ _('proxy_no_bind') }}</option>
+            </select>
+        </div>
+
+        <div class="modal-section">
+            <div class="modal-section-title">
+                {{ ui_icon('shield', 15) }}
+                {{ _('proxy_acl_title') }}
+                <span class="hint">{{ _('proxy_acl_hint') }}</span>
+            </div>
+            <div class="acl-editor" id="proxyAclList"></div>
+            <button class="btn btn-secondary btn-sm acl-add" type="button" onclick="addProxyAclRow('', true)">
+                {{ ui_icon('plus', 14) }} {{ _('proxy_acl_add') }}
+            </button>
+        </div>
+
+        <div class="modal-section">
+            <div class="modal-section-title">{{ ui_icon('gauge', 15) }} {{ _('proxy_limits_title') }}</div>
+            <div class="form-row-3">
+                <div class="form-group">
+                    <label class="form-label" for="proxyAccConns">{{ _('proxy_conns_label') }}</label>
+                    <input class="form-input" id="proxyAccConns" type="number" min="0" step="1"
+                        placeholder="{{ _('proxy_no_limit') }}">
+                    <div class="form-hint">{{ _('proxy_conns_hint') }}</div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="proxyAccRateIn">{{ _('proxy_rate_in') }}</label>
+                    <input class="form-input" id="proxyAccRateIn" type="number" min="0" step="1"
+                        placeholder="{{ _('proxy_no_limit') }}">
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="proxyAccRateOut">{{ _('proxy_rate_out') }}</label>
+                    <input class="form-input" id="proxyAccRateOut" type="number" min="0" step="1"
+                        placeholder="{{ _('proxy_no_limit') }}">
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label class="form-label" for="proxyAccQuota">{{ _('proxy_quota_label') }}</label>
+                    <input class="form-input" id="proxyAccQuota" type="number" min="0" step="0.1"
+                        placeholder="{{ _('proxy_no_limit') }}">
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="proxyAccQuotaPeriod">{{ _('proxy_quota_period') }}</label>
+                    <select class="form-select" id="proxyAccQuotaPeriod">
+                        <option value="D">{{ _('proxy_period_day') }}</option>
+                        <option value="W">{{ _('proxy_period_week') }}</option>
+                        <option value="M" selected>{{ _('proxy_period_month') }}</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <div class="modal-section">
+            <div class="modal-section-title">
+                {{ ui_icon('network', 15) }}
+                {{ _('proxy_upstream_title') }}
+                <span class="hint">{{ _('proxy_upstream_hint') }}</span>
+            </div>
+            <div class="form-row-3">
+                <div class="form-group">
+                    <label class="form-label" for="proxyAccUpType">{{ _('proxy_upstream_type') }}</label>
+                    <select class="form-select" id="proxyAccUpType">
+                        <option value="">{{ _('proxy_none') }}</option>
+                        <option value="socks5">socks5</option>
+                        <option value="http">http</option>
+                        <option value="connect">connect</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="proxyAccUpHost">{{ _('proxy_upstream_host') }}</label>
+                    <input class="form-input" id="proxyAccUpHost" type="text" spellcheck="false"
+                        placeholder="10.0.0.5">
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="proxyAccUpPort">{{ _('proxy_upstream_port') }}</label>
+                    <input class="form-input" id="proxyAccUpPort" type="number" min="1" max="65535"
+                        placeholder="1080">
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label class="form-label" for="proxyAccUpLogin">{{ _('proxy_upstream_login') }}</label>
+                    <input class="form-input" id="proxyAccUpLogin" type="text" spellcheck="false"
+                        autocomplete="off" placeholder="{{ _('proxy_not_set') }}">
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="proxyAccUpPass">{{ _('proxy_upstream_pass') }}</label>
+                    <input class="form-input" id="proxyAccUpPass" type="password" autocomplete="new-password"
+                        placeholder="{{ _('proxy_not_set') }}">
+                </div>
+            </div>
+        </div>
+
+        <div class="modal-section hidden" id="proxyAccKeySection">
+            <div class="modal-section-title">{{ ui_icon('key', 15) }} {{ _('proxy_key_title') }}</div>
+            <div class="key-list" id="proxyAccKeyList"></div>
+            <div class="key-note">{{ _('proxy_key_note') }}</div>
+        </div>
+        <div class="key-hint-box hidden" id="proxyAccKeyHint">
+            {{ ui_icon('key', 15) }} <span>{{ _('proxy_key_hint') }}</span>
+        </div>
+
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="closeModal('proxyAccountModal')">{{ _('cancel') }}</button>
+            <button class="btn btn-primary" id="proxyAccSubmitBtn" onclick="submitProxyAccount()">
+                {{ ui_icon('save', 15) }} <span id="proxyAccSubmitText">{{ _('create') }}</span>
+                <div class="spinner hidden" id="proxyAccSpinner"></div>
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- ===== Прокси: настройки инстанса ===== -->
+<div class="modal-backdrop" id="proxySettingsModal">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="proxySettingsTitle">
+        <div class="modal-header">
+            <div>
+                <h2 class="modal-title" id="proxySettingsTitle">
+                    {{ ui_icon('settings', 18) }} {{ _('proxy_settings_title') }}
+                </h2>
+                <div class="text-muted text-sm" id="proxySettingsSub">3proxy</div>
+            </div>
+            <button class="modal-close" onclick="closeModal('proxySettingsModal')"
+                aria-label="{{ _('close') }}">{{ ui_icon('x', 17) }}</button>
+        </div>
+
+        <div class="form-group">
+            <span class="form-label">{{ _('proxy_listener_type') }}</span>
+            <div class="seg-group" role="radiogroup" aria-label="{{ _('proxy_listener_type') }}">
+                <input type="radio" name="proxyListenerType" id="proxyListenerSocks" value="socks5"
+                    onchange="syncProxyListenerPorts()">
+                <label class="seg-btn" for="proxyListenerSocks">{{ _('proxy_type_socks5') }}</label>
+                <input type="radio" name="proxyListenerType" id="proxyListenerHttp" value="http"
+                    onchange="syncProxyListenerPorts()">
+                <label class="seg-btn" for="proxyListenerHttp">{{ _('proxy_type_http') }}</label>
+                <input type="radio" name="proxyListenerType" id="proxyListenerBoth" value="both"
+                    onchange="syncProxyListenerPorts()">
+                <label class="seg-btn" for="proxyListenerBoth">{{ _('proxy_type_both') }}</label>
+            </div>
+            <div class="form-hint">{{ _('proxy_listener_type_hint') }}</div>
+            <div class="form-hint hidden" id="proxyListenerOffHint"></div>
+        </div>
+
+        <div class="form-group">
+            <label class="form-label" for="proxySocksPort">{{ _('proxy_socks_port') }}</label>
+            <div class="port-field">
+                <input class="form-input" id="proxySocksPort" type="number" min="1" max="65535">
+                <button class="btn btn-secondary" type="button" onclick="checkProxyPort('socks', this)">
+                    {{ ui_icon('gauge', 15) }} {{ _('proxy_check_port') }}
+                </button>
+                <div class="port-check-msg is-idle" id="proxySocksPortState">
+                    {{ ui_icon('help', 12) }} <span>{{ _('proxy_port_not_checked') }}</span>
+                </div>
+            </div>
+            <div class="form-hint" id="proxySocksPortHint"></div>
+        </div>
+
+        <div class="form-group">
+            <label class="form-label" for="proxyHttpPort">{{ _('proxy_http_port') }}</label>
+            <div class="port-field">
+                <input class="form-input" id="proxyHttpPort" type="number" min="1" max="65535">
+                <button class="btn btn-secondary" type="button" onclick="checkProxyPort('http', this)">
+                    {{ ui_icon('gauge', 15) }} {{ _('proxy_check_port') }}
+                </button>
+                <div class="port-check-msg is-idle" id="proxyHttpPortState">
+                    {{ ui_icon('help', 12) }} <span>{{ _('proxy_port_not_checked') }}</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="form-group">
+            <span class="form-label">{{ _('proxy_dns_label') }}</span>
+            <div class="form-row">
+                <input class="form-input" id="proxyDns1" type="text" spellcheck="false"
+                    aria-label="{{ _('proxy_dns_server') }} 1" placeholder="8.8.8.8">
+                <input class="form-input" id="proxyDns2" type="text" spellcheck="false"
+                    aria-label="{{ _('proxy_dns_server') }} 2" placeholder="1.1.1.1">
+            </div>
+            <div class="form-hint">{{ _('proxy_dns_hint') }}</div>
+        </div>
+
+        <div class="form-group">
+            <label class="form-label" for="proxyMaxconn">{{ _('proxy_maxconn_label') }}</label>
+            <input class="form-input" id="proxyMaxconn" type="number" min="0" step="1"
+                placeholder="{{ _('proxy_maxconn_placeholder') }}">
+            <div class="form-hint">{{ _('proxy_maxconn_hint') }}</div>
+        </div>
+
+        <details class="proxy-advanced">
+            <summary>
+                {{ ui_icon('sliders', 15) }}
+                {{ _('proxy_advanced') }}
+                <span class="chev">{{ ui_icon('chevron-down', 15) }}</span>
+            </summary>
+            <div class="advanced-body">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label" for="proxyLogDays">{{ _('proxy_log_days') }}</label>
+                        <input class="form-input" id="proxyLogDays" type="number" min="1" step="1">
+                        <div class="form-hint">{{ _('proxy_log_days_hint') }}</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="proxyLogFormat">{{ _('proxy_log_format') }}</label>
+                        <input class="form-input mono" id="proxyLogFormat" type="text" spellcheck="false"
+                            placeholder="L%Y-%m-%d %H:%M:%S %U %I %O %N">
+                        <div class="form-hint">{{ _('proxy_log_format_hint') }}</div>
+                    </div>
+                </div>
+            </div>
+        </details>
+
+        <div class="key-off">
+            {{ ui_icon('alert', 13) }} <span>{{ _('proxy_settings_warning') }}</span>
+        </div>
+
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="closeModal('proxySettingsModal')">{{ _('cancel') }}</button>
+            <button class="btn btn-primary" id="proxySettingsSaveBtn" onclick="saveProxySettings()">
+                {{ ui_icon('save', 15) }} <span id="proxySettingsSaveText">{{ _('save') }}</span>
+                <div class="spinner hidden" id="proxySettingsSaveSpinner"></div>
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- ===== Прокси: подтверждение пересоздания контейнера ===== -->
+<div class="modal-backdrop" id="proxyRecreateModal">
+    <div class="modal modal-sm" role="dialog" aria-modal="true" aria-labelledby="proxyRecreateTitle">
+        <div class="modal-header">
+            <div>
+                <h2 class="modal-title" id="proxyRecreateTitle">
+                    {{ ui_icon('alert', 18) }} {{ _('proxy_recreate_title') }}
+                </h2>
+                <div class="text-muted text-sm">{{ _('proxy_recreate_sub') }}</div>
+            </div>
+            <button class="modal-close" onclick="cancelProxyRecreate()"
+                aria-label="{{ _('close') }}">{{ ui_icon('x', 17) }}</button>
+        </div>
+        <p class="text-muted text-sm" id="proxyRecreateText"></p>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="cancelProxyRecreate()">{{ _('cancel') }}</button>
+            <button class="btn btn-danger" id="proxyRecreateConfirmBtn" onclick="confirmProxyRecreate()">
+                {{ ui_icon('power', 15) }} <span id="proxyRecreateConfirmText">{{ _('proxy_recreate_btn') }}</span>
+                <div class="spinner hidden" id="proxyRecreateSpinner"></div>
+            </button>
+        </div>
+    </div>
+</div>
+
 <!-- ===== NGINX Site Modal ===== -->
 <div class="modal-backdrop" id="siteConfigModal">
     <div class="modal">
@@ -3891,13 +4638,6 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="/static/vendor/codemirror/codemirror.min.js"></script>
-<script src="/static/vendor/codemirror/mode/nginx/nginx.min.js"></script>
-<script src="/static/vendor/codemirror/mode/xml/xml.min.js"></script>
-<script src="/static/vendor/codemirror/mode/javascript/javascript.min.js"></script>
-<script src="/static/vendor/codemirror/mode/css/css.min.js"></script>
-<script src="/static/vendor/codemirror/mode/properties/properties.min.js"></script>
-<script src="/static/vendor/codemirror/mode/htmlmixed/htmlmixed.min.js"></script>
 <script>
     const SERVER_ID = {{ server_id }};
     let SSH_COOLDOWN_BASE = {{ (server.get('ssh_cooldown_base') or 30) | tojson }};
@@ -3907,7 +4647,7 @@
     // когда плагин установлен. Нет установки — нет ни разметки, ни JS.
     const TORRENT_PLUGIN = {{ (torrent_plugin or {}) | tojson }};
     // Иконка плагина из общего реестра: эмодзи в новой вёрстке не используем.
-    const TP_ICON_SVG = {{ ui_icon('shield', 19) | tojson }};
+    const TP_ICON_SVG = {{ ui_icon('torrent-guard', 35) | tojson }};
     document.body.dataset.serverUid = {{ (server.uid or '') | tojson }};
     const SERVER_HOST = "{{ server.host }}";
     const CUSTOM_PROTO_NAMES = {
@@ -3929,6 +4669,9 @@
     // a host with no AmneziaWG instance (nothing to install WARP into) from one
     // where the app simply is not active yet.
     const SERVER_PROTOCOL_KEYS = {{ (server.get('protocols') or {}).keys()|list|tojson }};
+    // Other panel servers that can donate a WARP profile (they carry an
+    // AmneziaWG instance). The current server is excluded by the backend.
+    const WARP_IMPORT_SOURCES = {{ (warp_import_sources or []) | tojson }};
     const MARKETPLACE_APPS = [
         { proto: 'awg3', category: 'protocols', icon: '🛡', title: 'AmneziaWG 3.1', descKey: 'awg3_desc', badge: 'NEW' },
         { proto: 'awg2', category: 'protocols', icon: '✨', title: 'AmneziaWG 2.0', descKey: 'awg_desc' },
@@ -3939,7 +4682,7 @@
         { proto: 'wireguard', category: 'protocols', icon: '🔒', title: 'WireGuard', descKey: 'wireguard_desc' },
         { proto: 'dns', category: 'services', icon: '🔍', title: 'AmneziaDNS', descKey: 'dns_desc' },
         { proto: 'adguard', category: 'services', icon: '🛡️', title: 'AdGuard Home', descKey: 'adguard_desc' },
-        { proto: 'socks5', category: 'services', icon: '🧦', title: 'SOCKS5 Proxy', descKey: 'socks5_desc' },
+        { proto: 'socks5', category: 'services', icon: '🧦', title: '3proxy', descKey: 'socks5_desc' },
         { proto: 'exit', category: 'services', icon: '🚪', title: 'Exit Node', descKey: 'exit_desc', badge: 'NEW' },
         { proto: 'smartroute', category: 'services', icon: '🧭', title: 'Smart Route', descKey: 'smartroute_desc', badge: 'NEW' },
         { proto: 'warp', category: 'services', icon: '☁️', title: 'Cloudflare WARP', descKey: 'srv_warp_card_desc' },
@@ -3966,6 +4709,10 @@
     let currentAwgProto = 'awg2';
     // Smart Route app state (GET /api/servers/{id}/smartroute/status); null = not loaded.
     let smartRouteStatus = null;
+    // True while the first Smart Route probe is in flight: the card is shown
+    // with a skeleton badge instead of being hidden (no layout jump when the
+    // answer arrives).
+    let smartRoutePending = false;
     // Last /check protocols payload: lets the exit-node marks be repainted after
     // a Smart Route action without running a second (SSH-heavy) check.
     let lastProtocolsInfo = {};
@@ -4382,12 +5129,12 @@
             serverUid: document.body.dataset.serverUid || '',
             sshCooldown: SSH_COOLDOWN_BASE,
             peerPollInterval: PEER_POLL_INTERVAL,
-            onCheck: () => checkServer(true),
+            onCheck: () => ProbeQueue.refresh('check', () => checkServer(true), 120000),
             onCooldownChange(value) { SSH_COOLDOWN_BASE = value; },
             onPollChange(value) {
                 PEER_POLL_INTERVAL = value;
                 clearTimeout(window.connPollTimer);
-                if (PEER_POLL_INTERVAL > 0 && document.getElementById('connectionsSection').style.display !== 'none') {
+                if (PEER_POLL_INTERVAL > 0 && entityListKind === 'vpn') {
                     window.connPollTimer = setTimeout(function() { loadConnections(true); }, PEER_POLL_INTERVAL * 1000);
                 }
             },
@@ -4661,12 +5408,14 @@
         });
 
         // Smart Route card: host-level app, installed-state comes from the
-        // smartroute status endpoint rather than the protocol check.
+        // smartroute status endpoint rather than the protocol check. While the
+        // first probe is in flight the card is visible with a skeleton badge.
+        const srPending = smartRoutePending && !smartRouteStatus;
         const srInstalled = !!(smartRouteStatus && smartRouteStatus.installed);
         const srCard = document.getElementById('proto-smartroute');
         if (srCard) {
-            srCard.classList.toggle('installed-app-hidden', !srInstalled);
-            srCard.classList.toggle('installed-app-visible', srInstalled);
+            srCard.classList.toggle('installed-app-hidden', !srInstalled && !srPending);
+            srCard.classList.toggle('installed-app-visible', srInstalled || srPending);
         }
         if (srInstalled) installedCount++;
         renderSmartRouteCard();
@@ -5533,16 +6282,11 @@
     }
 
     async function checkServer(forcePlugins, boot) {
-        loadRknBlock();
-        if (typeof loadWarpStatus === 'function') loadWarpStatus(true);
         setInstalledAppsLoading(true);
-        // Manual check bypasses the 12 h plugin cache.
-        if (forcePlugins) loadAwgPluginStatus(true);
-        // Smart Route is host-level: its status is a separate probe, not part
-        // of the /check payload. Start it in parallel with the check and
-        // settle it before updateStatusCounts() reveals the grid, otherwise
-        // the card pops in one round-trip after every other badge.
-        const smartRouteProbe = loadSmartRouteStatus().catch(() => null);
+        // Every other probe is started by the queue after this request
+        // answers: loadRknBlock/loadWarpStatus/loadAwgPluginStatus/
+        // loadSmartRouteStatus used to start here, in parallel with /check,
+        // and competed for the single pooled SSH connection.
         try {
             const data = await apiCall(
                 `/api/servers/${SERVER_ID}/check` + (boot ? '?boot=1' : ''), 'POST');
@@ -5578,6 +6322,14 @@
                     }
                 }
 
+                // Секция учёток прокси не держит /check: статус грузится
+                // отдельным запросом и ошибка здесь не ломает проверку.
+                try {
+                    syncProxySection(data.protocols);
+                } catch (proxyErr) {
+                    console.warn('Proxy section sync failed:', proxyErr);
+                }
+
                 if (protoSelect.innerHTML === '') {
                     const opt = document.createElement('option');
                     opt.textContent = _('no_protocols');
@@ -5590,23 +6342,39 @@
                     } else if (firstVal) {
                         protoSelect.value = firstVal;
                     }
-                    loadConnections();
+                    // Connections open right after the grid on purpose: the
+                    // peer list (and the deep-link highlight) is what the user
+                    // came for. The queue keeps it first in the background.
+                    ProbeQueue.background('connections', 10, () => loadConnections(), 25000);
                 }
             }
-            // Settle the parallel probe before the grid is revealed, so the
-            // Smart Route card is painted with its final badge together with
-            // the protocol cards instead of appearing later.
-            smartRouteStatus = await smartRouteProbe;
-            // Cards were painted before the probe resolved: repaint the
-            // exit-node marks now that "installed/enabled" is known.
-            refreshExitMarks();
             updateStatusCounts(data.protocols || {});
+            if (!boot) {
+                // Базовая версия обновляла хостовые карточки при КАЖДОМ
+                // checkServer(). Стартовая проверка (boot) получает те же три
+                // пробы из блока инициализации ниже — здесь дубля нет;
+                // обычные вызовы (протоколы, toggle, настройки, failover)
+                // ставят их в очередь, а dedup не даёт запустить дважды.
+                ProbeQueue.background('warp', 35, () => loadWarpStatus(true), 25000);
+                ProbeQueue.background('rkn', 36, () => loadRknBlock(), 25000);
+                ProbeQueue.background('smartroute', 45, () => loadSmartRouteStatus(), 15000);
+            }
+            if (forcePlugins) {
+                // Manual check bypasses the 12 h plugin cache, but it must not
+                // compete with the check itself: refresh after the answer.
+                // Форс нужен, потому что стартовая проба плагинов может ещё
+                // идти: без флага dedup вернул бы её promise и принудительная
+                // проверка не состоялась бы (приоритет 95 — после карточек).
+                ProbeQueue.background('plugin', 95, () => loadAwgPluginStatus(true), 30000, true);
+            }
             if (data.cached) {
-                // Сетка уже нарисована из снимка панели: свежую проверку
-                // догоняем фоном. У её ответа флага cached нет, поэтому
-                // второго круга не будет.
-                checkServer(forcePlugins).catch(error => console.warn(
-                    'Fresh server check failed:', error));
+                // The grid is already painted from the panel snapshot: run the
+                // fresh check in the background. Its answer has no `cached`
+                // flag, so there is no second round.
+                // Принудительная проба плагинов уже поставлена ручной
+                // проверкой: свежий /check не должен ставить её второй раз.
+                ProbeQueue.background('check-fresh', 96, () => checkServer(false), 120000)
+                    .catch(error => console.warn('Fresh server check failed:', error));
             } else {
                 showToast(_('server_check_complete'), 'success');
             }
@@ -5651,6 +6419,75 @@
         if (base === 'nginx') return 'nginx';
         if (base === 'xray') return { name: 'javascript', json: true };
         return 'properties';
+    }
+
+    // ========== Lazy CodeMirror ==========
+    // Nine files (~79 KB gzip) used to load on every server page, although
+    // only two modals need an editor. They are injected on first use, in the
+    // order the modes require (htmlmixed needs xml + css + javascript), and
+    // exactly once: a second click awaits the same promise.
+    let codeMirrorLoader = null;
+
+    function loadStylesheetOnce(href) {
+        return new Promise((resolve, reject) => {
+            const link = document.createElement('link');
+            link.rel = 'stylesheet';
+            link.href = href;
+            link.onload = () => resolve(true);
+            link.onerror = () => reject(new Error(href));
+            document.head.appendChild(link);
+        });
+    }
+
+    function loadScriptOnce(src) {
+        return new Promise((resolve, reject) => {
+            const script = document.createElement('script');
+            script.src = src;
+            script.onload = () => resolve(true);
+            script.onerror = () => reject(new Error(src));
+            document.body.appendChild(script);
+        });
+    }
+
+    function ensureCodeMirror() {
+        if (window.CodeMirror) return Promise.resolve(true);
+        if (codeMirrorLoader) return codeMirrorLoader;
+        const css = [
+            '/static/vendor/codemirror/codemirror.min.css',
+            '/static/vendor/codemirror/theme/material-darker.min.css'
+        ];
+        // Theme first: fromTextArea measures the widget, and without the theme
+        // it would be built for the light palette.
+        const js = [
+            '/static/vendor/codemirror/codemirror.min.js',
+            '/static/vendor/codemirror/mode/nginx/nginx.min.js',
+            '/static/vendor/codemirror/mode/xml/xml.min.js',
+            '/static/vendor/codemirror/mode/javascript/javascript.min.js',
+            '/static/vendor/codemirror/mode/css/css.min.js',
+            '/static/vendor/codemirror/mode/properties/properties.min.js',
+            '/static/vendor/codemirror/mode/htmlmixed/htmlmixed.min.js'
+        ];
+        codeMirrorLoader = (async () => {
+            for (const href of css) await loadStylesheetOnce(href);
+            for (const src of js) await loadScriptOnce(src);
+            if (!window.CodeMirror) throw new Error('CodeMirror unavailable');
+            return true;
+        })().catch(error => {
+            // Let the next attempt retry instead of caching the failure.
+            codeMirrorLoader = null;
+            throw error;
+        });
+        return codeMirrorLoader;
+    }
+
+    async function withCodeMirror(task) {
+        try {
+            await ensureCodeMirror();
+        } catch (error) {
+            console.warn('CodeMirror failed to load:', error);
+            showToast(_('editor_load_failed'), 'error');
+        }
+        return task();
     }
 
     function ensureConfigEditor(textareaId, options = {}) {
@@ -5723,10 +6560,22 @@
             return `<div class="protocol-info-item"><span class="protocol-info-label">${_('port')}</span><span class="protocol-info-value">172.29.172.254:53 (Internal)</span></div>`;
         }
         if (base === 'socks5') {
-            const user = info.username ? info.username : '—';
+            const card = proxyCardInfo(info);
+            // Выключенный листенер показываем перечёркнутым портом, а не
+            // «пустым» значением: видно, какой порт ждёт включения.
+            const listeningBadge = ` <span class="badge badge-success badge-case">${_('proxy_listening')}</span>`;
+            const offBadge = ` <span class="badge badge-secondary badge-case">${_('proxy_http_disabled')}</span>`;
+            const socksValue = card.socksEnabled
+                ? `${card.socksPort}/TCP` + (card.socksListening ? listeningBadge : '')
+                : `<s>${card.socksPort}/TCP</s>` + offBadge;
+            const httpValue = card.httpEnabled
+                ? `${card.httpPort}/TCP` + (card.httpListening ? listeningBadge : '')
+                : `<s>${card.httpPort}/TCP</s>` + offBadge;
             return `
-                <div class="protocol-info-item"><span class="protocol-info-label">${_('port')}</span><span class="protocol-info-value">${info.port}/TCP</span></div>
-                <div class="protocol-info-item"><span class="protocol-info-label">${_('socks5_username')}</span><span class="protocol-info-value">${user}</span></div>
+                <div class="protocol-info-item"><span class="protocol-info-label">SOCKS5</span><span class="protocol-info-value">${socksValue}</span></div>
+                <div class="protocol-info-item"><span class="protocol-info-label">${_('proxy_http_port')}</span><span class="protocol-info-value">${httpValue}</span></div>
+                <div class="protocol-info-item"><span class="protocol-info-label">${_('proxy_accounts_title')}</span><span class="protocol-info-value">${card.accounts}</span></div>
+                <div class="protocol-info-item"><span class="protocol-info-label">${_('proxy_dns_servers')}</span><span class="protocol-info-value">${escapeHtml(card.dns)}</span></div>
             `;
         }
         if (base === 'adguard') {
@@ -5862,10 +6711,15 @@
                 infoGrid.innerHTML = grid;
             }
             if (protoBase(proto) === 'socks5') {
+                // 2x2, как у карточки РКН: действия не разъезжаются в одну
+                // длинную строку и не сжимают подписи.
                 actionsEl.innerHTML = `
-                    <button class="btn btn-secondary btn-sm" onclick="openSocks5Settings('${proto}')" style="flex:1">${_('socks5_change_settings')}</button>
-                    <button class="btn btn-secondary btn-sm" onclick="showProtocolBackups('${proto}')">${_('backup')}</button>
-                    <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')">${_('uninstall')}</button>
+                    <div class="proxy-actions-grid">
+                        <button class="btn btn-secondary btn-sm" onclick="showEntityList('proxy')">${_('proxy_accounts_btn')}</button>
+                        <button class="btn btn-secondary btn-sm" onclick="openProxySettings()">${_('proxy_settings_btn')}</button>
+                        <button class="btn btn-secondary btn-sm" onclick="showProtocolBackups('${proto}')">${_('backup')}</button>
+                        <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')">${_('uninstall')}</button>
+                    </div>
                 `;
             } else if (protoBase(proto) === 'adguard') {
                 const webPort = info.web_port || 3000;
@@ -5902,14 +6756,14 @@
                 `;
             } else if (protoBase(proto) === 'xray') {
                 actionsEl.innerHTML = `
-                    <button class="btn btn-secondary btn-sm" onclick="selectProtocolForConns('${proto}')" style="flex:1">${_('connections')}</button>
+                    <button class="btn btn-secondary btn-sm" onclick="showEntityList('vpn', '${proto}')" style="flex:1">${_('connections')}</button>
                     <button class="btn btn-secondary btn-sm" onclick="showProtocolBackups('${proto}')">${_('backup')}</button>
                     <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')">${_('uninstall')}</button>
                 `;
                 showConnectionsSection();
             } else {
                 actionsEl.innerHTML = `
-                    <button class="btn btn-secondary btn-sm" onclick="selectProtocolForConns('${proto}')" style="flex:1">${_('connections')}</button>
+                    <button class="btn btn-secondary btn-sm" onclick="showEntityList('vpn', '${proto}')" style="flex:1">${_('connections')}</button>
                     <button class="btn btn-secondary btn-sm" onclick="showProtocolBackups('${proto}')">${_('backup')}</button>
                     <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('${proto}')">${_('uninstall')}</button>
                 `;
@@ -6059,8 +6913,10 @@
             const res = await apiCall(`/api/servers/${SERVER_ID}/server_config?server_uid=${encodeURIComponent(document.body.dataset.serverUid || '')}`, 'POST', { protocol: proto });
             document.getElementById('serverConfigModalTitle').textContent = `${_('server_config')} — ${name}`;
             document.getElementById('serverConfigProto').value = proto;
-            setEditorValue('serverConfigText', res.config || '', { mode: editorModeFor('server', proto) });
             serverConfigFilename = `server_${proto}.conf`;
+            await withCodeMirror(() => {
+                setEditorValue('serverConfigText', res.config || '', { mode: editorModeFor('server', proto) });
+            });
             openModal('serverConfigModal');
             refreshConfigEditor('serverConfigText');
         } catch (err) {
@@ -6434,7 +7290,9 @@
             const res = await apiCall(`/api/servers/${SERVER_ID}/nginx/site`, 'POST', { protocol: proto });
             document.getElementById('siteConfigModalTitle').textContent = `${_('site_editor')} — ${getProtoTitle(proto)}`;
             document.getElementById('siteConfigProto').value = proto;
-            setEditorValue('siteConfigText', res.html || '', { mode: editorModeFor('site', proto) });
+            await withCodeMirror(() => {
+                setEditorValue('siteConfigText', res.html || '', { mode: editorModeFor('site', proto) });
+            });
             openModal('siteConfigModal');
             refreshConfigEditor('siteConfigText');
         } catch (err) {
@@ -6462,14 +7320,88 @@
     }
 
 
+    // Списки под карточками взаимоисключающие: у страницы один активный
+    // список. Либо клиенты выбранного инстанса, либо учётки прокси — раньше
+    // оба висели одновременно, и прокси вёл себя не как обычный инстанс.
+    // Универсальный список под карточками взаимоисключающий: у страницы один
+    // активный список. Либо клиенты выбранного инстанса, либо учётки прокси —
+    // раньше оба висели одновременно, и прокси вёл себя не как обычный инстанс.
+    let entityListKind = 'none';
+
+    // Шапка одна: меняются только заголовок, иконка, кнопка действия и
+    // видимость селектора протокола (он нужен только клиентам инстанса).
+    function renderEntityListHeader(kind) {
+        const isProxy = kind === 'proxy';
+        const titleEl = document.getElementById('entityListTitle');
+        if (titleEl) titleEl.textContent = isProxy ? _('proxy_accounts_title') : _('connections');
+        const iconEl = document.getElementById('entityListIcon');
+        if (iconEl) iconEl.innerHTML = proxyIcon(isProxy ? 'network' : 'link', 16);
+        const countEl = document.getElementById('entityListCount');
+        if (countEl) countEl.classList.toggle('hidden', !isProxy);
+        const protoSelect = document.getElementById('connProtoSelect');
+        if (protoSelect) protoSelect.classList.toggle('hidden', isProxy);
+        const addBtn = document.getElementById('entityListAddBtn');
+        if (addBtn) {
+            addBtn.setAttribute('onclick', isProxy
+                ? "openProxyAccountModal('create')" : 'openAddConnectionModal()');
+        }
+        const addText = document.getElementById('entityListAddText');
+        if (addText) addText.textContent = isProxy ? _('proxy_add_account') : _('add');
+        const emptyTitle = document.getElementById('entityListEmptyTitle');
+        if (emptyTitle) emptyTitle.textContent = isProxy
+            ? _('proxy_accounts_empty') : _('no_connections');
+        const emptyDesc = document.getElementById('entityListEmptyDesc');
+        if (emptyDesc) emptyDesc.textContent = isProxy
+            ? _('proxy_accounts_empty_desc') : _('no_connections_desc');
+        // Сортировка: у учёток есть не все поля пира, лишние пункты гасим.
+        updateConnectionSortOptions(isProxy ? 'proxy' : (protoSelect ? protoSelect.value : ''));
+        if (isProxy) applyConnectionSort();
+    }
+
+    function scrollToEntityList() {
+        const section = document.getElementById('entityListSection');
+        if (section) section.scrollIntoView({ behavior: 'smooth' });
+    }
+
+    function setActiveList(kind) {
+        const next = (kind === 'vpn' || kind === 'proxy') ? kind : 'none';
+        const section = document.getElementById('entityListSection');
+        entityListKind = next;
+        if (section) section.classList.toggle('hidden', next === 'none');
+        if (next === 'none') return;
+        renderEntityListHeader(next);
+        if (next === 'proxy') {
+            document.querySelectorAll('.protocol-card.active')
+                .forEach(card => card.classList.remove('active'));
+            const proxyCard = document.getElementById('proto-socks5');
+            if (proxyCard) proxyCard.classList.add('active');
+        }
+    }
+
+    // Единая точка входа: источник списка + его загрузка и прокрутка к секции.
+    function showEntityList(kind, proto) {
+        setActiveList(kind);
+        if (kind === 'proxy') {
+            loadProxyStatus(true).catch(function (err) {
+                showToast(_('proxy_load_error') + ': ' + proxyErrorText(err), 'error');
+            });
+        } else if (kind === 'vpn') {
+            const select = document.getElementById('connProtoSelect');
+            if (proto && select) select.value = proto;
+            loadConnections();
+            applyEntitySearch();
+        }
+        scrollToEntityList();
+    }
+
     function showConnectionsSection() {
-        const section = document.getElementById('connectionsSection');
-        if (section) section.style.display = 'block';
+        // Автопоказ из /check не должен отбирать экран у уже открытого списка
+        // (например, учёток прокси): проверка сервера идёт в фоне.
+        if (entityListKind === 'none') setActiveList('vpn');
     }
 
     function hideConnectionsSection() {
-        const section = document.getElementById('connectionsSection');
-        if (section) section.style.display = 'none';
+        setActiveList('none');
         const select = document.getElementById('connProtoSelect');
         if (select) {
             select.innerHTML = '';
@@ -6656,7 +7588,7 @@
             telemtOpts.style.display = 'block';
         } else if (base === 'socks5') {
             portLabel.textContent = _('port') + ' (TCP)';
-            portInput.value = currentInstallAnother ? nextSuggestedPort(currentInstallProto, 38080) : '38080';
+            portInput.value = currentInstallAnother ? nextSuggestedPort(currentInstallProto, 1080) : '1080';
             portInput.disabled = false;
             portHint.textContent = currentInstallAnother ? _('port_next_instance_hint') : _('socks5_port_hint');
             socks5Opts.style.display = 'block';
@@ -6830,6 +7762,9 @@
             } else if (protoBase(currentInstallProto) === 'socks5') {
                 params.socks5_username = document.getElementById('installSocks5User').value || 'proxy_user';
                 params.socks5_password = document.getElementById('installSocks5Pass').value || '';
+                // HTTP-листенер: порт и флаг уходят в install-запрос.
+                params.socks5_http_port = document.getElementById('installSocks5HttpPort').value || '';
+                params.socks5_http_enabled = document.getElementById('installSocks5HttpEnabled').checked;
             } else if (protoBase(currentInstallProto) === 'adguard') {
                 const modeRadio = document.querySelector('input[name="adguardMode"]:checked');
                 params.adguard_mode = modeRadio ? modeRadio.value : 'sidebyside';
@@ -7698,6 +8633,13 @@
         const info = document.getElementById('smartroute-info');
         const toggleBtn = document.getElementById('smartroute-toggle-btn');
         if (!badgeEl) return;
+        if (!status && smartRoutePending) {
+            // First probe still in flight: keep the card in place with a
+            // skeleton badge so nothing jumps when the answer arrives.
+            badgeEl.innerHTML = '<span class="badge is-skeleton" aria-hidden="true">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span>';
+            if (info) info.classList.add('hidden');
+            return;
+        }
         if (!installed) {
             badgeEl.innerHTML = `<span class="badge badge-warn"><span class="badge-dot"></span> ${_('not_installed')}</span>`;
             if (info) info.classList.add('hidden');
@@ -7859,11 +8801,26 @@
     }
 
     async function loadSmartRouteStatus() {
+        smartRoutePending = true;
+        let probeFailed = false;
         try {
             smartRouteStatus = await apiCall(`/api/servers/${SERVER_ID}/smartroute/status`);
         } catch (err) {
             smartRouteStatus = null;
+            // Ошибка пробы — не «нет ответа»: скелетон навсегда остаётся
+            // на карточке, а в консоли только предупреждение очереди.
+            // Снимаем pending, карточка показывает «Не установлен», как
+            // это было до появления скелетона.
+            probeFailed = true;
             throw err;
+        } finally {
+            smartRoutePending = smartRouteStatus === null && !probeFailed;
+            // Every surface that reads smartRouteStatus repaints here, so the
+            // card never stays in its skeleton state after the answer lands.
+            applyInstalledAppsVisibility();
+            refreshExitMarks();
+            renderSmartRouteCard();
+            renderMarketplace();
         }
         return smartRouteStatus;
     }
@@ -8025,7 +8982,7 @@
         currentSocks5Proto = proto || 'socks5';
         try {
             const data = await apiCall(`/api/servers/${SERVER_ID}/socks5/credentials?protocol=${encodeURIComponent(currentSocks5Proto)}`);
-            document.getElementById('socks5SetPort').value = data.port || 38080;
+            document.getElementById('socks5SetPort').value = data.port || 1080;
             document.getElementById('socks5SetUser').value = data.username || 'proxy_user';
             document.getElementById('socks5SetPass').value = data.password || '';
             openModal('socks5SettingsModal');
@@ -8038,7 +8995,7 @@
         const btn = document.getElementById('socks5SaveBtn');
         const text = document.getElementById('socks5SaveBtnText');
         const spinner = document.getElementById('socks5SaveSpinner');
-        const port = parseInt(document.getElementById('socks5SetPort').value) || 38080;
+        const port = parseInt(document.getElementById('socks5SetPort').value) || 1080;
         const username = document.getElementById('socks5SetUser').value.trim();
         const password = document.getElementById('socks5SetPass').value.trim();
         btn.disabled = true;
@@ -8106,12 +9063,1140 @@
         }
     }
 
+    // ========== Прокси: учётные записи (SOCKS5 + HTTP) ==========
+    // Инстанс и учётки читаются из /proxy/status; /check отдаёт только
+    // карточку сервиса, поэтому тяжёлый статус грузится отдельно.
+    var proxyStatusCache = null;
+    var proxyStatusAt = 0;
+    var proxyStatusLoading = null;
+    var proxyUsersCache = null;
+    var proxyAccountMode = 'create';
+    var proxyAccountId = null;
+    var proxyPendingSettings = null;
+    var proxyPendingUser = '';
+
+    // Данные карточки SOCKS5: /proxy/status уточняет то, чего нет в /check.
+    function proxyCardInfo(info) {
+        info = info || {};
+        var status = proxyStatusCache || {};
+        var accounts = Array.isArray(status.accounts) ? status.accounts.length : 0;
+        var hasStatus = !!status.installed;
+        var socksEnabled = hasStatus ? !!status.socks_enabled : (info.socks_enabled !== false);
+        var httpEnabled = hasStatus ? !!status.http_enabled : !!info.http_enabled;
+        var socksPort = status.socks_port || info.port || '—';
+        var httpPort = status.http_port || info.http_port || '—';
+        var dnsList = Array.isArray(status.dns_servers) && status.dns_servers.length
+            ? status.dns_servers
+            : (Array.isArray(info.dns_servers) ? info.dns_servers : []);
+        // Учётки и DNS есть и в /check (запись сервера), и в /proxy/status.
+        // Число учёток из записи: 0 — законное значение, поэтому проверяем
+        // наличие массива, а не длину.
+        var accountCount = accounts;
+        if (!hasStatus && Array.isArray(info.accounts)) {
+            accountCount = info.accounts.length;
+        } else if (!hasStatus && typeof info.accounts_count === 'number') {
+            accountCount = info.accounts_count;
+        }
+        return {
+            socksPort: escapeHtml(String(socksPort)),
+            httpPort: escapeHtml(String(httpPort)),
+            socksEnabled: socksEnabled,
+            httpEnabled: httpEnabled,
+            // Слушает ли конкретный листенер: выключенный контейнер не запущен.
+            socksListening: socksEnabled && info.container_running !== false,
+            httpListening: httpEnabled && info.http_container_running !== false,
+            accounts: accountCount,
+            dns: dnsList.length ? dnsList.join(', ') : '—'
+        };
+    }
+
+    // Перерисовать только info-grid карточки, не трогая статус и кнопки.
+    function refreshProxyCardInfo() {
+        var grid = document.getElementById('socks5-info-grid');
+        if (!grid) return;
+        // currentProtocolStatus может быть ещё пуст (первый /check не
+        // ответил), а /proxy/status уже пришёл: рисуем по тому, что есть.
+        var info = (currentProtocolStatus || {}).socks5 || {};
+        grid.innerHTML = buildServiceInfoGrid('socks5', info);
+    }
+
+    function syncProxySection(protocols) {
+        var info = (protocols || {}).socks5 || {};
+        // HTTP-only инстанс: SOCKS-контейнера нет, но прокси установлен.
+        var installed = !!(info.container_running || info.container_exists || info.http_enabled);
+        // Список открывает кнопка «Учётные записи», а не /check. Но карточка
+        // живёт данными /proxy/status (учётки, DNS), поэтому статус грузим
+        // сразу: без этого счётчик учёток и DNS оставались пустыми до клика.
+        if (!installed) {
+            if (entityListKind === 'proxy') setActiveList('none');
+            proxyStatusCache = null;
+            return;
+        }
+        loadProxyStatus().catch(function (err) {
+            console.warn('Proxy status load failed:', err);
+        });
+    }
+
+    function loadProxyStatus(force) {
+        if (proxyStatusLoading) {
+            // force после мутации (создание/правка учётки): дождаться
+            // текущего запроса и перезапросить, иначе вернётся снимок,
+            // снятый до изменения, и список останется старым.
+            if (!force) return proxyStatusLoading;
+            return proxyStatusLoading.then(function () {
+                return loadProxyStatus(true);
+            }, function () {
+                return loadProxyStatus(true);
+            });
+        }
+        if (!force && proxyStatusCache && (Date.now() - proxyStatusAt) < 5000) {
+            renderProxyAccounts();
+            return Promise.resolve(proxyStatusCache);
+        }
+        if (!proxyStatusCache) {
+            var loadingEl = document.getElementById('entityListLoading');
+            if (loadingEl) loadingEl.classList.remove('hidden');
+        }
+        proxyStatusLoading = apiCall('/api/servers/' + SERVER_ID + '/proxy/status', 'GET')
+            .then(function (data) {
+                proxyStatusCache = data || {};
+                proxyStatusAt = Date.now();
+                renderProxyAccounts();
+                refreshProxyCardInfo();
+                return proxyStatusCache;
+            })
+            .finally(function () {
+                proxyStatusLoading = null;
+                var loadingEl = document.getElementById('entityListLoading');
+                if (loadingEl) loadingEl.classList.add('hidden');
+            });
+        return proxyStatusLoading;
+    }
+
+    function renderProxyAccounts() {
+        // Общий список один: пока показываются клиенты, учётки только
+        // кэшируются и не затирают строки пиров.
+        if (entityListKind !== 'proxy') return;
+        var listEl = document.getElementById('entityListInner');
+        var emptyEl = document.getElementById('entityListEmpty');
+        var loadingEl = document.getElementById('entityListLoading');
+        var countEl = document.getElementById('entityListCount');
+        if (!listEl) return;
+        if (loadingEl) loadingEl.classList.add('hidden');
+        var accounts = (proxyStatusCache && Array.isArray(proxyStatusCache.accounts))
+            ? proxyStatusCache.accounts : [];
+        if (countEl) countEl.textContent = String(accounts.length);
+        listEl.innerHTML = '';
+        if (!accounts.length) {
+            if (emptyEl) emptyEl.classList.remove('hidden');
+            return;
+        }
+        if (emptyEl) emptyEl.classList.add('hidden');
+        listEl.innerHTML = accounts.map(proxyAccountRow).join('');
+        applyConnectionSort();
+        applyEntitySearch();
+    }
+
+    // Поиск по общему списку: имя (data-sort-name) и логин/IP (data-sort-ip).
+    // Работает и для пиров, и для учёток — отдельного кода на список нет.
+    function applyEntitySearch() {
+        const input = document.getElementById('entityListSearch');
+        const list = document.getElementById('entityListInner');
+        if (!list) return;
+        const query = String((input && input.value) || '').trim().toLowerCase();
+        const rows = Array.prototype.slice.call(list.querySelectorAll(':scope > .client-item'));
+        let visible = 0;
+        rows.forEach(function (row) {
+            const haystack = [
+                row.getAttribute('data-sort-name') || '',
+                row.getAttribute('data-sort-ip') || '',
+                row.getAttribute('data-peer-name') || ''
+            ].join(' ').toLowerCase();
+            const match = !query || haystack.indexOf(query) >= 0;
+            row.classList.toggle('hidden', !match);
+            if (match) visible += 1;
+        });
+        const emptyEl = document.getElementById('entityListEmpty');
+        if (!emptyEl) return;
+        if (rows.length && query && !visible) emptyEl.classList.remove('hidden');
+        else if (visible) emptyEl.classList.add('hidden');
+    }
+
+    // Универсальный прогресс-тост для долгих операций раздела: та же
+    // разметка и стили, что у очереди действий с пирами (.peer-queue-*).
+    function startProgressToast(title) {
+        const host = document.getElementById('toastContainer') || document.body;
+        const el = document.createElement('div');
+        el.className = 'toast peer-queue-toast';
+        el.setAttribute('role', 'status');
+        el.setAttribute('aria-live', 'polite');
+        el.innerHTML =
+            '<div class="peer-queue-head"><span class="peer-queue-peer"></span>'
+            + '<span class="peer-queue-percent">0%</span></div>'
+            + '<div class="peer-queue-track" role="progressbar" aria-valuemin="0"'
+            + ' aria-valuemax="100" aria-valuenow="0"><div class="peer-queue-fill"></div></div>'
+            + '<div class="peer-queue-error" hidden></div>';
+        el.querySelector('.peer-queue-peer').textContent = title || '';
+        host.appendChild(el);
+
+        let percent = 5;
+        let timer = null;
+        let closed = false;
+
+        function paint(value) {
+            percent = Math.max(0, Math.min(100, Math.round(value)));
+            // Ширина — шагами по 5%: готовые классы .pct-N, без инлайн-стилей.
+            const step = Math.round(percent / 5) * 5;
+            el.querySelector('.peer-queue-percent').textContent = percent + '%';
+            el.querySelector('.peer-queue-fill').className = 'peer-queue-fill pct-' + step;
+            el.querySelector('.peer-queue-track').setAttribute('aria-valuenow', String(percent));
+        }
+
+        function stop() {
+            if (timer) {
+                clearInterval(timer);
+                timer = null;
+            }
+        }
+
+        function remove(delay) {
+            if (closed) return;
+            closed = true;
+            setTimeout(function () {
+                el.classList.add('peer-queue-fade');
+                setTimeout(function () { el.remove(); }, 300);
+            }, delay);
+        }
+
+        paint(percent);
+        // До ответа шкала ползёт к 90%: точный прогресс сервер не отдаёт.
+        timer = setInterval(function () {
+            if (percent < 90) paint(percent + 1);
+        }, 250);
+
+        return {
+            setPercent: function (value) {
+                stop();
+                paint(value);
+            },
+            done: function () {
+                stop();
+                paint(100);
+                remove(1200);
+            },
+            fail: function (message) {
+                stop();
+                el.classList.add('peer-queue-failed');
+                const errEl = el.querySelector('.peer-queue-error');
+                errEl.textContent = String(message || _('error'));
+                errEl.hidden = false;
+                remove(8000);
+            }
+        };
+    }
+
+    // Кнопка на время запроса: спиннер + подпись, состояние возвращается
+    // в finally даже при ошибке.
+    function proxyBusyStart(btn, spinnerId, textId, label) {
+        const spinner = document.getElementById(spinnerId);
+        const text = document.getElementById(textId);
+        const state = {
+            btn: btn,
+            spinner: spinner,
+            text: text,
+            wasDisabled: btn ? btn.disabled : false,
+            oldText: text ? text.textContent : ''
+        };
+        if (btn) btn.disabled = true;
+        if (spinner) spinner.classList.remove('hidden');
+        if (text) text.textContent = label;
+        return state;
+    }
+
+    function proxyBusyEnd(state) {
+        if (!state) return;
+        if (state.spinner) state.spinner.classList.add('hidden');
+        if (state.btn) state.btn.disabled = state.wasDisabled;
+        if (state.text) state.text.textContent = state.oldText;
+    }
+
+    // Иконки раздела «Прокси». Глобального uiIcon() в прод-сборке нет
+    // (он есть только в локальной ветке v1.8.11), поэтому набор локальный.
+    const PROXY_ICONS = {
+        link: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+        network: '<rect x="9" y="2" width="6" height="6" rx="1"/><rect x="2" y="16" width="6" height="6" rx="1"/><rect x="16" y="16" width="6" height="6" rx="1"/><path d="M12 8v4"/><path d="M5 16v-2h14v2"/>',
+        download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>',
+        upload: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/>',
+        key: '<circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/>',
+        settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
+        power: '<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04"/>',
+        trash: '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/>',
+        alert: '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+        refresh: '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
+        check: '<polyline points="20 6 9 17 4 12"/>',
+        x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>'
+    };
+    function proxyIcon(name, size) {
+        var body = PROXY_ICONS[name] || '';
+        var px = Number(size) || 14;
+        return '<svg class="ui-icon" width="' + px + '" height="' + px
+            + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
+            + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"'
+            + ' focusable="false">' + body + '</svg>';
+    }
+
+    // ===== Строка учётки =====
+
+    function proxyGb(mb) {
+        var gb = (Number(mb) || 0) / 1024;
+        return gb >= 100 ? String(Math.round(gb)) : gb.toFixed(1);
+    }
+
+    function proxyUserName(userId) {
+        var users = Array.isArray(proxyUsersCache) ? proxyUsersCache : [];
+        for (var i = 0; i < users.length; i++) {
+            if (String(users[i].id) === String(userId)) return users[i].username || userId;
+        }
+        return String(userId || '').slice(0, 8);
+    }
+
+    function proxyErrorText(err) {
+        if (!err) return _('error');
+        return err.message || String(err);
+    }
+
+    // Строка учётки — ровно та же вёрстка, что у пира в «Подключениях».
+    function proxyAccountRow(account) {
+        account = account || {};
+        var id = String(account.id || '');
+        var name = String(account.name || account.login || '');
+        var login = String(account.login || '');
+        var type = String(account.type || 'socks5').toLowerCase();
+        var enabled = account.enabled !== false;
+        var quotaMb = Number(account.quota_mb) || 0;
+        var usageMb = Number(account.usage_mb) || 0;
+        var exhausted = quotaMb > 0 && usageMb >= quotaMb;
+        var maxConns = Number(account.max_conns) || 0;
+        var currentConns = Number(account.current_conns || account.active_conns || 0);
+        var connLimit = maxConns > 0 && currentConns >= maxConns;
+        var initial = (name || login || '?').charAt(0).toUpperCase();
+
+        var online = account.online === true;
+        var avatarClass = 'client-avatar';
+        if (!enabled) avatarClass += ' is-off';
+        else if (exhausted) avatarClass += ' is-danger';
+        else if (online) avatarClass += ' avatar-online';
+        // Зелёная точка — реальная активность по логу 3proxy (≤ 3 минут),
+        // а не просто включённая учётка.
+        var avatarTitle = '';
+        var lastSeen = account.last_seen;
+        if (lastSeen !== null && lastSeen !== undefined
+                && typeof formatAgoCompact === 'function') {
+            avatarTitle = _('last_seen') + ': '
+                + formatAgoCompact(Math.max(0, Number(lastSeen) || 0));
+        }
+
+        var state = '';
+        if (!enabled) state = ' data-state="disabled"';
+        else if (exhausted) state = ' data-state="blocked"';
+
+        var typeKey = type === 'http' ? 'http' : (type === 'both' ? 'both' : 'socks5');
+        var typeLabel = typeKey === 'http' ? _('proxy_type_http')
+            : (typeKey === 'both' ? _('proxy_type_both') : _('proxy_type_socks5'));
+        var meta = '<span class="badge badge-type-' + typeKey + '">' + escapeHtml(typeLabel) + '</span>';
+
+        if (!enabled) {
+            meta += '<span class="badge badge-secondary"><span class="badge-dot"></span>'
+                + escapeHtml(_('proxy_status_disabled')) + '</span>';
+        } else if (exhausted) {
+            meta += '<span class="badge badge-danger"><span class="badge-dot"></span>'
+                + escapeHtml(_('proxy_status_quota_exhausted')) + '</span>';
+        } else if (connLimit) {
+            meta += '<span class="badge badge-warn"><span class="badge-dot"></span>'
+                + escapeHtml(_('proxy_status_conn_limit')) + '</span>';
+        } else {
+            meta += '<span class="badge badge-success"><span class="badge-dot"></span>'
+                + escapeHtml(_('proxy_status_active')) + '</span>';
+        }
+
+        if (account.user_id) {
+            meta += '<span class="badge badge-info">' + escapeHtml(proxyUserName(account.user_id)) + '</span>';
+        }
+
+        meta += '<span class="traffic-badge" title="' + escapeHtml(_('proxy_conns_label')) + '">'
+            + (currentConns > 0 ? currentConns : 0) + ' / '
+            + (maxConns > 0 ? maxConns : '∞') + '</span>';
+
+        var rateIn = Number(account.rate_in_mbps) || 0;
+        var rateOut = Number(account.rate_out_mbps) || 0;
+        if (rateIn > 0) {
+            meta += '<span class="traffic-badge traffic-down">' + proxyIcon('download', 11)
+                + escapeHtml(rateIn + ' ' + _('proxy_mbps')) + '</span>';
+        }
+        if (rateOut > 0) {
+            meta += '<span class="traffic-badge traffic-up">' + proxyIcon('upload', 11)
+                + escapeHtml(rateOut + ' ' + _('proxy_mbps')) + '</span>';
+        }
+        if (!rateIn && !rateOut) {
+            meta += '<span class="acc-check"><span class="acc-meta-label">'
+                + escapeHtml(_('proxy_speed')) + '</span>' + escapeHtml(_('proxy_no_limit')) + '</span>';
+        }
+
+        if (quotaMb > 0) {
+            var pct = Math.min(100, Math.round(usageMb / quotaMb * 100));
+            var pctClass = pct >= 100 ? ' is-danger' : (pct >= 80 ? ' is-warn' : '');
+            var fillClass = pct >= 100 ? ' is-danger' : (pct >= 80 ? ' is-warn' : '');
+            var step = Math.round(pct / 5) * 5;
+            meta += '<span class="acc-quota">'
+                + '<span class="quota-text"><span><b>' + escapeHtml(proxyGb(usageMb)) + '</b> / '
+                + escapeHtml(proxyGb(quotaMb) + ' ' + _('proxy_gb')) + '</span>'
+                + '<span class="quota-pct' + pctClass + '">' + pct + '%</span></span>'
+                + '<span class="progress"><span class="progress-fill' + fillClass
+                + ' pct-' + step + '"></span></span></span>';
+        } else {
+            meta += '<span class="acc-check"><span class="acc-meta-label">'
+                + escapeHtml(_('proxy_quota')) + '</span>' + escapeHtml(_('proxy_no_limit')) + '</span>';
+        }
+
+        var acl = Array.isArray(account.acl_ips)
+            ? account.acl_ips.filter(function (ip) { return !!ip; }) : [];
+        if (acl.length) {
+            var chips = acl.slice(0, 2).map(function (ip) {
+                return '<span class="acl-chip">' + escapeHtml(ip) + '</span>';
+            }).join('');
+            if (acl.length > 2) chips += '<span class="acl-any">+' + (acl.length - 2) + '</span>';
+            meta += '<span class="acc-acl">' + chips + '</span>';
+        } else {
+            meta += '<span class="acc-acl"><span class="acl-any">'
+                + escapeHtml(_('proxy_any_ip')) + '</span></span>';
+        }
+
+        var parent = account.parent || {};
+        var upstream = '—';
+        if (parent && parent.host) {
+            upstream = String(parent.type || 'socks5') + ' ' + parent.host
+                + (parent.port ? ':' + parent.port : '');
+        }
+        meta += '<span class="acc-upstream"><span class="acc-meta-label">'
+            + escapeHtml(_('proxy_upstream')) + '</span>' + escapeHtml(upstream) + '</span>';
+
+        var toggleClass = enabled ? 'peer-toggle' : 'peer-toggle peer-toggle-off';
+        var toggleTitle = enabled ? _('proxy_disable_btn') : _('proxy_enable_btn');
+        // Те же data-sort-* атрибуты, что у пира: общая сортировка списка
+        // работает для обоих источников без отдельного кода.
+        var createdTs = Date.parse(account.created_at || '') || 0;
+        var maxRate = Math.max(rateIn, rateOut);
+
+        return '<div class="client-item"' + state
+            + ' data-sort-name="' + escapeHtml(name) + '"'
+            + ' data-sort-created="' + createdTs + '"'
+            + ' data-sort-total="' + usageMb + '"'
+            + ' data-sort-ip="' + escapeHtml(login) + '"'
+            + ' data-sort-quota="' + quotaMb + '"'
+            + ' data-sort-maxspeed="' + maxRate + '"'
+            + ' data-sort-rx="0" data-sort-tx="0" data-sort-handshake="0"'
+            + ' data-sort-expiry="0">'
+            + '<div class="client-info">'
+            + '<div class="' + avatarClass + '"'
+            + (avatarTitle ? ' title="' + escapeHtml(avatarTitle) + '"' : '')
+            + '>' + escapeHtml(initial) + '</div>'
+            + '<div class="grow">'
+            + '<div class="client-name">' + escapeHtml(name)
+            + ' <span class="client-ip">' + escapeHtml(login) + '</span></div>'
+            + '<div class="client-meta">' + meta + '</div>'
+            + '</div></div>'
+            + '<div class="client-actions proxy-actions">'
+            + '<button class="btn btn-secondary btn-sm btn-icon" type="button"'
+            + ' onclick="openProxyKeyModal(\'' + escapeJs(id) + '\')"'
+            + ' title="' + escapeHtml(_('proxy_key_btn')) + '"'
+            + ' aria-label="' + escapeHtml(_('proxy_key_btn')) + '">' + proxyIcon('key', 15) + '</button>'
+            + '<button class="btn btn-secondary btn-sm btn-icon" type="button"'
+            + ' onclick="openProxyAccountModal(\'edit\', \'' + escapeJs(id) + '\')"'
+            + ' title="' + escapeHtml(_('proxy_edit_btn')) + '"'
+            + ' aria-label="' + escapeHtml(_('proxy_edit_btn')) + '">' + proxyIcon('settings', 15) + '</button>'
+            + '<button class="btn btn-secondary btn-sm btn-icon ' + toggleClass + '" type="button"'
+            + ' onclick="toggleProxyAccount(\'' + escapeJs(id) + '\', this)"'
+            + ' title="' + escapeHtml(toggleTitle) + '"'
+            + ' aria-label="' + escapeHtml(toggleTitle) + '">' + proxyIcon('power', 15) + '</button>'
+            + '<button class="btn btn-danger btn-sm btn-icon" type="button"'
+            + ' onclick="deleteProxyAccount(\'' + escapeJs(id) + '\', \'' + escapeJs(name) + '\', this)"'
+            + ' title="' + escapeHtml(_('delete')) + '"'
+            + ' aria-label="' + escapeHtml(_('delete')) + '">' + proxyIcon('trash', 15) + '</button>'
+            + '</div></div>';
+    }
+
+    // ===== Модалка учётки =====
+
+    function randomProxyString(length, alphabet) {
+        var chars = alphabet || 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+        var out = '';
+        var buf = new Uint32Array(1);
+        for (var i = 0; i < length; i++) {
+            var n;
+            if (window.crypto && window.crypto.getRandomValues) {
+                window.crypto.getRandomValues(buf);
+                n = buf[0] % chars.length;
+            } else {
+                n = Math.floor(Math.random() * chars.length);
+            }
+            out += chars.charAt(n);
+        }
+        return out;
+    }
+
+    function regenerateProxyLogin() {
+        var input = document.getElementById('proxyAccLogin');
+        if (input) input.value = 'user_' + randomProxyString(6, 'abcdefghijklmnopqrstuvwxyz0123456789');
+    }
+
+    function regenerateProxyPassword() {
+        var input = document.getElementById('proxyAccPassword');
+        if (input) input.value = randomProxyString(16);
+    }
+
+    function toggleProxyPassword() {
+        var input = document.getElementById('proxyAccPassword');
+        var btn = document.getElementById('proxyAccPwToggle');
+        if (!input || !btn) return;
+        var visible = input.getAttribute('type') === 'text';
+        input.setAttribute('type', visible ? 'password' : 'text');
+        var title = visible ? _('proxy_show_password') : _('proxy_hide_password');
+        btn.title = title;
+        btn.setAttribute('aria-label', title);
+    }
+
+    function proxyAclTag(value) {
+        return String(value || '').indexOf(':') >= 0 ? 'v6' : 'v4';
+    }
+
+    function addProxyAclRow(value, focus) {
+        var list = document.getElementById('proxyAclList');
+        if (!list) return;
+        var line = document.createElement('div');
+        line.className = 'acl-line';
+        var input = document.createElement('input');
+        input.className = 'form-input';
+        input.type = 'text';
+        input.value = value || '';
+        input.placeholder = '192.0.2.0/24';
+        input.setAttribute('aria-label', _('proxy_acl_title'));
+        var tag = document.createElement('span');
+        tag.className = 'badge badge-secondary';
+        tag.textContent = proxyAclTag(value);
+        input.addEventListener('input', function () {
+            tag.textContent = proxyAclTag(input.value);
+        });
+        var del = document.createElement('button');
+        del.className = 'btn btn-danger btn-icon';
+        del.type = 'button';
+        del.title = _('proxy_acl_remove');
+        del.setAttribute('aria-label', _('proxy_acl_remove'));
+        del.innerHTML = proxyIcon('trash', 15);
+        del.addEventListener('click', function () { line.remove(); });
+        line.appendChild(input);
+        line.appendChild(tag);
+        line.appendChild(del);
+        list.appendChild(line);
+        if (focus) input.focus();
+    }
+
+    function readProxyAcl() {
+        var list = document.getElementById('proxyAclList');
+        if (!list) return [];
+        return Array.prototype.slice.call(list.querySelectorAll('.acl-line .form-input'))
+            .map(function (input) { return input.value.trim(); })
+            .filter(function (value) { return !!value; });
+    }
+
+    function findProxyAccount(id) {
+        var accounts = (proxyStatusCache && Array.isArray(proxyStatusCache.accounts))
+            ? proxyStatusCache.accounts : [];
+        for (var i = 0; i < accounts.length; i++) {
+            if (String(accounts[i].id) === String(id)) return accounts[i];
+        }
+        return null;
+    }
+
+    function proxyIntValue(id) {
+        var el = document.getElementById(id);
+        if (!el) return null;
+        var raw = String(el.value || '').trim();
+        if (!raw) return null;
+        var value = parseInt(raw, 10);
+        // 0 и отрицательные — «без лимита», как пустое поле.
+        return (isNaN(value) || value <= 0) ? null : value;
+    }
+
+    function loadProxyUsers() {
+        if (proxyUsersCache) {
+            fillProxyUserSelect();
+            return;
+        }
+        apiCall('/api/users?size=1000', 'GET').then(function (data) {
+            proxyUsersCache = (data && Array.isArray(data.users)) ? data.users : [];
+            fillProxyUserSelect();
+        }).catch(function () {
+            proxyUsersCache = [];
+        });
+    }
+
+    function fillProxyUserSelect() {
+        var select = document.getElementById('proxyAccUser');
+        if (!select) return;
+        var current = select.value;
+        var users = Array.isArray(proxyUsersCache) ? proxyUsersCache.slice() : [];
+        users.sort(function (a, b) {
+            return String(a.username || '').localeCompare(String(b.username || ''));
+        });
+        select.innerHTML = '<option value="">' + escapeHtml(_('proxy_no_bind')) + '</option>'
+            + users.map(function (u) {
+                return '<option value="' + escapeHtml(u.id) + '">'
+                    + escapeHtml(u.username) + '</option>';
+            }).join('');
+        select.value = current || '';
+        if (!select.value && proxyPendingUser) {
+            select.value = String(proxyPendingUser);
+        }
+    }
+
+    function openProxyAccountModal(mode, id) {
+        proxyAccountMode = mode === 'edit' ? 'edit' : 'create';
+        proxyAccountId = id || null;
+        var isEdit = proxyAccountMode === 'edit';
+        var account = isEdit ? findProxyAccount(id) : null;
+        if (isEdit && !account) {
+            // Кэш мог ещё не приехать — догружаем статус и повторяем.
+            loadProxyStatus(true).then(function () {
+                if (findProxyAccount(id)) openProxyAccountModal('edit', id);
+                else showToast(_('proxy_account_missing'), 'error');
+            }).catch(function (err) {
+                showToast(_('proxy_load_error') + ': ' + proxyErrorText(err), 'error');
+            });
+            return;
+        }
+        document.getElementById('proxyAccountTitleText').textContent = isEdit
+            ? _('proxy_account_title_edit') : _('proxy_account_title_create');
+        document.getElementById('proxyAccSubmitText').textContent = isEdit
+            ? _('save') : _('create');
+        var sub = document.getElementById('proxyAccountSub');
+        if (sub) sub.classList.toggle('hidden', !isEdit);
+        document.getElementById('proxyAccKeySection').classList.toggle('hidden', !isEdit);
+        document.getElementById('proxyAccKeyHint').classList.toggle('hidden', isEdit);
+        document.querySelectorAll('input[name="proxyAccType"]').forEach(function (radio) {
+            radio.checked = radio.value === (account ? (account.type || 'socks5') : 'both');
+        });
+        document.getElementById('proxyAccName').value = account ? (account.name || '') : '';
+        proxyPendingUser = account && account.user_id ? String(account.user_id) : '';
+        document.getElementById('proxyAccUser').value = proxyPendingUser;
+        document.getElementById('proxyAccLogin').value = account
+            ? (account.login || '') : ('user_' + randomProxyString(6, 'abcdefghijklmnopqrstuvwxyz0123456789'));
+        document.getElementById('proxyAccPassword').value = account
+            ? (account.password || '') : randomProxyString(16);
+        document.getElementById('proxyAccPassword').setAttribute('type', 'password');
+        var aclList = document.getElementById('proxyAclList');
+        aclList.innerHTML = '';
+        (account && Array.isArray(account.acl_ips) ? account.acl_ips : []).forEach(addProxyAclRow);
+        document.getElementById('proxyAccConns').value = account && account.max_conns ? account.max_conns : '';
+        document.getElementById('proxyAccRateIn').value = account && account.rate_in_mbps ? account.rate_in_mbps : '';
+        document.getElementById('proxyAccRateOut').value = account && account.rate_out_mbps ? account.rate_out_mbps : '';
+        document.getElementById('proxyAccQuota').value = account && account.quota_mb
+            ? Math.round(account.quota_mb / 1024 * 10) / 10 : '';
+        document.getElementById('proxyAccQuotaPeriod').value = (account && account.quota_period) || 'M';
+        var parent = (account && account.parent) || {};
+        document.getElementById('proxyAccUpType').value = parent.type || '';
+        document.getElementById('proxyAccUpHost').value = parent.host || '';
+        document.getElementById('proxyAccUpPort').value = parent.port || '';
+        document.getElementById('proxyAccUpLogin').value = parent.login || '';
+        document.getElementById('proxyAccUpPass').value = parent.password || '';
+        if (isEdit && account) {
+            if (sub) {
+                sub.textContent = (account.login || '') + ' · '
+                    + _('proxy_type_' + (account.type === 'http' ? 'http'
+                        : (account.type === 'both' ? 'both' : 'socks5')));
+            }
+            renderProxyKeys(document.getElementById('proxyAccKeyList'), proxyVisibleKeys(account),
+                !(proxyStatusCache && proxyStatusCache.http_enabled)
+                    && (account.type === 'http' || account.type === 'both'));
+        } else {
+            document.getElementById('proxyAccKeyList').innerHTML = '';
+        }
+        loadProxyUsers();
+        openModal('proxyAccountModal');
+    }
+
+    function readProxyAccountForm() {
+        var typeRadio = document.querySelector('input[name="proxyAccType"]:checked');
+        var quotaGb = parseFloat(document.getElementById('proxyAccQuota').value);
+        var parentType = document.getElementById('proxyAccUpType').value;
+        var parent = null;
+        if (parentType) {
+            parent = {
+                type: parentType,
+                host: document.getElementById('proxyAccUpHost').value.trim(),
+                port: document.getElementById('proxyAccUpPort').value.trim(),
+                login: document.getElementById('proxyAccUpLogin').value.trim(),
+                password: document.getElementById('proxyAccUpPass').value
+            };
+        }
+        return {
+            name: document.getElementById('proxyAccName').value.trim(),
+            login: document.getElementById('proxyAccLogin').value.trim(),
+            password: document.getElementById('proxyAccPassword').value,
+            type: typeRadio ? typeRadio.value : 'both',
+            user_id: document.getElementById('proxyAccUser').value || null,
+            acl_ips: readProxyAcl(),
+            max_conns: proxyIntValue('proxyAccConns'),
+            rate_in_mbps: proxyIntValue('proxyAccRateIn'),
+            rate_out_mbps: proxyIntValue('proxyAccRateOut'),
+            quota_mb: quotaGb > 0 ? Math.round(quotaGb * 1024) : null,
+            quota_period: document.getElementById('proxyAccQuotaPeriod').value || 'M',
+            parent: parent
+        };
+    }
+
+    async function submitProxyAccount() {
+        var payload = readProxyAccountForm();
+        if (!payload.name) {
+            showToast(_('proxy_name_required'), 'error');
+            return;
+        }
+        if (!/^[A-Za-z0-9_.-]+$/.test(payload.login)) {
+            showToast(_('proxy_login_invalid'), 'error');
+            return;
+        }
+        if (!/^[A-Za-z0-9]+$/.test(payload.password)) {
+            showToast(_('proxy_password_invalid'), 'error');
+            return;
+        }
+        var btn = document.getElementById('proxyAccSubmitBtn');
+        var isEdit = proxyAccountMode === 'edit';
+        var busy = proxyBusyStart(btn, 'proxyAccSpinner', 'proxyAccSubmitText',
+            isEdit ? _('proxy_saving') : _('proxy_creating'));
+        var progress = startProgressToast((isEdit ? _('proxy_saving') : _('proxy_creating'))
+            + ': ' + (payload.name || payload.login));
+        var ok = false;
+        try {
+            var url = '/api/servers/' + SERVER_ID + '/proxy/accounts';
+            if (isEdit) {
+                url += '/' + encodeURIComponent(proxyAccountId);
+            }
+            await apiCall(url, 'POST', payload);
+            ok = true;
+            progress.done();
+            showToast(isEdit ? _('proxy_account_saved') : _('proxy_account_created'), 'success');
+        } catch (err) {
+            progress.fail(proxyErrorText(err));
+            showToast(_('error') + ': ' + proxyErrorText(err), 'error');
+        } finally {
+            proxyBusyEnd(busy);
+            if (ok) {
+                closeModal('proxyAccountModal');
+                await loadProxyStatus(true);
+            }
+        }
+    }
+
+    // ===== Ключи учёток =====
+
+    function proxyKeyProto(url) {
+        return String(url || '').toLowerCase().indexOf('socks5://') === 0
+            ? { cls: 'is-socks', label: 'SOCKS5' }
+            : { cls: 'is-http', label: 'HTTP' };
+    }
+
+    function renderProxyKeys(listEl, keys, quiet) {
+        if (!listEl) return;
+        var items = Array.isArray(keys) ? keys.filter(function (key) { return !!key; }) : [];
+        if (!items.length) {
+            // quiet: HTTP-ключ скрыт, потому что HTTP-прокси выключен;
+            // отдельная подсказка уже объясняет причину.
+            listEl.innerHTML = quiet ? '' : ('<div class="key-off">' + proxyIcon('alert', 13)
+                + ' <span>' + escapeHtml(_('proxy_key_unavailable')) + '</span></div>');
+            return;
+        }
+        listEl.innerHTML = items.map(function (url) {
+            var proto = proxyKeyProto(url);
+            return '<div class="key-row">'
+                + '<span class="key-proto ' + proto.cls + '">' + proto.label + '</span>'
+                + '<span class="key-value">' + escapeHtml(url) + '</span>'
+                + '<button class="btn btn-secondary btn-sm copy-btn" type="button"'
+                + ' data-copy="' + escapeHtml(url) + '" onclick="copyProxyKey(this)">'
+                + escapeHtml(_('proxy_copy')) + '</button>'
+                + '</div>';
+        }).join('');
+    }
+
+    function copyProxyKey(btn) {
+        var value = btn ? (btn.getAttribute('data-copy') || '') : '';
+        if (!value) return;
+        var done = function () { showToast(_('proxy_key_copied'), 'success'); };
+        var legacyCopy = function () {
+            var area = document.createElement('textarea');
+            area.value = value;
+            area.className = 'visually-hidden';
+            document.body.appendChild(area);
+            area.select();
+            var ok = false;
+            try { ok = document.execCommand('copy'); } catch (err) { ok = false; }
+            area.remove();
+            return ok;
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(value).then(done, function () {
+                if (legacyCopy()) done();
+                else showToast(_('proxy_copy_failed'), 'error');
+            });
+        } else if (legacyCopy()) {
+            done();
+        } else {
+            showToast(_('proxy_copy_failed'), 'error');
+        }
+    }
+
+    // Ключи для показа: HTTP-ключ не выдаётся, когда HTTP-прокси выключен.
+    function proxyVisibleKeys(account) {
+        var keys = (account && Array.isArray(account.keys)) ? account.keys.slice() : [];
+        var httpOff = !(proxyStatusCache && proxyStatusCache.http_enabled);
+        var sharesHttp = account && (account.type === 'http' || account.type === 'both');
+        if (httpOff && sharesHttp) {
+            keys = keys.filter(function (url) {
+                return String(url || '').indexOf('http://') !== 0;
+            });
+        }
+        return keys;
+    }
+
+    function openProxyKeyModal(id) {
+        var account = findProxyAccount(id);
+        if (!account) {
+            loadProxyStatus(true).then(function () {
+                if (findProxyAccount(id)) openProxyKeyModal(id);
+                else showToast(_('proxy_account_missing'), 'error');
+            }).catch(function (err) {
+                showToast(_('proxy_load_error') + ': ' + proxyErrorText(err), 'error');
+            });
+            return;
+        }
+        var shareHttp = account.type === 'both' || account.type === 'http';
+        var httpOff = shareHttp && !(proxyStatusCache && proxyStatusCache.http_enabled);
+        document.getElementById('proxyKeySub').textContent = (account.login || '')
+            + ' · ' + _('proxy_type_' + (account.type === 'http' ? 'http'
+                : (account.type === 'both' ? 'both' : 'socks5')));
+        renderProxyKeys(document.getElementById('proxyKeyList'), proxyVisibleKeys(account), httpOff);
+        document.getElementById('proxyKeyHttpOff').classList.toggle('hidden', !httpOff);
+        proxyAccountId = account.id;
+        openModal('proxyKeyModal');
+    }
+
+    function editProxyAccountFromKey() {
+        var account = proxyAccountId ? findProxyAccount(proxyAccountId) : null;
+        closeModal('proxyKeyModal');
+        if (account) openProxyAccountModal('edit', account.id);
+    }
+
+    // ===== Настройки инстанса =====
+
+    function setProxyPortState(kind, cls, icon, html) {
+        var box = document.getElementById(kind === 'socks' ? 'proxySocksPortState' : 'proxyHttpPortState');
+        if (!box) return;
+        box.className = 'port-check-msg ' + cls;
+        box.innerHTML = proxyIcon(icon, 12) + ' <span>' + html + '</span>';
+    }
+
+    function resetProxyPortState(kind) {
+        setProxyPortState(kind, 'is-idle', 'help', escapeHtml(_('proxy_port_not_checked')));
+    }
+
+    async function checkProxyPort(kind, btn) {
+        var input = document.getElementById(kind === 'socks' ? 'proxySocksPort' : 'proxyHttpPort');
+        if (!input) return;
+        var port = parseInt(input.value, 10);
+        if (!port || port < 1 || port > 65535) {
+            setProxyPortState(kind, 'is-invalid', 'alert', escapeHtml(_('proxy_port_invalid_msg')));
+            return;
+        }
+        // Сообщение о процессе: спиннер + текст (без инлайн-стилей).
+        var box = document.getElementById(kind === 'socks' ? 'proxySocksPortState' : 'proxyHttpPortState');
+        if (box) {
+            box.className = 'port-check-msg is-idle';
+            box.innerHTML = proxyIcon('refresh', 12).replace('class="ui-icon"', 'class="ui-icon proxy-spin"')
+                + ' <span>' + escapeHtml(_('proxy_port_checking')) + '</span>';
+        }
+        if (btn) btn.disabled = true;
+        try {
+            var res = await apiCall('/api/servers/' + SERVER_ID + '/proxy/port-check', 'POST', { port: port });
+            if (res && res.valid === false) {
+                setProxyPortState(kind, 'is-invalid', 'alert', escapeHtml(_('proxy_port_invalid_msg')));
+            } else if (res && res.free) {
+                setProxyPortState(kind, 'is-free', 'check',
+                    escapeHtml(_('proxy_port_free_msg')).replace('{port}', '<b>' + port + '</b>'));
+            } else {
+                var holder = res && res.holder ? escapeHtml(res.holder) : escapeHtml(_('proxy_port_busy_unknown'));
+                setProxyPortState(kind, 'is-busy', 'alert',
+                    escapeHtml(_('proxy_port_busy_msg'))
+                        .replace('{port}', '<b>' + port + '</b>')
+                        .replace('{holder}', '<b>' + holder + '</b>'));
+            }
+        } catch (err) {
+            var payload = err && err.payload;
+            if (payload && payload.valid === false) {
+                setProxyPortState(kind, 'is-invalid', 'alert', escapeHtml(_('proxy_port_invalid_msg')));
+            } else {
+                setProxyPortState(kind, 'is-idle', 'alert',
+                    escapeHtml(_('proxy_port_check_failed')) + (err && err.message
+                        ? ': ' + escapeHtml(err.message) : ''));
+            }
+        } finally {
+            if (btn) btn.disabled = false;
+            // Выключенный листенер остаётся недоступным и после проверки.
+            syncProxyListenerPorts();
+        }
+    }
+
+    async function openProxySettings() {
+        try {
+            await loadProxyStatus();
+        } catch (err) {
+            showToast(_('error') + ': ' + proxyErrorText(err), 'error');
+            return;
+        }
+        var st = proxyStatusCache || {};
+        var socks = document.getElementById('proxySocksPort');
+        var http = document.getElementById('proxyHttpPort');
+        var socksPort = st.socks_port || 1080;
+        var httpPort = st.http_port || 8312;
+        socks.value = socksPort;
+        socks.setAttribute('data-initial', String(socksPort));
+        http.value = httpPort;
+        http.setAttribute('data-initial', String(httpPort));
+        setProxyListenerType(proxyListenerTypeFromStatus(st));
+        syncProxyListenerPorts();
+        var dns = Array.isArray(st.dns_servers) ? st.dns_servers : [];
+        document.getElementById('proxyDns1').value = dns[0] || '8.8.8.8';
+        document.getElementById('proxyDns2').value = dns[1] || '1.1.1.1';
+        document.getElementById('proxyMaxconn').value = st.maxconn || '';
+        document.getElementById('proxyLogDays').value = st.log_rotate_days || 30;
+        // Старые записи хранят букву ротации ('L') вместо формата — показываем
+        // значение по умолчанию, чтобы пользователь не сохранял мусор обратно.
+        var logFormat = String(st.log_format || '');
+        document.getElementById('proxyLogFormat').value = logFormat.indexOf('%') >= 0
+            ? logFormat
+            : 'L%Y-%m-%d %H:%M:%S %U %I %O %N';
+        resetProxyPortState('socks');
+        resetProxyPortState('http');
+        var sub = document.getElementById('proxySettingsSub');
+        if (sub) {
+            sub.textContent = '3proxy' + (st.container && st.container.version
+                ? ' · ' + st.container.version : '');
+        }
+        var hint = document.getElementById('proxySocksPortHint');
+        if (hint) {
+            hint.textContent = _('proxy_socks_port_hint').replace('{port}', String(socksPort));
+        }
+        openModal('proxySettingsModal');
+    }
+
+    // Тип листенера: сохранённый или выведенный из старых полей.
+    // http ставится только для записи без SOCKS-порта — в текущей модели
+    // таких нет, но значение поддерживаем.
+    function proxyListenerTypeFromStatus(st) {
+        st = st || {};
+        var stored = String(st.listener_type || '').trim().toLowerCase();
+        if (stored === 'socks5' || stored === 'http' || stored === 'both') return stored;
+        if (st.http_enabled === false) return 'socks5';
+        var socksPort = String(st.socks_port || '').trim();
+        var httpPort = String(st.http_port || '').trim();
+        if (st.http_enabled && httpPort && !socksPort) return 'http';
+        return 'both';
+    }
+
+    function setProxyListenerType(value) {
+        var wanted = value === 'socks5' || value === 'http' ? value : 'both';
+        document.querySelectorAll('input[name="proxyListenerType"]').forEach(function (radio) {
+            radio.checked = radio.value === wanted;
+        });
+    }
+
+    function proxySelectedListenerType() {
+        var checked = document.querySelector('input[name="proxyListenerType"]:checked');
+        return checked ? checked.value : 'both';
+    }
+
+    // Выключенный листенер не держит порт: поле и «Проверить» недоступны,
+    // но значение порта остаётся — при переключении обратно оно пригодится.
+    function syncProxyListenerPorts() {
+        var listener = proxySelectedListenerType();
+        var socksOff = listener === 'http';
+        var httpOff = listener === 'socks5';
+        var socksInput = document.getElementById('proxySocksPort');
+        var httpInput = document.getElementById('proxyHttpPort');
+        if (socksInput) socksInput.disabled = socksOff;
+        if (httpInput) httpInput.disabled = httpOff;
+        document.querySelectorAll('#proxySettingsModal .port-field button').forEach(function (btn) {
+            var action = btn.getAttribute('onclick') || '';
+            if (action.indexOf("checkProxyPort('socks'") >= 0) btn.disabled = socksOff;
+            else if (action.indexOf("checkProxyPort('http'") >= 0) btn.disabled = httpOff;
+        });
+        var hint = document.getElementById('proxyListenerOffHint');
+        if (hint) {
+            var text = socksOff ? _('proxy_listener_socks_off')
+                : (httpOff ? _('proxy_listener_http_off') : '');
+            hint.textContent = text;
+            hint.classList.toggle('hidden', !text);
+        }
+    }
+
+    function collectProxySettings() {
+        var dns = [
+            document.getElementById('proxyDns1').value.trim(),
+            document.getElementById('proxyDns2').value.trim()
+        ].filter(function (value) { return !!value; });
+        var listenerType = proxySelectedListenerType();
+        return {
+            port: parseInt(document.getElementById('proxySocksPort').value, 10) || 0,
+            http_port: parseInt(document.getElementById('proxyHttpPort').value, 10) || 0,
+            // Модель хранения не меняется: socks5 → http_enabled=false.
+            http_enabled: listenerType !== 'socks5',
+            listener_type: listenerType,
+            dns_servers: dns,
+            maxconn: proxyIntValue('proxyMaxconn'),
+            log_rotate_days: proxyIntValue('proxyLogDays'),
+            log_format: document.getElementById('proxyLogFormat').value.trim() || 'L%Y-%m-%d %H:%M:%S %U %I %O %N'
+        };
+    }
+
+    function proxyPortChanges() {
+        var socks = document.getElementById('proxySocksPort');
+        var http = document.getElementById('proxyHttpPort');
+        var changes = [];
+        if (String(socks.value) !== String(socks.getAttribute('data-initial'))) {
+            changes.push('SOCKS5 ' + socks.getAttribute('data-initial') + ' → ' + socks.value);
+        }
+        if (String(http.value) !== String(http.getAttribute('data-initial'))) {
+            changes.push('HTTP ' + http.getAttribute('data-initial') + ' → ' + http.value);
+        }
+        return changes;
+    }
+
+    function saveProxySettings() {
+        var settings = collectProxySettings();
+        if (!settings.port || settings.port < 1 || settings.port > 65535) {
+            showToast(_('proxy_port_invalid_msg'), 'error');
+            return;
+        }
+        if (settings.listener_type !== 'socks5' && !settings.http_port) {
+            showToast(_('proxy_port_invalid_msg'), 'error');
+            return;
+        }
+        var changes = proxyPortChanges();
+        if (changes.length) {
+            proxyPendingSettings = settings;
+            document.getElementById('proxyRecreateText').textContent =
+                _('proxy_recreate_text').replace('{ports}', changes.join(', '));
+            closeModal('proxySettingsModal');
+            openModal('proxyRecreateModal');
+            return;
+        }
+        submitProxySettings(settings, 'proxySettingsModal');
+    }
+
+    function cancelProxyRecreate() {
+        proxyPendingSettings = null;
+        closeModal('proxyRecreateModal');
+        openModal('proxySettingsModal');
+    }
+
+    function confirmProxyRecreate() {
+        // Модалку не закрываем до ответа: иначе пересоздание контейнеров
+        // идёт «в тишине» (баг 3). Закроет submitProxySettings по успеху.
+        if (proxyPendingSettings) submitProxySettings(proxyPendingSettings, 'proxyRecreateModal');
+    }
+
+    async function submitProxySettings(settings, modalId) {
+        var btn = document.getElementById('proxySettingsSaveBtn');
+        var confirmBtn = document.getElementById('proxyRecreateConfirmBtn');
+        var isRecreate = modalId === 'proxyRecreateModal';
+        var busy = isRecreate
+            ? proxyBusyStart(confirmBtn, 'proxyRecreateSpinner', 'proxyRecreateConfirmText', _('proxy_saving'))
+            : proxyBusyStart(btn, 'proxySettingsSaveSpinner', 'proxySettingsSaveText', _('proxy_saving'));
+        var progress = startProgressToast(_('proxy_saving'));
+        var ok = false;
+        try {
+            await apiCall('/api/servers/' + SERVER_ID + '/proxy/settings', 'POST', settings);
+            ok = true;
+            progress.done();
+            showToast(_('proxy_settings_saved'), 'success');
+            await loadProxyStatus(true);
+            setTimeout(function () { checkServer(); }, 500);
+        } catch (err) {
+            progress.fail(_('error') + ': ' + proxyErrorText(err));
+            showToast(_('error') + ': ' + proxyErrorText(err), 'error');
+        } finally {
+            proxyBusyEnd(busy);
+            if (ok) {
+                proxyPendingSettings = null;
+                closeModal('proxySettingsModal');
+                closeModal('proxyRecreateModal');
+            }
+        }
+    }
+
+    async function toggleProxyAccount(id, btn) {
+        var account = findProxyAccount(id);
+        if (!account) return;
+        var next = account.enabled === false;
+        var title = (next ? _('proxy_enable_btn') : _('proxy_disable_btn'))
+            + ': ' + (account.name || account.login || '');
+        var progress = startProgressToast(title);
+        if (btn) btn.disabled = true;
+        try {
+            await apiCall('/api/servers/' + SERVER_ID + '/proxy/accounts/'
+                + encodeURIComponent(id) + '/toggle', 'POST', { enabled: next });
+            progress.done();
+            showToast(next ? _('proxy_account_enabled') : _('proxy_account_disabled'), 'success');
+            await loadProxyStatus(true);
+        } catch (err) {
+            progress.fail(proxyErrorText(err));
+            showToast(_('error') + ': ' + proxyErrorText(err), 'error');
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    }
+
+    async function deleteProxyAccount(id, name, btn) {
+        if (!confirm(_('proxy_delete_confirm').replace('{name}', name || ''))) return;
+        var progress = startProgressToast(_('proxy_deleting') + ': ' + (name || ''));
+        if (btn) btn.disabled = true;
+        try {
+            await apiCall('/api/servers/' + SERVER_ID + '/proxy/accounts/'
+                + encodeURIComponent(id), 'DELETE');
+            progress.done();
+            showToast(_('proxy_account_deleted'), 'success');
+            await loadProxyStatus(true);
+        } catch (err) {
+            progress.fail(proxyErrorText(err));
+            showToast(_('error') + ': ' + proxyErrorText(err), 'error');
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    }
+
+    function showProxyAccounts() {
+        // Тот же единственный активный список, что и у клиентов инстанса:
+        // шапка меняется, строки приезжают из /proxy/status.
+        setActiveList('proxy');
+        loadProxyStatus(true).catch(function (err) {
+            showToast(_('proxy_load_error') + ': ' + proxyErrorText(err), 'error');
+        });
+        scrollToEntityList();
+    }
+
     // ========== Connection Management ==========
     function selectProtocolForConns(proto) {
-        document.getElementById('connectionsSection').style.display = '';
+        setActiveList('vpn');
         document.getElementById('connProtoSelect').value = proto;
         loadConnections();
-        document.getElementById('connectionsSection').scrollIntoView({ behavior: 'smooth' });
+        scrollToEntityList();
     }
 
     // Mark the protocol card that owns the connections list below: the
@@ -8128,23 +10213,26 @@
 
     async function loadConnections(isPoll, force) {
         const proto = document.getElementById('connProtoSelect').value;
+        // Сейчас показываются учётки прокси: строки пиров не перерисовываем,
+        // иначе общий список подменится фоновым /check.
+        if (entityListKind !== 'vpn') return;
         updateConnectionSortOptions(proto);
         markActiveProtocolCard();
-        const loading = document.getElementById('connectionsLoading');
-        const emptyEl = document.getElementById('connectionsEmpty');
-        const listEl = document.getElementById('connectionsListInner');
+        const loading = document.getElementById('entityListLoading');
+        const emptyEl = document.getElementById('entityListEmpty');
+        const listEl = document.getElementById('entityListInner');
 
         if (!proto) {
-            loading.style.display = 'none';
+            loading.classList.add('hidden');
             return;
         }
 
         // Skip poll re-renders while the rename editor is open — a full innerHTML
         // rebuild would destroy the input mid-typing. `force` bypasses this for
         // the editor's own save path, which wants an immediate silent refresh.
-        if (isPoll && !force && document.querySelector('#connectionsListInner .rename-editor')) {
+        if (isPoll && !force && document.querySelector('#entityListInner .rename-editor')) {
             clearTimeout(window.connPollTimer);
-            if (PEER_POLL_INTERVAL > 0 && document.getElementById('connectionsSection').style.display !== 'none') {
+            if (PEER_POLL_INTERVAL > 0 && entityListKind === 'vpn') {
                 window.connPollTimer = setTimeout(function() { loadConnections(true); }, PEER_POLL_INTERVAL * 1000);
             }
             return;
@@ -8160,7 +10248,7 @@
             return;
         }
         window.connLoading = true;
-        if (!isPoll) loading.style.display = ''; // silent refresh on polls
+        if (!isPoll) loading.classList.remove('hidden'); // silent refresh on polls
         emptyEl.classList.add('hidden');
         try {
             const data = await apiCall(`/api/servers/${SERVER_ID}/connections?protocol=${proto}`);
@@ -8170,7 +10258,7 @@
             // The rename editor may have opened while this poll was in flight —
             // re-rendering now would destroy it mid-typing.
             if (isPoll && !force && listEl.querySelector('.rename-editor')) return;
-            loading.style.display = 'none';
+            loading.classList.add('hidden');
             if (!data.clients || data.clients.length === 0) {
                 listEl.innerHTML = '';
                 emptyEl.classList.remove('hidden');
@@ -8310,13 +10398,14 @@
                 }
             }
         } catch (err) {
-            loading.style.display = 'none';
+            loading.classList.add('hidden');
             showToast(_('connections_load_error') + ': ' + err.message, 'error');
         } finally {
             window.connLoading = false;
             PeerQueue.reapplyRowStates();
             applyConnectionSort();
             highlightPeerFromQuery();
+            applyEntitySearch();
             // A switch was requested mid-flight: load the currently selected
             // protocol now (the stale response above was dropped).
             if (window.connPending) {
@@ -8324,10 +10413,10 @@
                 loadConnections();
                 return;
             }
-            // Live refresh while the connections section is visible; the
-            // interval is opt-in per server (0 = off, management modal).
+            // Live refresh while the peers list is on screen; the interval is
+            // opt-in per server (0 = off, management modal).
             clearTimeout(window.connPollTimer);
-            if (PEER_POLL_INTERVAL > 0 && document.getElementById('connectionsSection').style.display !== 'none') {
+            if (PEER_POLL_INTERVAL > 0 && entityListKind === 'vpn') {
                 window.connPollTimer = setTimeout(function() { loadConnections(true); }, PEER_POLL_INTERVAL * 1000);
             }
         }
@@ -8870,6 +10959,11 @@
     };
 
     function connectionSortAvailable(field, proto) {
+        // Учётки прокси — отдельный источник списка: у них есть имя, дата,
+        // расход, логин (как data-sort-ip), квота и лимит скорости.
+        if (proto === 'proxy') {
+            return ['name', 'created', 'total', 'ip', 'quota', 'maxspeed'].includes(field);
+        }
         const isAwg = proto.startsWith('awg');
         const isWireGuard = protoBase(proto) === 'wireguard';
         switch (field) {
@@ -8889,11 +10983,13 @@
 
     function updateConnectionSortOptions(proto) {
         const select = document.getElementById('connSortField');
-        if (!select) return;
+        // Минимальные DOM-заглушки (тесты карточки) не имеют options.
+        if (!select || !select.options) return;
         Array.from(select.options).forEach(option => {
             option.disabled = !connectionSortAvailable(option.value, proto);
         });
-        if (select.selectedOptions.length && select.selectedOptions[0].disabled) {
+        const selected = select.selectedOptions;
+        if (selected && selected.length && selected[0].disabled) {
             select.value = 'name';
         }
     }
@@ -8912,7 +11008,7 @@
     });
 
     function applyConnectionSort() {
-        const list = document.getElementById('connectionsListInner');
+        const list = document.getElementById('entityListInner');
         const fieldSelect = document.getElementById('connSortField');
         const directionSelect = document.getElementById('connSortDirection');
         if (!list || !fieldSelect || !directionSelect) return;
@@ -8995,7 +11091,12 @@
     }
 
     function escapeJs(str) {
-        return str.replace(/'/g, "\\'").replace(/"/g, '\\"');
+        return String(str)
+            .replace(/\\/g, '\\\\')
+            .replace(/'/g, "\\'")
+            .replace(/"/g, '\\"')
+            .replace(/\n/g, '\\n')
+            .replace(/\r/g, '\\r');
     }
 
 
@@ -9326,6 +11427,25 @@
         srv_warp_tos_required: 'srv_warp_err_tos',
         srv_warp_job_busy: 'srv_warp_err_job_busy',
         srv_warp_no_targets: 'srv_warp_err_no_awg',
+        srv_warp_protocol_unsupported: 'srv_warp_err_protocol_unsupported',
+        srv_warp_registered_unlink_first: 'srv_warp_err_registered',
+        srv_warp_source_required: 'srv_warp_err_source_required',
+        srv_warp_source_is_self: 'srv_warp_err_source_self',
+        srv_warp_source_not_found: 'srv_warp_err_source_not_found',
+        srv_warp_source_no_targets: 'srv_warp_err_source_no_targets',
+        srv_warp_source_unreachable: 'srv_warp_err_source_unreachable',
+        srv_warp_source_register_failed: 'srv_warp_err_source_register',
+        srv_warp_handshake_failed: 'srv_warp_err_handshake',
+        srv_warp_quota_exhausted: 'srv_warp_err_quota',
+        srv_warp_register_api_unreachable: 'srv_warp_err_api_unreachable',
+        install_in_progress: 'srv_warp_err_job_busy',
+        // The host-level install refuses when any instance is registered;
+        // without this entry the 409 would fall back to a generic message.
+        srv_warp_registered_unlink_first: 'srv_warp_err_registered',
+        // Per-instance failures that only exist as a background job outcome;
+        // without these entries the card would show a generic message.
+        srv_warp_install_failed: 'srv_warp_err_install_failed',
+        srv_warp_repair_failed: 'srv_warp_err_repair_failed',
     };
 
     function warpAggregate() {
@@ -9434,6 +11554,14 @@
                     if (item.link_active) bits.push(`☁️ ${escapeHtml(_('srv_warp_link'))}`);
                     if (item.quarantine) bits.push('⚠️');
                     if (item.client_mtu) bits.push(`MTU ${escapeHtml(String(item.client_mtu))}`);
+                    // A failed repair is a background outcome: this row is the
+                    // only place a user can see it.
+                    const repair = item.repair_state || {};
+                    if (repair.state === 'error') {
+                        const reasonKey = WARP_ERROR_KEYS[repair.last_error]
+                            || 'srv_warp_err_repair_failed';
+                        bits.push(`❌ ${escapeHtml(_(reasonKey))}`);
+                    }
                     return `<div class="text-sm">${bits.join(' • ')}</div>`;
                 }).join('');
                 const budget = d.budget
@@ -9534,6 +11662,208 @@
             if (!jobs.some(job => job && job.id === jobId)) return status;
         }
         return warpStatus;
+    }
+
+    // Import a WARP profile registered on another panel server. Needed when
+    // this host cannot reach api.cloudflareclient.com (the provider filters
+    // TLS by SNI) while the WARP tunnel itself works.
+    const WARP_IMPORT_STATUS_KEYS = {
+        ready: 'srv_warp_source_status_ready',
+        can_register: 'srv_warp_source_status_can_register',
+        blocked: 'srv_warp_source_status_blocked',
+        unreachable: 'srv_warp_source_status_unreachable',
+        no_instance: 'srv_warp_source_status_no_instance',
+        unknown: 'srv_warp_source_status_unknown',
+    };
+    const WARP_IMPORT_STATUS_CLASS = {
+        ready: 'badge-success',
+        can_register: 'badge-success',
+        blocked: 'badge-danger',
+        unreachable: 'badge-danger',
+        no_instance: 'badge-warn',
+        unknown: 'badge-warn',
+    };
+    let warpImportChecked = null;
+
+    function warpImportSourceUsable(row) {
+        return !!row && (row.status === 'ready' || row.status === 'can_register');
+    }
+
+    function fillWarpImportSourceProtocols() {
+        const sourceSel = document.getElementById('warp-import-source');
+        const protoSel = document.getElementById('warp-import-source-protocol');
+        if (!sourceSel || !protoSel) return;
+        const rows = (Array.isArray(warpImportChecked) && warpImportChecked.length)
+            ? warpImportChecked
+            : (Array.isArray(WARP_IMPORT_SOURCES) ? WARP_IMPORT_SOURCES : []);
+        const picked = rows.find(item => item.uid === sourceSel.value);
+        const protos = (picked && Array.isArray(picked.protocols)) ? picked.protocols : [];
+        protoSel.innerHTML = protos.map(proto =>
+            `<option value="${escapeHtml(proto)}">${escapeHtml(proto)}</option>`
+        ).join('');
+        protoSel.disabled = !protos.length;
+    }
+
+    function onWarpImportSourceChange() {
+        fillWarpImportSourceProtocols();
+    }
+
+    // Paint the result of the source check: which server can hand over a
+    // profile, which can register one, and which is blocked by the provider.
+    function renderWarpImportSources(rows) {
+        const listEl = document.getElementById('warp-import-sources');
+        const sourceSel = document.getElementById('warp-import-source');
+        const noUsable = document.getElementById('warp-import-no-usable');
+        const importBtn = document.getElementById('warp-import-btn');
+        if (!listEl || !sourceSel) return;
+        listEl.classList.remove('hidden');
+        listEl.innerHTML = rows.map(row => {
+            const cls = WARP_IMPORT_STATUS_CLASS[row.status] || 'badge-warn';
+            const text = _(WARP_IMPORT_STATUS_KEYS[row.status] || 'srv_warp_source_status_unknown');
+            const proto = row.protocol ? ' · ' + row.protocol : '';
+            return '<div class="flex gap-sm" style="align-items:center; margin-bottom:6px;">' +
+                `<span class="badge ${cls}"><span class="badge-dot"></span> ${escapeHtml(text)}</span>` +
+                `<span class="text-sm">${escapeHtml(row.name)}${escapeHtml(proto)}</span>` +
+                '</div>';
+        }).join('');
+
+        // A blocked host cannot supply a profile: keep it visible (the reason
+        // must stay readable) but not selectable.
+        sourceSel.innerHTML = rows.map(row => {
+            const text = _(WARP_IMPORT_STATUS_KEYS[row.status] || 'srv_warp_source_status_unknown');
+            const disabled = warpImportSourceUsable(row) ? '' : ' disabled';
+            return `<option value="${escapeHtml(row.uid)}"${disabled}>` +
+                `${escapeHtml(row.name + ' — ' + text)}</option>`;
+        }).join('');
+        const first = rows.find(row => row.status === 'ready')
+            || rows.find(row => row.status === 'can_register');
+        if (first) sourceSel.value = first.uid;
+        fillWarpImportSourceProtocols();
+
+        const anyUsable = rows.some(warpImportSourceUsable);
+        if (noUsable) noUsable.classList.toggle('hidden', anyUsable);
+        if (importBtn) importBtn.disabled = !anyUsable || !sourceSel.value;
+    }
+
+    async function checkWarpImportSources() {
+        const listEl = document.getElementById('warp-import-sources');
+        const btn = document.getElementById('warp-import-check-btn');
+        const noUsable = document.getElementById('warp-import-no-usable');
+        if (btn) btn.disabled = true;
+        if (noUsable) noUsable.classList.add('hidden');
+        if (listEl) {
+            listEl.classList.remove('hidden');
+            listEl.innerHTML = `<div class="form-hint">${escapeHtml(_('srv_warp_import_checking'))}</div>`;
+        }
+        try {
+            const res = await warpPost('import/sources', {});
+            const rows = (res && Array.isArray(res.sources)) ? res.sources : [];
+            warpImportChecked = rows;
+            if (!rows.length) {
+                if (listEl) {
+                    listEl.innerHTML = `<div class="form-hint">` +
+                        `${escapeHtml(_('srv_warp_import_no_sources'))}</div>`;
+                }
+                return;
+            }
+            renderWarpImportSources(rows);
+        } catch (err) {
+            if (listEl) {
+                listEl.innerHTML = `<div class="form-hint is-error">` +
+                    `${escapeHtml(warpErrorMessage(err))}</div>`;
+            }
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    }
+
+    function openWarpImportModal(autoCheck) {
+        const sources = Array.isArray(WARP_IMPORT_SOURCES) ? WARP_IMPORT_SOURCES : [];
+        const emptyEl = document.getElementById('warp-import-empty');
+        const sourceSel = document.getElementById('warp-import-source');
+        const targetSel = document.getElementById('warp-import-target');
+        const errorEl = document.getElementById('warp-import-error');
+        const listEl = document.getElementById('warp-import-sources');
+        const noUsable = document.getElementById('warp-import-no-usable');
+        const btn = document.getElementById('warp-import-btn');
+        if (errorEl) { errorEl.textContent = ''; errorEl.classList.add('hidden'); }
+        if (listEl) { listEl.innerHTML = ''; listEl.classList.add('hidden'); }
+        if (noUsable) noUsable.classList.add('hidden');
+        if (btn) btn.disabled = !sources.length;
+        if (emptyEl) emptyEl.classList.toggle('hidden', sources.length > 0);
+        warpImportChecked = null;
+
+        if (sourceSel) {
+            sourceSel.innerHTML = sources.map(item =>
+                `<option value="${escapeHtml(item.uid)}">${escapeHtml(item.name)}</option>`
+            ).join('');
+            sourceSel.disabled = !sources.length;
+        }
+
+        // Source instances of the selected source server.
+        fillWarpImportSourceProtocols();
+
+        // Target instances on this server: every registered AWG instance.
+        if (targetSel) {
+            const known = Array.isArray(SERVER_PROTOCOL_KEYS) ? SERVER_PROTOCOL_KEYS : [];
+            const targets = known.filter(proto =>
+                ['awg', 'awg2', 'awg3'].includes(protoBase(proto)));
+            targetSel.innerHTML = targets.map(proto =>
+                `<option value="${escapeHtml(proto)}">${escapeHtml(proto)}</option>`
+            ).join('');
+            targetSel.disabled = !targets.length;
+        }
+        // When the modal is opened from a failed install it must not sit
+        // behind the install progress one.
+        if (document.getElementById('installModal')?.classList.contains('active')) {
+            closeModal('installModal');
+        }
+        openModal('warpImportModal');
+        if (autoCheck && sources.length) checkWarpImportSources();
+    }
+
+    async function importWarp() {
+        const sourceSel = document.getElementById('warp-import-source');
+        const protoSel = document.getElementById('warp-import-source-protocol');
+        const targetSel = document.getElementById('warp-import-target');
+        const errorEl = document.getElementById('warp-import-error');
+        const btn = document.getElementById('warp-import-btn');
+        const sourceUid = sourceSel ? sourceSel.value : '';
+        if (!sourceUid) return;
+        const body = {source_server_uid: sourceUid};
+        if (protoSel && protoSel.value) body.source_protocol = protoSel.value;
+        if (targetSel && targetSel.value) body.protocol = targetSel.value;
+
+        if (btn) btn.disabled = true;
+        if (errorEl) { errorEl.textContent = ''; errorEl.classList.add('hidden'); }
+        try {
+            const res = await warpPostWithTos('import', body);
+            if (!res) {
+                if (btn) btn.disabled = false;
+                return;
+            }
+            if (res.operation_id) {
+                closeModal('warpImportModal');
+                warpBusy = true;
+                renderWarpCard();
+                // The import has its own stage map (source/handshake): the
+                // shared poller must look it up, not the install one.
+                renderInstallOpProgress(res.operation_id, 'warp_import');
+                return;
+            }
+            await loadWarpStatus(true);
+            showToast(_('installed'), 'success');
+        } catch (err) {
+            const text = warpErrorMessage(err);
+            if (errorEl) {
+                errorEl.textContent = text;
+                errorEl.classList.remove('hidden');
+            } else {
+                showToast(_('error') + ': ' + text, 'error');
+            }
+        } finally {
+            if (btn) btn.disabled = false;
+        }
     }
 
     async function installWarp(protocol) {
@@ -9650,18 +11980,235 @@
         }
     }
 
+    // ========== Background probe queue ==========
+    // Every page-open probe except /check goes through this queue. They all
+    // share one pooled SSH connection per server (SSHManager._exec_lock), so
+    // running them "in parallel" only piles threads on the same lock and lets
+    // the background starve the check itself. One probe at a time, ordered by
+    // priority: what the user sees first runs first.
+    const BG_CONCURRENCY = 1;
+    // Set on pagehide: queued probes must not start on a dying page (their
+    // requests would race the navigation and hold the SSH lock for nothing).
+    let pageClosing = false;
+
+    function pluginCacheFresh() {
+        const cached = readAwgPluginCache();
+        return !!(cached && (Date.now() - cached.ts) < AWG_PLUGIN_CACHE_TTL);
+    }
+
+    function withProbeTimeout(task, timeoutMs) {
+        // The timer rejects the CALLER, not the task: a task that ignores the
+        // timeout keeps running and holds the SSH lock on the backend. The
+        // queue therefore frees its slot on timeout (so the rest of the page
+        // keeps loading) and only then forgets the key, which prevents the
+        // same probe from being duplicated while the stale one is still alive.
+        return new Promise((resolve, reject) => {
+            const timer = setTimeout(
+                () => reject(new Error('timeout')), timeoutMs || 25000);
+            Promise.resolve().then(task).then(
+                value => { clearTimeout(timer); resolve(value); },
+                error => { clearTimeout(timer); reject(error); });
+        });
+    }
+
+    const ProbeQueue = {
+        queue: [],
+        inflight: new Map(),
+        active: 0,
+        criticalDone: false,
+        pendingCritical: null,
+
+        whenCriticalDone() {
+            if (this.criticalDone) return Promise.resolve();
+            if (!this.pendingCritical) {
+                let settle;
+                this.pendingCritical = new Promise(resolve => { settle = resolve; });
+                this.pendingCritical._settle = settle;
+            }
+            return this.pendingCritical;
+        },
+
+        settleCritical() {
+            this.criticalDone = true;
+            if (this.pendingCritical) {
+                this.pendingCritical._settle();
+                this.pendingCritical = null;
+            }
+            this.pump();
+        },
+
+        critical(key, task, timeoutMs) {
+            // Critical work (the first /check) runs immediately and owns the
+            // single slot: everything queued waits for it.
+            if (this.inflight.has(key)) return this.inflight.get(key);
+            this.active += 1;
+            const promise = withProbeTimeout(task, timeoutMs)
+                .finally(() => {
+                    this.active -= 1;
+                    // Форсированная задача может уже занимать этот key: не
+                    // стирай её запись при завершении старого /check.
+                    if (this.inflight.get(key) === promise) this.inflight.delete(key);
+                    this.pump();
+                });
+            this.inflight.set(key, promise);
+            return promise;
+        },
+
+        background(key, priority, task, timeoutMs, force = false) {
+            // Форс (ручная «Проверка», принудительные плагины) обходит dedup:
+            // пользовательское действие не должно вернуть уже идущий promise.
+            // Старый promise не теряется — его задача сама его завершит; в
+            // inflight просто лежит новая запись. Все очистки ниже проверяют
+            // владельца записи по ссылке, чтобы старый task не стёр новую.
+            if (!force && this.inflight.has(key)) return this.inflight.get(key);
+            let settle;
+            const promise = new Promise(resolve => { settle = resolve; });
+            this.inflight.set(key, promise);
+            const entry = {key, priority, task, timeoutMs, settle, promise};
+            this.whenCriticalDone().then(() => {
+                if (pageClosing) {
+                    if (this.inflight.get(key) === promise) this.inflight.delete(key);
+                    settle();
+                    return;
+                }
+                // Re-check after the wait: a manual refresh may have queued
+                // the same key while the critical run was finishing.
+                if (this.inflight.get(key) !== promise) { settle(); return; }
+                this.queue.push(entry);
+                this.queue.sort((a, b) => a.priority - b.priority);
+                this.pump();
+            });
+            return promise;
+        },
+
+        pump() {
+            if (pageClosing || this.active >= BG_CONCURRENCY) return;
+            const entry = this.queue.shift();
+            if (!entry) return;
+            this.active += 1;
+            const started = Promise.resolve().then(entry.task);
+            // The caller gets a timeout, and the slot is freed on timeout so
+            // the rest of the page keeps loading. The KEY, however, is released
+            // only when the real task settles: a timed-out probe may still run
+            // and hold the SSH lock, and a duplicate would take the slot again.
+            withProbeTimeout(() => started, entry.timeoutMs)
+                .catch(error => {
+                    // `busy` is a normal answer on a single SSH lock: the probe
+                    // is skipped until its next scheduled run, not retried in a
+                    // loop and not painted as an error.
+                    if (String(error && error.message || '').indexOf('busy') === -1) {
+                        console.warn('Background probe failed:', entry.key, error);
+                    }
+                })
+                .finally(() => {
+                    this.active -= 1;
+                    entry.settle();
+                    this.pump();
+                });
+            const release = () => {
+                if (this.inflight.get(entry.key) === entry.promise) this.inflight.delete(entry.key);
+            };
+            started.then(release, release);
+            // Grace period: a probe whose task never settles (a fetch without
+            // an abort path) must not keep the key forever — the probe would be
+            // dead until the page reloads. After the timeout and a grace window
+            // the key is released anyway; a late duplicate is harmless because
+            // the backend serializes the SSH lock itself.
+            setTimeout(() => {
+                if (this.inflight.get(entry.key) !== entry.promise) return;
+                this.inflight.delete(entry.key);
+            }, (entry.timeoutMs || 25000) + 5000);
+        },
+
+        refresh(key, task, timeoutMs) {
+            // Explicit user action: it goes to the FRONT of the background
+            // queue (priority 0) instead of running in parallel with the
+            // critical check and fighting it for the single SSH lock.
+            // `critical(key)` is the one case that returns an already-running
+            // probe: while the boot check is in flight, a manual check must
+            // not be silently swallowed — it is queued behind it with an
+            // explicit `forcePlugins`, so the plugin card still refreshes.
+            if (this.inflight.has(key) && key !== 'check') {
+                return this.inflight.get(key);
+            }
+            // `check` принудительно обходит dedup, но background всё равно
+            // дождётся критического lane: ручная проверка встаёт в очередь,
+            // а не идёт параллельно со стартовой.
+            return this.background(key, 0, task, timeoutMs, true);
+        }
+    };
+
     // ========== Init ==========
+    // The Smart Route card is host-level and answers from the queue, so mark it
+    // pending before the first paint: it then appears as a skeleton instead of
+    // popping in (or being hidden and reappearing) a second later.
+    smartRoutePending = true;
     applyInstalledAppsVisibility();
-    checkServer(false, true);
-    loadServerStats();
-    // ip-status - самая дорогая проба (десятки SSH-команд): уходит
-    // последней, после того как браузер получил дешёвые ответы.
-    window.addEventListener('load', function () { loadIpStatus(); });
+    // /check owns the critical lane; the queued probes below start only after
+    // it answers, so they cannot compete for the pooled SSH connection.
+    ProbeQueue.critical('check', () => checkServer(false, true), 120000)
+        .catch(error => console.warn('Server check failed:', error))
+        .finally(() => {
+            ProbeQueue.settleCritical();
+            ProbeQueue.background('smartroute', 45, () => loadSmartRouteStatus(), 15000);
+            ProbeQueue.background('ssh-trust', 20, () => loadSSHTrustStatus(), 15000);
+            ProbeQueue.background('stats', 30, () => loadServerStats(), 25000);
+            ProbeQueue.background('warp', 35, () => loadWarpStatus(true), 25000);
+            ProbeQueue.background('rkn', 36, () => loadRknBlock(), 25000);
+            ProbeQueue.background('cheburcheck', 40, () => loadCheburcheck(), 15000);
+            // ip-status and the plugin badge are the most expensive probes
+            // (dozens of SSH commands each): the page is already filled in
+            // when they land.
+            ProbeQueue.background('ip', 90, () => loadIpStatus(), 25000);
+            if (!pluginCacheFresh()) {
+                ProbeQueue.background('plugin', 95, () => loadAwgPluginStatus(), 30000);
+            }
+        });
     let ipStatusPoller = null;
     if (!ipStatusPoller) {
-        ipStatusPoller = setInterval(() => { if (!document.hidden) loadIpStatus(); }, 60000);
+        ipStatusPoller = setInterval(() => {
+            if (!document.hidden) ProbeQueue.background('ip', 90, () => loadIpStatus(), 25000);
+        }, 60000);
     }
-    document.addEventListener('visibilitychange', () => { if (!document.hidden) loadIpStatus(); });
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) ProbeQueue.background('ip', 90, () => loadIpStatus(), 25000);
+    });
+    window.addEventListener('pagehide', () => {
+        pageClosing = true;
+        if (ipStatusPoller) clearInterval(ipStatusPoller);
+        ipStatusPoller = null;
+        if (window.connPollTimer) clearTimeout(window.connPollTimer);
+    });
+    window.addEventListener('pageshow', (event) => {
+        if (!event.persisted) return;
+        // Back from the bfcache: pagehide stopped the queue and the pollers.
+        pageClosing = false;
+        if (!ipStatusPoller) {
+            ipStatusPoller = setInterval(() => {
+                if (!document.hidden) ProbeQueue.background('ip', 90, () => loadIpStatus(), 25000);
+            }, 60000);
+        }
+        // Everything pagehide silenced is re-queued: the badges would
+        // otherwise stay stale until a manual reload.
+        ProbeQueue.background('smartroute', 45, () => loadSmartRouteStatus(), 15000);
+        ProbeQueue.background('ssh-trust', 20, () => loadSSHTrustStatus(), 15000);
+        ProbeQueue.background('stats', 30, () => loadServerStats(), 25000);
+        ProbeQueue.background('warp', 35, () => loadWarpStatus(true), 25000);
+        ProbeQueue.background('rkn', 36, () => loadRknBlock(), 25000);
+        ProbeQueue.background('cheburcheck', 40, () => loadCheburcheck(), 15000);
+        ProbeQueue.background('ip', 90, () => loadIpStatus(), 25000);
+        // The peer list poll dies with pagehide as well; restart it only when
+        // the section is open, exactly like loadConnections does.
+        if (PEER_POLL_INTERVAL > 0
+                && document.getElementById('connectionsSection')
+                && document.getElementById('connectionsSection').style.display !== 'none') {
+            clearTimeout(window.connPollTimer);
+            window.connPollTimer = setTimeout(function () {
+                ProbeQueue.background('connections', 10, () => loadConnections(true), 25000);
+            }, PEER_POLL_INTERVAL * 1000);
+        }
+        ProbeQueue.pump();
+    });
 </script>
 <script>
 function cheburAge(checkedAt) {
@@ -9850,6 +12397,5 @@ function openCheburcheckModal() {
     loadCheburcheck();
 }
 
-document.addEventListener('DOMContentLoaded', loadCheburcheck);
 </script>
 {% endblock %}

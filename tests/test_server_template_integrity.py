@@ -55,25 +55,29 @@ class TestServerTemplateIntegrity(unittest.TestCase):
         between = source[import_button:rename_modal]
         self.assertIn("</div>\n    </div>\n</div>", between)
 
-    def test_smartroute_probe_settles_before_the_grid_is_revealed(self):
-        """The host-level Smart Route probe must start together with /check and
-        settle before updateStatusCounts() reveals the grid. A serial probe
-        after the reveal makes the card pop in a round-trip after every other
-        badge (the owner-reported flicker)."""
+    def test_smartroute_probe_never_gates_the_grid(self):
+        """The host-level Smart Route probe must not delay the grid.
+
+        It used to be awaited before updateStatusCounts() so the card would not
+        pop in a round-trip later. That made the whole grid wait for five SSH
+        round trips on every page load, so the probe is now queued and its
+        answer repaints the dependent surfaces when it arrives.
+        """
         source = SERVER_TEMPLATE.read_text(encoding="utf-8")
         start = source.index("async function checkServer(")
         end = source.index("function updateStatusCounts", start)
         body = source[start:end]
 
-        probe = body.index("const smartRouteProbe = loadSmartRouteStatus()")
-        check = body.index("await apiCall(")
-        reveal = body.index("updateStatusCounts(data.protocols")
-        settled = body.index("smartRouteStatus = await smartRouteProbe")
-        self.assertLess(probe, check)
-        self.assertLess(settled, reveal)
-        # A second settle in `finally` would block error recovery on a slow probe.
-        self.assertNotIn("smartRouteStatus = await smartRouteProbe", body[reveal:])
+        self.assertNotIn("await smartRouteProbe", body)
+        self.assertNotIn("smartRouteStatus = await smartRouteProbe", body)
         self.assertNotIn("await loadSmartRouteStatus()", body)
+        # Queued with an explicit priority, and applied through the shared
+        # repaint path (see loadSmartRouteStatus: applyInstalledAppsVisibility,
+        # refreshExitMarks, renderSmartRouteCard, renderMarketplace).
+        self.assertIn("ProbeQueue.background('smartroute', 45,", source)
+        # The grid reveal is not conditioned on the probe.
+        reveal = body.index("updateStatusCounts(data.protocols")
+        self.assertLess(body.index("await apiCall("), reveal)
 
     def test_wgeasy_preview_function_restores_button_state(self):
         source = SERVER_TEMPLATE.read_text(encoding="utf-8")

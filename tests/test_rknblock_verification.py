@@ -72,7 +72,7 @@ class UiHealthTests(unittest.TestCase):
             self.assertIn('done', stages, name)
         self.assertEqual(set(app.FLOW_STAGES),
                          {'protocol', 'smartroute', 'rknblock', 'warp',
-                          'xray_update'})
+                          'warp_import', 'xray_update'})
         source = (ROOT / 'app.py').read_text(encoding='utf-8')
         self.assertIn('/api/servers/{server_id}/smartroute/install/{op_id}', source)
         self.assertIn('/api/servers/{server_id}/rknblock/install/{op_id}', source)
