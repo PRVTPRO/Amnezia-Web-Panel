@@ -185,13 +185,43 @@ async def api_json_error_handler(request: Request, exc: Exception):
 _IPV6_BAD_BODY_PATH = re.compile(
     r'^/api/servers/[^/]+/(?:ipv6|docker/ipv6/apply|protocol/[^/]+/ipv6)$')
 
+# Keys FastAPI puts the rejected value into. `input` holds it verbatim, and
+# `ctx` can carry it too (e.g. the pattern that failed). A mistyped password,
+# API token or private key would otherwise travel back to the caller inside
+# the response body — and from there into browser devtools, HAR captures,
+# reverse-proxy logs and bug reports. A per-field denylist would miss the next
+# secret-bearing model, so every entry is scrubbed instead: `loc`, `msg` and
+# `type` stay, which is all the panel UI and the tests need.
+_LEAKY_VALIDATION_KEYS = ('input', 'ctx', 'url')
+
+
+def _scrub_validation_errors(errors):
+    """Strip echoed request values from a FastAPI validation detail list."""
+    cleaned = []
+    for error in errors or ():
+        if isinstance(error, dict):
+            error = {key: value for key, value in error.items()
+                     if key not in _LEAKY_VALIDATION_KEYS}
+        cleaned.append(error)
+    return cleaned
+
 
 @app.exception_handler(RequestValidationError)
-async def ipv6_validation_error_handler(request: Request, exc: RequestValidationError):
+async def request_validation_error_handler(request: Request,
+                                           exc: RequestValidationError):
     if _IPV6_BAD_BODY_PATH.match(request.url.path):
         return JSONResponse({'error': 'bad_request', 'code': 'bad_request'},
                             status_code=400)
-    return await request_validation_exception_handler(request, exc)
+    response = await request_validation_exception_handler(request, exc)
+    try:
+        payload = json.loads(response.body)
+    except (TypeError, ValueError):
+        return response
+    detail = payload.get('detail') if isinstance(payload, dict) else None
+    if not isinstance(detail, list):
+        return response
+    payload['detail'] = _scrub_validation_errors(detail)
+    return JSONResponse(payload, status_code=response.status_code)
 
 
 @app.get("/redoc", include_in_schema=False)
@@ -1879,6 +1909,541 @@ def protocol_public_endpoint(server, protocol):
     return host, public_port
 
 
+# ===== прокси-учётки (раздел «Прокси», ТЗ_PROXY_ACCOUNTS 4.1) =====
+#
+# Учётки живут в servers[i].protocols.socks5.accounts. Конфиг 3proxy целиком
+# собирает managers/socks5_manager.py, а app.py отвечает за модель, валидацию
+# и выдачу URL-ключей. Пароли не шифруются: панель обязана показывать их
+# в ключе, защита — права 0600 на конфиг на сервере.
+
+PROXY_ACCOUNT_TYPES = ('socks5', 'http', 'both')
+# Тип листенера инстанса: только SOCKS5, только HTTP или оба контейнера.
+PROXY_LISTENER_TYPES = ('socks5', 'http', 'both')
+PROXY_QUOTA_PERIODS = ('H', 'D', 'W', 'M')
+PROXY_PARENT_TYPES = ('socks5', 'http', 'connect')
+PROXY_DEFAULT_SOCKS_PORT = 1080
+PROXY_DEFAULT_HTTP_PORT = 8312
+PROXY_DEFAULT_DNS = ['8.8.8.8', '1.1.1.1']
+PROXY_DEFAULT_LOG_ROTATE_DAYS = 30
+PROXY_DEFAULT_LOG_FORMAT = 'L%Y-%m-%d %H:%M:%S %U %I %O %N'
+# Учётка «в сети», если в логе 3proxy была активность не дольше 3 минут —
+# тот же порог, по которому пиры Amnezia считаются онлайн (свежий handshake).
+PROXY_ONLINE_SECONDS = 180
+# Порты, опубликованные Docker'ом, в `ss` выглядят как docker-proxy/dockerd —
+# это публикация контейнера панели, а не чужой процесс.
+PROXY_DOCKER_HOLDERS = ('docker-proxy', 'dockerd')
+# Логины и пароли попадают в URL-ключ и в 3proxy.cfg, поэтому алфавит
+# намеренно узкий: экранирование тогда не нужно ни там, ни там.
+_PROXY_CREDENTIAL_RE = re.compile(r'^[A-Za-z0-9_.-]+$')
+_PROXY_PASSWORD_ALPHABET = (
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789')
+PROXY_ACCOUNT_FIELDS = (
+    'id', 'name', 'login', 'password', 'type', 'enabled', 'user_id',
+    'acl_ips', 'max_conns', 'rate_in_mbps', 'rate_out_mbps',
+    'quota_mb', 'quota_period', 'counter_in', 'counter_out', 'parent',
+    'created_at',
+)
+
+
+def _proxy_strip_brackets(value):
+    """`[2001:db8::1]/64` → `2001:db8::1/64`: 3proxy не понимает скобки в ACL."""
+    text = str(value if value is not None else '').strip()
+    match = re.fullmatch(r'\[([^\]]+)\](?:/(\d{1,3}))?', text)
+    if match:
+        text = match.group(1) + (f'/{match.group(2)}' if match.group(2) else '')
+    return text
+
+
+def _proxy_optional_int(value, label, minimum=1, maximum=1000000):
+    """Пустая строка/None → None, иначе целое в допустимых пределах."""
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f'{label}: ожидается целое число')
+    try:
+        number = int(float(value)) if isinstance(value, str) else int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f'{label}: ожидается целое число')
+    if number < minimum or number > maximum:
+        raise ValueError(f'{label}: допустимо от {minimum} до {maximum}')
+    return number
+
+
+def _proxy_port(value, label='port'):
+    port = _proxy_optional_int(value, label, 1, 65535)
+    if port is None:
+        raise ValueError(f'{label}: обязателен')
+    return port
+
+
+def _proxy_bool(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() not in ('', '0', 'false', 'no', 'off')
+    return bool(value)
+
+
+def _proxy_acl_list(value):
+    """ACL учётки: список IP/CIDR, IPv4 и IPv6 без квадратных скобок."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [part for part in re.split(r'[\s,]+', value) if part]
+    if not isinstance(value, (list, tuple)):
+        raise ValueError('acl_ips: ожидается список IP или CIDR')
+    result = []
+    for item in value:
+        text = _proxy_strip_brackets(item)
+        if not text or text == '*':
+            continue
+        try:
+            if '/' in text:
+                network = ipaddress.ip_network(text, strict=False)
+                result.append(f'{network.network_address}/{network.prefixlen}')
+            else:
+                result.append(str(ipaddress.ip_address(text)))
+        except ValueError:
+            raise ValueError(f'acl_ips: некорректный IP или CIDR: {item!r}')
+    return result
+
+
+def _proxy_dns_servers(value):
+    """DNS-серверы инстанса: 1–2 адреса; IPv6 хранится без скобок."""
+    if value is None:
+        return list(PROXY_DEFAULT_DNS)
+    if isinstance(value, str):
+        value = [part for part in re.split(r'[\s,]+', value) if part]
+    if not isinstance(value, (list, tuple)):
+        raise ValueError('dns_servers: ожидается список адресов')
+    servers = []
+    for item in value:
+        text = _proxy_strip_brackets(item)
+        if not text:
+            continue
+        try:
+            servers.append(str(ipaddress.ip_address(text)))
+        except ValueError:
+            raise ValueError(f'dns_servers: некорректный IP-адрес: {item!r}')
+    if not servers:
+        raise ValueError('dns_servers: укажите хотя бы один адрес')
+    if len(servers) > 2:
+        raise ValueError('dns_servers: не больше двух адресов')
+    return servers
+
+
+def _proxy_normalize_parent(value):
+    """Upstream учётки: None, если хост не задан, иначе все поля валидны."""
+    if not value:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError('parent: ожидается объект с type/host/port')
+    host = _proxy_strip_brackets(value.get('host'))
+    if not host:
+        return None
+    parent_type = str(value.get('type') or 'socks5').strip().lower()
+    if parent_type not in PROXY_PARENT_TYPES:
+        raise ValueError('parent.type: ожидается socks5, http или connect')
+    try:
+        host = str(ipaddress.ip_address(host))
+    except ValueError:
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', host):
+            raise ValueError('parent.host: ожидается IP-адрес или имя хоста')
+    port = _proxy_optional_int(value.get('port'), 'parent.port', 1, 65535)
+    if port is None:
+        raise ValueError('parent.port: обязателен')
+    login = str(value.get('login') or '').strip()
+    password = str(value.get('password') or '').strip()
+    if bool(login) != bool(password):
+        raise ValueError('parent: логин и пароль задаются вместе')
+    for label, item in (('parent.login', login), ('parent.password', password)):
+        if item and not _PROXY_CREDENTIAL_RE.fullmatch(item):
+            raise ValueError(f'{label}: допустимы только A-Za-z0-9_.-')
+    return {'type': parent_type, 'host': host, 'port': port,
+            'login': login, 'password': password}
+
+
+def proxy_next_counter(accounts, record=None):
+    """Следующий свободный номер счётчика квоты.
+
+    Массив counter-файла 3proxy выделяется парой (countin/countout), поэтому
+    шаг — 2. Номер никогда не переиспользуется: иначе квота сбросится при
+    перезапуске прокси (ТЗ 4.4). После удаления последней учётки с квотой её
+    номера уже нет в списке, поэтому последний выданный номер хранится в
+    записи инстанса (`counter_seq`).
+    """
+    used = []
+    for account in accounts or []:
+        if not isinstance(account, dict):
+            continue
+        for key in ('counter_in', 'counter_out'):
+            value = account.get(key)
+            if isinstance(value, bool):
+                continue
+            try:
+                number = int(value)
+            except (TypeError, ValueError):
+                continue
+            if number > 0:
+                used.append(number)
+    if isinstance(record, dict):
+        try:
+            last = int(record.get('counter_seq') or 0)
+        except (TypeError, ValueError):
+            last = 0
+        if last > 0:
+            used.append(last)
+    return max(used) + 1 if used else 1
+
+
+def proxy_account_keys(server, protocol, account):
+    """URL-ключи учётки: socks5 для socks5/both, http для http/both (ТЗ 4.6)."""
+    # Выключенная учётка исключена из users конфига — её ключ не работает.
+    # У старых записей поля enabled нет: такая учётка считается включённой.
+    if not _proxy_bool(account.get('enabled'), True):
+        return []
+    record = (server.get('protocols') or {}).get(protocol) or {}
+    host, public_port = protocol_public_endpoint(server, protocol)
+    kind = str(account.get('type') or 'socks5').strip().lower()
+    login = str(account.get('login') or '')
+    password = str(account.get('password') or '')
+    # Публичный порт (DNAT) важнее локального: именно его набирает клиент.
+    socks_port = public_port or str(record.get('port') or '').strip()
+    http_port = str(record.get('http_port') or '').strip()
+    keys = []
+    # Ключ имеет смысл только у поднятого листенера: выключенный порт
+    # клиенту ничего не даёт, UI такой ключ и не показывает.
+    if (kind in ('socks5', 'both') and socks_port
+            and _proxy_bool(record.get('socks_enabled'), True)):
+        keys.append(f'socks5://{login}:{password}@{host}:{socks_port}')
+    if kind in ('http', 'both') and http_port and _proxy_bool(record.get('http_enabled')):
+        keys.append(f'http://{login}:{password}@{host}:{http_port}')
+    return keys
+
+
+def proxy_normalize_account(payload, existing=None):
+    """Провалидированная учётка ровно из полей ТЗ 4.1.
+
+    payload — пришедшие поля; existing — сохранённая учётка при правке.
+    Пустая строка в числовом поле означает None, пустой пароль — новый
+    сгенерированный. Любая ошибка — ValueError с текстом для UI.
+    """
+    payload = payload if isinstance(payload, dict) else {}
+    existing = existing if isinstance(existing, dict) else {}
+
+    def pick(key, default=None):
+        return payload[key] if key in payload else default
+
+    login_value = pick('login', None)
+    if login_value is None:
+        login_value = existing.get('login') or ''
+    login = str(login_value or '').strip()
+    if not login:
+        login = 'proxy' + secrets.token_hex(3)
+    if not _PROXY_CREDENTIAL_RE.fullmatch(login):
+        raise ValueError('login: допустимы только латинские буквы, цифры, '
+                         'точка, дефис и подчёркивание')
+
+    raw_password = pick('password', None)
+    if raw_password is None:
+        password = str(existing.get('password') or '').strip()
+    else:
+        password = str(raw_password).strip()
+    if not password:
+        password = ''.join(secrets.choice(_PROXY_PASSWORD_ALPHABET)
+                           for _ in range(16))
+    if not _PROXY_CREDENTIAL_RE.fullmatch(password):
+        raise ValueError('password: допустимы только латинские буквы, цифры, '
+                         'точка, дефис и подчёркивание')
+
+    type_value = pick('type', None)
+    if type_value in (None, ''):
+        type_value = existing.get('type') or 'socks5'
+    account_type = str(type_value).strip().lower()
+    if account_type not in PROXY_ACCOUNT_TYPES:
+        raise ValueError('type: ожидается socks5, http или both')
+
+    name_value = pick('name', None)
+    if name_value is None:
+        name_value = existing.get('name') or login
+    name = str(name_value or login).strip()
+    if len(name) > 120:
+        raise ValueError('name: не длиннее 120 символов')
+
+    enabled_value = pick('enabled', None)
+    if enabled_value is None:
+        enabled = _proxy_bool(existing.get('enabled'), True)
+    else:
+        enabled = _proxy_bool(enabled_value)
+
+    user_id = pick('user_id', existing.get('user_id'))
+    user_id = str(user_id).strip() if user_id not in (None, '') else None
+
+    acl_value = pick('acl_ips', None)
+    if acl_value is None:
+        acl_value = existing.get('acl_ips') or []
+    acl_ips = _proxy_acl_list(acl_value)
+
+    max_conns = _proxy_optional_int(
+        pick('max_conns', existing.get('max_conns')), 'max_conns', 1, 100000)
+    rate_in_mbps = _proxy_optional_int(
+        pick('rate_in_mbps', existing.get('rate_in_mbps')),
+        'rate_in_mbps', 1, 1000000)
+    rate_out_mbps = _proxy_optional_int(
+        pick('rate_out_mbps', existing.get('rate_out_mbps')),
+        'rate_out_mbps', 1, 1000000)
+    quota_mb = _proxy_optional_int(
+        pick('quota_mb', existing.get('quota_mb')), 'quota_mb', 1, 100000000)
+
+    period_value = pick('quota_period', None)
+    if period_value in (None, ''):
+        period_value = existing.get('quota_period') or 'M'
+    quota_period = str(period_value).strip().upper()
+    if quota_period not in PROXY_QUOTA_PERIODS:
+        raise ValueError('quota_period: ожидается H, D, W или M')
+
+    counter_in = _proxy_optional_int(
+        pick('counter_in', existing.get('counter_in')), 'counter_in', 1, 1000000)
+    counter_out = _proxy_optional_int(
+        pick('counter_out', existing.get('counter_out')), 'counter_out', 1, 1000000)
+    if counter_in and counter_out and counter_in == counter_out:
+        raise ValueError('counter_in/counter_out: номера должны различаться')
+    if quota_mb is None:
+        # Без квоты счётчики не нужны и не должны занимать номера.
+        counter_in = counter_out = None
+
+    parent = _proxy_normalize_parent(pick('parent', existing.get('parent')))
+
+    created_at = str(existing.get('created_at') or '').strip() or \
+        datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+    return {
+        'id': str(existing.get('id') or '').strip() or uuid.uuid4().hex,
+        'name': name,
+        'login': login,
+        'password': password,
+        'type': account_type,
+        'enabled': enabled,
+        'user_id': user_id,
+        'acl_ips': acl_ips,
+        'max_conns': max_conns,
+        'rate_in_mbps': rate_in_mbps,
+        'rate_out_mbps': rate_out_mbps,
+        'quota_mb': quota_mb,
+        'quota_period': quota_period,
+        'counter_in': counter_in,
+        'counter_out': counter_out,
+        'parent': parent,
+        'created_at': created_at,
+    }
+
+
+def proxy_account_payload(req):
+    """Поля запроса учётки без служебных ключей pydantic.
+
+    exclude_unset обязателен: иначе Pydantic подставит None в поля, которых
+    форма не присылала, и правка учётки молча сбросит пароль/квоту.
+    """
+    if isinstance(req, dict):
+        return dict(req)
+    return req.model_dump(exclude_unset=True)
+
+
+def proxy_assign_counters(accounts, account, record=None):
+    """Выдать пару номеров счётчиков новой учётке с квотой."""
+    if account.get('quota_mb') and not account.get('counter_in'):
+        number = proxy_next_counter(accounts, record)
+        account['counter_in'] = number
+        account['counter_out'] = number + 1
+        if isinstance(record, dict):
+            record['counter_seq'] = number + 1
+    return account
+
+
+def proxy_listener_view(record):
+    """Тип листенера для UI: сохранённый или выведенный из старых полей."""
+    record = record if isinstance(record, dict) else {}
+    stored = str(record.get('listener_type') or '').strip().lower()
+    if stored in PROXY_LISTENER_TYPES:
+        return stored
+    socks_on = _proxy_bool(record.get('socks_enabled'), True)
+    http_on = _proxy_bool(record.get('http_enabled'))
+    if socks_on and http_on:
+        return 'both'
+    return 'http' if http_on else 'socks5'
+
+
+def proxy_instance_settings(payload, existing=None):
+    """Порты, DNS, maxconn и логи инстанса — провалидированные значения.
+
+    Возвращает (settings, options): settings сохраняются в запись сервера,
+    options уходят в manager.apply/build_config.
+    """
+    payload = payload if isinstance(payload, dict) else {}
+    existing = existing if isinstance(existing, dict) else {}
+
+    def pick(key, default=None):
+        return payload[key] if key in payload else default
+
+    port = _proxy_port(
+        pick('port', existing.get('port') or PROXY_DEFAULT_SOCKS_PORT), 'port')
+    # Тип листенера (ТЗ_PROXY_UI_V2 1): socks5|http|both. Старое поле
+    # http_enabled продолжает работать, если listener_type не передан.
+    raw_listener = pick('listener_type', None)
+    listener_type = ''
+    if raw_listener not in (None, ''):
+        listener_type = str(raw_listener).strip().lower()
+        if listener_type not in PROXY_LISTENER_TYPES:
+            raise ValueError('listener_type: ожидается socks5, http или both')
+    if listener_type:
+        http_enabled = listener_type != 'socks5'
+        socks_enabled = listener_type != 'http'
+    else:
+        http_enabled = _proxy_bool(
+            pick('http_enabled', existing.get('http_enabled')), False)
+        socks_enabled = _proxy_bool(
+            pick('socks_enabled', existing.get('socks_enabled')), True)
+    if not socks_enabled and not http_enabled:
+        raise ValueError('listener_type: нужен хотя бы один листенер')
+    http_raw = pick('http_port', existing.get('http_port'))
+    # «HTTP без порта» — ошибка, а не молчаливый дефолт: иначе получится
+    # listener_type=http с выключенным HTTP-контейнером.
+    if listener_type == 'http' and not str(http_raw or '').strip():
+        raise ValueError('http_port: требуется для listener_type=http')
+    http_port = None
+    if http_enabled or str(http_raw or '').strip():
+        http_port = _proxy_port(http_raw or PROXY_DEFAULT_HTTP_PORT, 'http_port')
+    # Совпадение опасно только когда SOCKS-листенер работает: у выключенного
+    # контейнера порт свободен, HTTP на тот же номер допустим.
+    if http_port is not None and http_port == port and socks_enabled:
+        raise ValueError('http_port: совпадает с SOCKS5-портом')
+
+    dns_servers = _proxy_dns_servers(pick('dns_servers', existing.get('dns_servers')))
+    maxconn = _proxy_optional_int(
+        pick('maxconn', existing.get('maxconn')), 'maxconn', 0, 100000)
+    maxconn = maxconn or None  # 0 = значение 3proxy по умолчанию
+    rotate = _proxy_optional_int(
+        pick('log_rotate_days', existing.get('log_rotate_days')),
+        'log_rotate_days', 1, 3650) or PROXY_DEFAULT_LOG_ROTATE_DAYS
+    log_format = str(pick('log_format', existing.get('log_format')) or '').strip() \
+        or PROXY_DEFAULT_LOG_FORMAT
+    if len(log_format) > 200 or any(ch in log_format for ch in ('"', '\\', '\n', '\r')):
+        raise ValueError('log_format: недопустимые символы')
+    # Парсер статистики читает строку «дата время <логин> <in> <out>»: без
+    # %U (логин) и %I/%O (байты) не считаются расход квоты и «онлайн».
+    if log_format != PROXY_DEFAULT_LOG_FORMAT and any(
+            token not in log_format for token in ('%U', '%I', '%O')):
+        raise ValueError('log_format: нужны переменные %U, %I и %O для учёта трафика')
+
+    settings = {
+        'port': str(port),
+        'http_port': str(http_port) if http_port is not None else '',
+        'http_enabled': http_enabled,
+        'socks_enabled': socks_enabled,
+        'listener_type': listener_type or ('both' if http_enabled else 'socks5'),
+        'dns_servers': dns_servers,
+        'maxconn': maxconn,
+        'log_rotate_days': rotate,
+        'log_format': log_format,
+    }
+    options = {
+        'dns_servers': dns_servers,
+        'maxconn': maxconn,
+        'log_rotate_days': rotate,
+        'log_format': log_format,
+    }
+    return settings, options
+
+
+def proxy_ensure_accounts(server, protocol, ssh=None):
+    """Миграция старой установки: одна учётка из users/socks в конфиге.
+
+    Новые установки пишут accounts сразу, поэтому здесь ничего не меняется.
+    Старый API хранил только username/password и восстанавливал их чтением
+    конфига; делаем то же самое при первом чтении статуса (ТЗ 4.0).
+    """
+    protocols = server.get('protocols') or {}
+    record = protocols.get(protocol)
+    if not isinstance(record, dict):
+        return []
+    accounts = record.get('accounts')
+    if isinstance(accounts, list) and accounts:
+        return accounts
+    if not record.get('installed'):
+        return accounts if isinstance(accounts, list) else []
+
+    own_ssh = None
+    try:
+        if ssh is None:
+            own_ssh = get_ssh(server)
+            own_ssh.connect()
+            ssh = own_ssh
+        manager = get_protocol_manager(ssh, protocol)
+        text = ''
+        reader = getattr(manager, '_read_config', None)
+        if callable(reader):
+            text = reader() or ''
+        migrated = manager.parse_accounts_from_config(text) if text else []
+        normalized = []
+        for item in migrated or []:
+            clean = dict(item)
+            clean.pop('port', None)  # порт листенера — свойство инстанса
+            account = proxy_normalize_account(clean, existing=clean)
+            proxy_assign_counters(normalized, account, record)
+            normalized.append(account)
+        if normalized:
+            record['accounts'] = normalized
+            # Восстановленная запись (data.json потерян) не знает последнего
+            # выданного номера: фиксируем максимум из мигрированных учёток,
+            # чтобы после их удаления номер не достался следующей.
+            highest = 0
+            for account in normalized:
+                for key in ('counter_in', 'counter_out'):
+                    try:
+                        highest = max(highest, int(account.get(key) or 0))
+                    except (TypeError, ValueError):
+                        continue
+            try:
+                previous_high = int(record.get('counter_seq') or 0)
+            except (TypeError, ValueError):
+                previous_high = 0
+            if highest:
+                record['counter_seq'] = max(highest, previous_high)
+        return normalized
+    except Exception as e:
+        logger.warning('proxy accounts migration failed: %s', e)
+        return accounts if isinstance(accounts, list) else []
+    finally:
+        if own_ssh is not None:
+            own_ssh.disconnect()
+
+
+def proxy_account_view(server, protocol, account, usage=None, activity=None):
+    """Ответ API по учётке: ровно поля модели + расход, активность и ключи."""
+    usage = usage or {}
+    activity = activity or {}
+    view = {key: account.get(key) for key in PROXY_ACCOUNT_FIELDS}
+    view['acl_ips'] = list(account.get('acl_ips') or [])
+    view['enabled'] = _proxy_bool(account.get('enabled'), True)
+    view['quota_period'] = str(account.get('quota_period') or 'M').upper()
+    login = str(account.get('login') or '')
+    spent = usage.get(login) or 0
+    view['usage_mb'] = round(float(spent) / (1024 * 1024), 2)
+    # Активность по логу: зелёная точка у аватара = реальная работа сейчас,
+    # а не просто включённая учётка.
+    age = activity.get(login)
+    try:
+        age = int(age) if age is not None else None
+    except (TypeError, ValueError):
+        age = None
+    view['last_seen'] = age
+    view['online'] = bool(age is not None and age <= PROXY_ONLINE_SECONDS)
+    view['keys'] = proxy_account_keys(server, protocol, account)
+    return view
+
+
 def join_dns(dns1, dns2):
     """Join the two DNS fields into the `a, b` form used in configs."""
     parts = [str(value).strip() for value in (dns1, dns2) if value and str(value).strip()]
@@ -1954,7 +2519,7 @@ def protocol_short_name(protocol: str, header_protection=False, protocol_version
         'wireguard': 'WG',
         'xray': 'Xray',
         'telemt': 'Telemt',
-        'socks5': 'SOCKS5',
+        'socks5': '3proxy',
         'dns': 'DNS',
         'adguard': 'AdGuard',
         'nginx': 'NGINX',
@@ -2329,6 +2894,143 @@ peer_creates = PeerCreateService(
 )
 
 
+async def _finalize_and_remove_peer(server, protocol, client_id, *, actor, kind,
+                                    server_id, allow_unverified=False,
+                                    owner_user_id=None):
+    """Remove one peer and settle its last observable traffic counters.
+
+    Shared by the admin removal endpoint and by self-service deletion, so both
+    paths use the same finalization instead of a second implementation. Order
+    matters and is the whole point of this helper:
+
+    * SSH (connect, read the final counter, remove the peer) runs strictly
+      outside ``DATA_LOCK`` — a slow remote host must not block data writes;
+    * only the reload -> finalize -> commit window is taken under the lock.
+
+    ``owner_user_id`` narrows the ownership record: a user deleting their own
+    connection must never settle somebody else's counters, while an admin
+    removal keeps working on the physical peer scope.
+
+    Every refusal raises ``FinalizationError`` with a stable ``.code``; the
+    callers map it to their own response body.
+    """
+    data = load_data()
+    if server_id is None or server_id < 0 or server_id >= len(data.get('servers', [])):
+        raise FinalizationError('server_not_found', 'Server not found')
+
+    conn = find_connection(data, server_id, protocol, client_id,
+                           user_id=owner_user_id)
+    if conn is None:
+        if owner_user_id is not None:
+            # A self-service caller must never fall back to raw removal: the row
+            # it owns vanished between the ownership check and this lookup (an
+            # admin removal or an unlink won the race), and another user's row
+            # may share the physical peer. Raw removal would drop that peer
+            # without settling the other row.
+            raise FinalizationError('connection_link_disappeared',
+                                    'Connection link disappeared during removal')
+        # An unowned peer has no baselines to settle: remove it raw. The panel
+        # keeps no accounting record for it, so there is nothing to lose.
+        ssh = None
+        try:
+            ssh = get_ssh(server)
+            await asyncio.to_thread(ssh.connect)
+            manager = get_protocol_manager(ssh, protocol)
+            await asyncio.to_thread(_manager_call, manager, 'remove_client',
+                                    protocol, client_id)
+        finally:
+            if ssh:
+                try:
+                    ssh.disconnect()
+                except Exception:
+                    pass
+        _invalidate_ip_status(server.get('uid'))
+        return {'status': 'success', 'finalized': False}
+
+    scope = connection_scope(conn, server)
+    intent = make_intent(scope, 'remove')
+    operation_id = uuid.uuid4().hex
+
+    observed_bytes = None
+    quiescent = False
+    ssh = None
+    try:
+        ssh = get_ssh(server)
+        await asyncio.to_thread(ssh.connect)
+        manager = get_protocol_manager(ssh, protocol)
+        observed_bytes, quiescent = await asyncio.to_thread(
+            read_peer_state, manager, protocol, client_id)
+
+        if observed_bytes is None and not quiescent and not allow_unverified:
+            # The only remaining fail-closed case: the last counter is unknown
+            # on a peer that can still forward traffic.
+            raise FinalizationError('final_counter_read_failed',
+                                    'Could not read the final traffic counter.',
+                                    can_force=True)
+
+        await asyncio.to_thread(_manager_call, manager, 'remove_client',
+                               protocol, client_id)
+    except FinalizationError:
+        raise
+    except Exception as exc:
+        logger.exception("Error during peer removal SSH")
+        raise FinalizationError('removal_ssh_failed', str(exc)) from None
+    finally:
+        if ssh:
+            try:
+                ssh.disconnect()
+            except Exception:
+                pass
+
+    async with DATA_LOCK:
+        before = pathlib_read_data_bytes() if os.path.exists(DATA_FILE) else b''
+        data = load_data()
+        if server_id is None or server_id < 0 or server_id >= len(data.get('servers', [])):
+            raise FinalizationError('server_not_found', 'Server not found')
+        server_now = data['servers'][server_id]
+        conn = find_connection(data, server_id, protocol, client_id,
+                               user_id=owner_user_id)
+        if conn is None:
+            raise FinalizationError('connection_link_disappeared',
+                                    'Connection link disappeared during removal')
+        mode = 'delete_unverified' if observed_bytes is None else 'delete_finalized'
+        accounting = finalize_connection_record(
+            data, conn, server_now, observed_bytes, time.time(), mode,
+            operation_id, quiescent)
+        result = await asyncio.to_thread(
+            commit_finalize, DATA_FILE, operation_id, actor, kind, intent,
+            before, data)
+        result['accounting'] = accounting
+        result['finalized'] = True
+        _invalidate_ip_status(server_now.get('uid'))
+        return result
+
+
+def _finalization_error_response(exc):
+    """Admin-facing body for a refused peer removal (unchanged contract)."""
+    if exc.code == 'removal_ssh_failed':
+        return JSONResponse({'error': str(exc), 'code': 'removal_ssh_failed'},
+                            status_code=502)
+    if exc.code == 'connection_link_disappeared':
+        return JSONResponse({'error': str(exc)}, status_code=409)
+    return JSONResponse({'error': str(exc), 'code': exc.code,
+                         'can_force': exc.can_force}, status_code=409)
+
+
+async def _self_service_finalize_peer(server, protocol, client_id, *, actor, kind,
+                                      server_id, allow_unverified=False,
+                                      owner_user_id=None):
+    """Late-bound adapter injected into ConnectionService.
+
+    Resolved on every call so patching the panel helpers (tests, hot fixes)
+    keeps working, and so self-service and admin removal cannot drift apart.
+    """
+    return await _finalize_and_remove_peer(
+        server, protocol, client_id, actor=actor, kind=kind,
+        server_id=server_id, allow_unverified=allow_unverified,
+        owner_user_id=owner_user_id)
+
+
 self_service_connections = ConnectionService(
     load_data=load_data,
     save_data=save_data,
@@ -2338,6 +3040,7 @@ self_service_connections = ConnectionService(
     manager_call=_manager_call,
     generate_vpn_link=generate_vpn_link,
     protocol_public_endpoint=protocol_public_endpoint,
+    finalize_peer=_self_service_finalize_peer,
 )
 
 
@@ -2400,14 +3103,53 @@ warp_runtime = WarpRuntime(
 )
 
 
-def _self_service_error_response(exc):
+def _self_service_error_response(exc, lang='en'):
     if isinstance(exc, RateLimitError):
         return JSONResponse({'error': str(exc)}, status_code=429)
     if isinstance(exc, SelfServiceError):
+        code = getattr(exc, 'code', None)
         body = {'error': str(exc)}
-        if getattr(exc, 'code', None):
-            body['code'] = exc.code
+        if code:
+            body['code'] = code
+        # The web is the untrusted side: never echo an exception whose text may
+        # carry SSH output, host names or paths. Keep the stable code and
+        # localize the human-readable part instead.
+        if code in ('self_service_unavailable', 'removal_ssh_failed'):
+            body['error'] = _t('self_service_delete_unavailable', lang)
+        elif code in ('connection_not_found', 'server_not_found'):
+            body['error'] = _t('self_service_delete_not_found', lang)
         return JSONResponse(body, status_code=exc.status_code)
+    # A finalization refusal is a real, actionable answer, not an outage: keep
+    # the machine code so the UI can explain it instead of a generic 500.
+    if isinstance(exc, FinalizationError):
+        body = {'error': str(exc), 'code': exc.code}
+        status_code = 409
+        if exc.code == 'final_counter_read_failed':
+            # The only remaining fail-closed case: nothing was removed, the
+            # user just needs to retry or ask an administrator.
+            body['error'] = _t('self_service_delete_counter_unavailable', lang)
+        elif exc.code == 'removal_ssh_failed':
+            # Same status as the admin path; the remote text stays server-side.
+            body['error'] = _t('self_service_delete_ssh_failed', lang)
+            status_code = 502
+        elif exc.code == 'connection_link_disappeared':
+            # The row changed under us: nothing to settle, nothing removed.
+            body['error'] = _t('self_service_delete_link_disappeared', lang)
+        elif exc.code in ('server_not_found', 'connection_not_found'):
+            body['error'] = _t('self_service_delete_not_found', lang)
+            status_code = 404
+        return JSONResponse(body, status_code=status_code)
+    if isinstance(exc, peer_lifecycle_lock.PeerLifecycleBusy):
+        return JSONResponse({
+            'error': _t('self_service_delete_busy', lang),
+            'code': 'peer_lifecycle_busy',
+        }, status_code=409)
+    if isinstance(exc, peer_lifecycle_lock.PeerLifecycleUncertain):
+        # The SSH result is unknown: nothing was deleted, an operator must look.
+        return JSONResponse({
+            'error': _t('self_service_delete_restore_required', lang),
+            'code': 'peer_lifecycle_uncertain',
+        }, status_code=503)
     logger.exception("Unexpected self-service error")
     return JSONResponse({'error': 'Internal server error'}, status_code=500)
 
@@ -3046,6 +3788,8 @@ class InstallProtocolRequest(BaseModel):
     # SOCKS5
     socks5_username: Optional[str] = None
     socks5_password: Optional[str] = None
+    socks5_http_port: Optional[str] = None
+    socks5_http_enabled: Optional[bool] = None
     # AdGuard Home
     adguard_mode: Optional[str] = None  # 'replace' or 'sidebyside'
     adguard_web_port: Optional[int] = None
@@ -3152,6 +3896,20 @@ class SrvWarpRequest(BaseModel):
     enable: Optional[bool] = None
 
 
+class SrvWarpImportRequest(BaseModel):
+    """Body of /warp/import: same identity/TOS fields plus the source."""
+    server_uid: Optional[str] = None
+    protocol: Optional[str] = None
+    source_server_uid: Optional[str] = None
+    source_protocol: Optional[str] = None
+    accept_tos: Optional[bool] = False
+
+
+class SrvWarpImportSourcesRequest(BaseModel):
+    """Body of /warp/import/sources: which server is asking for candidates."""
+    server_uid: Optional[str] = None
+
+
 class SmartRouteOwnSubnetsRequest(BaseModel):
     cidrs: list = []
 
@@ -3180,6 +3938,59 @@ class Socks5SettingsRequest(BaseModel):
     port: Optional[int] = None
     username: Optional[str] = None
     password: Optional[str] = None
+
+
+class ProxyInstallRequest(BaseModel):
+    """Первичная установка/переустановка прокси-инстанса (ТЗ 4.5)."""
+    port: object = None
+    http_port: object = None
+    http_enabled: Optional[bool] = False
+    socks_enabled: Optional[bool] = None
+    listener_type: Optional[str] = None
+    dns_servers: object = None
+    maxconn: object = None
+    log_rotate_days: object = None
+    log_format: Optional[str] = None
+    username: Optional[str] = None
+    password: Optional[str] = None
+
+
+class ProxySettingsRequest(BaseModel):
+    """Настройки инстанса: порты, DNS, maxconn, логи."""
+    port: object = None
+    http_port: object = None
+    http_enabled: Optional[bool] = False
+    socks_enabled: Optional[bool] = None
+    listener_type: Optional[str] = None
+    dns_servers: object = None
+    maxconn: object = None
+    log_rotate_days: object = None
+    log_format: Optional[str] = None
+
+
+class ProxyAccountRequest(BaseModel):
+    """Создание/правка учётки; числовые поля принимаем как есть и валидируем."""
+    name: Optional[str] = None
+    login: Optional[str] = None
+    password: Optional[str] = None
+    type: Optional[str] = None
+    enabled: Optional[bool] = None
+    user_id: Optional[str] = None
+    acl_ips: object = None
+    max_conns: object = None
+    rate_in_mbps: object = None
+    rate_out_mbps: object = None
+    quota_mb: object = None
+    quota_period: Optional[str] = None
+    parent: object = None
+
+
+class ProxyPortCheckRequest(BaseModel):
+    port: object = None
+
+
+class ProxyToggleRequest(BaseModel):
+    enabled: bool = True
 
 
 class ProtocolRequest(BaseModel):
@@ -4662,6 +5473,7 @@ async def server_detail(request: Request, server_id: int):
     return tpl(request, 'server.html', server=server, server_id=server_id,
                users=users_list,
                copy_targets=_instance_copy_targets(data, server_id),
+               warp_import_sources=_warp_import_sources(data, server_id),
                torrent_plugin=torrent_plugin.status(server))
 
 
@@ -6693,6 +7505,10 @@ def _warp_status_payload(server, state):
             'dns_via_warp': bool((link or {}).get('dns_via_warp')),
             'quarantine': bool(warp_record.get('quarantine')),
             'state_stale': bool((link or {}).get('stale')),
+            # Repair runs as a background task, so its outcome is only
+            # observable here: without this field a failed repair left no
+            # trace anywhere the panel could show.
+            'repair_state': warp_record.get('repair_state') or None,
         })
 
     active_job = _WARP_JOBS.get(str(uid))
@@ -6732,10 +7548,42 @@ async def _warp_require_tos(server, accept):
 def _warp_install_guard(server, uid, protocol):
     state = warp_state_store.load()
     protocols = [protocol] if protocol else _warp_awg_protocols(server)
+    if not protocol:
+        # Status also lists instances that live in the warp store but are gone
+        # from data.json (a registered instance could be deleted as a protocol
+        # while unlinked). A host-level install must refuse on those too,
+        # otherwise it registers a second Cloudflare account next to the
+        # leftover record.
+        stored = ((state.get('servers') or {}).get(str(uid)) or {}).get('protocols') or {}
+        for proto in stored:
+            if protocol_base(proto) in ('awg', 'awg2', 'awg3') and proto not in protocols:
+                protocols.append(proto)
     for proto in protocols:
         record = proto_record(state, uid, proto)
         if (record.get('warp') or {}).get('registered') or warp_link(record):
             raise SrvWarpError('srv_warp_registered_unlink_first', 409)
+
+
+def _drop_warp_instance_state(uid, protocol):
+    """Forget the warp record of an instance that was just deleted.
+
+    A leftover record made the WARP card show a phantom "installed" instance
+    forever: the status projection merges store-only protocols, while
+    ``_targets()`` and uninstall only walk ``server['protocols']``.
+    """
+    if not uid or protocol_base(protocol) not in ('awg', 'awg2', 'awg3'):
+        return
+    uid = str(uid)
+
+    def drop(state):
+        record = (state.get('servers') or {}).get(uid) or {}
+        protocols = record.get('protocols') or {}
+        protocols.pop(protocol, None)
+
+    try:
+        warp_state_store.mutate(drop)
+    except Exception:
+        logger.exception("Failed to drop warp state for %s/%s", uid, protocol)
 
 
 def _warp_link_preflight(data, server_id, server, uid, protocol):
@@ -6767,7 +7615,14 @@ async def _warp_post(actor, request, server_id, req, kind, runner, *, tos=False,
             raise SrvWarpError('srv_warp_job_busy', 409)
 
         if kind in ('install', 'uninstall', 'repair'):
-            protocol = _warp_named_protocol(req, server=server, required=False)
+            # Host-level operations without an explicit protocol cover every
+            # registered AWG instance: the card's Install/Delete act on the
+            # whole host.  _warp_named_protocol() used to collapse "no
+            # protocol" to the first candidate, so on a multi-instance server
+            # only the first instance was touched -- the others stayed
+            # registered and the card got stuck.
+            protocol = (_warp_named_protocol(req, server=server, required=False)
+                        if (req.protocol or '').strip() else None)
         elif kind == 'exit-egress':
             protocol = None
         else:
@@ -6827,7 +7682,14 @@ async def api_srv_warp_install(request: Request, server_id: int, req: SrvWarpReq
             raise SrvWarpError('srv_warp_identity_mismatch', 409)
         if _warp_job_active(uid):
             raise SrvWarpError('srv_warp_job_busy', 409)
-        protocol = _warp_named_protocol(req, server=server, required=False)
+        # No protocol in the request means every registered AWG instance:
+        # the marketplace installs the app for the whole host (see the
+        # matching comment in server.html).  _warp_named_protocol() would
+        # otherwise collapse "no protocol" to the first candidate, so a
+        # stopped first instance made a host with a running instance look
+        # like it had no target.
+        protocol = (_warp_named_protocol(req, server=server, required=False)
+                    if (req.protocol or '').strip() else None)
         await _warp_require_tos(server, bool(req.accept_tos))
         _warp_install_guard(server, uid, protocol)
         _install_ops_load()
@@ -6864,6 +7726,114 @@ async def _run_warp_install(op_id, server_id, uid, protocol):
                          'message': str(exc) or exc.code})
     except Exception as exc:
         logger.exception("Cloudflare WARP install failed")
+        op_finish(op, 'error',
+                  error={'code': 'install_failed',
+                         'message': str(exc)[:500]})
+
+
+@app.post('/api/servers/{server_id}/warp/import', tags=["Servers"])
+async def api_srv_warp_import(request: Request, server_id: int,
+                              req: SrvWarpImportRequest):
+    """Queue a WARP import (a profile registered on another panel server).
+
+    Some hosts cannot reach ``api.cloudflareclient.com``: the provider filters
+    TLS by SNI, so ``wgcf register`` fails while the WARP dataplane works. The
+    account is then registered on a host that can reach the API and imported
+    here, with a live handshake check before the state is recorded.
+    """
+    actor = _request_user(request)
+    if not actor or actor.get('role') not in ('admin', 'support'):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        idx = _rkn_server_index(data, server_id, req.server_uid)
+        if idx is None:
+            raise SrvWarpError('srv_warp_identity_mismatch', 409)
+        server = data['servers'][idx]
+        uid = server.get('uid') or ''
+        if not uid:
+            raise SrvWarpError('srv_warp_identity_mismatch', 409)
+        if _warp_job_active(uid):
+            raise SrvWarpError('srv_warp_job_busy', 409)
+        source_uid = (req.source_server_uid or '').strip()
+        if not source_uid:
+            raise SrvWarpError('srv_warp_source_required', 409)
+        if source_uid == uid:
+            raise SrvWarpError('srv_warp_source_is_self', 409)
+        src_idx = _rkn_server_index(data, None, source_uid)
+        if src_idx is None:
+            raise SrvWarpError('srv_warp_source_not_found', 409)
+        protocol = _warp_named_protocol(req, server=server, required=False)
+        source_protocol = (req.source_protocol or '').strip() or None
+        if source_protocol and protocol_base(source_protocol) not in (
+                'awg', 'awg2', 'awg3'):
+            raise SrvWarpError('srv_warp_protocol_unsupported', 409)
+        await _warp_require_tos(server, bool(req.accept_tos))
+        _warp_install_guard(server, uid, protocol)
+        _install_ops_load()
+        if (idx, 'warp') in _INSTALL_ACTIVE:
+            return JSONResponse(
+                {'error': 'Cloudflare WARP installation is already running',
+                 'code': 'install_in_progress'},
+                status_code=409)
+        op = op_create(idx, 'warp_import', WARP_IMPORT_TOTAL)
+        asyncio.create_task(_run_warp_import(
+            op['id'], idx, uid, source_uid, protocol, source_protocol))
+        return {'operation_id': op['id']}
+    except SrvWarpError as exc:
+        return JSONResponse({'error': exc.code, 'code': exc.code},
+                            status_code=exc.http_status)
+
+
+@app.post('/api/servers/{server_id}/warp/import/sources', tags=["Servers"])
+async def api_srv_warp_import_sources(request: Request, server_id: int,
+                                      req: SrvWarpImportSourcesRequest):
+    """Probe which panel servers can actually donate a WARP profile.
+
+    Registration is impossible from an SNI-filtered host, so the user needs to
+    know which *other* server can either hand over a stored profile or still
+    register one. That check is an SSH round trip per candidate and runs only
+    when asked (the UI's "check servers" button).
+    """
+    actor = _request_user(request)
+    if not actor or actor.get('role') not in ('admin', 'support'):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        idx = _rkn_server_index(data, server_id, req.server_uid)
+        if idx is None:
+            raise SrvWarpError('srv_warp_identity_mismatch', 409)
+        uid = data['servers'][idx].get('uid') or ''
+        if not uid:
+            raise SrvWarpError('srv_warp_identity_mismatch', 409)
+        return {'sources': await warp_runtime.probe_sources(idx, uid)}
+    except SrvWarpError as exc:
+        return JSONResponse({'error': exc.code, 'code': exc.code},
+                            status_code=exc.http_status)
+
+
+async def _run_warp_import(op_id, server_id, uid, source_uid, protocol,
+                           source_protocol):
+    """Background worker: one WARP profile import with staged progress."""
+    op = _INSTALL_OPS.get(op_id)
+    if not op:
+        return
+    try:
+        job_id = _warp_job_begin(uid, 'import')
+        op_log(op, 'start', 'Cloudflare WARP profile import started')
+        await warp_runtime.import_profile(
+            server_id, uid, source_uid, protocol=protocol,
+            source_protocol=source_protocol, job_id=job_id,
+            progress=lambda stage, msg: op_log(op, stage, msg))
+        op_log(op, 'done', 'Cloudflare WARP profile imported')
+        op_finish(op, 'success',
+                  result={'status': 'success', 'installed': True})
+    except SrvWarpError as exc:
+        op_finish(op, 'error',
+                  error={'code': exc.code,
+                         'message': str(exc) or exc.code})
+    except Exception as exc:
+        logger.exception("Cloudflare WARP profile import failed")
         op_finish(op, 'error',
                   error={'code': 'install_failed',
                          'message': str(exc)[:500]})
@@ -7646,6 +8616,18 @@ def api_check_server(request: Request, server_id: int):
                 for key in ('subnet', 'public_key', 'obfuscation'):
                     if db_proto.get(key) not in (None, ''):
                         merged.setdefault(key, db_proto[key])
+            if protocol_base(proto) == 'socks5':
+                # Карточка рисуется из /check ещё до /proxy/status: отдаём
+                # счётчик учёток и DNS, иначе первый кадр показывает 0 и «—».
+                # Пароли и логины в /check не попадают — только количество.
+                merged['dns_servers'] = db_proto.get('dns_servers') or list(PROXY_DEFAULT_DNS)
+                if db_proto.get('http_port'):
+                    merged.setdefault('http_port', db_proto['http_port'])
+                for key in ('http_enabled', 'socks_enabled'):
+                    if key in db_proto:
+                        merged.setdefault(key, db_proto[key])
+                if isinstance(db_proto.get('accounts'), list):
+                    merged['accounts_count'] = len(db_proto['accounts'])
             if protocol_base(proto) in AWG_PROTOCOLS and db_proto.get('exit_link'):
                 merged['exit_link'] = db_proto['exit_link']
             if protocol_base(proto) in AWG_PROTOCOLS and db_proto.get('exit_failover'):
@@ -7707,7 +8689,13 @@ def api_check_server(request: Request, server_id: int):
         try:
             awg_protos = [p for p in protocols_to_check if protocol_base(p) in AWG_PROTOCOLS]
             if awg_protos:
-                AWGManager(ssh).prefetch_awg_state(awg_protos)
+                # Only instances that actually have a link need the extra
+                # `wg show exit0` block: it is three commands per container.
+                exit_protos = [
+                    p for p in awg_protos
+                    if ((server.get('protocols') or {}).get(p) or {}).get('exit_link')
+                ]
+                AWGManager(ssh).prefetch_awg_state(awg_protos, exit_protocols=exit_protos)
         except Exception as e:
             logger.warning(f"AWG status prefetch failed, falling back to per-instance checks: {e}")
         # Run checks sequentially. Several managers use the same SSH connection;
@@ -7737,6 +8725,17 @@ def api_check_server(request: Request, server_id: int):
                         'display_name': protocol_display_name(proto, result.get('header_protection'), result.get('protocol_version')),
                         'container_name': protocol_container_name(proto),
                     }
+                    if protocol_base(proto) == 'socks5':
+                        # Запись восстановлена из живого статуса (data.json
+                        # потерян): сохраняем порты, DNS и тип листенера,
+                        # иначе карточка и ключи живут догадками.
+                        server['protocols'][proto].update({
+                            'port': str(result.get('port') or ''),
+                            'http_port': str(result.get('http_port') or ''),
+                            'http_enabled': bool(result.get('http_enabled')),
+                            'socks_enabled': bool(result.get('socks_enabled', True)),
+                            'dns_servers': list(PROXY_DEFAULT_DNS),
+                        })
                     if protocol_base(proto) == 'adguard':
                         server['protocols'][proto].update({
                             'mode': result.get('mode'),
@@ -8485,6 +9484,13 @@ WARP_INSTALL_STAGES = {'start': 1, 'arch': 2, 'download': 3, 'register': 4,
                        'profile': 5, 'startsh': 6, 'done': 7}
 WARP_INSTALL_TOTAL = 7
 
+# A profile borrowed from another panel server: no download/register (and no
+# arch probe), so it gets its own increasing sequence instead of being wedged
+# into the install map.
+WARP_IMPORT_STAGES = {'start': 1, 'source': 2, 'profile': 3, 'handshake': 4,
+                      'startsh': 5, 'done': 6}
+WARP_IMPORT_TOTAL = 6
+
 XRAY_UPDATE_STAGES = {'start': 1, 'host': 2, 'version': 3, 'arch': 4,
                       'build': 5, 'verify': 6, 'swap': 7, 'check': 8, 'done': 9}
 XRAY_UPDATE_TOTAL = 9
@@ -8494,6 +9500,7 @@ FLOW_STAGES = {
     'smartroute': SMARTROUTE_INSTALL_STAGES,
     'rknblock': RKNBLOCK_INSTALL_STAGES,
     'warp': WARP_INSTALL_STAGES,
+    'warp_import': WARP_IMPORT_STAGES,
     'xray_update': XRAY_UPDATE_STAGES,
 }
 FLOW_TOTALS = {
@@ -8501,6 +9508,7 @@ FLOW_TOTALS = {
     'smartroute': SMARTROUTE_INSTALL_TOTAL,
     'rknblock': RKNBLOCK_INSTALL_TOTAL,
     'warp': WARP_INSTALL_TOTAL,
+    'warp_import': WARP_IMPORT_TOTAL,
     'xray_update': XRAY_UPDATE_TOTAL,
 }
 
@@ -8808,6 +9816,21 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
         # Reinstalling an instance is not the same as adding one: an instance a
         # user deliberately left unlinked must not be linked behind their back.
         reinstall = install_protocol in (server.get('protocols') or {})
+
+        # SOCKS5: HTTP-листенер и его порт. Новый UI присылает поля явно;
+        # старый клиент их не знает — тогда сохраняем прежнее состояние,
+        # чтобы переустановка не выключила HTTP молча.
+        socks_http_enabled = False
+        socks_http_port = None
+        if install_base == 'socks5':
+            if req.socks5_http_enabled is None:
+                socks_http_enabled = _proxy_bool(previous_record.get('http_enabled'))
+            else:
+                socks_http_enabled = _proxy_bool(req.socks5_http_enabled)
+            socks_http_port = str(req.socks5_http_port or '').strip() \
+                or str(previous_record.get('http_port') or '').strip() or None
+            if socks_http_enabled and not socks_http_port:
+                socks_http_port = str(PROXY_DEFAULT_HTTP_PORT)
         if install_base in AWG_PROTOCOLS:
             previous_link = ((server.get('protocols') or {}).get(install_protocol) or {}).get('exit_link')
 
@@ -8832,17 +9855,34 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
         ssh = await asyncio.to_thread(get_ssh, server)
         await asyncio.to_thread(ssh.connect)
 
-        # Validate the requested port before touching Docker: a busy port
+        # Validate the requested ports before touching Docker: a busy port
         # otherwise fails mid-install with a half-created broken container.
+        # SOCKS5 проверяет оба листенера: SOCKS5 и, если включён, HTTP.
         transport = INSTALL_PORT_TRANSPORT.get(install_base)
+        ports_to_check = []
         if transport and req.port and str(req.port).isdigit():
+            ports_to_check.append((str(req.port), transport))
+        if install_base == 'socks5' and socks_http_enabled and socks_http_port:
+            ports_to_check.append((str(socks_http_port), 'tcp'))
+        if install_base == 'socks5':
+            # Переустановка поверх своего же порта: его держит наш контейнер,
+            # и get_used_ports покажет docker-proxy. Это не конфликт.
+            own_ports = {
+                str(previous_record.get('port') or ''),
+                str(previous_record.get('http_port') or ''),
+            }
+            ports_to_check = [(port, transport_name)
+                              for port, transport_name in ports_to_check
+                              if port not in own_ports]
+        if ports_to_check:
             used = await asyncio.to_thread(get_used_ports, ssh)
-            owner = used.get(transport, {}).get(str(req.port))
-            if owner:
-                return JSONResponse(
-                    {'error': f'Port {req.port}/{transport} is already used by {owner}. '
-                              f'Choose another port.'},
-                    status_code=400)
+            for port, proto in ports_to_check:
+                owner = used.get(proto, {}).get(port)
+                if owner:
+                    return JSONResponse(
+                        {'error': f'Port {port}/{proto} is already used by {owner}. '
+                                  f'Choose another port.'},
+                        status_code=400)
 
         op = op_create(server_id, 'protocol', PROTOCOL_INSTALL_TOTAL)
         op['protocol'] = install_protocol
@@ -8922,11 +9962,35 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
             install_kwargs = dict(port=req.port)
         elif install_base == 'socks5':
             install_args = ()
+            # Переустановка не теряет учётки: они уже лежат в записи сервера.
+            socks_accounts = [a for a in (previous_record.get('accounts') or [])
+                              if isinstance(a, dict)]
+            if not socks_accounts:
+                try:
+                    socks_account = proxy_normalize_account({
+                        'name': str(req.socks5_username or '').strip() or 'Proxy',
+                        'login': req.socks5_username,
+                        'password': req.socks5_password,
+                        'type': 'both' if socks_http_enabled else 'socks5',
+                        'enabled': True,
+                    })
+                except ValueError as e:
+                    ssh.disconnect()
+                    return JSONResponse({'error': str(e)}, status_code=400)
+                socks_accounts = [proxy_assign_counters([], socks_account)]
+            # Переустановка HTTP-only инстанса не должна поднимать SOCKS:
+            # тип листенера переживает переустановку, как и учётки.
+            socks_listener_enabled = _proxy_bool(
+                previous_record.get('socks_enabled'), True)
             install_kwargs = dict(
                 protocol_type=install_protocol,
                 port=req.port,
                 username=req.socks5_username,
                 password=req.socks5_password,
+                http_port=socks_http_port if socks_http_enabled else None,
+                http_enabled=socks_http_enabled,
+                accounts=socks_accounts,
+                socks_enabled=socks_listener_enabled,
             )
         elif install_base == 'adguard':
             install_args = ()
@@ -9011,6 +10075,25 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
             proto_record['internal_ip'] = result.get('internal_ip')
             proto_record['web_port'] = result.get('web_port')
             proto_record['expose_web'] = result.get('expose_web')
+        if install_base == 'socks5':
+            # Настройки инстанса переживают переустановку: порты берём из
+            # запроса, остальное — из прежней записи.
+            proto_record['port'] = str(req.port)
+            proto_record['http_port'] = str(socks_http_port or '')
+            proto_record['http_enabled'] = socks_http_enabled
+            proto_record['dns_servers'] = previous_record.get('dns_servers') \
+                or list(PROXY_DEFAULT_DNS)
+            proto_record['maxconn'] = previous_record.get('maxconn')
+            proto_record['log_rotate_days'] = previous_record.get('log_rotate_days') \
+                or PROXY_DEFAULT_LOG_ROTATE_DAYS
+            proto_record['log_format'] = previous_record.get('log_format') \
+                or PROXY_DEFAULT_LOG_FORMAT
+            proto_record['accounts'] = socks_accounts
+            proto_record['socks_enabled'] = socks_listener_enabled
+            # Счётчики квоты живут в state/ и переживают пересоздание
+            # контейнера: без counter_seq удалённые номера выдались бы снова.
+            if previous_record.get('counter_seq') is not None:
+                proto_record['counter_seq'] = previous_record['counter_seq']
         if install_base == 'nginx':
             proto_record['domain'] = result.get('domain')
             proto_record['email'] = result.get('email')
@@ -9127,6 +10210,15 @@ def api_socks5_update_credentials(request: Request, server_id: int, req: Socks5S
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
         protocol = req.protocol if is_valid_protocol(req.protocol) and protocol_base(req.protocol) == 'socks5' else 'socks5'
+        # Легаси-путь перегенерирует конфиг из прочитанных users, теряя ACL,
+        # лимиты и квоты. Экземпляр с учётками в data.json правится только
+        # через /proxy/accounts.
+        record = (server.get('protocols') or {}).get(protocol) or {}
+        if isinstance(record.get('accounts'), list) and record['accounts']:
+            return JSONResponse(
+                {'error': 'This instance is managed by the proxy accounts API; '
+                          'edit accounts via /api/servers/%d/proxy/accounts.' % server_id},
+                status_code=409)
         ssh = get_ssh(server)
         ssh.connect()
         manager = get_protocol_manager(ssh, protocol)
@@ -9148,6 +10240,553 @@ def api_socks5_update_credentials(request: Request, server_id: int, req: Socks5S
         return result
     except Exception as e:
         logger.exception("Error updating SOCKS5 credentials")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+# ===== API раздела «Прокси» (ТЗ_PROXY_ACCOUNTS 4.5) =====
+
+class ProxyApplyError(Exception):
+    """manager.apply вернул status=error: данные сервера не сохраняются."""
+
+
+def _proxy_published_ports(ssh):
+    """Порты, которые публикуют контейнеры прокси этой панели."""
+    try:
+        out, _, code = ssh.run_sudo_command(
+            "docker ps --format '{{.Names}} {{.Ports}}' 2>/dev/null")
+    except Exception:  # noqa: BLE001 — проверка порта не должна ронять запрос
+        return set()
+    if code != 0 or not isinstance(out, str) or not out:
+        return set()
+    ports = set()
+    for line in out.splitlines():
+        name, _, mapping = line.partition(' ')
+        if not name.startswith(('amnezia-socks5proxy', 'amnezia-httpproxy')):
+            continue
+        for part in mapping.split(','):
+            match = re.search(r':(\d+)->', part)
+            if match:
+                ports.add(match.group(1))
+    return ports
+
+
+def _proxy_busy_ports(ssh, ports):
+    """Занятые tcp-порты, кроме публикаций собственных контейнеров прокси."""
+    used = (get_used_ports(ssh) or {}).get('tcp') or {}
+    own_ports = _proxy_published_ports(ssh)
+    busy = []
+    for port in ports:
+        if port in (None, ''):
+            continue
+        owner = used.get(str(port))
+        if not owner:
+            continue
+        # docker-proxy/dockerd — это опубликованный порт контейнера. Свой
+        # контейнер прокси не конфликт, чужой контейнер — конфликт.
+        if owner in PROXY_DOCKER_HOLDERS and str(port) in own_ports:
+            continue
+        busy.append((str(port), owner))
+    return busy
+
+
+def _proxy_apply_accounts(server, record, accounts):
+    """Применить учётки к работающему инстансу. Ошибка → ProxyApplyError."""
+    settings, options = proxy_instance_settings({}, record)
+    ssh = get_ssh(server)
+    ssh.connect()
+    try:
+        manager = get_protocol_manager(ssh, 'socks5')
+        result = manager.apply(
+            accounts,
+            int(settings['port']),
+            http_port=int(settings['http_port']) if settings['http_port'] else None,
+            http_enabled=bool(settings['http_enabled']),
+            options=options,
+            socks_enabled=bool(settings['socks_enabled']),
+        )
+    finally:
+        ssh.disconnect()
+    if not isinstance(result, dict) or result.get('status') != 'success':
+        message = (result or {}).get('message') or 'Failed to apply proxy settings'
+        raise ProxyApplyError(message)
+    return result
+
+
+def _proxy_find_account(accounts, account_id):
+    target = str(account_id or '').strip()
+    for index, account in enumerate(accounts or []):
+        if isinstance(account, dict) and str(account.get('id') or '') == target:
+            return index
+    return -1
+
+
+def _proxy_require_record(server):
+    """Запись socks5 установленного инстанса или None."""
+    record = (server.get('protocols') or {}).get('socks5')
+    if not isinstance(record, dict) or not record.get('installed'):
+        return None
+    return record
+
+
+@app.get('/api/servers/{server_id}/proxy/status', tags=["Protocols"])
+def api_proxy_status(request: Request, server_id: int, protocol: str = 'socks5'):
+    """Инстанс прокси + список учёток с расходом и ключами.
+
+    Для сервера без установленного прокси отвечает installed=false без SSH:
+    новый сервер не должен падать и не должен ждать недоступный хост.
+    """
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if not 0 <= server_id < len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        protocol = protocol if is_valid_protocol(protocol) \
+            and protocol_base(protocol) == 'socks5' else 'socks5'
+        record = (server.get('protocols') or {}).get(protocol)
+        if not isinstance(record, dict):
+            record = {}
+        accounts = [a for a in (record.get('accounts') or []) if isinstance(a, dict)]
+
+        if not record.get('installed'):
+            return {
+                'status': 'success',
+                'installed': False,
+                'container': {'running': False, 'image': '', 'version': ''},
+                'socks_port': record.get('port'),
+                'http_port': record.get('http_port'),
+                'http_enabled': _proxy_bool(record.get('http_enabled')),
+                'socks_enabled': _proxy_bool(record.get('socks_enabled'), True),
+                'listener_type': proxy_listener_view(record),
+                'dns_servers': record.get('dns_servers') or list(PROXY_DEFAULT_DNS),
+                'maxconn': record.get('maxconn'),
+                'log_rotate_days': record.get('log_rotate_days')
+                or PROXY_DEFAULT_LOG_ROTATE_DAYS,
+                'log_format': record.get('log_format') or PROXY_DEFAULT_LOG_FORMAT,
+                'accounts': [proxy_account_view(server, protocol, account)
+                             for account in accounts],
+            }
+
+        # Миграция старой одноучётной установки — при первом чтении статуса,
+        # не в горячем пути /check (ТЗ 4.0).
+        before = json.dumps(record.get('accounts') or [], sort_keys=True)
+        ssh = get_ssh(server)
+        ssh.connect()
+        try:
+            manager = get_protocol_manager(ssh, protocol)
+            state = manager.get_server_status(protocol) or {}
+            accounts = proxy_ensure_accounts(server, protocol, ssh=ssh)
+            usage, activity = (manager.read_stats(accounts)
+                               if accounts else ({}, {}))
+        finally:
+            ssh.disconnect()
+        if json.dumps(record.get('accounts') or [], sort_keys=True) != before:
+            save_data(data)
+
+        return {
+            'status': 'success',
+            'installed': True,
+            'container': {
+                'running': bool(state.get('container_running')),
+                'image': state.get('image') or '',
+                'version': state.get('version') or '',
+            },
+            'socks_port': record.get('port') or state.get('port'),
+            'http_port': record.get('http_port') or state.get('http_port'),
+            'http_enabled': _proxy_bool(record.get('http_enabled')),
+            'socks_enabled': _proxy_bool(record.get('socks_enabled'), True),
+            'listener_type': proxy_listener_view(record),
+            'dns_servers': record.get('dns_servers') or list(PROXY_DEFAULT_DNS),
+            'maxconn': record.get('maxconn'),
+            'log_rotate_days': record.get('log_rotate_days')
+            or PROXY_DEFAULT_LOG_ROTATE_DAYS,
+            'log_format': record.get('log_format') or PROXY_DEFAULT_LOG_FORMAT,
+            'accounts': [proxy_account_view(server, protocol, account, usage, activity)
+                         for account in accounts],
+        }
+    except Exception as e:
+        logger.exception("Error reading proxy status")
+        return JSONResponse({'error': str(e)}, status_code=502)
+
+
+@app.post('/api/servers/{server_id}/proxy/install', tags=["Protocols"])
+def api_proxy_install(request: Request, server_id: int, req: ProxyInstallRequest):
+    """Поставить/переустановить прокси-инстанс.
+
+    Переустановка сохраняет учётки из записи сервера (ТЗ 4.0); первая
+    установка создаёт одну учётку типа both (если HTTP включён) или socks5.
+    """
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if not 0 <= server_id < len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        protocols = server.setdefault('protocols', {})
+        record = protocols.get('socks5')
+        if not isinstance(record, dict):
+            record = {}
+        try:
+            settings, _options = proxy_instance_settings(req.model_dump(exclude_unset=True), record)
+        except ValueError as e:
+            return JSONResponse({'error': str(e)}, status_code=400)
+
+        accounts = [a for a in (record.get('accounts') or []) if isinstance(a, dict)]
+        if not accounts:
+            try:
+                account = proxy_normalize_account({
+                    'name': str(req.username or '').strip() or 'Proxy',
+                    'login': req.username,
+                    'password': req.password,
+                    'type': ('both' if (settings['socks_enabled']
+                                        and settings['http_enabled'])
+                             else ('http' if settings['http_enabled'] else 'socks5')),
+                    'enabled': True,
+                })
+            except ValueError as e:
+                return JSONResponse({'error': str(e)}, status_code=400)
+            accounts = [proxy_assign_counters([], account)]
+
+        ssh = get_ssh(server)
+        ssh.connect()
+        try:
+            check_ports = []
+            if settings['socks_enabled']:
+                check_ports.append(settings['port'])
+            if settings['http_enabled']:
+                check_ports.append(settings['http_port'])
+            busy = _proxy_busy_ports(ssh, check_ports)
+            if busy:
+                port, owner = busy[0]
+                return JSONResponse(
+                    {'error': f'Port {port}/tcp is already used by {owner}. '
+                              f'Choose another port.'}, status_code=400)
+            manager = get_protocol_manager(ssh, 'socks5')
+            result = manager.install_protocol(
+                protocol_type='socks5',
+                port=settings['port'],
+                username=accounts[0].get('login'),
+                password=accounts[0].get('password'),
+                http_port=int(settings['http_port']) if settings['http_port'] else None,
+                http_enabled=bool(settings['http_enabled']),
+                socks_enabled=bool(settings['socks_enabled']),
+                accounts=accounts,
+            )
+        finally:
+            ssh.disconnect()
+
+        if not isinstance(result, dict):
+            result = {'status': 'success', 'message': str(result)}
+        if result.get('status') != 'success' or result.get('error'):
+            message = result.get('message') or result.get('error') \
+                or 'Proxy installation failed'
+            return JSONResponse({'error': message}, status_code=400)
+
+        record.update(settings)
+        record['installed'] = True
+        record['accounts'] = accounts
+        record['base_protocol'] = 'socks5'
+        record['instance'] = protocol_instance('socks5')
+        record['display_name'] = protocol_display_name('socks5')
+        record['container_name'] = protocol_container_name('socks5')
+        protocols['socks5'] = record
+        save_data(data)
+        result['accounts'] = [proxy_account_view(server, 'socks5', account)
+                              for account in accounts]
+        return result
+    except Exception as e:
+        logger.exception("Error installing proxy")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/proxy/settings', tags=["Protocols"])
+def api_proxy_settings(request: Request, server_id: int, req: ProxySettingsRequest):
+    """Порты, DNS, лимит соединений и логи инстанса."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if not 0 <= server_id < len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        record = _proxy_require_record(server)
+        if record is None:
+            return JSONResponse({'error': 'Proxy is not installed'}, status_code=400)
+        try:
+            settings, options = proxy_instance_settings(req.model_dump(exclude_unset=True), record)
+        except ValueError as e:
+            return JSONResponse({'error': str(e)}, status_code=400)
+        accounts = [a for a in (record.get('accounts') or []) if isinstance(a, dict)]
+
+        # Занятость проверяем только у портов, которые реально меняются:
+        # текущий порт держит наш же контейнер. Выключенный листенер порт
+        # не занимает — его порт проверяем только при включении.
+        check_ports = []
+        socks_was_enabled = _proxy_bool(record.get('socks_enabled'), True)
+        if settings['socks_enabled'] and (
+                settings['port'] != str(record.get('port') or '')
+                or not socks_was_enabled):
+            check_ports.append(settings['port'])
+        http_was_enabled = _proxy_bool(record.get('http_enabled'))
+        if settings['http_enabled'] and (
+                settings['http_port'] != str(record.get('http_port') or '')
+                or not http_was_enabled):
+            check_ports.append(settings['http_port'])
+
+        ssh = get_ssh(server)
+        ssh.connect()
+        try:
+            busy = _proxy_busy_ports(ssh, check_ports)
+            if busy:
+                port, owner = busy[0]
+                return JSONResponse(
+                    {'error': f'Port {port}/tcp is already used by {owner}. '
+                              f'Choose another port.'}, status_code=400)
+            manager = get_protocol_manager(ssh, 'socks5')
+            result = manager.apply(
+                accounts,
+                int(settings['port']),
+                http_port=int(settings['http_port']) if settings['http_port'] else None,
+                http_enabled=bool(settings['http_enabled']),
+                options=options,
+                socks_enabled=bool(settings['socks_enabled']),
+            )
+        finally:
+            ssh.disconnect()
+
+        if not isinstance(result, dict) or result.get('status') != 'success':
+            message = (result or {}).get('message') or 'Failed to apply proxy settings'
+            return JSONResponse({'error': message}, status_code=400)
+
+        record.update(settings)
+        record['installed'] = True
+        save_data(data)
+        result['settings'] = settings
+        return result
+    except Exception as e:
+        logger.exception("Error saving proxy settings")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/proxy/port-check', tags=["Protocols"])
+def api_proxy_port_check(request: Request, server_id: int, req: ProxyPortCheckRequest):
+    """Свободен ли порт: {free, holder, valid} для модалки настроек."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        port = _proxy_port(req.port, 'port')
+    except ValueError as e:
+        return JSONResponse({'error': str(e), 'free': False, 'holder': '',
+                             'valid': False}, status_code=400)
+    data = load_data()
+    if not 0 <= server_id < len(data['servers']):
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    ssh = None
+    try:
+        ssh = get_ssh(data['servers'][server_id])
+        ssh.connect()
+        used = (get_used_ports(ssh) or {}).get('tcp') or {}
+        holder = used.get(str(port)) or ''
+        # Порт нашего же контейнера в `ss` выглядит как docker-proxy/dockerd:
+        # «Проверить» на текущем порту обязан отвечать «свободен» (баг 3).
+        # Чужой контейнер на этом порту по-прежнему занят.
+        if holder in PROXY_DOCKER_HOLDERS and str(port) in _proxy_published_ports(ssh):
+            holder = ''
+        return {'status': 'success', 'port': port, 'free': not holder,
+                'holder': holder, 'valid': True}
+    except Exception as e:
+        logger.warning(f"Proxy port check on server {server_id} failed: {e}")
+        return JSONResponse({'error': str(e)}, status_code=502)
+    finally:
+        if ssh is not None:
+            ssh.disconnect()
+
+
+@app.post('/api/servers/{server_id}/proxy/accounts', tags=["Protocols"])
+def api_proxy_create_account(request: Request, server_id: int,
+                             req: ProxyAccountRequest):
+    """Создать учётку: валидация → apply на сервере → сохранение."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if not 0 <= server_id < len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        record = _proxy_require_record(server)
+        if record is None:
+            return JSONResponse({'error': 'Proxy is not installed'}, status_code=400)
+        accounts = [a for a in (record.get('accounts') or []) if isinstance(a, dict)]
+        try:
+            account = proxy_normalize_account(proxy_account_payload(req))
+        except ValueError as e:
+            return JSONResponse({'error': str(e)}, status_code=400)
+        if any(str(a.get('login') or '') == account['login'] for a in accounts):
+            return JSONResponse(
+                {'error': f"Login {account['login']!r} is already used"},
+                status_code=400)
+        proxy_assign_counters(accounts, account, record)
+        updated = accounts + [account]
+        try:
+            applied = _proxy_apply_accounts(server, record, updated)
+        except ProxyApplyError as e:
+            return JSONResponse({'error': str(e)}, status_code=400)
+        record['accounts'] = updated
+        save_data(data)
+        return {'status': 'success',
+                'account': proxy_account_view(server, 'socks5', account),
+                'keys': proxy_account_keys(server, 'socks5', account),
+                'log': applied.get('log') or []}
+    except Exception as e:
+        logger.exception("Error creating proxy account")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/proxy/accounts/{account_id}', tags=["Protocols"])
+def api_proxy_update_account(request: Request, server_id: int, account_id: str,
+                             req: ProxyAccountRequest):
+    """Изменить учётку; пустое поле пароля генерирует новый пароль."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if not 0 <= server_id < len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        record = _proxy_require_record(server)
+        if record is None:
+            return JSONResponse({'error': 'Proxy is not installed'}, status_code=400)
+        accounts = [a for a in (record.get('accounts') or []) if isinstance(a, dict)]
+        index = _proxy_find_account(accounts, account_id)
+        if index < 0:
+            return JSONResponse({'error': 'Account not found'}, status_code=404)
+        existing = accounts[index]
+        try:
+            account = proxy_normalize_account(proxy_account_payload(req),
+                                              existing=existing)
+        except ValueError as e:
+            return JSONResponse({'error': str(e)}, status_code=400)
+        if any(str(a.get('login') or '') == account['login']
+               for position, a in enumerate(accounts) if position != index):
+            return JSONResponse(
+                {'error': f"Login {account['login']!r} is already used"},
+                status_code=400)
+        others = [a for position, a in enumerate(accounts) if position != index]
+        proxy_assign_counters(others, account, record)
+        updated = list(accounts)
+        updated[index] = account
+        try:
+            applied = _proxy_apply_accounts(server, record, updated)
+        except ProxyApplyError as e:
+            return JSONResponse({'error': str(e)}, status_code=400)
+        record['accounts'] = updated
+        save_data(data)
+        return {'status': 'success',
+                'account': proxy_account_view(server, 'socks5', account),
+                'keys': proxy_account_keys(server, 'socks5', account),
+                'log': applied.get('log') or []}
+    except Exception as e:
+        logger.exception("Error updating proxy account")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.delete('/api/servers/{server_id}/proxy/accounts/{account_id}', tags=["Protocols"])
+def api_proxy_delete_account(request: Request, server_id: int, account_id: str):
+    """Удалить учётку; удаление последней разрешено (пустой users в конфиге)."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if not 0 <= server_id < len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        record = _proxy_require_record(server)
+        if record is None:
+            return JSONResponse({'error': 'Proxy is not installed'}, status_code=400)
+        accounts = [a for a in (record.get('accounts') or []) if isinstance(a, dict)]
+        index = _proxy_find_account(accounts, account_id)
+        if index < 0:
+            return JSONResponse({'error': 'Account not found'}, status_code=404)
+        updated = [a for position, a in enumerate(accounts) if position != index]
+        try:
+            applied = _proxy_apply_accounts(server, record, updated)
+        except ProxyApplyError as e:
+            return JSONResponse({'error': str(e)}, status_code=400)
+        record['accounts'] = updated
+        save_data(data)
+        return {'status': 'success',
+                'id': accounts[index].get('id'),
+                'accounts': [proxy_account_view(server, 'socks5', account)
+                             for account in updated],
+                'log': applied.get('log') or []}
+    except Exception as e:
+        logger.exception("Error deleting proxy account")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.post('/api/servers/{server_id}/proxy/accounts/{account_id}/toggle',
+          tags=["Protocols"])
+def api_proxy_toggle_account(request: Request, server_id: int, account_id: str,
+                             req: ProxyToggleRequest):
+    """Включить/выключить учётку: disabled не попадает в users конфига."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if not 0 <= server_id < len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        record = _proxy_require_record(server)
+        if record is None:
+            return JSONResponse({'error': 'Proxy is not installed'}, status_code=400)
+        accounts = [a for a in (record.get('accounts') or []) if isinstance(a, dict)]
+        index = _proxy_find_account(accounts, account_id)
+        if index < 0:
+            return JSONResponse({'error': 'Account not found'}, status_code=404)
+        account = dict(accounts[index])
+        account['enabled'] = bool(req.enabled)
+        updated = list(accounts)
+        updated[index] = account
+        try:
+            applied = _proxy_apply_accounts(server, record, updated)
+        except ProxyApplyError as e:
+            return JSONResponse({'error': str(e)}, status_code=400)
+        record['accounts'] = updated
+        save_data(data)
+        return {'status': 'success',
+                'account': proxy_account_view(server, 'socks5', account),
+                'keys': proxy_account_keys(server, 'socks5', account),
+                'log': applied.get('log') or []}
+    except Exception as e:
+        logger.exception("Error toggling proxy account")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.get('/api/servers/{server_id}/proxy/accounts/{account_id}/key',
+         tags=["Protocols"])
+def api_proxy_account_key(request: Request, server_id: int, account_id: str):
+    """URL-ключи учётки; для both — socks5 и http."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        data = load_data()
+        if not 0 <= server_id < len(data['servers']):
+            return JSONResponse({'error': 'Server not found'}, status_code=404)
+        server = data['servers'][server_id]
+        record = _proxy_require_record(server)
+        if record is None:
+            return JSONResponse({'error': 'Proxy is not installed'}, status_code=400)
+        accounts = [a for a in (record.get('accounts') or []) if isinstance(a, dict)]
+        index = _proxy_find_account(accounts, account_id)
+        if index < 0:
+            return JSONResponse({'error': 'Account not found'}, status_code=404)
+        account = accounts[index]
+        return {'status': 'success', 'id': account.get('id'),
+                'keys': proxy_account_keys(server, 'socks5', account)}
+    except Exception as e:
+        logger.exception("Error reading proxy account key")
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
@@ -10316,11 +11955,16 @@ IPV6_CONFLICT_CODES = frozenset({
 IPV6_RETRY_CODES = frozenset({'peer_lifecycle_uncertain'})
 IPV6_BAD_REQUEST_CODES = frozenset({'not_awg', 'bad_request'})
 
-_IP_STATUS_TTL = 20.0
+_IP_STATUS_TTL = 75.0
 # A degraded or unknown payload is re-probed sooner: the next poll should not
 # keep showing a stale error for the full healthy TTL.
 _IP_STATUS_TTL_DEGRADED = 3.0
+# An unreachable host is a state, not a server error: cache the failure for a
+# short while so neither the 60 s poll nor a visibilitychange storm opens a new
+# SSH connection every time (the connect cooldown only grows to 300 s).
+_IP_STATUS_TTL_FAILED = 10.0
 _IP_STATUS_CACHE = {}
+_IP_STATUS_CACHE_LOCK = threading.Lock()
 _OP_STORES = {}
 _OP_LOCKS = {}
 
@@ -10371,27 +12015,32 @@ def _xray_port_usage(ssh, server):
 
 
 def _ip_status_cache_ttl(payload):
-    """20 s for a healthy payload, 3 s for a degraded or failed one."""
-    if isinstance(payload, dict) and payload.get('state') == 'ok' \
-            and not payload.get('error'):
+    """75 s for a healthy payload, 10 s for an SSH failure, 3 s for degraded."""
+    if not isinstance(payload, dict):
+        return _IP_STATUS_TTL_DEGRADED
+    if payload.get('state') == 'unknown' and payload.get('error') == 'ssh_failed':
+        return _IP_STATUS_TTL_FAILED
+    if payload.get('state') == 'ok' and not payload.get('error'):
         return _IP_STATUS_TTL
     return _IP_STATUS_TTL_DEGRADED
 
 
 def _ip_status_cache_get(server_uid):
-    entry = _IP_STATUS_CACHE.get(server_uid)
-    if not entry:
-        return None
-    stamp, payload, ttl = entry
-    if time.time() - stamp > ttl:
-        _IP_STATUS_CACHE.pop(server_uid, None)
-        return None
+    with _IP_STATUS_CACHE_LOCK:
+        entry = _IP_STATUS_CACHE.get(server_uid)
+        if not entry:
+            return None
+        stamp, payload, ttl = entry
+        if time.time() - stamp > ttl:
+            _IP_STATUS_CACHE.pop(server_uid, None)
+            return None
     return payload
 
 
 def _ip_status_cache_put(server_uid, payload):
-    _IP_STATUS_CACHE[server_uid] = (time.time(), payload,
-                                    _ip_status_cache_ttl(payload))
+    with _IP_STATUS_CACHE_LOCK:
+        _IP_STATUS_CACHE[server_uid] = (time.time(), payload,
+                                        _ip_status_cache_ttl(payload))
 
 
 def _invalidate_ip_status(server_uid=None):
@@ -10406,10 +12055,11 @@ def _invalidate_ip_status(server_uid=None):
             _CHECK_CACHE.clear()
         else:
             _CHECK_CACHE.pop(server_uid, None)
-    if server_uid is None:
-        _IP_STATUS_CACHE.clear()
-    else:
-        _IP_STATUS_CACHE.pop(server_uid, None)
+    with _IP_STATUS_CACHE_LOCK:
+        if server_uid is None:
+            _IP_STATUS_CACHE.clear()
+        else:
+            _IP_STATUS_CACHE.pop(server_uid, None)
 
 
 def _invalidate_ip_status_for_server(server_id):
@@ -10470,8 +12120,10 @@ def api_ip_status(request: Request, server_id: int):
     """IPv4/IPv6 state of the host, Docker, every AWG instance and the
     xray connections (as port usage: a running instance uses the host IP).
 
-    Cached for 20 s per server: the page polls it and every miss costs several
-    SSH round-trips. Mutations drop the entry themselves.
+    Cached for 75 s per server (one poll interval plus headroom): the page
+    polls it every 60 s and every miss costs several SSH round-trips.
+    Mutations drop the entry themselves; an unreachable host is cached for
+    10 s so it is not re-probed on every visibilitychange.
     """
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -10497,6 +12149,9 @@ def api_ip_status(request: Request, server_id: int):
                            exc_info=True)
             status = {'state': 'unknown', 'error': 'ssh_failed',
                       'host': {}, 'docker': {}, 'instances': []}
+            # Cache the failure too: without this every 60 s poll and every
+            # visibilitychange opened a new SSH connection to a dead host.
+            _ip_status_cache_put(uid, status)
     status = dict(status)
     status['preference'] = {
         'new_instances': server.get('ipv6_new_instances'),
@@ -10850,6 +12505,11 @@ async def api_uninstall_protocol(request: Request, server_id: int, req: Protocol
             ]
             save_data(data)
         ssh.disconnect()
+        # The instance is gone, so its warp record must go too. Without this
+        # the card kept showing it as installed and a host-level install was
+        # allowed to register a second account beside the leftover record.
+        if req.protocol not in (server.get('protocols') or {}):
+            _drop_warp_instance_state(server.get('uid'), req.protocol)
         if base == 'exit':
             detached = await exit_link_svc.detach_entries_for_exit(server.get('uid'), 'exit_uninstalled')
             return {'status': 'success', 'detached': detached}
@@ -11204,6 +12864,33 @@ def _instance_copy_load():
 
 def _instance_copy_error(exc, status_code=400):
     return JSONResponse({'error': exc.message, 'code': exc.code}, status_code=status_code)
+
+
+def _warp_import_sources(data, server_id):
+    """Other panel servers that can donate a WARP profile.
+
+    Only servers with an AmneziaWG instance are useful: the profile lives
+    inside such a container. The target server itself is excluded, so the UI
+    cannot offer an import onto the same host.
+    """
+    sources = []
+    for index, server in enumerate(data.get('servers', [])):
+        if index == server_id:
+            continue
+        uid = server.get('uid') or ''
+        if not uid:
+            continue
+        awg = [proto for proto in (server.get('protocols') or {})
+               if protocol_base(proto) in ('awg', 'awg2', 'awg3')]
+        if not awg:
+            continue
+        sources.append({
+            'uid': uid,
+            'name': server.get('name') or server.get('host') or uid,
+            'host': server.get('host') or '',
+            'protocols': awg,
+        })
+    return sources
 
 
 def _instance_copy_targets(data, server_id):
@@ -12677,75 +14364,13 @@ async def api_remove_connection(request: Request, server_id: int, req: Connectio
             return JSONResponse({'error': 'Client ID is required'}, status_code=400)
 
         actor = _actor_id(request, admin)
-        operation_id = uuid.uuid4().hex
-
-        # An owned peer must be finalized; an unowned peer can be removed raw.
-        conn = find_connection(data, server_id, req.protocol, req.client_id)
-        if conn is None:
-            ssh = get_ssh(server)
-            await asyncio.to_thread(ssh.connect)
-            manager = get_protocol_manager(ssh, req.protocol)
-            await asyncio.to_thread(_manager_call, manager, 'remove_client',
-                                    req.protocol, req.client_id)
-            ssh.disconnect()
-            _invalidate_ip_status(server.get('uid'))
-            return {'status': 'success', 'finalized': False}
-
-        scope = connection_scope(conn, server)
-        kind = 'peer_remove'
-        intent = make_intent(scope, 'remove')
-
-        observed_bytes = None
-        quiescent = False
-        ssh = None
         try:
-            ssh = get_ssh(server)
-            await asyncio.to_thread(ssh.connect)
-            manager = get_protocol_manager(ssh, req.protocol)
-            observed_bytes, quiescent = await asyncio.to_thread(
-                read_peer_state, manager, req.protocol, req.client_id)
-
-            if observed_bytes is None and not quiescent and not req.allow_unverified:
-                return JSONResponse({
-                    'error': 'Could not read the final traffic counter.',
-                    'code': 'final_counter_read_failed',
-                    'can_force': True,
-                }, status_code=409)
-
-            await asyncio.to_thread(_manager_call, manager, 'remove_client',
-                                    req.protocol, req.client_id)
+            return await _finalize_and_remove_peer(
+                server, req.protocol, req.client_id, actor=actor,
+                kind='peer_remove', server_id=server_id,
+                allow_unverified=req.allow_unverified)
         except FinalizationError as exc:
-            return JSONResponse({'error': str(exc), 'code': exc.code,
-                                 'can_force': exc.can_force}, status_code=409)
-        except Exception as exc:
-            logger.exception("Error during peer removal SSH")
-            return JSONResponse({'error': str(exc), 'code': 'removal_ssh_failed'},
-                                status_code=502)
-        finally:
-            if ssh:
-                try:
-                    ssh.disconnect()
-                except Exception:
-                    pass
-
-        async with DATA_LOCK:
-            before = pathlib_read_data_bytes() if os.path.exists(DATA_FILE) else b''
-            data = load_data()
-            conn = find_connection(data, server_id, req.protocol, req.client_id)
-            if conn is None:
-                return JSONResponse({'error': 'Connection link disappeared during removal'},
-                                    status_code=409)
-            mode = 'delete_unverified' if observed_bytes is None else 'delete_finalized'
-            accounting = finalize_connection_record(
-                data, conn, server, observed_bytes, time.time(), mode,
-                operation_id, quiescent)
-            result = await asyncio.to_thread(
-                commit_finalize, DATA_FILE, operation_id, actor, kind, intent,
-                before, data)
-            result['accounting'] = accounting
-            result['finalized'] = True
-            _invalidate_ip_status(data['servers'][server_id].get('uid'))
-            return result
+            return _finalization_error_response(exc)
     except Exception as e:
         logger.exception("Error removing connection")
         return JSONResponse({'error': str(e)}, status_code=500)
@@ -14022,7 +15647,7 @@ async def api_my_connection_delete(request: Request, connection_id: str):
     try:
         return await self_service_connections.delete_user_connection(user['id'], connection_id, 'web')
     except Exception as exc:
-        return _self_service_error_response(exc)
+        return _self_service_error_response(exc, request.cookies.get('lang', 'en'))
 
 
 @app.post('/api/users/{user_id}/share/setup', tags=["Users"])

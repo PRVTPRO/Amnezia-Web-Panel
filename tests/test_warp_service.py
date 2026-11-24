@@ -199,6 +199,12 @@ class ClassifyStateTests(unittest.TestCase):
         self.assertEqual(self._classify(handshake_age=300),
                          ws.ST_DISCONNECTED)
 
+    def test_unmeasured_handshake_is_connecting(self):
+        # The status projection has no live probe, so a linked instance with
+        # no handshake telemetry must not read as disconnected.
+        self.assertEqual(self._classify(handshake_age=None),
+                         ws.ST_CONNECTING)
+
     def test_probe_failure_is_connecting(self):
         self.assertEqual(self._classify(probe_ok=False), ws.ST_CONNECTING)
 
@@ -216,6 +222,9 @@ class ClassifyStateTests(unittest.TestCase):
         self.assertEqual(
             ws.aggregate_state([ws.ST_CONNECTED, ws.ST_DISCONNECTED]),
             ws.AGG_DEGRADED)
+        self.assertEqual(
+            ws.aggregate_state([ws.ST_NOT_INSTALLED, ws.ST_CONNECTING]),
+            ws.AGG_INSTALLED)
         self.assertEqual(ws.aggregate_state([]), ws.AGG_NOT_INSTALLED)
         self.assertEqual(
             ws.aggregate_state([ws.ST_CONNECTED], remote_unreachable=True),

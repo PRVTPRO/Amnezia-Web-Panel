@@ -1,7 +1,10 @@
 import asyncio
 import copy
+import json
 import unittest
+from unittest.mock import MagicMock, patch
 
+import app as panel
 from connection_service import ConnectionService, RateLimitError, SelfServiceError
 
 
@@ -34,6 +37,46 @@ class FakeManager:
 class FailingManager(FakeManager):
     def add_client(self, protocol, name, host, port, public_port=None):
         raise RuntimeError('remote failed')
+
+
+class FakeFinalizer:
+    """Stand-in for app.py's finalization path (SSH removal + accounting).
+
+    Records the arguments the service passed, removes the peer through the
+    manager, drops the link row and appends a tombstone, which is what the real
+    helper does. ``error`` makes it refuse instead, like a fail-closed path.
+    """
+
+    def __init__(self, state, manager=None, error=None):
+        self.state = state
+        self.manager = manager
+        self.error = error
+        self.calls = []
+
+    async def __call__(self, server, protocol, client_id, *, actor, kind,
+                       server_id, allow_unverified=False, owner_user_id=None):
+        self.calls.append({'server': server, 'protocol': protocol,
+                           'client_id': client_id, 'actor': actor, 'kind': kind,
+                           'server_id': server_id,
+                           'allow_unverified': allow_unverified,
+                           'owner_user_id': owner_user_id})
+        if self.error is not None:
+            raise self.error
+        if self.manager is not None:
+            self.manager.remove_client(protocol, client_id)
+        self.state['user_connections'] = [
+            c for c in self.state.get('user_connections', [])
+            if not (c.get('server_id') == server_id
+                    and c.get('client_id') == client_id)
+        ]
+        self.state.setdefault('accounting_recoveries', []).append({
+            'operation': 'delete_finalized',
+            'scope': {'server_uid': server.get('uid'), 'protocol': protocol,
+                      'client_id': client_id},
+            'connection': {'client_id': client_id, 'protocol': protocol},
+            'counters_verified_final': False,
+        })
+        return {'status': 'success', 'finalized': True}
 
 
 def base_data():
@@ -70,7 +113,7 @@ def base_data():
 
 class ConnectionServiceTest(unittest.IsolatedAsyncioTestCase):
     def make_service(self, data=None, manager=None, save_raises=False,
-                     public_endpoint=None):
+                     public_endpoint=None, finalize_peer=None):
         state = copy.deepcopy(data or base_data())
         public_endpoint = public_endpoint or (
             lambda server, protocol: (server.get('host', ''), None))
@@ -86,6 +129,9 @@ class ConnectionServiceTest(unittest.IsolatedAsyncioTestCase):
                 state.clear()
                 state.update(new_data)
 
+        if finalize_peer is None:
+            finalize_peer = FakeFinalizer(state, fake_manager)
+
         service = ConnectionService(
             load_data=load_data,
             save_data=save_data,
@@ -95,6 +141,7 @@ class ConnectionServiceTest(unittest.IsolatedAsyncioTestCase):
             manager_call=lambda manager, method, protocol, *args, **kwargs: getattr(manager, method)(protocol, *args, **kwargs),
             generate_vpn_link=lambda config: f'vpn://{config}',
             protocol_public_endpoint=public_endpoint,
+            finalize_peer=finalize_peer,
         )
         return service, state, fake_manager
 
@@ -277,11 +324,11 @@ class ConnectionServiceTest(unittest.IsolatedAsyncioTestCase):
             'name': 'phone',
             'created_by': 'self_service',
         })
-        service, _, _ = self.make_service(data)
+        service, state, manager = self.make_service(data)
 
-        with self.assertRaises(SelfServiceError) as guard:
-            await service.delete_user_connection('user-1', 'conn-1', 'web')
-        self.assertEqual(guard.exception.status_code, 409)
+        result = await service.delete_user_connection('user-1', 'conn-1', 'web')
+        self.assertEqual(result['status'], 'success')
+        self.assertEqual(manager.removed, [('awg', 'client-1')])
         with self.assertRaises(RateLimitError):
             await service.delete_user_connection('user-1', 'missing', 'web')
 
@@ -379,6 +426,83 @@ class ConnectionServiceTest(unittest.IsolatedAsyncioTestCase):
             await service.delete_user_connection('user-1', 'nonexistent', 'web')
 
         self.assertEqual(ctx.exception.status_code, 404)
+
+    async def test_delete_of_another_users_connection_is_forbidden(self):
+        data = base_data()
+        data['users'].append({'id': 'user-2', 'username': 'bob', 'enabled': True})
+        data['user_connections'].append({
+            'id': 'conn-bob', 'user_id': 'user-2', 'server_id': 0,
+            'protocol': 'awg', 'client_id': 'client-bob', 'name': 'bob-phone',
+            'created_by': 'self_service',
+        })
+        service, saved, manager = self.make_service(data)
+
+        with self.assertRaises(SelfServiceError) as ctx:
+            await service.delete_user_connection('user-1', 'conn-bob', 'web')
+
+        self.assertEqual(ctx.exception.status_code, 404)
+        self.assertEqual(manager.removed, [])
+        self.assertEqual(len(saved['user_connections']), 1)
+
+    async def test_delete_refuses_when_finalization_is_not_configured(self):
+        data = base_data()
+        data['user_connections'].append({
+            'id': 'conn-1', 'user_id': 'user-1', 'server_id': 0,
+            'protocol': 'awg', 'client_id': 'client-1', 'name': 'phone',
+            'created_by': 'self_service',
+        })
+        state = copy.deepcopy(data)
+        service = ConnectionService(
+            load_data=lambda: state,
+            save_data=lambda new: state.update(new),
+            data_lock=asyncio.Lock(),
+            get_ssh=lambda server: FakeSSH(),
+            get_protocol_manager=lambda ssh, protocol: FakeManager(),
+            manager_call=lambda manager, method, protocol, *a, **k: getattr(manager, method)(protocol, *a, **k),
+            generate_vpn_link=lambda config: f'vpn://{config}',
+        )
+
+        with self.assertRaises(SelfServiceError) as ctx:
+            await service.delete_user_connection('user-1', 'conn-1', 'web')
+
+        # Failing closed here is correct: without the finalization path the
+        # service cannot settle counters, and a silent row drop would be the
+        # very regression this guard exists for.
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertEqual(len(state['user_connections']), 1)
+
+    async def test_delete_does_not_hold_the_data_lock_over_ssh(self):
+        """The finalizer must run with DATA_LOCK released (SSH is slow)."""
+        data = base_data()
+        data['user_connections'].append({
+            'id': 'conn-1', 'user_id': 'user-1', 'server_id': 0,
+            'protocol': 'awg', 'client_id': 'client-1', 'name': 'phone',
+            'created_by': 'self_service',
+        })
+        helper = ConnectionServiceTest()
+        lock = asyncio.Lock()
+        observed = {}
+        async def finalize(server, protocol, client_id, *, actor, kind,
+                           server_id, allow_unverified=False, owner_user_id=None):
+            observed['locked'] = lock.locked()
+            return {'status': 'success', 'finalized': True}
+
+        state = copy.deepcopy(data)
+        service = ConnectionService(
+            load_data=lambda: state,
+            save_data=lambda new: state.update(new),
+            data_lock=lock,
+            get_ssh=lambda server: FakeSSH(),
+            get_protocol_manager=lambda ssh, protocol: FakeManager(),
+            manager_call=lambda manager, method, protocol, *a, **k: getattr(manager, method)(protocol, *a, **k),
+            generate_vpn_link=lambda config: f'vpn://{config}',
+            finalize_peer=finalize,
+        )
+
+        await service.delete_user_connection('user-1', 'conn-1', 'web')
+
+        self.assertFalse(observed['locked'])
+        self.assertFalse(lock.locked())
 
     async def test_create_succeeds_for_user_with_zero_connections(self):
         service, state, manager = self.make_service()
@@ -525,6 +649,50 @@ class ConnectionServiceTest(unittest.IsolatedAsyncioTestCase):
             await service.create_user_connection('user-1', 0, 'xray', 'home', 'web')
 
         self.assertIn('not allowed', str(ctx.exception).lower())
+
+
+class TestFinalizationLinkDisappeared(unittest.IsolatedAsyncioTestCase):
+    """A vanished owned row must fail closed before any remote peer is touched."""
+
+    async def test_disappeared_owned_link_refuses_without_ssh(self):
+        data = base_data()
+        server = data['servers'][0]
+
+        with patch.object(panel, 'load_data', return_value=data), \
+             patch.object(panel, 'get_ssh', MagicMock()) as ssh:
+            with self.assertRaises(panel.FinalizationError) as ctx:
+                await panel._finalize_and_remove_peer(
+                    server, 'awg', 'нет-такого-client-id',
+                    actor='u', kind='self_service_peer_remove',
+                    server_id=0, owner_user_id='1',
+                )
+
+        self.assertEqual(ctx.exception.code, 'connection_link_disappeared')
+        ssh.assert_not_called()
+
+    def test_disappeared_link_error_is_localized(self):
+        exc = panel.FinalizationError('connection_link_disappeared', 'x')
+
+        response = panel._self_service_error_response(exc, 'ru')
+
+        self.assertEqual(response.status_code, 409)
+        body = json.loads(response.body)
+        self.assertEqual(body['code'], 'connection_link_disappeared')
+        self.assertNotEqual(body['error'], str(exc))
+        self.assertNotIn('x', body['error'])
+        self.assertIn('Обновите страницу', body['error'])
+
+    def test_server_not_found_error_is_localized_404(self):
+        exc = panel.FinalizationError('server_not_found', 'x')
+
+        response = panel._self_service_error_response(exc, 'ru')
+
+        self.assertEqual(response.status_code, 404)
+        body = json.loads(response.body)
+        self.assertEqual(body['code'], 'server_not_found')
+        self.assertNotEqual(body['error'], str(exc))
+        self.assertNotIn('x', body['error'])
+        self.assertIn('Подключение не найдено', body['error'])
 
 
 if __name__ == '__main__':

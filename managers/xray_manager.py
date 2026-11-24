@@ -29,21 +29,32 @@ def _random_range(low_min, low_max, span_min, span_max):
 
 
 def _xhttp_extra():
-    """XHTTP tuning per the XTLS guidance: express every knob the core
-    accepts as a range, and shift the bounds per install so servers do
-    not share one padding/multiplexing profile. hKeepAlivePeriod is the
-    one field that rejects ranges; maxConnections conflicts with
-    maxConcurrency and stays off."""
+    """XHTTP tuning per the current classic anti-DPI profile (mode
+    stream-one), proven on weak mobile clients: the wide maxConcurrency
+    ranges of the previous profile made old phones drop the tunnel
+    mid-session. Keeping the connection count in the 1-2 band is also a
+    popular DPI-evasion choice in its own right - one or two long-lived
+    connections look like an ordinary browser HTTP/2 session instead of
+    a multiplexed tunnel.
+
+    xmux deliberately carries a single connection knob: some clients
+    reject an xmux object with two knobs at once, even when one is 0.
+    maxConnections is a band rather than a fixed count (the core draws
+    it once per client session), so the connection count is not a fixed
+    pattern. maxConcurrency stays absent, which means no per-connection
+    stream cap (mux.go caps only when the value is positive) - the
+    profile is reuse-heavy, not serial. hKeepAlivePeriod stays absent
+    too: that is the core default keepalive, exactly what an explicit
+    0 meant. The remaining knobs are ranges with bounds shifted per
+    install so servers do not share one padding/muxing profile."""
     return {
         "xPaddingBytes": _random_range(50, 300, 500, 1200),
         "scStreamUpServerSecs": _random_range(10, 30, 40, 60),
         "xmux": {
-            "maxConcurrency": _random_range(8, 16, 4, 16),
-            "maxConnections": 0,
-            "cMaxReuseTimes": 0,
-            "hMaxRequestTimes": _random_range(400, 800, 200, 400),
-            "hMaxReusableSecs": _random_range(1200, 2400, 600, 1200),
-            "hKeepAlivePeriod": 0,
+            "maxConnections": "1-2",
+            "cMaxReuseTimes": _random_range(64, 128, 10, 20),
+            "hMaxRequestTimes": _random_range(400, 600, 50, 100),
+            "hMaxReusableSecs": _random_range(1200, 1800, 150, 350),
         },
     }
 
@@ -546,7 +557,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
                 "xhttpSettings": {
                     "path": '/' + uuid.uuid4().hex[:16],
                     "host": site_name,
-                    "mode": "auto",
+                    "mode": "stream-one",
                     "extra": _xhttp_extra(),
                 },
                 "realitySettings": reality_settings,

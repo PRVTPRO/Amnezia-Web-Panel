@@ -511,7 +511,9 @@ def classify_instance_state(*, installed, link_active, ssh_ok=True,
 
     Precedence: unreachable > stopped > error > disconnected > connecting >
     connected; ``not_installed``/``available_not_linked``/``rate_limited``
-    come from the record, not from the probe.
+    come from the record, not from the probe.  With no handshake telemetry
+    a linked instance is ``connecting`` (awaiting confirmation), never
+    ``disconnected``.
     """
     if not ssh_ok:
         return ST_UNREACHABLE
@@ -526,7 +528,11 @@ def classify_instance_state(*, installed, link_active, ssh_ok=True,
     if rate_limited:
         return ST_RATE_LIMITED
     if handshake_age is None:
-        return ST_DISCONNECTED
+        # No handshake telemetry: the status projection has no live probe, so
+        # an unknown age must not be reported as a failure.  A configured but
+        # unmeasured link is "connecting", not "disconnected" -- otherwise
+        # every linked instance kept the server badge at "degraded" forever.
+        return ST_CONNECTING
     if handshake_age > max_age:
         return ST_DISCONNECTED
     if probe_ok is False:

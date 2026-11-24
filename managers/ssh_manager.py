@@ -134,8 +134,14 @@ class SSHManager:
         # otherwise every API request kills the shared transport.
         self.pooled = False
 
-    def connect(self):
-        """Establish SSH connection to the server."""
+    def connect(self, force=False):
+        """Establish SSH connection to the server.
+
+        ``force=True`` обходит идемпотентный pooled-шорткат: транспорт может
+        оставаться ``is_active()`` и при этом отклонять открытие новых каналов
+        (sshd исчерпал MaxSessions) или быть зависшим mux. Вызвавший после
+        отказа канала должен получить новое соединение, а не ту же сессию.
+        """
         # Legacy endpoints still call connect() after get_ssh() has returned a
         # pooled manager.  Reconnecting there used to close the shared
         # transport underneath another request (stats/background checks),
@@ -147,7 +153,7 @@ class SSHManager:
                 raise SSHBusy(
                     f"SSH to {self.host} is still busy with another operation")
             with self._conn_lock:
-                if self.pooled:
+                if self.pooled and not force:
                     try:
                         transport = self.client.get_transport() if self.client else None
                         if transport and transport.is_active():
@@ -363,6 +369,28 @@ class SSHManager:
             except Exception:
                 pass
             self.client = None
+        # Кэши состояния хоста были получены через закрытый транспорт: после
+        # force-reconnect устаревший docker/AWG-снапшот показал бы в UI
+        # остановленные контейнеры или мёртвые пиры (замечание ревью #408).
+        self._docker_ps_cache = None
+        with self._awg_batch_lock:
+            self._awg_batch = None
+
+    @contextmanager
+    def _closing_channel(self, channel):
+        """Закрыть session channel при любом исходе команды.
+
+        Полуоткрытый канал продолжает занимать слот MaxSessions на стороне
+        sshd, поэтому один force-reconnect лечил бы симптом ненадолго:
+        следующий транспорт снова упёрся бы в «no more sessions».
+        """
+        try:
+            yield
+        finally:
+            try:
+                channel.close()
+            except Exception:
+                pass
 
     def disconnect(self):
         """Close SSH connection.
@@ -495,6 +523,24 @@ class SSHManager:
         return str(exc).strip() or type(exc).__name__
 
     @staticmethod
+    def _channel_open_failure(exc):
+        """Отказ до запуска команды: канал открыть не удалось.
+
+        sshd с исчерпанным MaxSessions держит TCP/SSH-транспорт активным, но
+        не даёт открыть session channel; paramiko сообщает об этом как
+        ChannelException(2, 'Connect failed'). Повтор такой команды безопасен —
+        до удалённого хоста она не дошла. Ошибки чтения/записи уже запущенной
+        команды сюда не относятся: их реконнект не лечит.
+        """
+        if isinstance(exc, paramiko.ChannelException):
+            return True
+        text = str(exc).lower()
+        return any(marker in text for marker in (
+            'no more sessions', 'connect failed', 'open failed',
+            'unable to open channel',
+        ))
+
+    @staticmethod
     def _drain_streams(stdout, stderr, backstop):
         """Read stdout and stderr concurrently, bounded by the kill switch.
 
@@ -554,8 +600,15 @@ class SSHManager:
             # дважды. Забор (fence) в этом случае ставится выше.
             if not _retried and not lifecycle_active():
                 logger.warning(f"exec failed ({e}); reconnecting and retrying once")
+                # is_active() не показывает, что sshd отказал в новом канале:
+                # обычный connect() вернул бы True на том же транспорте, и
+                # повтор снова упал бы с ChannelException (issue #408).
+                forced = self._channel_open_failure(e)
+                logger.info(
+                    f"SSH exec failed on {self.host}; "
+                    f"forced reconnect={forced}, pooled={self.pooled}")
                 try:
-                    self.connect()
+                    self.connect(force=forced)
                 except Exception as ce:
                     logger.error(f"reconnect failed: {ce}")
                     return "", self._reason(ce), -1
@@ -565,79 +618,80 @@ class SSHManager:
 
         # Crucial: set timeout on the channel to prevent hanging indefinitely
         channel = stdout.channel
-        channel.settimeout(timeout)
-        stderr.channel.settimeout(timeout)
+        with self._closing_channel(channel):
+            channel.settimeout(timeout)
+            stderr.channel.settimeout(timeout)
 
-        # The kill switch covers the stdin write as well as the reads: a full
-        # send window could otherwise block for a long time.
-        # A command that is slow but healthy may legitimately run longer than
-        # one timeout, so the wall-clock guard is generous.
-        with self._kill_switch(2 * timeout + _KILL_SWITCH_GRACE, 'command'):
-            if stdin_input is not None:
+            # The kill switch covers the stdin write as well as the reads: a full
+            # send window could otherwise block for a long time.
+            # A command that is slow but healthy may legitimately run longer than
+            # one timeout, so the wall-clock guard is generous.
+            with self._kill_switch(2 * timeout + _KILL_SWITCH_GRACE, 'command'):
+                if stdin_input is not None:
+                    try:
+                        stdin.write(stdin_input)
+                        stdin.flush()
+                        # Signal EOF so consumers of stdin (e.g. docker exec -i)
+                        # behave exactly as with the old `echo ... |` pipe.
+                        stdin.channel.shutdown_write()
+                    except Exception as e:
+                        logger.warning(f"failed to write command stdin: {e}")
                 try:
-                    stdin.write(stdin_input)
-                    stdin.flush()
-                    # Signal EOF so consumers of stdin (e.g. docker exec -i)
-                    # behave exactly as with the old `echo ... |` pipe.
-                    stdin.channel.shutdown_write()
+                    # Drain both pipes before waiting for the exit status: paramiko
+                    # documents that recv_exit_status() deadlocks when the command
+                    # writes more than one channel window while nobody reads it.
+                    out_bytes, err_bytes = self._drain_streams(
+                        stdout, stderr, 2 * timeout + _KILL_SWITCH_GRACE + 5)
+                    out = out_bytes.decode('utf-8', errors='replace').strip()
+                    err = err_bytes.decode('utf-8', errors='replace').strip()
+                    # recv_exit_status() itself waits on an Event with no timeout.
+                    # Wait for it explicitly so a lost route ends as an error, not
+                    # as a worker thread that never comes back.
+                    status_event = getattr(channel, 'status_event', None)
+                    if status_event is not None and not status_event.wait(timeout):
+                        raise TimeoutError(
+                            f'no exit status after {timeout:g}s')
+                    exit_code = channel.recv_exit_status()
+                    if exit_code < 0 and not self._transport_alive():
+                        # paramiko uses -1 when the transport died before sending
+                        # the exit status: the command outcome is unknown, not a
+                        # normal failure, and the interlock must know that.
+                        raise RuntimeError('remote exit status was not received')
                 except Exception as e:
-                    logger.warning(f"failed to write command stdin: {e}")
-            try:
-                # Drain both pipes before waiting for the exit status: paramiko
-                # documents that recv_exit_status() deadlocks when the command
-                # writes more than one channel window while nobody reads it.
-                out_bytes, err_bytes = self._drain_streams(
-                    stdout, stderr, 2 * timeout + _KILL_SWITCH_GRACE + 5)
-                out = out_bytes.decode('utf-8', errors='replace').strip()
-                err = err_bytes.decode('utf-8', errors='replace').strip()
-                # recv_exit_status() itself waits on an Event with no timeout.
-                # Wait for it explicitly so a lost route ends as an error, not
-                # as a worker thread that never comes back.
-                status_event = getattr(channel, 'status_event', None)
-                if status_event is not None and not status_event.wait(timeout):
-                    raise TimeoutError(
-                        f'no exit status after {timeout:g}s')
-                exit_code = channel.recv_exit_status()
-                if exit_code < 0 and not self._transport_alive():
-                    # paramiko uses -1 when the transport died before sending
-                    # the exit status: the command outcome is unknown, not a
-                    # normal failure, and the interlock must know that.
-                    raise RuntimeError('remote exit status was not received')
-            except Exception as e:
-                from peer_lifecycle_lock import note_ssh_uncertainty
-                note_ssh_uncertainty()
-                logger.error(f"Command timed out or failed to read: {e}")
-                dead = not self._transport_alive()
-                try:
-                    channel.close()
-                except Exception:
-                    pass
-                # Drop the transport only when it is actually gone (or was
-                # closed by the kill switch). A slow command on a healthy link
-                # keeps the pooled connection for the next request.
-                if dead:
-                    self._drop_transport()
-                if isinstance(e, TimeoutError):
-                    err = (f"SSH command timed out after {timeout:g}s "
-                           f"({self._reason(e)})")
+                    from peer_lifecycle_lock import note_ssh_uncertainty
+                    note_ssh_uncertainty()
+                    logger.error(f"Command timed out or failed to read: {e}")
+                    dead = not self._transport_alive()
+                    try:
+                        channel.close()
+                    except Exception:
+                        pass
+                    # Drop the transport only when it is actually gone (or was
+                    # closed by the kill switch). A slow command on a healthy link
+                    # keeps the pooled connection for the next request.
+                    if dead:
+                        self._drop_transport()
+                    if isinstance(e, TimeoutError):
+                        err = (f"SSH command timed out after {timeout:g}s "
+                               f"({self._reason(e)})")
+                    else:
+                        err = ("SSH connection lost while running the command "
+                               f"({self._reason(e)})")
+                    out, exit_code = "", -1
                 else:
-                    err = ("SSH connection lost while running the command "
-                           f"({self._reason(e)})")
-                out, exit_code = "", -1
-            else:
-                # A signal-killed command (OOM killer, admin `kill`) makes sshd
-                # send exit-signal, which paramiko does not decode: the status
-                # stays -1 on a perfectly healthy transport. Keep the output.
-                if exit_code < 0:
-                    err = (err or 'remote command was killed before reporting '
-                                   'an exit status')
-                    logger.warning(
-                        f"Command on {self.host} ended without an exit status: {err}")
+                    # A signal-killed command (OOM killer, admin `kill`) makes sshd
+                    # send exit-signal, which paramiko does not decode: the status
+                    # stays -1 on a perfectly healthy transport. Keep the output.
+                    if exit_code < 0:
+                        err = (err or 'remote command was killed before reporting '
+                                       'an exit status')
+                        logger.warning(
+                            f"Command on {self.host} ended without an exit status: {err}")
 
-        if exit_code != 0:
-            logger.warning(f"Command exited with code {exit_code}: {err}")
+            if exit_code != 0:
+                logger.warning(f"Command exited with code {exit_code}: {err}")
 
-        return out, err, exit_code
+            return out, err, exit_code
 
     def run_sudo_command(self, command, timeout=60):
         """
