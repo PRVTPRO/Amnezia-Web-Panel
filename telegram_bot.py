@@ -42,7 +42,7 @@ _pending_inputs = {}
 
 _EXTRA_PROTOCOL_DISPLAY_NAMES = {
     "dns": "AmneziaDNS",
-    "socks5": "SOCKS5",
+    "socks5": "3proxy",
     "exit": "Exit Node",
     "adguard": "AdGuard Home",
     "nginx": "NGINX",

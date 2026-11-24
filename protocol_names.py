@@ -11,7 +11,7 @@ def protocol_display_name(protocol, header_protection=False, protocol_version=No
         'awg': 'AmneziaWG', 'awg2': 'AmneziaWG 2.0',
         'awg3': 'AmneziaWG 3.1', 'awg_legacy': 'AmneziaWG Legacy',
         'xray': 'Xray', 'telemt': 'Telemt', 'dns': 'AmneziaDNS',
-        'wireguard': 'WireGuard', 'socks5': 'SOCKS5', 'adguard': 'AdGuard Home',
+        'wireguard': 'WireGuard', 'socks5': '3proxy', 'adguard': 'AdGuard Home',
         'nginx': 'NGINX', 'haproxy': 'HAProxy', 'exit': 'Exit Node',
     }
     name = names.get(base, base)
