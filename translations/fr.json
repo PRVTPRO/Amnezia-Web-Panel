@@ -1657,7 +1657,6 @@
   "self_service_delete_restore_required": "Le serveur n'a pas confirmé le résultat. Rien n'a été supprimé ; un administrateur doit vérifier l'état de la connexion.",
   "self_service_delete_link_disappeared": "Cette connexion a été modifiée ou supprimée. Actualisez la page et réessayez.",
   "self_service_delete_not_found": "Connexion introuvable. Actualisez la page.",
-  "srv_warp_err_registered": "WARP est déjà enregistré sur l'une des instances de ce serveur. Dissociez-le d'abord.",
   "srv_warp_err_install_failed": "L'installation de WARP a échoué sur cette instance",
   "srv_warp_err_repair_failed": "La réparation de WARP a échoué sur cette instance",
   "editor_load_failed": "Impossible de charger l'éditeur de code — un champ texte simple est utilisé",

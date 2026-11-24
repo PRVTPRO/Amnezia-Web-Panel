@@ -1657,7 +1657,6 @@
   "self_service_delete_restore_required": "The server did not confirm the result. Nothing was deleted; an administrator must check the connection state.",
   "self_service_delete_link_disappeared": "This connection was changed or removed. Refresh the page and try again.",
   "self_service_delete_not_found": "Connection not found. Refresh the page.",
-  "srv_warp_err_registered": "WARP is already registered on one of this server's instances. Unlink it there first.",
   "srv_warp_err_install_failed": "WARP install failed on this instance",
   "srv_warp_err_repair_failed": "WARP repair failed on this instance",
   "editor_load_failed": "Could not load the code editor — a plain text field is used instead",
