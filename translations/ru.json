@@ -1597,6 +1597,7 @@
   "smartroute_timer_stale": "Список префиксов давно не обновлялся",
   "smartroute_timer_armed": "Таймер взведён",
   "smartroute_card_warn": "внимание",
+  "editor_load_failed": "Не удалось загрузить редактор кода — открыто обычное текстовое поле",
   "proxy_accounts_title": "Учётные записи",
   "proxy_add_account": "Новая учётка",
   "proxy_accounts_empty": "Учёток пока нет",

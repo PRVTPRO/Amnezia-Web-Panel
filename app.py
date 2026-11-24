@@ -8308,7 +8308,13 @@ def api_check_server(request: Request, server_id: int):
         try:
             awg_protos = [p for p in protocols_to_check if protocol_base(p) in AWG_PROTOCOLS]
             if awg_protos:
-                AWGManager(ssh).prefetch_awg_state(awg_protos)
+                # Only instances that actually have a link need the extra
+                # `wg show exit0` block: it is three commands per container.
+                exit_protos = [
+                    p for p in awg_protos
+                    if ((server.get('protocols') or {}).get(p) or {}).get('exit_link')
+                ]
+                AWGManager(ssh).prefetch_awg_state(awg_protos, exit_protocols=exit_protos)
         except Exception as e:
             logger.warning(f"AWG status prefetch failed, falling back to per-instance checks: {e}")
         # Run checks sequentially. Several managers use the same SSH connection;
@@ -11559,11 +11565,16 @@ IPV6_CONFLICT_CODES = frozenset({
 IPV6_RETRY_CODES = frozenset({'peer_lifecycle_uncertain'})
 IPV6_BAD_REQUEST_CODES = frozenset({'not_awg', 'bad_request'})
 
-_IP_STATUS_TTL = 20.0
+_IP_STATUS_TTL = 75.0
 # A degraded or unknown payload is re-probed sooner: the next poll should not
 # keep showing a stale error for the full healthy TTL.
 _IP_STATUS_TTL_DEGRADED = 3.0
+# An unreachable host is a state, not a server error: cache the failure for a
+# short while so neither the 60 s poll nor a visibilitychange storm opens a new
+# SSH connection every time (the connect cooldown only grows to 300 s).
+_IP_STATUS_TTL_FAILED = 10.0
 _IP_STATUS_CACHE = {}
+_IP_STATUS_CACHE_LOCK = threading.Lock()
 _OP_STORES = {}
 _OP_LOCKS = {}
 
@@ -11614,27 +11625,32 @@ def _xray_port_usage(ssh, server):
 
 
 def _ip_status_cache_ttl(payload):
-    """20 s for a healthy payload, 3 s for a degraded or failed one."""
-    if isinstance(payload, dict) and payload.get('state') == 'ok' \
-            and not payload.get('error'):
+    """75 s for a healthy payload, 10 s for an SSH failure, 3 s for degraded."""
+    if not isinstance(payload, dict):
+        return _IP_STATUS_TTL_DEGRADED
+    if payload.get('state') == 'unknown' and payload.get('error') == 'ssh_failed':
+        return _IP_STATUS_TTL_FAILED
+    if payload.get('state') == 'ok' and not payload.get('error'):
         return _IP_STATUS_TTL
     return _IP_STATUS_TTL_DEGRADED
 
 
 def _ip_status_cache_get(server_uid):
-    entry = _IP_STATUS_CACHE.get(server_uid)
-    if not entry:
-        return None
-    stamp, payload, ttl = entry
-    if time.time() - stamp > ttl:
-        _IP_STATUS_CACHE.pop(server_uid, None)
-        return None
+    with _IP_STATUS_CACHE_LOCK:
+        entry = _IP_STATUS_CACHE.get(server_uid)
+        if not entry:
+            return None
+        stamp, payload, ttl = entry
+        if time.time() - stamp > ttl:
+            _IP_STATUS_CACHE.pop(server_uid, None)
+            return None
     return payload
 
 
 def _ip_status_cache_put(server_uid, payload):
-    _IP_STATUS_CACHE[server_uid] = (time.time(), payload,
-                                    _ip_status_cache_ttl(payload))
+    with _IP_STATUS_CACHE_LOCK:
+        _IP_STATUS_CACHE[server_uid] = (time.time(), payload,
+                                        _ip_status_cache_ttl(payload))
 
 
 def _invalidate_ip_status(server_uid=None):
@@ -11649,10 +11665,11 @@ def _invalidate_ip_status(server_uid=None):
             _CHECK_CACHE.clear()
         else:
             _CHECK_CACHE.pop(server_uid, None)
-    if server_uid is None:
-        _IP_STATUS_CACHE.clear()
-    else:
-        _IP_STATUS_CACHE.pop(server_uid, None)
+    with _IP_STATUS_CACHE_LOCK:
+        if server_uid is None:
+            _IP_STATUS_CACHE.clear()
+        else:
+            _IP_STATUS_CACHE.pop(server_uid, None)
 
 
 def _invalidate_ip_status_for_server(server_id):
@@ -11713,8 +11730,10 @@ def api_ip_status(request: Request, server_id: int):
     """IPv4/IPv6 state of the host, Docker, every AWG instance and the
     xray connections (as port usage: a running instance uses the host IP).
 
-    Cached for 20 s per server: the page polls it and every miss costs several
-    SSH round-trips. Mutations drop the entry themselves.
+    Cached for 75 s per server (one poll interval plus headroom): the page
+    polls it every 60 s and every miss costs several SSH round-trips.
+    Mutations drop the entry themselves; an unreachable host is cached for
+    10 s so it is not re-probed on every visibilitychange.
     """
     if not _check_admin(request):
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
@@ -11740,6 +11759,9 @@ def api_ip_status(request: Request, server_id: int):
                            exc_info=True)
             status = {'state': 'unknown', 'error': 'ssh_failed',
                       'host': {}, 'docker': {}, 'instances': []}
+            # Cache the failure too: without this every 60 s poll and every
+            # visibilitychange opened a new SSH connection to a dead host.
+            _ip_status_cache_put(uid, status)
     status = dict(status)
     status['preference'] = {
         'new_instances': server.get('ipv6_new_instances'),

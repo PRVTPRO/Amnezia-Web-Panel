@@ -1597,6 +1597,7 @@
   "smartroute_timer_stale": "La liste de préfixes n'a pas été actualisée depuis trop longtemps",
   "smartroute_timer_armed": "Minuteur armé",
   "smartroute_card_warn": "attention",
+  "editor_load_failed": "Impossible de charger l'éditeur de code — un champ texte simple est utilisé",
   "proxy_accounts_title": "Comptes",
   "proxy_add_account": "Nouveau compte",
   "proxy_accounts_empty": "Aucun compte pour l'instant",

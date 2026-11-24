@@ -315,8 +315,10 @@ class SmartRouteUiWiringTests(unittest.TestCase):
         self.assertIn('smartRouteMark(info.exit_link)', button)
         self.assertIn('function smartRouteMark(', self.page)
         self.assertIn('function smartRouteMarkState(', self.page)
-        # painted after the parallel probe settles, repainted after actions
-        self.assertIn('smartRouteStatus = await smartRouteProbe;', self.page)
+        # The probe must never be a gate for the grid: its answer is applied
+        # in its own task, and the marks are repainted there.
+        self.assertNotIn('smartRouteStatus = await smartRouteProbe;', self.page)
+        self.assertIn("ProbeQueue.background('smartroute'", self.page)
         self.assertIn('refreshExitMarks();', self.page)
         self.assertIn('refreshExitMark(currentExitLinkProto, state);', self.page)
         self.assertIn('smart_route_lost = true;', self.page)

@@ -412,19 +412,31 @@ class Ip6HostHeaderTests(Ipv6FixesBase):
 
 
 class StatusCacheTtlTests(unittest.TestCase):
-    """B11: healthy payloads live 20 s, degraded ones only 3 s."""
+    """B11: healthy payloads live one poll interval (75 s), degraded 3 s,
+    an unreachable host 10 s."""
 
     def setUp(self):
         panel._IP_STATUS_CACHE.clear()
         self.addCleanup(panel._IP_STATUS_CACHE.clear)
 
-    def test_ok_payload_lives_twenty_seconds(self):
+    def test_ok_payload_lives_one_poll_interval(self):
         payload = status_payload()
         with mock.patch.object(panel.time, 'time', return_value=100.0):
             panel._ip_status_cache_put('srv-uid', payload)
-        with mock.patch.object(panel.time, 'time', return_value=119.0):
+        # The page polls every 60 s; a snapshot must survive that with a
+        # headroom for the probe itself.
+        with mock.patch.object(panel.time, 'time', return_value=159.0):
             self.assertIs(panel._ip_status_cache_get('srv-uid'), payload)
-        with mock.patch.object(panel.time, 'time', return_value=121.0):
+        with mock.patch.object(panel.time, 'time', return_value=176.0):
+            self.assertIsNone(panel._ip_status_cache_get('srv-uid'))
+
+    def test_ssh_failure_is_cached_for_ten_seconds(self):
+        payload = status_payload(state='unknown', error='ssh_failed')
+        with mock.patch.object(panel.time, 'time', return_value=100.0):
+            panel._ip_status_cache_put('srv-uid', payload)
+        with mock.patch.object(panel.time, 'time', return_value=109.0):
+            self.assertIs(panel._ip_status_cache_get('srv-uid'), payload)
+        with mock.patch.object(panel.time, 'time', return_value=111.0):
             self.assertIsNone(panel._ip_status_cache_get('srv-uid'))
 
     def test_degraded_payload_lives_three_seconds(self):

@@ -1597,6 +1597,7 @@
   "smartroute_timer_stale": "فهرست پیشوندها مدت زیادی به‌روزرسانی نشده است",
   "smartroute_timer_armed": "تایمر فعال است",
   "smartroute_card_warn": "هشدار",
+  "editor_load_failed": "بارگذاری ویرایشگر کد ممکن نشد — از فیلد متنی ساده استفاده میشود",
   "proxy_accounts_title": "حساب‌ها",
   "proxy_add_account": "حساب جدید",
   "proxy_accounts_empty": "هنوز حسابی وجود ندارد",

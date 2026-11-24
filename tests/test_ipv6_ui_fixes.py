@@ -382,6 +382,9 @@ IPV4_POLICY_KEYS = {
     'ipv4_recreate_confirm', 'ipv4_ingress_saved',
 }
 
+# Lazy CodeMirror loader (P6): the one user-visible failure message.
+LAZY_EDITOR_KEYS = {'editor_load_failed'}
+
 # I1 masking block (per-instance special-junk packet): install and settings.
 AWG_I1_KEYS = {
     'awg_i1_ascii_only', 'awg_i1_auto_badge', 'awg_i1_bad_tag',

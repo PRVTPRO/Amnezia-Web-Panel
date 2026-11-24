@@ -1597,6 +1597,7 @@
   "smartroute_timer_stale": "The prefix list has not been refreshed for too long",
   "smartroute_timer_armed": "Timer is armed",
   "smartroute_card_warn": "warning",
+  "editor_load_failed": "Could not load the code editor — a plain text field is used instead",
   "proxy_accounts_title": "Accounts",
   "proxy_add_account": "New account",
   "proxy_accounts_empty": "No accounts yet",

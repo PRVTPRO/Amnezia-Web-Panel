@@ -1597,6 +1597,7 @@
   "smartroute_timer_stale": "前缀列表已长时间未更新",
   "smartroute_timer_armed": "定时器已启用",
   "smartroute_card_warn": "注意",
+  "editor_load_failed": "无法加载代码编辑器，已改用纯文本输入框",
   "proxy_accounts_title": "账户",
   "proxy_add_account": "新建账户",
   "proxy_accounts_empty": "暂无账户",
