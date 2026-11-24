@@ -102,6 +102,7 @@ from warp_service import (
     WarpStateStore,
     WARP_CLIENT_MTU_CAP,
     WARP_REGISTER_LIMIT,
+    migrate_legacy_client_mtu,
     aggregate_state,
     classify_instance_state,
     proto_record,
@@ -3686,6 +3687,11 @@ async def startup():
     _panel_lease.acquire()
     data = load_data()
     _refresh_panel_access(data)
+    # One-time WARP MTU rewrite: records saved with the old 1220 cap must be
+    # updated in the store, not on every read (a real 1220 budget is legal).
+    warp_state = warp_state_store.load()
+    if migrate_legacy_client_mtu(warp_state):
+        warp_state_store.save(warp_state)
     if data.get(DISASTER_HOLD):
         raise RuntimeError('Disaster recovery requires independent node reconciliation before startup')
     _start_conn_monitor()
@@ -13236,7 +13242,8 @@ def api_save_connection_config(request: Request, server_id: int, req: SaveConnec
         ssh = get_ssh(server)
         ssh.connect()
         manager = get_protocol_manager(ssh, req.protocol)
-        _manager_call(manager, 'save_client_config', req.protocol, req.client_id, config_text)
+        _manager_call(manager, 'save_client_config', req.protocol, req.client_id,
+                      config_text, warp_ctx=srv_warp_ctx(server, req.protocol))
         ssh.disconnect()
         shown = split_tunnel.apply_to_config(config_text)
         return {'status': 'success', **config_payloads(shown, server, req.protocol)}

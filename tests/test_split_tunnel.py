@@ -367,7 +367,7 @@ class SplitTunnelApiTests(unittest.TestCase):
         ssh = SimpleNamespace(connect=lambda: None, disconnect=lambda: None)
         with mock.patch.object(panel, 'get_ssh', return_value=ssh), \
                 mock.patch.object(panel, 'get_protocol_manager', return_value=object()), \
-                mock.patch.object(panel, '_manager_call', side_effect=lambda *a: saved.append(a[-1])):
+                mock.patch.object(panel, '_manager_call', side_effect=lambda *a, **kw: saved.append(a[-1])):
             res = self.client.post('/api/servers/0/connections/config/save', headers=self.auth,
                                    json={'protocol': 'awg2', 'client_id': 'peer', 'config': shown})
         self.assertEqual(res.status_code, 200, res.text)

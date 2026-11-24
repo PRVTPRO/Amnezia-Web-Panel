@@ -132,20 +132,24 @@ class WarpStateStoreTests(unittest.TestCase):
         self.assertEqual(ctx['prefix'], '/opt/amnezia/awg/warp/awg')
 
 
-    def test_ctx_lifts_legacy_default_budget(self):
+    def test_one_time_migration_lifts_only_legacy_records(self):
         store = ws.WarpStateStore(self.path)
-
-        def build(state):
-            rec = ws.proto_record(state, 'uid-1', 'awg')
-            rec['warp_link'] = {'active': True, 'dns_via_warp': False,
-                                'server_uid': 'uid-1', 'entry_uid': 'uid-1',
-                                'protocol': 'awg'}
-            rec['client_mtu_warp'] = 1220
-
         state = store.load()
-        build(state)
+        rec = ws.proto_record(state, 'uid-1', 'awg')
+        rec['client_mtu_warp'] = 1220
+        rec['warp_egress_regen'] = {'uid-1:awg': {'mtu': 1220}}
+
+        self.assertEqual(ws.migrate_legacy_client_mtu(state), 2)
+        self.assertEqual(rec['client_mtu_warp'], ws.WARP_CLIENT_MTU_CAP)
+        self.assertEqual(rec['warp_egress_regen']['uid-1:awg']['mtu'],
+                         ws.WARP_CLIENT_MTU_CAP)
+        self.assertEqual(ws.migrate_legacy_client_mtu(state), 0)
+
+        # A real 1220 budget written after the migration must stay 1220.
+        rec['warp_egress_regen'] = {}
+        rec['client_mtu_warp'] = 1220
         ctx = ws.warp_ctx_for(state, 'uid-1', 'awg')
-        self.assertEqual(ctx['client_mtu'], ws.WARP_CLIENT_MTU_CAP)
+        self.assertEqual(ctx['client_mtu'], 1220)
 
 
 class QuotaTests(unittest.TestCase):

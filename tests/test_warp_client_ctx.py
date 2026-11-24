@@ -238,6 +238,28 @@ class ClientConfigWarpCtxTests(unittest.TestCase):
             warp_ctx=dict(WARP_CTX, client_mtu=1220))
         self.assertIn('AllowedIPs = 10.0.0.0/8', custom)
 
+    def test_saved_crlf_config_is_normalized(self):
+        mgr = FakeManager()
+        mgr.clients = [{
+            'clientId': 'peer',
+            'userData': {
+                'clientPrivateKey': 'priv',
+                'customConfig': '[Interface]\r\nAddress = 10.8.1.6/32\r\n'
+                                'MTU = 1220\r\n\r\n[Peer]\r\n'
+                                'AllowedIPs = 0.0.0.0/0, ::/0\r\n',
+            },
+        }]
+        config = mgr.get_client_config(
+            'awg', 'peer', '203.0.113.9', 55424, warp_ctx=WARP_CTX)
+        self.assertIn('MTU = 1280\r\n', config)
+        self.assertNotIn('MTU = 1220', config)
+
+        narrow = mgr.get_client_config(
+            'awg', 'peer', '203.0.113.9', 55424,
+            warp_ctx=dict(WARP_CTX, client_mtu=1220))
+        self.assertIn('AllowedIPs = 0.0.0.0/0\r\n', narrow)
+        self.assertNotIn('::/0', narrow)
+
 
 class SaveClientConfigBudgetTests(unittest.TestCase):
     def make_manager(self):

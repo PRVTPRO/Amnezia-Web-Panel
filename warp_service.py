@@ -51,9 +51,10 @@ WARP_IFACE_MTU = 1280
 WARP_CLIENT_MTU_CAP = 1280
 WARP_MIN_CLIENT_MTU = 1200
 # Links created before the cap was corrected stored that old cap verbatim.
-# They must be lifted to the current cap when read, otherwise every existing
-# instance keeps handing out a config that Windows/Apple refuse to import.
+# A one-time state migration (migrate_legacy_client_mtu) rewrites them; a
+# budget of 1220 written afterwards is a real constraint and must be kept.
 _LEGACY_CLIENT_MTU_CAP = 1220
+WARP_MTU_MIGRATION_KEY = 'client_mtu_cap_1280_migrated'
 WARP_TRANSPORT_OVERHEAD = 60
 WARP_DEFAULT_LINK_MTU = 1500
 WARP_DNS_SLOTS = 7
@@ -442,16 +443,35 @@ def warp_ctx_for(state, server_uid, protocol):
     }
 
 
+def migrate_legacy_client_mtu(state):
+    """One-time persistent rewrite of budgets stored with the old cap.
+
+    Deciding by value on every read would silently inflate a *legitimate*
+    1220 budget (a narrow uplink or an instance whose own MTU is 1220). The
+    marker makes the rewrite happen exactly once, at startup, so budgets
+    written later are never touched. Regen records are migrated too.
+    """
+    if state.get(WARP_MTU_MIGRATION_KEY):
+        return 0
+    changed = 0
+    for srv in (state.get('servers') or {}).values():
+        for rec in (srv.get('protocols') or {}).values():
+            if rec.get('client_mtu_warp') == _LEGACY_CLIENT_MTU_CAP:
+                rec['client_mtu_warp'] = WARP_CLIENT_MTU_CAP
+                changed += 1
+            for entry in (rec.get('warp_egress_regen') or {}).values():
+                if isinstance(entry, dict) and entry.get('mtu') == _LEGACY_CLIENT_MTU_CAP:
+                    entry['mtu'] = WARP_CLIENT_MTU_CAP
+                    changed += 1
+    state[WARP_MTU_MIGRATION_KEY] = True
+    return changed
+
+
 def _authoritative_client_mtu(record, link, regen):
     if regen and regen.get('mtu'):
         return int(regen['mtu'])
     stored = (record or {}).get('client_mtu_warp')
-    if stored:
-        stored = int(stored)
-        if stored == _LEGACY_CLIENT_MTU_CAP:
-            return WARP_CLIENT_MTU_CAP
-        return stored
-    return None
+    return int(stored) if stored else None
 
 
 # --- quota -------------------------------------------------------------------

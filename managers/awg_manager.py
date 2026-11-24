@@ -573,15 +573,19 @@ def warp_fix_saved_config(config_text, warp_ctx):
         return config_text
     if not budget:
         return config_text
+    # Saved configs may be CRLF (they are stored verbatim); Python's `$` in
+    # MULTILINE mode stops before `\n`, leaving `\r` in the matched line.
+    crlf = '\r\n' in config_text
+    text = config_text.replace('\r\n', '\n')
     fixed = re.sub(r'(?m)^[ \t]*MTU[ \t]*=[ \t]*\d+[ \t]*$',
-                   'MTU = %d' % budget, config_text or '')
+                   'MTU = %d' % budget, text)
     if 0 < budget < MIN_CLIENT_MTU:
         # Only the panel's own full-tunnel line is safe to narrow; a manually
         # edited AllowedIPs list must stay as the operator wrote it.
         fixed = re.sub(
             r'(?m)^([ \t]*AllowedIPs[ \t]*=[ \t]*)0\.0\.0\.0/0[ \t]*,[ \t]*::/0[ \t]*$',
             r'\g<1>0.0.0.0/0', fixed)
-    return fixed
+    return fixed.replace('\n', '\r\n') if crlf else fixed
 
 
 def safe_client_mtu(awg_params, link_mtu=DEFAULT_LINK_MTU):
