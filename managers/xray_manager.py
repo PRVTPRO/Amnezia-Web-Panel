@@ -126,6 +126,11 @@ PRIVILEGES = '--privileged --cap-add=NET_ADMIN'
 # Exit codes of `docker run` itself (125: daemon or image, 126/127: the
 # command could not be invoked): the core was never asked.
 _DOCKER_RUN_FAILURES = (125, 126, 127)
+# What the live-config reader exits with when there is no file to read. The
+# script picks it, so nothing else answers with it: `cat` and `test` exit 1
+# for a file they may not read just as for a missing one, and so does a sudo
+# that was refused.
+NO_LIVE_CONFIG = 3
 # Restart verification: one poll per second; the core counts as back after
 # START_STABLE consecutive "running" polls with an unmoved restart counter.
 START_POLLS = 6
@@ -841,15 +846,20 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
             raise
 
     def _read_config_text(self):
-        """The live file's content, or None when there is none."""
-        out, err, code = self.ssh.run_sudo_command(
-            f'cat {shlex.quote(self._config_path())} 2>/dev/null')
-        if code < 0:
-            # Unknown is not absent: a config that cannot be read is exactly
-            # the one that must not be treated as "nothing to restore".
+        """The live file's content; None when there is nothing to restore,
+        which is a file the host reports missing or one that holds nothing.
+        Any other failed read raises: a config that cannot be read is
+        exactly the one that must not be taken for "nothing to restore"."""
+        path = shlex.quote(self._config_path())
+        script = (f'if [ -e {path} ]; then cat {path}; '
+                  f'else exit {NO_LIVE_CONFIG}; fi')
+        out, err, code = self.ssh.run_sudo_command('sh -c ' + shlex.quote(script))
+        if code == NO_LIVE_CONFIG:
+            return None
+        if code != 0:
             raise XrayControlError(
                 'Could not read the live configuration: ' + _why(err, code))
-        return out if code == 0 and (out or '').strip() else None
+        return out if (out or '').strip() else None
 
     def _container_state(self):
         """(status, restart count) of the container. Raises when docker

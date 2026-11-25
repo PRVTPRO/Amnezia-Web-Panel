@@ -5,8 +5,10 @@ configuration restored."""
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 from unittest.mock import Mock, patch
 
@@ -14,7 +16,7 @@ from fastapi.testclient import TestClient
 
 import app as panel
 from managers.xray_manager import (
-    _CANDIDATE, CONFIG_MODE, PRIVILEGES, START_POLLS, START_STABLE,
+    _CANDIDATE, CONFIG_MODE, NO_LIVE_CONFIG, PRIVILEGES, START_POLLS, START_STABLE,
     XrayConfigRejected, XrayControlError, XrayManager, _core_verdict)
 
 CONFIG = '/opt/amnezia/xray/server.json'
@@ -22,6 +24,9 @@ OLD = json.dumps({'tag': 'old'})
 NEW = json.dumps({'tag': 'new'}, indent=2)
 MOUNTS = "docker inspect -f '{{range .Mounts}}{{.Destination}}{{println}}{{end}}'"
 STATE = "docker inspect -f '{{.State.Status}} {{.RestartCount}}'"
+# How the manager reads the live configuration: one shell command, which
+# answers "there is no file" with an exit status of its own.
+READER = "sh -c 'if [ -e "
 PROOF = 'Failed to start: main: failed to add address 2606:4700::1/128 to wg0'
 # What the SSH layer answers when a command did not run to an exit status.
 LOST = ('', 'SSH to node is still busy with a previous command', -1)
@@ -75,6 +80,10 @@ class FakeHost:
             return LOST if state == UNKNOWN else (f'{state[0]} {state[1]}\n', '', 0)
         if command.startswith('docker logs'):
             return (self.logs, '', 0)
+        if command.startswith(READER):
+            path = command.split('cat ', 1)[1].split(';', 1)[0]
+            return (self.files.get(path, ''), '',
+                    0 if path in self.files else NO_LIVE_CONFIG)
         if command.startswith('cat '):
             path = command.split()[1]
             return (self.files.get(path, ''), '', 0 if path in self.files else 1)
@@ -220,12 +229,57 @@ class WriteTests(unittest.TestCase):
     def test_a_live_config_that_cannot_be_read_is_not_taken_for_absent(self):
         # "unknown" must not pass for "nothing to restore"
         host = FakeHost()
-        host.fail['cat '] = LOST
+        host.fail[READER] = LOST
         with self.assertRaises(XrayControlError):
             manager_for(host)._write_server_json(json.loads(NEW), restart=True)
 
         self.assertEqual(host.files, {CONFIG: OLD})
         self.assertFalse(any(c.startswith('mv -f -- ') for c in host.commands))
+
+    def test_a_live_config_that_refuses_to_be_read_is_not_taken_for_absent(self):
+        # `cat` exits 1 for a file it may not read, exactly as for a missing
+        # one: the two look alike as soon as the reason is thrown away.
+        host = FakeHost()
+        host.fail[READER] = ('', f'cat: {CONFIG}: Permission denied', 1)
+        with self.assertRaises(XrayControlError) as ctx:
+            manager_for(host)._write_server_json(json.loads(NEW), restart=True)
+
+        self.assertIn('Could not read the live configuration', str(ctx.exception))
+        self.assertIn('Permission denied', str(ctx.exception))
+        self.assertEqual(host.files, {CONFIG: OLD})
+        self.assertFalse(any(c.startswith('mv -f -- ') for c in host.commands))
+
+    def test_a_refused_command_is_not_taken_for_a_missing_config(self):
+        # sudo itself said no (exit status 1): the file was never asked for
+        host = FakeHost(previous=None)
+        host.fail[READER] = ('', 'sudo: a password is required', 1)
+        with self.assertRaises(XrayControlError) as ctx:
+            manager_for(host)._write_server_json(json.loads(NEW), restart=True)
+
+        self.assertIn('Could not read the live configuration', str(ctx.exception))
+        self.assertIn('password is required', str(ctx.exception))
+        self.assertEqual(host.files, {})
+        self.assertFalse(any(c.startswith('mv -f -- ') for c in host.commands))
+
+    def test_a_missing_live_config_counts_as_none_only_once_it_is_reported_missing(self):
+        # an instance whose core runs without a file on the host: the host's
+        # own "there is no file" is what makes it "nothing to restore"
+        host = FakeHost(previous=None, states=[('running', 0), ('exited', 0),
+                                               ('running', 0), ('running', 0)])
+        manager_for(host)._write_server_json(json.loads(NEW), restart=True)
+
+        self.assertEqual(sum(c.startswith(READER) for c in host.commands), 1)
+        self.assertEqual(host.files, {CONFIG: NEW})
+
+    def test_the_reader_keeps_the_reason_and_owns_the_answer_for_missing(self):
+        host = FakeHost()
+        XrayManager(host)._read_config_text()
+
+        reader, = [c for c in host.commands if c.startswith(READER)]
+        self.assertIn(f'[ -e {CONFIG} ]', reader)
+        self.assertIn(f'cat {CONFIG}; else exit {NO_LIVE_CONFIG};', reader)
+        # the reason of a failed read must reach the panel
+        self.assertNotIn('2>/dev/null', reader)
 
     def test_the_live_api_payload_is_staged_root_only(self):
         # it carries a client's credentials
@@ -490,6 +544,68 @@ class InstallEndpointTests(unittest.TestCase):
         self.assertEqual(res.status_code, 400, res.text)
         self.assertIn(PROOF, res.json()['error'])
         manager.install_protocol.assert_called_once()
+
+
+class LocalShell:
+    """run_sudo_command answered by the local POSIX shell, for the one
+    command whose meaning is the shell's: what becomes of a file it can
+    read, one it cannot, and one that is not there."""
+
+    def run_sudo_command(self, command, **kwargs):
+        done = subprocess.run(['sh', '-c', command], capture_output=True, text=True,
+                              encoding='utf-8', errors='replace')
+        return done.stdout, done.stderr, done.returncode
+
+
+@unittest.skipUnless(shutil.which('sh'), 'needs a POSIX shell')
+class LiveConfigReaderShellTests(unittest.TestCase):
+    """The live-config reader against a real shell. A stand-in that answers
+    from a script cannot see what the command itself does, and that is what
+    tells a file that cannot be read from one that is not there."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.path = Path(self.tmp).as_posix() + '/server.json'
+        self.manager = XrayManager(LocalShell())
+        self.manager._config_path = lambda: self.path
+
+    def write(self, text):
+        Path(self.path).write_text(text, encoding='utf-8')
+
+    def test_a_file_that_is_there_is_read(self):
+        self.write(OLD + '\n')
+        self.assertEqual(self.manager._read_config_text(), OLD + '\n')
+
+    def test_no_file_is_none(self):
+        self.assertIsNone(self.manager._read_config_text())
+
+    def test_no_directory_is_none_either(self):
+        os.rmdir(self.tmp)
+        self.assertIsNone(self.manager._read_config_text())
+
+    def test_a_file_with_nothing_in_it_is_none(self):
+        self.write('  \n')
+        self.assertIsNone(self.manager._read_config_text())
+
+    def test_a_directory_in_its_place_is_not_taken_for_absent(self):
+        os.mkdir(self.path)
+        with self.assertRaises(XrayControlError) as ctx:
+            self.manager._read_config_text()
+        self.assertIn('Could not read the live configuration', str(ctx.exception))
+
+    @unittest.skipIf(os.name == 'nt', 'file modes are not enforced here')
+    @unittest.skipIf(hasattr(os, 'geteuid') and os.geteuid() == 0, 'root reads anything')
+    def test_a_file_that_may_not_be_read_is_not_taken_for_absent(self):
+        self.write(OLD)
+        os.chmod(self.path, 0)
+        self.addCleanup(os.chmod, self.path, 0o600)
+        with self.assertRaises(XrayControlError) as ctx:
+            self.manager._read_config_text()
+        # what the review asked for: cat exits 1 on a file that is there
+        self.assertIn('Could not read the live configuration', str(ctx.exception))
+        # with cat's own reason, which a locale may word differently
+        self.assertIn('cat:', str(ctx.exception))
 
 
 if __name__ == '__main__':
