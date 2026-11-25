@@ -3,10 +3,16 @@ secret is left behind, an unverified start is never passed off as a
 success, and a core that does not come back gets its previous
 configuration restored."""
 import json
+import os
+import shutil
+import tempfile
 import unittest
 from unittest import mock
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
+from fastapi.testclient import TestClient
+
+import app as panel
 from managers.xray_manager import (
     CONFIG_MODE, PRIVILEGES, START_POLLS, START_STABLE, XrayConfigRejected,
     XrayControlError, XrayManager, _core_verdict)
@@ -427,6 +433,52 @@ class InstallTests(unittest.TestCase):
             manager.install_protocol(port=443)
         self.assertIn(PROOF, str(ctx.exception))
         self.assertFalse(any(c.startswith('docker run -d') for c in commands))
+
+
+class InstallEndpointTests(unittest.TestCase):
+    """A configuration the core refuses during an install is reported as
+    such, not as an internal error."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.data_file = panel.DATA_FILE
+        panel.DATA_FILE = os.path.join(self.tmp, 'data.json')
+        self.addCleanup(setattr, panel, 'DATA_FILE', self.data_file)
+        with open(panel.DATA_FILE, 'w', encoding='utf-8') as handle:
+            json.dump({'servers': [dict(uid='node-a', host='192.0.2.1', name='node',
+                                        protocols={})],
+                       'users': [{'id': 'admin-id', 'username': 'admin',
+                                  'password_hash': panel.hash_password('admin'),
+                                  'role': 'admin', 'enabled': True}],
+                       'user_connections': []}, handle)
+        # the app must not start its background monitors under the test
+        self.monitor_flag = panel._conn_monitor_started
+        panel._conn_monitor_started = True
+        self.addCleanup(setattr, panel, '_conn_monitor_started', self.monitor_flag)
+
+    def test_a_rejected_install_config_is_a_client_error(self):
+        ssh = Mock()
+        ssh.run_sudo_command.side_effect = lambda command, **kwargs: ('', '', 0)
+        manager = Mock()
+        manager.install_protocol.side_effect = XrayConfigRejected(
+            'Xray rejected the configuration: ' + PROOF)
+        with TestClient(panel.app) as client, \
+             patch.object(panel, 'get_ssh', return_value=ssh), \
+             patch.object(panel, 'get_protocol_manager', return_value=manager), \
+             patch.object(panel, 'ensure_docker_installed', return_value=''), \
+             patch.object(panel, 'get_used_ports', return_value={}), \
+             patch.object(panel, 'xray_fp_kwargs', return_value={}):
+            login = client.post('/api/auth/login',
+                                json={'username': 'admin', 'password': 'admin'})
+            self.assertEqual(login.status_code, 200, login.text)
+            res = client.post('/api/servers/0/install',
+                              json={'protocol': 'xray', 'port': '443'})
+
+        self.assertEqual(res.status_code, 400, res.text)
+        self.assertIn(PROOF, res.json()['error'])
+        manager.install_protocol.assert_called_once()
+
 
 if __name__ == '__main__':
     unittest.main()
