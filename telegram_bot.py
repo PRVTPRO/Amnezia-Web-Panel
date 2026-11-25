@@ -2012,6 +2012,7 @@ async def _admin_clients(api: TelegramAPI, chat_id: int, message_id: int, server
 
     try:
         data, clients = await asyncio.to_thread(_load_clients)
+        server = data["servers"][server_id]
         if not clients:
             await api.edit_message(chat_id, message_id, f"👥 {_tt(lang, 'no_connections_short')}", reply_markup={"inline_keyboard": [[{"text": f"➕ {_tt(lang, 'btn_create_connection')}", "callback_data": _ref("add_client", {"sid": server_id, "proto": proto})}], [{"text": f"⬅️ {_tt(lang, 'btn_protocol')}", "callback_data": _ref("proto", {"sid": server_id, "proto": proto})}]]})
             return
