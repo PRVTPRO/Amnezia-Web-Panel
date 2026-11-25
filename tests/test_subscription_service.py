@@ -4,10 +4,16 @@ import asyncio
 import base64
 import urllib.parse
 import json
+import os
 import re
+import shutil
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+
+from fastapi.testclient import TestClient
 
 import app as panel
 from managers.nginx_manager import NginxManager
@@ -29,6 +35,59 @@ def state():
     }
 
 
+# A wg-quick config as the AWG manager hands it out, with the classic
+# obfuscation knobs a client looks for to tell AmneziaWG from WireGuard.
+AWG_CONF = (
+    "[Interface]\n"
+    "PrivateKey = cHJpdmF0ZWtleQ==\n"
+    "Address = 10.8.0.2/32\n"
+    "DNS = 1.1.1.1\n"
+    "MTU = 1280\n"
+    "Jc = 3\nJmin = 10\nJmax = 30\nS1 = 15\nS2 = 18\n"
+    "H1 = 1020325451\nH2 = 3288052141\nH3 = 1766607858\nH4 = 2528465083\n"
+    "[Peer]\nPublicKey = cHVibGlja2V5\nPresharedKey = cHJlc2hhcmVka2V5\n"
+    "AllowedIPs = 0.0.0.0/0\nEndpoint = entry.example:55424\n")
+
+
+def mixed_state():
+    """A user with an xray and an AmneziaWG connection on the same server."""
+    data = state()
+    data['servers'][1]['protocols'] = {'xray': {'port': 443},
+                                       'awg': {'port': '55424'}}
+    data['user_connections'].append(
+        dict(id='c2', user_id='u1', server_id=1,
+             protocol='awg', client_id='peer-awg'))
+    return data
+
+
+def opt_in(data):
+    data['settings'] = {'subscription': {
+        'enabled': True, 'server_uid': 'mask', 'path': 'sub', 'include_awg': True}}
+    return data
+
+
+def fake_manager(broken=()):
+    """Answers like both managers: a link for xray, a config for AmneziaWG.
+    A connection whose client is in ``broken`` fails the way the AmneziaWG
+    manager does when it cannot rebuild a client."""
+    manager = Mock()
+
+    def get_client_config(protocol, client_id, host, port, public_port=None, **kwargs):
+        if client_id in broken:
+            raise RuntimeError(f'Client {client_id} not found')
+        if protocol.startswith('xray'):
+            return f'vless://{client_id}@entry:443?type=tcp#old-private-note'
+        return AWG_CONF
+
+    manager.get_client_config = Mock(side_effect=get_client_config)
+    return manager
+
+
+# What the panel reads from the WARP state for an instance: a push must hand
+# exactly this to the AmneziaWG manager.
+WARP_CTX = {'active': True, 'client_mtu': 1280, 'dns_via_warp': True}
+
+
 class SubscriptionPathTests(unittest.TestCase):
     def test_path_normalization(self):
         self.assertEqual(panel.normalize_subscription_path('/Sub/'), 'sub')
@@ -41,7 +100,9 @@ class SubscriptionPathTests(unittest.TestCase):
     def test_settings_defaults(self):
         self.assertEqual(panel.subscription_settings({'settings': {}}),
                          {'enabled': False, 'server_uid': None, 'path': 'sub',
-                          'name': ''})
+                          'name': '', 'include_awg': False})
+        # AmneziaWG is opt-in: nothing stored means off.
+        self.assertFalse(panel.subscription_settings(state())['include_awg'])
 
     def test_nginx_server_requires_an_nginx_protocol(self):
         data = state()
@@ -219,31 +280,142 @@ class SubscriptionPushTests(unittest.TestCase):
         self.assertIn('198.51.100.1', str(ctx.exception))
         self.assertEqual(self.uploads, [])
 
-
-    def test_a_connection_that_cannot_be_built_keeps_the_others(self):
+    def test_push_leaves_amneziawg_out_unless_the_admin_opted_in(self):
         user = self.data['users'][0]
-        self.data['user_connections'].append(
-            dict(id='c2', user_id='u1', server_id=1,
-                 protocol='xray', client_id='peer-2'))
-        # the first peer is gone from the server
-        manager = Mock()
-        manager.get_client_config = Mock(side_effect=[
-            RuntimeError('Client peer-1 not found'),
-            'vless://peer-2@entry:443?type=tcp'])
+        self.data = mixed_state()
+        manager = fake_manager()
         with patch.object(panel, 'get_ssh', return_value=self._ssh()), \
              patch.object(panel, 'get_protocol_manager', return_value=manager), \
              patch.object(panel, 'protocol_public_endpoint',
                           return_value=('entry.example', None)), \
              patch.object(panel, 'xray_fp_kwargs', return_value={}):
-            token, links, errors, unchanged = panel.push_user_subscription(
+            panel.push_user_subscription(
                 self.data, user,
                 {'enabled': True, 'server_uid': 'mask', 'path': 'sub'},
+                self.data['servers'][0])
+
+        content, _ = self.uploads[0]
+        self.assertEqual(base64.b64decode(content).decode().split('\n'),
+                         ['vless://peer-1@entry:443?type=tcp#'
+                          '198.51.100.1%20%C2%B7%20Xray'])
+        # the AmneziaWG connection was never asked for
+        self.assertEqual([c.args[0] for c in manager.get_client_config.call_args_list],
+                         ['xray'])
+
+    def test_push_carries_amneziawg_beside_vless_when_opted_in(self):
+        user = self.data['users'][0]
+        self.data = opt_in(mixed_state())
+        manager = fake_manager()
+        with patch.object(panel, 'get_ssh', return_value=self._ssh()), \
+             patch.object(panel, 'get_protocol_manager', return_value=manager), \
+             patch.object(panel, 'protocol_public_endpoint',
+                          return_value=('entry.example', None)), \
+             patch.object(panel, 'xray_fp_kwargs', return_value={}), \
+             patch.object(panel, 'srv_warp_ctx', return_value=WARP_CTX):
+            token, links, errors, unchanged = panel.push_user_subscription(
+                self.data, user, panel.subscription_settings(self.data),
+                self.data['servers'][0])
+
+        self.assertEqual((links, errors, unchanged), (2, [], False))
+        content, _ = self.uploads[0]
+        xray_line, awg_line = base64.b64decode(content).decode().split('\n')
+        self.assertTrue(xray_line.startswith('vless://'))
+        self.assertEqual(awg_line,
+                         panel.amneziawg_share_link(AWG_CONF, '198.51.100.1 · AmneziaWG'))
+        # the config is asked for the way the panel hands it out to a user
+        xray_call, awg_call = manager.get_client_config.call_args_list
+        self.assertEqual(xray_call.args, ('xray', 'peer-1', 'entry.example', 443))
+        self.assertEqual(xray_call.kwargs, {'public_port': None})
+        self.assertEqual(awg_call.args, ('awg', 'peer-awg', 'entry.example', '55424'))
+
+    def test_an_amneziawg_config_follows_the_instance_warp_link(self):
+        user = self.data['users'][0]
+        self.data = opt_in(mixed_state())
+        manager = fake_manager()
+        node = self.data['servers'][1]
+        with patch.object(panel, 'get_ssh', return_value=self._ssh()), \
+             patch.object(panel, 'get_protocol_manager', return_value=manager), \
+             patch.object(panel, 'protocol_public_endpoint',
+                          return_value=('entry.example', None)), \
+             patch.object(panel, 'xray_fp_kwargs', return_value={}), \
+             patch.object(panel, 'srv_warp_ctx',
+                          return_value=WARP_CTX) as warp_ctx:
+            panel.push_user_subscription(
+                self.data, user, panel.subscription_settings(self.data),
+                self.data['servers'][0])
+
+        # Without the context the manager would rebuild the config with the
+        # instance MTU and an IPv6 resolver, which a WARP-exit instance
+        # cannot carry.
+        warp_ctx.assert_called_once_with(node, 'awg')
+        xray_call, awg_call = manager.get_client_config.call_args_list
+        self.assertEqual(awg_call.kwargs, {'public_port': None, 'warp_ctx': WARP_CTX})
+        # an xray link has no use for it
+        self.assertNotIn('warp_ctx', xray_call.kwargs)
+
+    def test_an_instance_without_a_stored_port_is_asked_on_the_awg_default(self):
+        user = self.data['users'][0]
+        self.data = opt_in(mixed_state())
+        del self.data['servers'][1]['protocols']['awg']['port']
+        manager = fake_manager()
+        with patch.object(panel, 'get_ssh', return_value=self._ssh()), \
+             patch.object(panel, 'get_protocol_manager', return_value=manager), \
+             patch.object(panel, 'protocol_public_endpoint',
+                          return_value=('entry.example', None)), \
+             patch.object(panel, 'xray_fp_kwargs', return_value={}), \
+             patch.object(panel, 'srv_warp_ctx', return_value=WARP_CTX):
+            panel.push_user_subscription(
+                self.data, user, panel.subscription_settings(self.data),
+                self.data['servers'][0])
+
+        # the port every other client-config endpoint falls back to
+        awg_call = manager.get_client_config.call_args_list[1]
+        self.assertEqual(awg_call.args, ('awg', 'peer-awg', 'entry.example', 55424))
+
+    def test_a_connection_that_cannot_be_built_keeps_the_others(self):
+        user = self.data['users'][0]
+        self.data = opt_in(mixed_state())
+        self.data['user_connections'].append(
+            dict(id='c3', user_id='u1', server_id=1,
+                 protocol='xray', client_id='peer-2'))
+        # the AmneziaWG peer is gone from the server
+        manager = fake_manager(broken={'peer-awg'})
+        with patch.object(panel, 'get_ssh', return_value=self._ssh()), \
+             patch.object(panel, 'get_protocol_manager', return_value=manager), \
+             patch.object(panel, 'protocol_public_endpoint',
+                          return_value=('entry.example', None)), \
+             patch.object(panel, 'xray_fp_kwargs', return_value={}), \
+             patch.object(panel, 'srv_warp_ctx', return_value=WARP_CTX):
+            token, links, errors, unchanged = panel.push_user_subscription(
+                self.data, user, panel.subscription_settings(self.data),
+                self.data['servers'][0])
+
+        self.assertEqual((links, unchanged), (2, False))
+        self.assertEqual(errors, ['198.51.100.1: Client peer-awg not found'])
+        content, _ = self.uploads[0]
+        lines = base64.b64decode(content).decode().split('\n')
+        self.assertEqual(len(lines), links)
+        self.assertTrue(all(line.startswith('vless://') for line in lines))
+
+    def test_an_amneziawg_link_survives_a_broken_xray_connection(self):
+        user = self.data['users'][0]
+        self.data = opt_in(mixed_state())
+        manager = fake_manager(broken={'peer-1'})
+        with patch.object(panel, 'get_ssh', return_value=self._ssh()), \
+             patch.object(panel, 'get_protocol_manager', return_value=manager), \
+             patch.object(panel, 'protocol_public_endpoint',
+                          return_value=('entry.example', None)), \
+             patch.object(panel, 'xray_fp_kwargs', return_value={}), \
+             patch.object(panel, 'srv_warp_ctx', return_value=WARP_CTX):
+            token, links, errors, unchanged = panel.push_user_subscription(
+                self.data, user, panel.subscription_settings(self.data),
                 self.data['servers'][0])
 
         self.assertEqual((links, unchanged), (1, False))
         self.assertEqual(errors, ['198.51.100.1: Client peer-1 not found'])
         content, _ = self.uploads[0]
-        self.assertIn(b'peer-2', base64.b64decode(content))
+        self.assertEqual(base64.b64decode(content).decode(),
+                         panel.amneziawg_share_link(AWG_CONF, '198.51.100.1 · AmneziaWG'))
 
     def test_an_unreachable_server_is_reported_and_the_others_are_written(self):
         user = self.data['users'][0]
@@ -274,6 +446,24 @@ class SubscriptionPushTests(unittest.TestCase):
         self.assertEqual(errors, ['198.51.100.1: ssh down'])
         content, _ = self.uploads[0]
         self.assertIn(b'peer-2', base64.b64decode(content))
+
+    def test_an_amneziawg_instance_keeps_its_own_name(self):
+        user = self.data['users'][0]
+        self.data = opt_in(mixed_state())
+        self.data['servers'][1]['name'] = 'Frankfurt'
+        self.data['servers'][1]['protocols']['awg']['custom_name'] = 'AWG 3.1'
+        with patch.object(panel, 'get_ssh', return_value=self._ssh()), \
+             patch.object(panel, 'get_protocol_manager', return_value=fake_manager()), \
+             patch.object(panel, 'protocol_public_endpoint',
+                          return_value=('entry.example', None)), \
+             patch.object(panel, 'xray_fp_kwargs', return_value={}), \
+             patch.object(panel, 'srv_warp_ctx', return_value=WARP_CTX):
+            panel.push_user_subscription(
+                self.data, user, panel.subscription_settings(self.data),
+                self.data['servers'][0])
+        content, _ = self.uploads[0]
+        awg_line = base64.b64decode(content).decode().split('\n')[1]
+        self.assertEqual(awg_line, panel.amneziawg_share_link(AWG_CONF, 'Frankfurt · AWG 3.1'))
 
 
 class SubscriptionConfigTests(unittest.TestCase):
@@ -387,6 +577,64 @@ class AutoPushTests(unittest.TestCase):
         self.assertEqual(self.data['users'][0]['sub_url'],
                          'https://mask.example/sub/keep')
 
+    def test_an_amneziawg_only_user_is_served_once_the_admin_opts_in(self):
+        self.data = opt_in(mixed_state())
+        self.data['settings']['subscription']['include_awg'] = False
+        self.data['user_connections'] = [
+            c for c in self.data['user_connections'] if c['protocol'] == 'awg']
+        self.data['users'][0]['sub_url'] = 'https://mask.example/sub/old'
+        manager = fake_manager()
+        with patch.object(panel, 'get_ssh', return_value=self.ssh), \
+             patch.object(panel, 'get_protocol_manager', return_value=manager), \
+             patch.object(panel, 'save_data', Mock()):
+            # off: nothing to serve, and the cached URL clears
+            panel.auto_push_subscriptions(self.data, ['u1'])
+        self.assertEqual(self.uploads, [])
+        self.assertIsNone(self.data['users'][0].get('sub_url'))
+
+        self.data['settings']['subscription']['include_awg'] = True
+        with patch.object(panel, 'get_ssh', return_value=self.ssh), \
+             patch.object(panel, 'get_protocol_manager', return_value=manager), \
+             patch.object(panel, 'srv_warp_ctx', return_value=WARP_CTX), \
+             patch.object(panel, '_subscription_mask_domain',
+                          return_value='mask.example'), \
+             patch.object(panel, 'save_data', Mock()):
+            panel.auto_push_subscriptions(self.data, ['u1'])
+        self.assertEqual(len(self.uploads), 1)
+        self.assertTrue(self.data['users'][0]['sub_url']
+                        .startswith('https://mask.example/sub/'))
+        self.assertIn('amneziawg://', base64.b64decode(self.uploads[0][0]).decode())
+
+    def test_turning_the_option_off_retires_the_amneziawg_only_users_file(self):
+        self.data = mixed_state()
+        self.data['user_connections'] = [
+            c for c in self.data['user_connections'] if c['protocol'] == 'awg']
+        user = self.data['users'][0]
+        # a real token: the prune only removes files named like one
+        token = panel.ensure_subscription_token(user)
+        user['sub_url'] = f'https://mask.example/sub/{token}'
+        self.data['settings'] = {'subscription': {
+            'enabled': True, 'server_uid': 'mask', 'path': 'sub',
+            'include_awg': False}}
+
+        def ls(command, **kwargs):
+            # the mask still holds the file from when the option was on
+            if command.startswith('ls -1'):
+                return (token + '\n', '', 0)
+            return ('', '', 0)
+        self.ssh.run_sudo_command = lambda *a, **k: (
+            self.sudo.append(a[0] if a else '') or ls(*a, **k))
+        with patch.object(panel, 'get_ssh', return_value=self.ssh), \
+             patch.object(panel, 'get_protocol_manager', return_value=fake_manager()), \
+             patch.object(panel, '_subscription_mask_domain',
+                          return_value='mask.example'):
+            outcome = panel.push_all_subscriptions(self.data)
+
+        self.assertEqual(outcome['pushed'], [])
+        self.assertEqual(self.uploads, [])
+        self.assertIsNone(user.get('sub_url'))
+        self.assertTrue(any('rm -f' in cmd and token in cmd for cmd in self.sudo))
+
 
 class SubscriptionEndpointsTests(unittest.TestCase):
     def request(self):
@@ -468,6 +716,65 @@ class SubscriptionEndpointsTests(unittest.TestCase):
                 panel.AddConnectionRequest(protocol='xray', name='phone')))
         self.assertEqual(pushed, [])
 
+    def test_adding_an_amneziawg_connection_pushes_once_the_admin_opted_in(self):
+        # From the server card, and from the users page with an existing
+        # client: both used to refresh the file for Xray only.
+        for opted_in in (True, False):
+            with self.subTest(opted_in=opted_in):
+                data = state()
+                data['settings'] = {'subscription': {
+                    'enabled': True, 'server_uid': 'mask', 'path': 'sub',
+                    'include_awg': opted_in}}
+                data['servers'][1]['protocols'] = {'awg': {'port': '55424'}}
+                pushed = []
+                manager = Mock()
+                manager.add_client.return_value = {'client_id': 'peer-new',
+                                                   'config': AWG_CONF}
+                manager.get_client_config.return_value = AWG_CONF
+                with patch.object(panel, 'load_data', return_value=data), \
+                     patch.object(panel, '_check_admin', lambda request: True), \
+                     patch.object(panel, 'get_ssh', return_value=Mock()), \
+                     patch.object(panel, 'get_protocol_manager', return_value=manager), \
+                     patch.object(panel, 'save_data', Mock()), \
+                     patch.object(panel, 'auto_push_subscriptions',
+                                  Mock(side_effect=lambda d, ids: pushed.append(list(ids)))):
+                    from_card = asyncio.run(panel.api_add_connection(
+                        self.request(), 1,
+                        panel.AddConnectionRequest(protocol='awg', name='phone',
+                                                   user_id='u1')))
+                    from_users = asyncio.run(panel.api_add_user_connection(
+                        self.request(), 'u1',
+                        panel.AddUserConnectionRequest(server_id=1, protocol='awg',
+                                                       client_id='peer-awg')))
+                self.assertIn('config', from_card)
+                self.assertEqual(from_users.get('status'), 'success')
+                self.assertEqual(pushed, [['u1'], ['u1']] if opted_in else [])
+
+    def test_settings_save_keeps_the_amneziawg_choice(self):
+        data = state()
+        with patch.object(panel, 'load_data', return_value=data), \
+             patch.object(panel, '_check_admin', lambda request: True), \
+             patch.object(panel, 'save_data', Mock()):
+            panel.api_subscription_settings_save(
+                self.request(),
+                panel.SubscriptionSettingsRequest(enabled=False, path='sub',
+                                                  include_awg=True))
+        self.assertTrue(panel.subscription_settings(data)['include_awg'])
+        # a request that says nothing about it leaves it off
+        data = state()
+        with patch.object(panel, 'load_data', return_value=data), \
+             patch.object(panel, '_check_admin', lambda request: True), \
+             patch.object(panel, 'save_data', Mock()):
+            panel.api_subscription_settings_save(
+                self.request(), panel.SubscriptionSettingsRequest(enabled=False, path='sub'))
+        self.assertFalse(panel.subscription_settings(data)['include_awg'])
+
+    def test_status_reports_the_amneziawg_choice(self):
+        data = opt_in(state())
+        with patch.object(panel, 'load_data', return_value=data), \
+             patch.object(panel, '_check_admin', lambda request: True):
+            self.assertTrue(panel.api_subscription_status(self.request())['include_awg'])
+
     def test_endpoints_require_admin(self):
         data = state()
         with patch.object(panel, 'load_data', return_value=data), \
@@ -479,6 +786,157 @@ class SubscriptionEndpointsTests(unittest.TestCase):
                              panel.SubscriptionSettingsRequest()),
                          lambda: panel.api_subscription_reset(self.request(), 'u1')):
                 self.assertEqual(call().status_code, 403)
+
+
+class AmneziawgLinkTests(unittest.TestCase):
+    """The AmneziaWG share link, in the form YPtun composes and reads:
+    `amneziawg://`, then the wg-quick config in base64url without padding,
+    then `#name` (ShareLinkParser.kt and ShareLinkComposer.kt in
+    yanisplugg/yptun)."""
+
+    def test_link_is_the_config_in_base64url_with_the_name_after_a_hash(self):
+        link = panel.amneziawg_share_link(AWG_CONF, 'Frankfurt · AmneziaWG 3.1')
+        config = AWG_CONF.strip()
+
+        payload, hash_mark, fragment = link[len('amneziawg://'):].rpartition('#')
+        self.assertEqual(hash_mark, '#')
+        self.assertEqual(payload, base64.urlsafe_b64encode(
+            config.encode()).decode().rstrip('='))
+        self.assertNotIn('=', payload)
+        self.assertNotIn('\n', link)
+        self.assertNotIn('\r', link)
+        self.assertEqual(urllib.parse.unquote(fragment), 'Frankfurt · AmneziaWG 3.1')
+        # the client gets the whole config back, byte for byte
+        padded = payload + '=' * (-len(payload) % 4)
+        self.assertEqual(base64.urlsafe_b64decode(padded).decode(), config)
+
+    def test_whitespace_around_the_config_is_dropped(self):
+        self.assertEqual(panel.amneziawg_share_link(' \n' + AWG_CONF + '\n\n', 'x'),
+                         panel.amneziawg_share_link(AWG_CONF, 'x'))
+
+    def test_a_name_is_escaped_the_way_the_client_decodes_it(self):
+        # YPtun takes everything after the first "#", reads "%" pairs and
+        # turns a raw "+" into a space: none of these may travel raw.
+        name = 'Frankfurt #2 · -50% +test'
+        link = panel.amneziawg_share_link(AWG_CONF, name)
+        payload, hash_mark, fragment = link[len('amneziawg://'):].partition('#')
+        self.assertTrue(hash_mark)
+        self.assertNotIn('#', payload)
+        for raw in ('#', '+', ' ', '\n'):
+            self.assertNotIn(raw, fragment)
+        # "-50%" survives as itself, not as a broken "%xx" escape
+        self.assertEqual(urllib.parse.unquote(fragment), name)
+        # a line break would split one link into two in the subscription
+        self.assertNotIn('\n', panel.amneziawg_share_link(AWG_CONF, 'two\nlines'))
+
+    def test_targets_are_xray_only_until_the_admin_opts_in(self):
+        data = mixed_state()
+        data['user_connections'].append(
+            dict(id='c3', user_id='u1', server_id=1,
+                 protocol='wireguard', client_id='w'))
+
+        def carried(subscription):
+            data['settings'] = {'subscription': subscription}
+            return [c['protocol'] for _, conns
+                    in panel._subscription_user_targets(data, data['users'][0])
+                    for c in conns]
+
+        on = {'enabled': True, 'server_uid': 'mask', 'path': 'sub',
+              'include_awg': True}
+        self.assertEqual(carried(on), ['xray', 'awg'])
+        # plain WireGuard is not AmneziaWG, opted in or not
+        on['include_awg'] = False
+        self.assertEqual(carried(on), ['xray'])
+        self.assertEqual(carried({}), ['xray'])
+
+    def test_every_amneziawg_instance_family_is_carried_when_opted_in(self):
+        families = panel.AWG_PROTOCOLS + ('awg__2', 'awg3__3')
+        for protocol in families:
+            with self.subTest(protocol=protocol):
+                data = opt_in(mixed_state())
+                data['user_connections'] = [dict(
+                    id='c', user_id='u1', server_id=1,
+                    protocol=protocol, client_id='p')]
+                targets = panel._subscription_user_targets(data, data['users'][0])
+                self.assertEqual([c['protocol'] for _, conns in targets for c in conns],
+                                 [protocol])
+
+
+class SubscriptionSettingsTemplateTests(unittest.TestCase):
+    def test_the_option_is_offered_with_its_hint_right_below_it(self):
+        source = (Path(__file__).resolve().parents[1]
+                  / 'templates' / 'settings.html').read_text(encoding='utf-8')
+        box = source.index('id="sub_include_awg"')
+        self.assertIn('{% if subscription_settings.include_awg %}checked{% endif %}',
+                      source[box:box + 200])
+        label = source.index("{{ _('subscription_include_awg') }}", box)
+        hint = source.index("{{ _('subscription_include_awg_hint') }}", box)
+        # label first, the hint directly after, then the next setting
+        self.assertLess(box, label)
+        self.assertLess(label, hint)
+        self.assertLess(hint, source.index('id="subName"'))
+        # the option sits inside the fields that only show when enabled
+        self.assertLess(source.index('id="subFields"'), box)
+        # and it is what the save request sends
+        self.assertIn("include_awg: document.getElementById('sub_include_awg').checked",
+                      source)
+
+
+class SettingsPageRenderTests(unittest.TestCase):
+    """The real /settings page: a Jinja mistake in the option would otherwise
+    only show when an admin opens the page."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._saved = (panel.DATA_FILE, panel._conn_monitor_started)
+        panel.DATA_FILE = os.path.join(self.tmp, 'data.json')
+        panel._conn_monitor_started = True  # keep the background SSH monitor out
+
+    def tearDown(self):
+        panel.DATA_FILE, panel._conn_monitor_started = self._saved
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _render_subscription_block(self, include_awg):
+        data = {
+            'servers': [dict(name='mask-node', host='198.51.100.9', ssh_port=22,
+                             username='root', password='x', private_key='',
+                             server_info={}, uid='mask', protocols={'nginx': {}})],
+            'users': [dict(id='admin-id', username='admin',
+                           password_hash=panel.hash_password('admin'),
+                           role='admin', enabled=True)],
+            'user_connections': [],
+            'settings': {'subscription': {
+                'enabled': True, 'server_uid': 'mask', 'path': 'sub',
+                'name': 'My VPN', 'include_awg': include_awg}},
+        }
+        with open(panel.DATA_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f)
+        with TestClient(panel.app) as client:
+            login = client.post('/api/auth/login',
+                                json={'username': 'admin', 'password': 'admin'})
+            self.assertEqual(login.status_code, 200, login.text)
+            page = client.get('/settings')
+        self.assertEqual(page.status_code, 200)
+        html = page.text
+        self.assertIn('Subscriptions (Xray / AmneziaWG)', html)
+        block = html[html.index('id="subFields"'):]
+        return block[:block.index('id="subName"')]
+
+    def test_the_option_renders_checked_only_when_it_is_on(self):
+        catalogue = json.loads((Path(__file__).resolve().parents[1]
+                                / 'translations' / 'en.json').read_text(encoding='utf-8'))
+        for include_awg in (True, False):
+            with self.subTest(include_awg=include_awg):
+                block = self._render_subscription_block(include_awg)
+                checkbox = next(line for line in block.split('>')
+                                if 'id="sub_include_awg"' in line.split('<')[-1])
+                self.assertEqual('checked' in checkbox, include_awg)
+                # the label, then the hint, both translated
+                label = block.index(catalogue['subscription_include_awg'])
+                hint = block.index(catalogue['subscription_include_awg_hint'])
+                self.assertLess(label, hint)
+                self.assertNotIn('{{', block)
+                self.assertNotIn('{%', block)
 
 
 if __name__ == '__main__':

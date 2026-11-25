@@ -14334,7 +14334,7 @@ def api_add_connection(request: Request, server_id: int, req: AddConnectionReque
             }
             data['user_connections'].append(conn)
             save_data(data)
-            if protocol_base(req.protocol) == 'xray':
+            if _subscription_carries(data, req.protocol):
                 # Refresh the owner's subscription file right away; the
                 # periodic monitor covers every other change source.
                 try:
@@ -15393,7 +15393,7 @@ async def api_add_user_connection(request: Request, user_id: str, req: AddUserCo
             data = load_data()
             data['user_connections'].append(conn)
             save_data(data)
-            if protocol_base(req.protocol) == 'xray':
+            if _subscription_carries(data, req.protocol):
                 # Refresh the user's subscription file right away; the
                 # periodic monitor covers every other change source.
                 try:
@@ -15992,7 +15992,8 @@ def subscription_settings(data):
     return {'enabled': bool(settings.get('enabled')),
             'server_uid': server_uid,
             'path': path,
-            'name': normalize_subscription_name(settings.get('name'))}
+            'name': normalize_subscription_name(settings.get('name')),
+            'include_awg': bool(settings.get('include_awg'))}
 
 
 def normalize_subscription_path(path):
@@ -16044,7 +16045,7 @@ def _subscription_userinfo(user):
 
 
 def _subscription_config_entries(data):
-    """[(token, userinfo), ...] for users with a token and xray targets."""
+    """[(token, userinfo), ...] for users with a token and subscription targets."""
     entries = []
     for user in data.get('users', []):
         token = user.get('sub_token')
@@ -16154,14 +16155,33 @@ def _subscription_mask_domain(nginx_server):
         return None
 
 
+def amneziawg_share_link(config_text, name):
+    """`amneziawg://<base64url of the wg-quick config>#name`, the AmneziaWG
+    share link YPtun reads: it decodes the body and hands the whole config
+    to its core. Not a standard scheme, which is why it is opt-in."""
+    payload = base64.urlsafe_b64encode(
+        config_text.strip().encode('utf-8')).decode('ascii').rstrip('=')
+    return f'amneziawg://{payload}#{urllib.parse.quote(name)}'
+
+
+def _subscription_carries(data, protocol):
+    """Whether subscriptions carry connections of this protocol: xray always,
+    AmneziaWG when the admin opted in (not every client understands those
+    links)."""
+    base = protocol_base(protocol or '')
+    if base == 'xray':
+        return True
+    return base in AWG_PROTOCOLS and subscription_settings(data)['include_awg']
+
+
 def _subscription_user_targets(data, user):
-    """[(server, [connection, ...])] for the user's xray connections."""
+    """[(server, [connection, ...])] for the user's connections a
+    subscription carries."""
     groups = {}
     for conn in data.get('user_connections', []):
         if conn.get('user_id') != user.get('id'):
             continue
-        protocol = conn.get('protocol') or ''
-        if not protocol.startswith('xray'):
+        if not _subscription_carries(data, conn.get('protocol')):
             continue
         server_id = conn.get('server_id')
         if isinstance(server_id, int) and 0 <= server_id < len(data.get('servers', [])):
@@ -16174,13 +16194,19 @@ def _subscription_connection_link(ssh, server, conn, instance_names):
     """One connection as the subscription carries it, or None when the panel
     has nothing to hand out for it."""
     protocol = conn['protocol']
+    base = protocol_base(protocol)
     proto_info = server.get('protocols', {}).get(protocol, {})
-    port = proto_info.get('port', 443)
+    port = proto_info.get('port', 443 if base == 'xray' else 55424)
     pub_host, pub_port = protocol_public_endpoint(server, protocol)
+    # An AmneziaWG config follows the instance's WARP link the way it did
+    # when the connection was created: the budget MTU, no IPv6 resolver
+    # through warp0.
+    extra = ({'warp_ctx': srv_warp_ctx(server, protocol)}
+             if base in AWG_PROTOCOLS else xray_fp_kwargs(server, protocol))
     config = _manager_call(
         get_protocol_manager(ssh, protocol), 'get_client_config',
         protocol, conn.get('client_id'), pub_host, port,
-        public_port=pub_port, **xray_fp_kwargs(server, protocol))
+        public_port=pub_port, **extra)
     if not config:
         return None
     # The link fragment is what the user sees in their client: "server ·
@@ -16191,6 +16217,9 @@ def _subscription_connection_link(ssh, server, conn, instance_names):
                      or protocol_display_name(protocol))
     entry_name = (f"{server.get('name') or server.get('host')}"
                   f" · {instance_name}")
+    if base in AWG_PROTOCOLS:
+        # AmneziaWG travels as its wg-quick config
+        return amneziawg_share_link(config, entry_name)
     fragment = urllib.parse.quote(entry_name)
     return (config.rpartition('#')[0] + '#' + fragment
             if '#' in config
@@ -16217,8 +16246,9 @@ def push_user_subscription(data, user, sub_settings, nginx_server):
                         link = _subscription_connection_link(
                             ssh, server, conn, instance_names)
                     except Exception as e:
-                        # A connection the panel cannot build must not take
-                        # the user's other links on this server with it.
+                        # A connection the panel cannot build (a peer that
+                        # is gone, a client without a stored key) must not
+                        # take the user's other links on this server with it.
                         errors.append(f"{server.get('host')}: {e}")
                         continue
                     if link:
@@ -16229,7 +16259,7 @@ def push_user_subscription(data, user, sub_settings, nginx_server):
             errors.append(f"{server.get('host')}: {e}")
     if not links:
         raise RuntimeError('no links collected: '
-                           + ('; '.join(errors) or 'no xray connections'))
+                           + ('; '.join(errors) or 'no connections to carry'))
     payload = base64.b64encode('\n'.join(links).encode()).decode()
     sub_dir = f"{NginxManager.HTML_DIR}/{sub_settings['path']}"
     remote_path = f"{sub_dir}/{token}"
@@ -16271,7 +16301,7 @@ def auto_push_subscriptions(data, user_ids=None):
     updated = 0
     for user in targets:
         if not _subscription_user_targets(data, user):
-            user.pop('sub_url', None)  # all xray connections are gone
+            user.pop('sub_url', None)  # nothing left to serve
             continue
         try:
             token, count, errors, unchanged = push_user_subscription(
@@ -16310,6 +16340,9 @@ def push_all_subscriptions(data):
     valid_tokens = set()
     for user in data.get('users', []):
         if not _subscription_user_targets(data, user):
+            # Nothing to serve; the file that may have existed is pruned
+            # below, so the cached URL must not outlive it.
+            user.pop('sub_url', None)
             continue
         try:
             token, count, user_errors, unchanged = push_user_subscription(
@@ -16370,6 +16403,7 @@ class SubscriptionSettingsRequest(BaseModel):
     server_uid: Optional[str] = None
     path: Optional[str] = None
     name: Optional[str] = None
+    include_awg: bool = False
 
 
 @app.get('/api/subscription/status', tags=["Settings"])
@@ -16413,6 +16447,7 @@ def api_subscription_settings_save(request: Request, req: SubscriptionSettingsRe
         settings.pop('server_id', None)  # legacy index format
         settings['path'] = sub_path
         settings['name'] = sub_name
+        settings['include_awg'] = req.include_awg
         save_data(data)
         result = {'status': 'success', 'enabled': req.enabled, 'path': sub_path,
                   'pushed': [], 'errors': []}
