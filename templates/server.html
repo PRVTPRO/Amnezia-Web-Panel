@@ -12422,7 +12422,8 @@ async function loadCheburcheck() {
         if (!el) return;
         const status = (r && r.status) || 'unknown';
         const br = ((r && r.probe) || {}).blocking_regions || 0;
-        const rc = br + (((r && r.probe) || {}).clear_regions || 0);
+        const rc = ((r && r.probe) || {}).total_regions
+            || br + (((r && r.probe) || {}).clear_regions || 0);
         const rr = ((r && r.probe) || {}).restricted_regions || 0;
         const remarks = (r && r.remarks) || 0;
         // "No restrictions detected" must not appear next to "restrictions: 24":
@@ -12493,7 +12494,7 @@ function cheburcheckStale(checkedAt) {
 function cheburcheckTargetRow(target, rec) {
     const status = rec.status || 'unknown';
     const br = (rec.probe || {}).blocking_regions || 0;
-    const rc = br + ((rec.probe || {}).clear_regions || 0);
+    const rc = (rec.probe || {}).total_regions || br + ((rec.probe || {}).clear_regions || 0);
     const rr = (rec.probe || {}).restricted_regions || 0;
     const staticBits = [];
     if ((rec.static || {}).blocked) staticBits.push(_('cheburcheck_static_rkn'));

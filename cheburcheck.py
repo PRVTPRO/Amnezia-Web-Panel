@@ -463,16 +463,64 @@ def select_verdict(regions, is_static_cdn):
     return None if winner == "uncertain" else winner
 
 
+def region_key(region):
+    """Bucket name for one scanner answer.
+
+    The service returns one ``result`` per scanner, and several scanners may
+    work from the same region. Counters must be taken over distinct regions,
+    otherwise every repeated answer looks like another region. Answers without
+    a region share one bucket, exactly as cheburcheck.ru does when it selects
+    probes ("missing regions share one bucket").
+    """
+    return str(region or "").strip().casefold()
+
+
 def ban_regions(regions, is_static_cdn=False):
-    """Regions whose verdict is a TSPU block (the only ban verdict)."""
-    return [r for r in (regions or [])
-            if region_verdict(r, is_static_cdn) in BAN_VERDICTS]
+    """Regions whose verdict is a TSPU block (the only ban verdict).
+
+    One item per region even when several scanners answered from it.
+    """
+    found = {}
+    for r in regions or []:
+        if region_verdict(r, is_static_cdn) in BAN_VERDICTS:
+            found.setdefault(region_key(r.get("region")), r)
+    return list(found.values())
 
 
 def restricted_regions(regions, is_static_cdn=False):
     """Regions carrying SNI/DNS/CDN restrictions (not bans)."""
-    return [r for r in (regions or [])
-            if region_verdict(r, is_static_cdn) in RESTRICTION_VERDICTS]
+    banned = {region_key(r.get("region")) for r in (regions or [])
+              if region_verdict(r, is_static_cdn) in BAN_VERDICTS}
+    found = {}
+    for r in regions or []:
+        key = region_key(r.get("region"))
+        if key in banned:
+            continue
+        if region_verdict(r, is_static_cdn) in RESTRICTION_VERDICTS:
+            found.setdefault(key, r)
+    return list(found.values())
+
+
+def region_counts(regions, is_static_cdn=False):
+    """(answered regions, banned regions, restricted regions).
+
+    The denominator of the "regions blocked" counter: distinct regions that
+    returned a verdict, not the number of scanner answers. The scanner cache
+    replays previous answers, so counting answers made the total grow with
+    every scan (issue #415).
+    """
+    answered, banned, restricted = set(), set(), set()
+    for r in (regions or []):
+        verdict = region_verdict(r, is_static_cdn)
+        if not verdict:
+            continue
+        key = region_key(r.get("region"))
+        answered.add(key)
+        if verdict in BAN_VERDICTS:
+            banned.add(key)
+        elif verdict in RESTRICTION_VERDICTS:
+            restricted.add(key)
+    return len(answered), len(banned), len(restricted - banned)
 
 
 # Kept for callers/tests written before the ban/restriction split.
@@ -527,9 +575,7 @@ def build_summary(host, static, probe, error=None):
     pr = probe.get("response_count") or 0
     regions = probe.get("regions") or []
     is_static_cdn = static_is_cdn(static)
-    banned = ban_regions(regions, is_static_cdn)
-    restricted = restricted_regions(regions, is_static_cdn)
-    restricted_count = len(restricted)
+    total_regions, ban_count, restricted_count = region_counts(regions, is_static_cdn)
     if not restricted_count:
         # The site maps a raw cdn_block to "ok" for non-CDN targets; keep the
         # scanner's own SNI/DNS/CDN hits visible as remarks anyway.
@@ -538,14 +584,15 @@ def build_summary(host, static, probe, error=None):
                                in raw_counts.items()
                                if verdict in RESTRICTION_VERDICTS)
     # Count only regions that actually returned verdicts: ``response_count``
-    # comes from the "done" event and may exceed what the stream delivered.
+    # comes from the "done" event, may exceed what the stream delivered, and
+    # grows with every scan because the service replays cached answers.
     answered = len([r for r in regions if r.get("verdicts")])
     winner = select_verdict(regions, is_static_cdn)
     # A ban is a TSPU verdict only: SNI/DNS/CDN verdicts and a static CDN/RKN
     # hit are reported as facts, they do not flip the status.
-    if banned:
+    if ban_count:
         status = "banned"
-    elif answered and not banned:
+    elif answered:
         status = "clean"
     else:
         status = "unknown"
@@ -579,13 +626,14 @@ def build_summary(host, static, probe, error=None):
             "verdict_counts": display_counts,
             "raw_verdict_counts": probe.get("verdict_counts") or {},
             "static_cdn": is_static_cdn,
-            "ban_regions": len(banned),
+            "total_regions": total_regions,
+            "ban_regions": ban_count,
             "restricted_regions": restricted_count,
             "static_hit": static_hit,
-            "blocking_regions": len(banned),        # compat: ban-based
-            "clear_regions": max(0, answered - len(banned)),
+            "blocking_regions": ban_count,          # compat: ban-based
+            "clear_regions": max(0, total_regions - ban_count),
         },
-        "partial": bool(answered and 0 < len(banned) < answered),
+        "partial": bool(0 < ban_count < total_regions),
     }
     if error:
         record["error"] = str(error)
