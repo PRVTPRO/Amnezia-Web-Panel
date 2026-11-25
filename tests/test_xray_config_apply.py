@@ -1,14 +1,15 @@
 """Xray config apply: nothing the core cannot build is persisted, nothing
-secret is left behind, and a core that does not come back gets its
-previous configuration restored."""
+secret is left behind, an unverified start is never passed off as a
+success, and a core that does not come back gets its previous
+configuration restored."""
 import json
 import unittest
 from unittest import mock
 from unittest.mock import Mock
 
 from managers.xray_manager import (
-    CONFIG_MODE, PRIVILEGES, START_STABLE, XrayConfigRejected, XrayManager,
-    _core_verdict)
+    CONFIG_MODE, PRIVILEGES, START_POLLS, START_STABLE, XrayConfigRejected,
+    XrayControlError, XrayManager, _core_verdict)
 
 CONFIG = '/opt/amnezia/xray/server.json'
 OLD = json.dumps({'tag': 'old'})
@@ -16,6 +17,9 @@ NEW = json.dumps({'tag': 'new'}, indent=2)
 MOUNTS = "docker inspect -f '{{range .Mounts}}{{.Destination}}{{println}}{{end}}'"
 STATE = "docker inspect -f '{{.State.Status}} {{.RestartCount}}'"
 PROOF = 'Failed to start: main: failed to add address 2606:4700::1/128 to wg0'
+# What the SSH layer answers when a command did not run to an exit status.
+LOST = ('', 'SSH to node is still busy with a previous command', -1)
+UNKNOWN = 'unknown'   # a state query that never gets an answer
 
 
 class FakeHost:
@@ -33,9 +37,11 @@ class FakeHost:
         # (stdout, stderr, code) of `xray run -test`
         self.verdict = verdict
         # (status, restart count) per state query; the last one repeats.
-        # None when docker reports nothing at all.
         self.states = [('running', 0)] if states is None else list(states)
         self.logs = logs
+        # command prefix -> (stdout, stderr, code), for every call or just
+        # the first one
+        self.fail, self.fail_once = {}, {}
         self.commands = []
         self.container_copies = []
 
@@ -47,15 +53,20 @@ class FakeHost:
 
     def run_sudo_command(self, command, **kwargs):
         self.commands.append(command)
+        for prefix, reply in self.fail_once.items():
+            if command.startswith(prefix):
+                del self.fail_once[prefix]
+                return reply
+        for prefix, reply in self.fail.items():
+            if command.startswith(prefix):
+                return reply
         if command.startswith('docker run --rm '):
             return self.verdict
         if command.startswith(MOUNTS):
             return ('/opt/amnezia/xray\n' if self.mounted else '', '', 0)
         if command.startswith(STATE):
-            if not self.states:
-                return ('', '', 1)
             state = self.states.pop(0) if len(self.states) > 1 else self.states[0]
-            return (f'{state[0]} {state[1]}\n', '', 0)
+            return LOST if state == UNKNOWN else (f'{state[0]} {state[1]}\n', '', 0)
         if command.startswith('docker logs'):
             return (self.logs, '', 0)
         if command.startswith('cat '):
@@ -157,6 +168,54 @@ class WriteTests(unittest.TestCase):
         self.assertNotIn('incidental warning', str(ctx.exception))
         self.assertFalse(any(c.startswith(('docker stop', 'docker start')) for c in host.commands))
 
+    def test_a_lost_answer_is_no_verdict_on_the_config(self):
+        # the SSH layer answers -1 when the command never ran to an exit status
+        host = FakeHost(verdict=LOST)
+        with self.assertRaises(XrayControlError) as ctx:
+            manager_for(host)._write_server_json(json.loads(NEW), restart=True)
+
+        self.assertNotIsInstance(ctx.exception, XrayConfigRejected)
+        self.assertIn('Could not check the configuration with the core', str(ctx.exception))
+        self.assertIn('still busy', str(ctx.exception))
+        self.assertEqual(host.files, {CONFIG: OLD})
+
+    def test_a_check_that_cannot_run_is_no_verdict_either(self):
+        # docker run itself failed: the core was never asked
+        host = FakeHost(verdict=('docker: Unable to find image amneziavpn/amnezia-xray',
+                                 '', 125))
+        with self.assertRaises(XrayControlError) as ctx:
+            manager_for(host)._write_server_json(json.loads(NEW), restart=False)
+
+        self.assertIn('Unable to find image', str(ctx.exception))
+        self.assertEqual(host.files, {CONFIG: OLD})
+
+    def test_an_unreadable_container_state_stops_the_write_before_anything_changes(self):
+        host = FakeHost()
+        host.fail[STATE] = LOST
+        with self.assertRaises(XrayControlError) as ctx:
+            manager_for(host)._write_server_json(json.loads(NEW), restart=True)
+
+        self.assertIn('Could not read the Xray container state', str(ctx.exception))
+        self.assertEqual(host.files, {CONFIG: OLD})
+        self.assertFalse(any(c.startswith('mv -f -- ') for c in host.commands))
+
+    def test_a_live_config_that_cannot_be_read_is_not_taken_for_absent(self):
+        # "unknown" must not pass for "nothing to restore"
+        host = FakeHost()
+        host.fail['cat '] = LOST
+        with self.assertRaises(XrayControlError):
+            manager_for(host)._write_server_json(json.loads(NEW), restart=True)
+
+        self.assertEqual(host.files, {CONFIG: OLD})
+        self.assertFalse(any(c.startswith('mv -f -- ') for c in host.commands))
+
+    def test_the_live_api_payload_is_staged_root_only(self):
+        # it carries a client's credentials
+        host = FakeHost()
+        XrayManager(host)._run_xray_api_json('adu', {'inbounds': []})
+        staged = [(path, mode) for path, mode in host.uploads if '/tmp/_xray_api_' in path]
+        self.assertEqual([mode for _, mode in staged], [CONFIG_MODE])
+
 
 class RestartTests(unittest.TestCase):
     def test_the_core_must_be_seen_stable_after_the_start(self):
@@ -212,22 +271,65 @@ class RestartTests(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             manager_for(host)._write_server_json(json.loads(NEW), restart=True)
         self.assertEqual(host.files, {CONFIG: OLD})
-        self.assertIn('neither the new nor the previous', str(ctx.exception))
+        self.assertIn('after the previous configuration was restored', str(ctx.exception))
 
-    def test_a_container_that_will_not_stop_is_reported_before_any_start(self):
-        host = FakeHost(states=[('running', 0), ('running', 0)])
+    def test_a_start_that_fails_gets_the_previous_config_back(self):
+        # the first start is refused; the restored configuration starts fine
+        host = FakeHost(states=[('running', 0), ('exited', 0), ('exited', 0),
+                                ('running', 0), ('running', 0)])
+        host.fail_once['docker start'] = ('', 'OCI runtime create failed', 125)
         with self.assertRaises(RuntimeError) as ctx:
             manager_for(host)._write_server_json(json.loads(NEW), restart=True)
-        self.assertIn('takes effect at the next start', str(ctx.exception))
-        self.assertFalse(any(c.startswith('docker start ') for c in host.commands))
-        self.assertEqual(host.files, {CONFIG: NEW})
 
-    def test_without_a_state_to_verify_against_the_write_is_not_blocked(self):
-        host = FakeHost()
-        host.states = []
+        self.assertEqual(host.files, {CONFIG: OLD})
+        self.assertIn('could not start the container: OCI runtime create failed',
+                      str(ctx.exception))
+        self.assertIn('previous configuration was restored and is running', str(ctx.exception))
+        self.assertEqual(sum(c.startswith('docker start ') for c in host.commands), 2)
+
+    def test_a_container_that_will_not_stop_gets_the_previous_config_back(self):
+        # The core keeps running the configuration it had: the file is put
+        # back in step with it, and nothing is ever started on the new one.
+        host = FakeHost(states=[('running', 0)])
+        with self.assertRaises(RuntimeError) as ctx:
+            manager_for(host)._write_server_json(json.loads(NEW), restart=True)
+
+        self.assertEqual(host.files, {CONFIG: OLD})
+        self.assertFalse(any(c.startswith('docker start ') for c in host.commands))
+        self.assertIn('could not be confirmed', str(ctx.exception))
+        self.assertEqual(host.commands.count('docker stop amnezia-xray'), 2 * START_POLLS)
+
+    def test_a_state_that_cannot_be_read_right_after_the_start_is_retried(self):
+        # one lost answer, then docker reports a stable core
+        host = FakeHost(states=[('running', 0), ('exited', 0), UNKNOWN,
+                                ('running', 0), ('running', 0)])
         manager_for(host)._write_server_json(json.loads(NEW), restart=True)
+
         self.assertEqual(host.files, {CONFIG: NEW})
-        self.assertEqual(sum(c.startswith('docker start ') for c in host.commands), 1)
+        self.assertEqual(host.commands.count('sleep 1'), 3)
+
+    def test_a_state_that_stays_unreadable_is_never_a_success(self):
+        # The polls never get an answer: the write fails closed, and the
+        # core that was running before it gets its configuration back.
+        host = FakeHost(states=[('running', 0), ('exited', 0)] + [UNKNOWN] * START_POLLS
+                        + [('exited', 0), ('running', 0), ('running', 0)])
+        with self.assertRaises(RuntimeError) as ctx:
+            manager_for(host)._write_server_json(json.loads(NEW), restart=True)
+
+        self.assertEqual(host.files, {CONFIG: OLD})
+        self.assertIn('could not be confirmed running', str(ctx.exception))
+        self.assertIn('previous configuration was restored and is running', str(ctx.exception))
+
+    def test_polls_without_a_real_pause_in_between_prove_nothing(self):
+        # Every pause is lost: two back-to-back polls would read "running"
+        # twice before a crashing core had the time to crash.
+        host = FakeHost(states=[('running', 0), ('exited', 0), ('running', 0)])
+        host.fail['sleep 1'] = LOST
+        with self.assertRaises(RuntimeError) as ctx:
+            manager_for(host)._write_server_json(json.loads(NEW), restart=True)
+
+        self.assertEqual(host.files, {CONFIG: OLD})
+        self.assertIn('could not be confirmed', str(ctx.exception))
 
 
 class ClientChangeTests(unittest.TestCase):
@@ -325,7 +427,6 @@ class InstallTests(unittest.TestCase):
             manager.install_protocol(port=443)
         self.assertIn(PROOF, str(ctx.exception))
         self.assertFalse(any(c.startswith('docker run -d') for c in commands))
-
 
 if __name__ == '__main__':
     unittest.main()

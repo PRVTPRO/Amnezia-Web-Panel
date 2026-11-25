@@ -118,8 +118,11 @@ CONFIG_MODE = 0o600
 # How the throwaway validation container sees a staged candidate.
 _CANDIDATE = '/tmp/.server.json.candidate'
 # What a core container is granted; the validation container gets the same,
-# so that it can prove exactly what a start of the real one would do.
+# so that it builds the configuration under the conditions of the live one.
 PRIVILEGES = '--privileged --cap-add=NET_ADMIN'
+# Exit codes of `docker run` itself (125: daemon or image, 126/127: the
+# command could not be invoked): the core was never asked.
+_DOCKER_RUN_FAILURES = (125, 126, 127)
 # Restart verification: one poll per second; the core counts as back after
 # START_STABLE consecutive "running" polls with an unmoved restart counter.
 START_POLLS = 6
@@ -131,8 +134,20 @@ class XrayConfigRejected(RuntimeError):
     """The core cannot build a configuration; nothing was changed."""
 
 
+class XrayControlError(RuntimeError):
+    """A command could not be run on the server, or its answer could not be
+    read, so its outcome is unknown. This says nothing about the
+    configuration: the SSH layer answers -1 when a command did not run to an
+    exit status, and a state that cannot be read is never assumed healthy."""
+
+
 class XrayStartError(RuntimeError):
-    """The core did not come back after its container was restarted."""
+    """The core is not confirmed running after its container was restarted."""
+
+
+def _why(err, code):
+    """The remote reason of a failed command, or its exit status."""
+    return (err or '').strip() or f'exit code {code}'
 
 
 def _core_verdict(text, limit=400):
@@ -757,9 +772,12 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
     def _config_test_command(self, host_file):
         """`xray run -test` for a config file, in a throwaway container built
         from the live image with the live privileges and config directory.
-        Its own network namespace makes the proof match what a start of the
-        real container would do, and lets a kernel-tun outbound be built
-        without colliding with the running core."""
+        It makes the core load and build the configuration, which is all it
+        does: the core exits before any listener starts, so a failure at
+        start-up is caught by the restart watch, not here. The container has
+        a network namespace of its own, so the build happens under the
+        conditions of a fresh start, and a kernel-tun outbound cannot
+        collide with the running core."""
         return (
             f'docker run --rm {PRIVILEGES} '
             f'-v {shlex.quote(self._config_dir())}:{shlex.quote(self._config_dir())}:ro '
@@ -769,9 +787,15 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
 
     def _prove_config(self, host_file):
         """Refuse a configuration the core cannot build, before anything
-        live is touched. `xray run -test` reports a build failure on
-        stdout and exits with a code of its own."""
+        live is touched. `xray run -test` reports a build failure on stdout
+        and exits with a code of its own. Anything else - the panel losing
+        the answer, or docker failing to run the check at all - is not a
+        verdict about the configuration."""
         out, err, code = self.ssh.run_sudo_command(self._config_test_command(host_file))
+        if code < 0 or code in _DOCKER_RUN_FAILURES:
+            raise XrayControlError(
+                'Could not check the configuration with the core: '
+                + (_why(err, code) if code < 0 else _core_verdict(out)))
         if code != 0:
             raise XrayConfigRejected(
                 'Xray rejected the configuration: '
@@ -780,14 +804,23 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
     def _config_dir_mounted(self):
         """Whether the container reads its config from the host directory
         (every container the panel creates does)."""
-        out, _, code = self.ssh.run_sudo_command(
+        out, err, code = self.ssh.run_sudo_command(
             f"docker inspect -f '{{{{range .Mounts}}}}{{{{.Destination}}}}"
             f"{{{{println}}}}{{{{end}}}}' {shlex.quote(self.container_name)} 2>/dev/null")
+        if code < 0:
+            raise XrayControlError(
+                'Could not inspect the Xray container: ' + _why(err, code))
         return code == 0 and self._config_dir() in (out or '').split()
 
     def _commit_config(self, stage):
         """Move the staged file over the live one with a rename, so a failed
         write can never leave a truncated config behind."""
+        def failed(action, err, code):
+            # A command without an exit status may well have done its job.
+            if code < 0:
+                return XrayControlError(f'Could not confirm {action}: ' + _why(err, code))
+            return RuntimeError(f'Could not {action}: ' + _why(err, code))
+
         try:
             if not self._config_dir_mounted():
                 # A container keeping its own copy needs it updated as well.
@@ -795,72 +828,102 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
                     f'docker cp -- {shlex.quote(stage)} '
                     f'{shlex.quote(self.container_name + ":" + self._config_path())}')
                 if code != 0:
-                    raise RuntimeError(
-                        'Could not copy the configuration into the container: '
-                        + ((err or out or '').strip() or f'exit code {code}'))
+                    raise failed('copy the configuration into the container', out or err, code)
             _, err, code = self.ssh.run_sudo_command(
                 f'mv -f -- {shlex.quote(stage)} {shlex.quote(self._config_path())}')
             if code != 0:
-                raise RuntimeError(
-                    'Could not install the new configuration: '
-                    + ((err or '').strip() or f'exit code {code}'))
+                raise failed('install the new configuration', err, code)
         except Exception:
             self.ssh.run_sudo_command(f'rm -f -- {shlex.quote(stage)}')
             raise
 
     def _read_config_text(self):
-        out, _, code = self.ssh.run_sudo_command(
+        """The live file's content, or None when there is none."""
+        out, err, code = self.ssh.run_sudo_command(
             f'cat {shlex.quote(self._config_path())} 2>/dev/null')
+        if code < 0:
+            # Unknown is not absent: a config that cannot be read is exactly
+            # the one that must not be treated as "nothing to restore".
+            raise XrayControlError(
+                'Could not read the live configuration: ' + _why(err, code))
         return out if code == 0 and (out or '').strip() else None
 
     def _container_state(self):
-        """(status, restart count) of the container, or (None, None) when
-        docker reports nothing."""
-        out, _, code = self.ssh.run_sudo_command(
+        """(status, restart count) of the container. Raises when docker
+        cannot be asked or answers something else: an unreadable state is
+        never reported as a healthy one."""
+        out, err, code = self.ssh.run_sudo_command(
             f"docker inspect -f '{{{{.State.Status}}}} {{{{.RestartCount}}}}' "
             f"{shlex.quote(self.container_name)} 2>/dev/null")
         parts = (out or '').split()
         if code != 0 or len(parts) != 2 or not parts[1].isdigit():
-            return None, None
+            raise XrayControlError(
+                'Could not read the Xray container state'
+                + (': ' + _why(err, code) if code < 0 else ''))
         return parts[0], int(parts[1])
 
     def _restart_core(self):
-        """Stop the container, start it again and make sure the core came
-        back. A config the core cannot start makes the container crash-loop
-        under --restart always, so "running" alone proves nothing: the
-        restart counter has to stay put as well. An explicit stop also
-        breaks a crash-loop the instance may already be in, which is the
-        state it is in when a broken config gets fixed."""
-        self.ssh.run_sudo_command(f'docker stop {shlex.quote(self.container_name)}')
-        status, seen = self._container_state()
-        if status in ('running', 'paused', 'restarting'):
-            raise RuntimeError(
-                'Could not stop the Xray container: the new configuration is '
-                'saved and takes effect at the next start')
-        _, err, code = self.ssh.run_sudo_command(
-            f'docker start {shlex.quote(self.container_name)}')
-        if code != 0:
-            raise RuntimeError(
-                'Could not start the Xray container ('
-                + ((err or '').strip() or f'exit code {code}')
-                + '): the new configuration stays on disk')
-        stable = 0
-        for _ in range(START_POLLS):
-            self.ssh.run_sudo_command('sleep 1')
-            status, count = self._container_state()
-            if status is None:
-                return  # docker reports no state: nothing to verify against
-            if (status in _CRASH_STATES
-                    or (count is not None and seen is not None and count > seen)):
-                out, _, _ = self.ssh.run_sudo_command(
-                    f'docker logs --tail 30 {shlex.quote(self.container_name)} 2>&1')
+        """Stop the container, start it again and make sure the core is back.
+        A config the core cannot start makes the container crash-loop under
+        --restart always, so "running" alone proves nothing: the restart
+        counter has to stay put as well. An explicit stop also breaks a
+        crash-loop the instance may already be in, which is the state it is
+        in when a broken config gets fixed.
+
+        Every ending without a confirmed core raises XrayStartError, and
+        that includes a state the panel could not read: an unverified start
+        is never passed off as a success."""
+        try:
+            for _ in range(START_POLLS):
+                self.ssh.run_sudo_command(f'docker stop {shlex.quote(self.container_name)}')
+                try:
+                    status, seen = self._container_state()
+                except XrayControlError:
+                    status, seen = None, None
+                if status is not None and status not in ('running', 'paused', 'restarting'):
+                    break
+                self.ssh.run_sudo_command('sleep 1')
+            else:
                 raise XrayStartError(
-                    'Xray did not come back (' + _core_verdict(out) + ')')
-            seen = count if count is not None else seen
-            stable = stable + 1 if status == 'running' else 0
-            if stable >= START_STABLE:
-                return
-        raise XrayStartError('Xray did not come back (still starting)')
+                    'Xray could not be confirmed stopped: the container is '
+                    'still up or its state could not be read')
+
+            _, err, code = self.ssh.run_sudo_command(
+                f'docker start {shlex.quote(self.container_name)}')
+            if code > 0:
+                raise XrayStartError(
+                    'Xray did not come back (could not start the container: '
+                    + _why(err, code) + ')')
+            # A lost answer to the start is no failure in itself: the polls
+            # below are what decides.
+            stable, unverified = 0, None
+            for _ in range(START_POLLS):
+                _, _, paused = self.ssh.run_sudo_command('sleep 1')
+                if paused != 0:
+                    # A poll right after a pause that never happened proves
+                    # nothing: a crashing core would not have had the time.
+                    continue
+                try:
+                    status, count = self._container_state()
+                except XrayControlError as exc:
+                    stable, unverified = 0, exc
+                    continue
+                if status in _CRASH_STATES or count > seen:
+                    out, _, _ = self.ssh.run_sudo_command(
+                        f'docker logs --tail 30 {shlex.quote(self.container_name)} 2>&1')
+                    raise XrayStartError(
+                        'Xray did not come back (' + _core_verdict(out) + ')')
+                seen = count
+                stable = stable + 1 if status == 'running' else 0
+                if stable >= START_STABLE:
+                    return
+            if unverified is not None:
+                raise XrayStartError(
+                    'Xray could not be confirmed running (' + str(unverified) + ')')
+            raise XrayStartError('Xray did not come back (still starting)')
+        except XrayControlError as exc:
+            raise XrayStartError(
+                'Xray could not be confirmed running (' + str(exc) + ')') from exc
 
     def _restore_config(self, text):
         """Put back a configuration that was running a moment ago - it needs
@@ -870,35 +933,36 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
 
     def _write_server_json(self, data, restart=True):
         """Apply a new server.json without ever leaving the instance worse
-        off. The candidate is staged as a private file, proven against the
+        off. The candidate is staged as a private file, checked against the
         core with `xray run -test`, renamed over the live file and - when
-        the core must restart - watched until it is back. A core that does
-        not come back gets the previous configuration restored before the
-        error surfaces."""
+        the core must restart - watched until it is back. Whatever goes
+        wrong before the rename changes nothing; whatever goes wrong after
+        it, on a core that was running, gets the previous configuration
+        restored before the error surfaces."""
         stage = self._stage_config(json.dumps(data, indent=2))
         try:
             self._prove_config(stage)
+            # A core that was down before the write has nothing to fall back
+            # to: the config being replaced is the broken one.
+            was_running = self._container_state()[0] if restart else None
+            previous = self._read_config_text() if restart else None
         except Exception:
             self.ssh.run_sudo_command(f'rm -f -- {shlex.quote(stage)}')
             raise
-        # A core that was down before the write has nothing to fall back
-        # to: the config being replaced is the broken one.
-        was_running = self._container_state()[0] if restart else None
-        previous = self._read_config_text() if restart else None
         self._commit_config(stage)
         if not restart:
             return
         try:
             self._restart_core()
-        except XrayStartError as exc:
+        except Exception as exc:
             detail = str(exc)
-            if was_running in (None, 'running') and previous is not None:
+            if was_running == 'running' and previous is not None:
                 try:
                     self._restore_config(previous)
-                except XrayStartError as restore_exc:
+                except Exception as restore_exc:
                     raise RuntimeError(
-                        'Xray came back with neither the new nor the previous '
-                        'configuration (' + str(restore_exc) + ')') from exc
+                        'Xray could not be confirmed running after the previous '
+                        'configuration was restored (' + str(restore_exc) + ')') from exc
                 detail += '; the previous configuration was restored and is running'
             raise RuntimeError(detail) from exc
 
@@ -916,7 +980,9 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         tmp_name = f"/tmp/_xray_api_{uuid.uuid4().hex}.json"
         container_tmp = tmp_name
         try:
-            self.ssh.upload_file_sudo(json.dumps(payload, indent=2), tmp_name)
+            # the payload carries a client's credentials
+            self.ssh.upload_file_sudo(json.dumps(payload, indent=2), tmp_name,
+                                      mode=CONFIG_MODE)
             _, err, code = self.ssh.run_sudo_command(
                 f"docker cp {tmp_name} {self.container_name}:{container_tmp}"
             )

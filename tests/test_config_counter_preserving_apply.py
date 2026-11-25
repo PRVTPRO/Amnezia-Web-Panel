@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 import app as panel
 from managers.xray_manager import XrayConfigRejected, XrayManager
+from xray_fixtures import remote_answers
 
 CONFIG = json.dumps({
     'log': {'loglevel': 'error'},
@@ -45,7 +46,7 @@ class CounterPreservingApplyTests(unittest.IsolatedAsyncioTestCase):
         self.manager.container_name = 'amnezia-xray'
         self.manager._config_path.return_value = '/opt/amnezia/xray/server.json'
         # The running container's raw config (the protected-mode read).
-        self.manager_run = Mock(return_value=(CONFIG, '', 0))
+        self.manager_run = Mock(side_effect=remote_answers(CONFIG))
         self.ssh.run_sudo_command = self.manager_run
         self.stack.enter_context(patch.object(panel, 'get_ssh', return_value=self.ssh))
         self.stack.enter_context(patch.object(panel, 'get_protocol_manager',

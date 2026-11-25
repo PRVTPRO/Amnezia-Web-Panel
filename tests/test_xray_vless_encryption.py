@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 
 import app as panel
 from managers.xray_manager import VLESS_ENC_KEY_FILE, XrayManager
+from xray_fixtures import remote_answers
 
 XHTTP_CONFIG = {
     'log': {'loglevel': 'error'},
@@ -29,7 +30,7 @@ XHTTP_CONFIG = {
 
 def make_manager(vlessenc_output, config=None):
     ssh = Mock()
-    ssh.run_sudo_command = Mock(return_value=(vlessenc_output, '', 0))
+    ssh.run_sudo_command = Mock(side_effect=remote_answers(vlessenc_output))
     manager = XrayManager(ssh)
     manager._get_server_json = lambda: config
     uploads = []

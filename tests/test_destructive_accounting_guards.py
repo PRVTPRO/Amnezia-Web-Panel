@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi import UploadFile
 import app as panel
+from xray_fixtures import remote_answers
 import peer_lifecycle_lock as interlock
 import telegram_bot
 from connection_service import SelfServiceError
@@ -122,7 +123,7 @@ class ConfigAccountingEdits(unittest.IsolatedAsyncioTestCase):
         self.manager._get_server_json.return_value = {'stats': {}}
         self.manager.container_name = 'amnezia-xray'
         self.manager._config_path.return_value = '/opt/amnezia/xray/server.json'
-        self.ssh.run_sudo_command.return_value = ('{"stats":{"changed":true},"stats":{}}', '', 0)
+        self.ssh.run_sudo_command.side_effect = remote_answers('{"stats":{"changed":true},"stats":{}}')
         with patch.object(panel, 'read_peer_state', return_value=(120, False)), \
              patch.object(panel, 'apply_final_sample') as finalize:
             result = await self.call('{"stats":{}}', 'xray')
@@ -142,7 +143,8 @@ class ConfigAccountingEdits(unittest.IsolatedAsyncioTestCase):
         # xray peer edits apply: counters are finalized, baselines follow the
         # restarted core.
         self.data['user_connections'][0]['protocol'] = 'xray'
-        self.ssh.run_sudo_command.return_value = ('{"inbounds":[{"settings":{"clients":[{"id":"original"}]}}]}', '', 0)
+        self.ssh.run_sudo_command.side_effect = remote_answers(
+            '{"inbounds":[{"settings":{"clients":[{"id":"original"}]}}]}')
         self.manager._config_path.return_value = '/opt/amnezia/xray/server.json'
         self.manager.container_name = 'amnezia-xray'
         with patch.object(panel, 'read_peer_state', return_value=(500, False)), \
