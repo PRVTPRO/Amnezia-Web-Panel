@@ -115,8 +115,11 @@ XRAY_DEFAULT_FINGERPRINT = 'firefox'
 # server.json carries the Reality private key and the VLESS Encryption
 # secret: it is staged and stored readable by root only.
 CONFIG_MODE = 0o600
-# How the throwaway validation container sees a staged candidate.
-_CANDIDATE = '/tmp/.server.json.candidate'
+# How the throwaway validation container sees a staged candidate. Told
+# nothing, the core guesses the format from the name's extension and refuses
+# a name it does not know without reading the file, so it ends in .json and
+# the format is passed to it explicitly as well.
+_CANDIDATE = '/tmp/.server.candidate.json'
 # What a core container is granted; the validation container gets the same,
 # so that it builds the configuration under the conditions of the live one.
 PRIVILEGES = '--privileged --cap-add=NET_ADMIN'
@@ -783,7 +786,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
             f'-v {shlex.quote(self._config_dir())}:{shlex.quote(self._config_dir())}:ro '
             f'-v {shlex.quote(host_file)}:{_CANDIDATE}:ro '
             f'--entrypoint="" {self.image_name} '
-            f'/usr/bin/xray run -test -c {_CANDIDATE}')
+            f'/usr/bin/xray run -test -c {_CANDIDATE} -format json')
 
     def _prove_config(self, host_file):
         """Refuse a configuration the core cannot build, before anything

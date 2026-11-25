@@ -14,8 +14,8 @@ from fastapi.testclient import TestClient
 
 import app as panel
 from managers.xray_manager import (
-    CONFIG_MODE, PRIVILEGES, START_POLLS, START_STABLE, XrayConfigRejected,
-    XrayControlError, XrayManager, _core_verdict)
+    _CANDIDATE, CONFIG_MODE, PRIVILEGES, START_POLLS, START_STABLE,
+    XrayConfigRejected, XrayControlError, XrayManager, _core_verdict)
 
 CONFIG = '/opt/amnezia/xray/server.json'
 OLD = json.dumps({'tag': 'old'})
@@ -133,9 +133,21 @@ class WriteTests(unittest.TestCase):
         prove = next(c for c in host.commands if 'xray run -test' in c)
         self.assertTrue(prove.startswith(f'docker run --rm {PRIVILEGES} '), prove)
         self.assertIn('-v /opt/amnezia/xray:/opt/amnezia/xray:ro ', prove)
-        self.assertIn(f'-v {stage}:/tmp/.server.json.candidate:ro ', prove)
+        self.assertIn(f'-v {stage}:{_CANDIDATE}:ro ', prove)
         self.assertIn('--entrypoint="" amneziavpn/amnezia-xray ', prove)
-        self.assertTrue(prove.endswith('/usr/bin/xray run -test -c /tmp/.server.json.candidate'))
+        self.assertTrue(prove.endswith(f'/usr/bin/xray run -test -c {_CANDIDATE} -format json'))
+
+    def test_the_core_is_told_what_it_reads(self):
+        # Told nothing, the core guesses the format from the name's
+        # extension and refuses a name it does not know without reading the
+        # file. A candidate called ".json.candidate" therefore made every
+        # write fail with "Failed to get format of", whatever the
+        # configuration said.
+        self.assertTrue(_CANDIDATE.endswith('.json'), _CANDIDATE)
+        host = FakeHost()
+        manager_for(host)._write_server_json(json.loads(NEW), restart=False)
+        prove = next(c for c in host.commands if 'xray run -test' in c)
+        self.assertEqual(prove.split()[-2:], ['-format', 'json'])
 
     def test_nothing_is_left_behind_and_the_live_file_is_root_only(self):
         host = FakeHost()
