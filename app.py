@@ -16170,6 +16170,33 @@ def _subscription_user_targets(data, user):
             for server_id, conns in groups.items()]
 
 
+def _subscription_connection_link(ssh, server, conn, instance_names):
+    """One connection as the subscription carries it, or None when the panel
+    has nothing to hand out for it."""
+    protocol = conn['protocol']
+    proto_info = server.get('protocols', {}).get(protocol, {})
+    port = proto_info.get('port', 443)
+    pub_host, pub_port = protocol_public_endpoint(server, protocol)
+    config = _manager_call(
+        get_protocol_manager(ssh, protocol), 'get_client_config',
+        protocol, conn.get('client_id'), pub_host, port,
+        public_port=pub_port, **xray_fp_kwargs(server, protocol))
+    if not config:
+        return None
+    # The link fragment is what the user sees in their client: "server ·
+    # instance". The panel-side connection name is the admin's private note
+    # and must not leak into the subscription.
+    instance_name = (proto_info.get('custom_name')
+                     or instance_names.get(protocol)
+                     or protocol_display_name(protocol))
+    entry_name = (f"{server.get('name') or server.get('host')}"
+                  f" · {instance_name}")
+    fragment = urllib.parse.quote(entry_name)
+    return (config.rpartition('#')[0] + '#' + fragment
+            if '#' in config
+            else config + '#' + fragment)
+
+
 def push_user_subscription(data, user, sub_settings, nginx_server):
     """Build the user's link list and write the base64 file into the mask
     html root. One SSH hop per entry server (the live config is the link
@@ -16186,29 +16213,16 @@ def push_user_subscription(data, user, sub_settings, nginx_server):
             ssh.connect()
             try:
                 for conn in conns:
-                    protocol = conn['protocol']
-                    proto_info = server.get('protocols', {}).get(protocol, {})
-                    port = proto_info.get('port', 443)
-                    pub_host, pub_port = protocol_public_endpoint(server, protocol)
-                    link = _manager_call(
-                        get_protocol_manager(ssh, protocol), 'get_client_config',
-                        protocol, conn.get('client_id'), pub_host, port,
-                        public_port=pub_port,
-                        **xray_fp_kwargs(server, protocol))
+                    try:
+                        link = _subscription_connection_link(
+                            ssh, server, conn, instance_names)
+                    except Exception as e:
+                        # A connection the panel cannot build must not take
+                        # the user's other links on this server with it.
+                        errors.append(f"{server.get('host')}: {e}")
+                        continue
                     if link:
-                        # The link fragment is what the user sees in their
-                        # client: "server · xray instance". The panel-side
-                        # connection name is the admin's private note and
-                        # must not leak into the subscription.
-                        instance_name = (proto_info.get('custom_name')
-                                         or instance_names.get(protocol)
-                                         or protocol_display_name(protocol))
-                        entry_name = (f"{server.get('name') or server.get('host')}"
-                                      f" · {instance_name}")
-                        fragment = urllib.parse.quote(entry_name)
-                        links.append(link.rpartition('#')[0] + '#' + fragment
-                                     if '#' in link
-                                     else link + '#' + fragment)
+                        links.append(link)
             finally:
                 ssh.disconnect()
         except Exception as e:

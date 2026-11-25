@@ -220,6 +220,62 @@ class SubscriptionPushTests(unittest.TestCase):
         self.assertEqual(self.uploads, [])
 
 
+    def test_a_connection_that_cannot_be_built_keeps_the_others(self):
+        user = self.data['users'][0]
+        self.data['user_connections'].append(
+            dict(id='c2', user_id='u1', server_id=1,
+                 protocol='xray', client_id='peer-2'))
+        # the first peer is gone from the server
+        manager = Mock()
+        manager.get_client_config = Mock(side_effect=[
+            RuntimeError('Client peer-1 not found'),
+            'vless://peer-2@entry:443?type=tcp'])
+        with patch.object(panel, 'get_ssh', return_value=self._ssh()), \
+             patch.object(panel, 'get_protocol_manager', return_value=manager), \
+             patch.object(panel, 'protocol_public_endpoint',
+                          return_value=('entry.example', None)), \
+             patch.object(panel, 'xray_fp_kwargs', return_value={}):
+            token, links, errors, unchanged = panel.push_user_subscription(
+                self.data, user,
+                {'enabled': True, 'server_uid': 'mask', 'path': 'sub'},
+                self.data['servers'][0])
+
+        self.assertEqual((links, unchanged), (1, False))
+        self.assertEqual(errors, ['198.51.100.1: Client peer-1 not found'])
+        content, _ = self.uploads[0]
+        self.assertIn(b'peer-2', base64.b64decode(content))
+
+    def test_an_unreachable_server_is_reported_and_the_others_are_written(self):
+        user = self.data['users'][0]
+        self.data['servers'].append(
+            dict(uid='node2', host='198.51.100.2', protocols={'xray': {'port': 443}}))
+        self.data['user_connections'].append(
+            dict(id='c2', user_id='u1', server_id=2,
+                 protocol='xray', client_id='peer-2'))
+        manager = Mock()
+        manager.get_client_config = Mock(
+            return_value='vless://peer-2@entry:443?type=tcp')
+
+        def ssh_for(server):
+            if server.get('uid') == 'node':
+                raise OSError('ssh down')
+            return self._ssh()
+        with patch.object(panel, 'get_ssh', side_effect=ssh_for), \
+             patch.object(panel, 'get_protocol_manager', return_value=manager), \
+             patch.object(panel, 'protocol_public_endpoint',
+                          return_value=('entry.example', None)), \
+             patch.object(panel, 'xray_fp_kwargs', return_value={}):
+            token, links, errors, unchanged = panel.push_user_subscription(
+                self.data, user,
+                {'enabled': True, 'server_uid': 'mask', 'path': 'sub'},
+                self.data['servers'][0])
+
+        self.assertEqual((links, unchanged), (1, False))
+        self.assertEqual(errors, ['198.51.100.1: ssh down'])
+        content, _ = self.uploads[0]
+        self.assertIn(b'peer-2', base64.b64decode(content))
+
+
 class SubscriptionConfigTests(unittest.TestCase):
     def _base_config(self):
         return NginxManager(Mock())._build_ssl_config('d.example', 443)
