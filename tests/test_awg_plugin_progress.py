@@ -21,6 +21,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 import app as panel
+from warp_service import WarpStateStore, proto_record, warp_link
 from managers.awg_plugin_updater import (
     KERNEL_MODULE,
     STAGE_STEPS,
@@ -380,6 +381,42 @@ class AwgPluginProgressTests(unittest.TestCase):
         self.assertIn('@media (prefers-reduced-motion: reduce)', html)
         reduced = html[html.index('@media (prefers-reduced-motion: reduce)'):]
         self.assertIn('.awg-progress-fill::after { animation: none; }', reduced)
+
+    def test_update_marks_active_warp_links_stale(self):
+        """Пересоздание контейнеров снимает подтверждение warp0."""
+        store = WarpStateStore(
+            str(Path(self.tmp.name) / 'data.json.srv_warp_state.json'))
+
+        def seed(state):
+            rec = proto_record(state, 'u0', 'awg')
+            rec['warp_link'] = {
+                'active': True,
+                'dns_via_warp': False,
+                'applied_at': 1,
+                'stale': None,
+                'dataplane_ok': True,
+                'server_uid': 'u0',
+                'entry_uid': 'u0',
+                'protocol': 'awg',
+            }
+
+        store.mutate(seed)
+        with patch.object(panel, 'warp_state_store', store):
+            op_id = 'op-warp-stale'
+            panel._awg_plugin_ops[op_id] = {
+                'id': op_id, 'server_id': 0, 'component': KERNEL_MODULE,
+                'target': '3.1.20260906', 'state': 'running', 'lines': [],
+                'result': None, 'error': None, 'cancel_requested': False,
+                'step': 0, 'total': TOTAL_STEPS, 'percent': 0,
+                'started_at': 't',
+            }
+            asyncio.run(panel._run_awg_plugin_update(
+                op_id, 0, KERNEL_MODULE, '3.1.20260906', False))
+
+        self.assertEqual(panel._awg_plugin_ops[op_id]['state'], 'success')
+        link = warp_link(proto_record(store.load(), 'u0', 'awg'))
+        self.assertEqual(link['stale'], 'container_recreated')
+        self.assertFalse(link['dataplane_ok'])
 
 
 if __name__ == '__main__':

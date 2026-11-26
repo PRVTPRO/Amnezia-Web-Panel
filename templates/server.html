@@ -11459,6 +11459,9 @@
         srv_warp_job_busy: 'srv_warp_err_job_busy',
         srv_warp_no_targets: 'srv_warp_err_no_awg',
         srv_warp_in_use: 'srv_warp_in_use_err',
+        srv_warp_link_failed: 'srv_warp_err_link_failed',
+        srv_warp_register_failed: 'srv_warp_err_register_failed',
+        srv_warp_budget_mismatch: 'srv_warp_err_budget',
         srv_warp_protocol_unsupported: 'srv_warp_err_protocol_unsupported',
         srv_warp_registered_unlink_first: 'srv_warp_err_registered',
         srv_warp_source_required: 'srv_warp_err_source_required',
@@ -11589,7 +11592,24 @@
             return;
         }
         const stateKey = WARP_STATE_KEYS[inst.state] || 'srv_warp_state_error';
-        let html = `<span class="badge ${warpInstanceBadgeClass(inst.state)}"><span class="badge-dot"></span> ${escapeHtml(_(stateKey))}</span>`;
+        const repair = inst.repair_state || {};
+        const repairFailed = !inst.link_active && repair.state === 'error' && !!inst.last_error;
+        const staleActive = !!(inst.link_active && inst.state_stale);
+        let html;
+        if (staleActive) {
+            // Активный линк с устаревшей меткой больше не подтверждён пробой:
+            // обычный бейдж показывал бы «Подключён» для мёртвого линка.
+            html = `<span class="badge badge-danger"><span class="badge-dot"></span> ${escapeHtml(_('srv_warp_state_error'))}</span>`
+                + `<div class="form-hint" style="color:var(--danger, #f87171)">${escapeHtml(_('srv_warp_instance_stale'))}</div>`;
+        } else if (repairFailed) {
+            // После сбоя link/repair линк снят: без этой ветки бейдж
+            // оставался «Установлен», а причина ошибки нигде не показывалась.
+            const reasonKey = WARP_ERROR_KEYS[inst.last_error] || 'srv_warp_err_generic';
+            html = `<span class="badge badge-danger"><span class="badge-dot"></span> ${escapeHtml(_('srv_warp_state_error'))}</span>`
+                + `<div class="form-hint" style="color:var(--danger, #f87171)">${escapeHtml(_(reasonKey))}</div>`;
+        } else {
+            html = `<span class="badge ${warpInstanceBadgeClass(inst.state)}"><span class="badge-dot"></span> ${escapeHtml(_(stateKey))}</span>`;
+        }
         if (busy) html += ` <span class="form-hint">${escapeHtml(_('srv_warp_instance_busy'))}</span>`;
         stateEl.innerHTML = html;
         if (!detailsEl) return;
@@ -11609,7 +11629,8 @@
         ).join('');
         const warnings = [];
         if (inst.quarantine) warnings.push(_('srv_warp_instance_quarantine'));
-        if (inst.state_stale) warnings.push(_('srv_warp_instance_stale'));
+        // При активном линке причина уже показана красным под бейджем.
+        if (inst.state_stale && !staleActive) warnings.push(_('srv_warp_instance_stale'));
         detailsEl.innerHTML = `<div class="form-label">${escapeHtml(_('srv_warp_instance_details'))}</div>`
             + `<div class="protocol-info" style="margin-top:var(--space-sm);">${table}</div>`
             + warnings.map(text => `<div class="form-hint" style="color:var(--warning, #fbbf24)">⚠ ${escapeHtml(text)}</div>`).join('');
