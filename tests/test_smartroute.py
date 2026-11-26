@@ -4,9 +4,14 @@ FakeSSH mirrors the pattern of tests/test_status_batch.py: record commands,
 serve canned answers.
 """
 
+import os
 import shlex
+import shutil
+import subprocess
+import tempfile
 import time
 import unittest
+from pathlib import Path
 
 from managers.smartroute_manager import (
     CONTAINER_APPLY_FINAL, CONTAINER_APPLY_SCRIPT,
@@ -596,6 +601,58 @@ class ManagerFlowTests(unittest.TestCase):
 
 class ApplyHardeningTests(unittest.TestCase):
     """Regression tests for partial route-application failures (review feedback)."""
+
+    @unittest.skipUnless(shutil.which('bash') and shutil.which('awk'), 'requires bash and awk')
+    def test_duplicate_prefix_does_not_skip_later_unique_prefix(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            routes = root / 'routes'
+            routes.write_text('192.0.2.0/24\n')
+            (root / 'smartr_v4.cidr').write_text(
+                '198.51.100.0/24\n198.51.100.0/24\n198.51.100.128/25\n')
+
+            # Model ip -batch stopping on the first duplicate route add.
+            ip = root / 'ip'
+            ip.write_text("""#!/bin/bash
+set -eu
+case "$2" in
+  route) awk '{print "throw " $0}' "$ROUTES" ;;
+  -batch)
+    if [ "$#" -gt 2 ]; then exec < "$3"; fi
+    while read -r _ operation _ prefix _; do
+      case "$operation" in
+        del)
+          grep -Fxv -- "$prefix" "$ROUTES" > "$ROUTES.next" || :
+          mv -- "$ROUTES.next" "$ROUTES"
+          ;;
+        add)
+          if grep -Fxq -- "$prefix" "$ROUTES"; then exit 2; fi
+          printf '%s\\n' "$prefix" >> "$ROUTES"
+          ;;
+        *) exit 3 ;;
+      esac
+    done
+    ;;
+  *) exit 3 ;;
+esac
+""")
+            ip.chmod(0o700)
+
+            script = render_container_script(
+                CONTAINER_APPLY_FINAL,
+                config_path='/opt/amnezia/awg/awg0.conf',
+                subnet_default='10.8.0.0/24',
+            ).replace('/tmp/smartr_', f'{root}/smartr_')
+            result = subprocess.run(
+                ['bash', '-c', script],
+                env={**os.environ, 'PATH': f'{root}:{os.environ["PATH"]}', 'ROUTES': str(routes)},
+                capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('2 throw routes', result.stdout)
+            self.assertEqual(routes.read_text().splitlines(), [
+                '198.51.100.0/24', '198.51.100.128/25',
+            ])
 
     def test_apply_snapshots_routes_before_delete(self):
         # last-known-good snapshot must exist BEFORE the del batch runs,
