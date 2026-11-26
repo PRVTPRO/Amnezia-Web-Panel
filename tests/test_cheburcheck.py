@@ -324,6 +324,75 @@ class TestCdnAndVerdictVoting(unittest.TestCase):
         self.assertEqual(len(cheburcheck.restricted_regions(regions, False)), 1)
 
 
+class TestRegionCounters(unittest.TestCase):
+    """Issue #415: counters count regions, not scanner answers."""
+
+    @staticmethod
+    def _probe(*answers, response_count=None):
+        regions = [{"region": region, "verdicts": verdicts,
+                    "cdn_unblocked": False, "host_results": 2}
+                   for region, verdicts in answers]
+        return {"regions": regions,
+                "response_count": (len(regions) if response_count is None
+                                   else response_count),
+                "verdicts": [v for _, verdicts in answers for v in verdicts],
+                "verdict_counts": {}}
+
+    def test_repeated_scanners_in_one_region_count_once(self):
+        probe = self._probe(("Москва", ["ok"]), ("Москва", ["ok"]),
+                            ("Москва", ["tspu_block"]), ("Казань", ["ok"]))
+        rec = cheburcheck.build_summary("1.2.3.4", {}, probe)
+        self.assertEqual(rec["status"], "banned")
+        self.assertEqual(rec["probe"]["total_regions"], 2)
+        self.assertEqual(rec["probe"]["ban_regions"], 1)
+        self.assertEqual(rec["probe"]["blocking_regions"], 1)
+        self.assertEqual(rec["probe"]["clear_regions"], 1)
+        self.assertTrue(rec["partial"])
+
+    def test_cached_replays_do_not_grow_the_region_total(self):
+        """The service replays cached answers, so the number of answers grows
+        with every scan; the region total must stay the same."""
+        first = self._probe(("A", ["ok"]), ("B", ["ok"]), ("C", ["ok"]),
+                            response_count=3)
+        second = self._probe(("A", ["ok"]), ("B", ["ok"]), ("C", ["ok"]),
+                             ("A", ["ok"]), ("B", ["ok"]), ("C", ["ok"]),
+                             response_count=6)
+        third = self._probe(("A", ["ok"]), ("B", ["ok"]), ("C", ["ok"]),
+                            ("A", ["ok"]), ("B", ["ok"]), ("C", ["ok"]),
+                            ("A", ["ok"]), response_count=7)
+        totals = [cheburcheck.build_summary("1.2.3.4", {}, probe)["probe"]["total_regions"]
+                  for probe in (first, second, third)]
+        self.assertEqual(totals, [3, 3, 3])
+
+    def test_answers_without_region_share_one_bucket(self):
+        probe = {"regions": [{"region": None, "verdicts": ["ok"]},
+                             {"region": "", "verdicts": ["tspu_block"]},
+                             {"region": "Москва", "verdicts": ["ok"]}],
+                 "response_count": 3,
+                 "verdicts": ["ok", "tspu_block", "ok"],
+                 "verdict_counts": {}}
+        rec = cheburcheck.build_summary("1.2.3.4", {}, probe)
+        self.assertEqual(rec["probe"]["total_regions"], 2)
+        self.assertEqual(rec["probe"]["blocking_regions"], 1)
+        self.assertEqual(rec["probe"]["clear_regions"], 1)
+
+    def test_restriction_region_is_not_counted_twice(self):
+        probe = self._probe(("A", ["sni_block"]), ("A", ["tspu_block"]))
+        rec = cheburcheck.build_summary("1.2.3.4", {}, probe)
+        self.assertEqual(rec["probe"]["total_regions"], 1)
+        self.assertEqual(rec["probe"]["ban_regions"], 1)
+        # A banned region is not also reported as a restricted one.
+        self.assertEqual(rec["probe"]["restricted_regions"], 0)
+
+    def test_partial_means_some_regions_banned_and_some_not(self):
+        probe = self._probe(("A", ["tspu_block"]), ("B", ["ok"]))
+        rec = cheburcheck.build_summary("1.2.3.4", {}, probe)
+        self.assertTrue(rec["partial"])
+        all_banned = self._probe(("A", ["tspu_block"]))
+        rec = cheburcheck.build_summary("1.2.3.4", {}, all_banned)
+        self.assertFalse(rec["partial"])
+
+
 class TestQuietHours(unittest.TestCase):
     """in_quiet_hours: the window during which no check runs."""
 
