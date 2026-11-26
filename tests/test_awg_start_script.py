@@ -21,6 +21,8 @@ def fixture(name):
 
 
 class RecordingSSH:
+    start_script_mode = 0o755
+
     def __init__(self):
         self.uploads = {}
         self.commands = []
@@ -38,6 +40,10 @@ class RecordingSSH:
             return self.resolved_config_path + '\n', '', 0
         if 'test -f' in command:  # _config_exists probe: config missing by default
             return '', '', 1
+        if 'amnezia-start-mode-' in command and command.startswith('docker cp'):
+            return '', '', 0 if self.start_script_mode is not None else 1
+        if command.startswith('stat -c %a '):
+            return f'{self.start_script_mode:o}\n', '', 0
         return '', '', 0
 
     resolved_config_path = ''
@@ -128,11 +134,26 @@ class StartScriptDeliveryTests(unittest.TestCase):
         manager._write_start_script('awg2')
 
         self.assertEqual(ssh.uploads['/tmp/_amnz_start.sh'], manager._render_start_script('awg2'))
-        self.assertEqual(ssh.commands, [
+        # The mode is set on the host copy before docker cp (docker keeps the
+        # source mode); docker exec cannot chmod a stopped container.
+        self.assertEqual(ssh.commands[:3], [
+            'chmod 755 /tmp/_amnz_start.sh',
             'docker cp /tmp/_amnz_start.sh amnezia-awg2:/opt/amnezia/start.sh',
-            'docker exec amnezia-awg2 chmod +x /opt/amnezia/start.sh',
             'rm -f /tmp/_amnz_start.sh',
         ])
+        self.assertTrue(ssh.commands[3].startswith(
+            'docker cp amnezia-awg2:/opt/amnezia/start.sh /tmp/amnezia-start-mode-'))
+        self.assertTrue(ssh.commands[4].startswith('stat -c %a /tmp/amnezia-start-mode-'))
+        self.assertTrue(ssh.commands[5].startswith('rm -f /tmp/amnezia-start-mode-'))
+        self.assertFalse([c for c in ssh.commands if 'docker exec' in c])
+        self.assertFalse([c for c in ssh.commands if 'docker restart' in c])
+
+    def test_write_start_script_rejects_a_non_executable_result(self):
+        ssh = RecordingSSH()
+        ssh.start_script_mode = 0o644
+        with self.assertRaises(RuntimeError) as ctx:
+            AWGManager(ssh)._write_start_script('awg2')
+        self.assertIn('not executable', str(ctx.exception))
 
     def test_upload_start_script_restarts_the_container(self):
         ssh = RecordingSSH()

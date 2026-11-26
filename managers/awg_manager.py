@@ -833,6 +833,69 @@ def generate_transit_params(awg3=False):
     return {k: v for k, v in params.items() if k in wanted}
 
 
+# ----- start.sh delivery -----
+# `docker cp` keeps the mode of the source file, and the entrypoint is
+# ["dumb-init", "/opt/amnezia/start.sh"]. A script that lands as 0644 cannot
+# be executed: the container dies with 'Permission denied' (exit 2) and
+# Docker restarts it forever. `docker exec chmod` cannot repair it - the
+# container is already down, which is exactly when it is needed. The fixes
+# below therefore work on the host copy, which docker accepts for stopped
+# containers too.
+START_SCRIPT_PATH = '/opt/amnezia/start.sh'
+
+
+def start_script_mode(ssh, container, path=START_SCRIPT_PATH):
+    """Permission bits of the in-container script, or None when unreadable."""
+    token = os.urandom(6).hex()
+    tmp = f'/tmp/amnezia-start-mode-{token}.sh'
+    try:
+        _out, _err, code = ssh.run_sudo_command(
+            f'docker cp {shlex.quote(container)}:{shlex.quote(path)} '
+            f'{shlex.quote(tmp)}')
+        if code != 0:
+            return None
+        out, _err, code = ssh.run_sudo_command(f'stat -c %a {shlex.quote(tmp)}')
+        if code != 0:
+            return None
+    finally:
+        ssh.run_sudo_command(f'rm -f {shlex.quote(tmp)}')
+    try:
+        return int((out or '').strip().splitlines()[-1], 8)
+    except (IndexError, ValueError):
+        return None
+
+
+def ensure_start_script_executable(ssh, container, path=START_SCRIPT_PATH):
+    """Restore the executable bit on the entrypoint script.
+
+    Returns (ok, detail). Repairing needs a round trip through the host:
+    the container may be stopped, so neither `docker exec` nor a bind-path
+    chmod is available.
+    """
+    token = os.urandom(6).hex()
+    tmp = f'/tmp/amnezia-start-fix-{token}.sh'
+    try:
+        _out, err, code = ssh.run_sudo_command(
+            f'docker cp {shlex.quote(container)}:{shlex.quote(path)} '
+            f'{shlex.quote(tmp)}')
+        if code != 0:
+            return False, (err or 'cannot read the script').strip()
+        _out, err, code = ssh.run_sudo_command(f'chmod 755 {shlex.quote(tmp)}')
+        if code != 0:
+            return False, (err or 'cannot chmod the script copy').strip()
+        _out, err, code = ssh.run_sudo_command(
+            f'docker cp {shlex.quote(tmp)} '
+            f'{shlex.quote(container)}:{shlex.quote(path)}')
+        if code != 0:
+            return False, (err or 'cannot write the script back').strip()
+    finally:
+        ssh.run_sudo_command(f'rm -f {shlex.quote(tmp)}')
+    mode = start_script_mode(ssh, container, path)
+    if mode is None:
+        return False, 'script mode unreadable after repair'
+    return bool(mode & 0o111), f'mode {mode:o}'
+
+
 class AWGManager:
     """Manages AmneziaWG protocol installation and client management."""
 
@@ -1908,6 +1971,7 @@ class AWGManager:
             f'docker cp {backup}:{awg_dir}/. {tmp_dir}/ && '
             f'docker cp {tmp_dir}/. {container}:{awg_dir}/ && '
             f'docker cp {backup}:/opt/amnezia/start.sh {tmp_dir}/start.sh && '
+            f'chmod 755 {tmp_dir}/start.sh && '
             f'docker cp {tmp_dir}/start.sh {container}:/opt/amnezia/start.sh && '
             f'rm -rf {tmp_dir}')
         if code != 0:
@@ -3586,14 +3650,39 @@ fi
 
     def _write_start_script(self, protocol_type=None, config_path=None,
                             warp_ctx=None):
-        """Put a freshly rendered start.sh into the container (no restart)."""
+        """Put a freshly rendered start.sh into the container (no restart).
+
+        The executable bit is set on the host copy before `docker cp`, which
+        preserves the source mode. Doing it in the container is not enough:
+        `docker exec chmod` fails while the container is stopped and leaves a
+        0644 entrypoint behind, so the next `docker start` never comes up.
+        """
         container_name = self._container_name(protocol_type)
         self.ssh.upload_file(
             self._render_start_script(protocol_type, config_path, warp_ctx=warp_ctx),
             "/tmp/_amnz_start.sh")
-        self.ssh.run_sudo_command(f"docker cp /tmp/_amnz_start.sh {container_name}:/opt/amnezia/start.sh")
-        self.ssh.run_sudo_command(f"docker exec {container_name} chmod +x /opt/amnezia/start.sh")
-        self.ssh.run_command("rm -f /tmp/_amnz_start.sh")
+        try:
+            _out, err, code = self.ssh.run_sudo_command(
+                "chmod 755 /tmp/_amnz_start.sh")
+            if code != 0:
+                raise RuntimeError(
+                    f'cannot mark start.sh executable: {(err or "").strip()}')
+            _out, err, code = self.ssh.run_sudo_command(
+                f"docker cp /tmp/_amnz_start.sh "
+                f"{container_name}:{START_SCRIPT_PATH}")
+            if code != 0:
+                raise RuntimeError(
+                    f'cannot install start.sh into {container_name}: '
+                    f'{(err or "").strip()}')
+        finally:
+            self.ssh.run_command("rm -f /tmp/_amnz_start.sh")
+        mode = start_script_mode(self.ssh, container_name)
+        if mode is None:
+            logger.warning("start.sh mode in %s is unreadable", container_name)
+        elif not mode & 0o111:
+            raise RuntimeError(
+                f'{container_name}:{START_SCRIPT_PATH} is not executable '
+                f'(mode {mode:o})')
 
     def _upload_start_script(self, protocol_type=None, warp_ctx=None):
         """Write the start script and restart the container to run it."""
