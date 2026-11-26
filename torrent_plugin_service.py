@@ -329,8 +329,20 @@ class TorrentPlugin:
 
     def health_for(self, server):
         key = plugin_key(server)
+        # Health — память процесса, а обход идёт только по текущим инстансам.
+        # Запись удалённого (или переставшего подходить) инстанса иначе
+        # остаётся навсегда: карточка показывает «Нужно запустить контейнер»
+        # по контейнеру, которого уже нет. Чистим такие записи при чтении.
+        # Пустой/отсутствующий список инстансов ничего не доказывает —
+        # тогда записи не трогаем.
+        live = set(self.capable(server)) if server.get('protocols') else None
         with self._health_lock:
             bucket = dict(self._health.get(key) or {})
+            stale = [proto for proto in bucket if live is not None and proto not in live]
+            for proto in stale:
+                bucket.pop(proto, None)
+            if stale:
+                self._health[key] = dict(bucket)
         if not bucket:
             return {'state': 'unknown', 'ok': None, 'error': '',
                     'checked_at': None, 'protocols': {}}
