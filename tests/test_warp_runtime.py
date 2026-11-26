@@ -13,6 +13,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 import warp_service as ws
 from warp_runtime import WarpRuntime
@@ -324,6 +325,221 @@ class WarpRuntimeHarness(unittest.TestCase):
         self.assertFalse(self.record('awg2')['warp']['registered'])
         self.assertTrue(self.data['servers'][0]['warp']['installed'])
 
+    # ----- link ------------------------------------------------------------
+
+    def test_link_registers_missing_profile_before_the_killswitch(self):
+        # The start.sh of a linked instance blackholes client traffic until
+        # warp0 is up, so an unregistered instance must never be announced as
+        # linked: that is what left awg3__3 without internet.
+        self.seed_state(registered=False)
+        self.ssh.account_present = False
+        self.ssh.conf_present = False
+        probes = []
+
+        async def up(self, manager, protocol, attempts=5, delay=2.0):
+            probes.append(protocol)
+            return {'up': True, 'facts': {}, 'detail': ''}
+
+        with mock.patch.object(type(self.runtime), '_wait_warp_dataplane', up):
+            run_coro(self.runtime.link(0, 'srv-1', 'awg', job_id='job-link'))
+
+        commands = '\n'.join(self.ssh.commands)
+        self.assertIn('wgcf register --accept-tos', commands)
+        rec = self.record()
+        self.assertTrue(rec['warp']['registered'])
+        self.assertIsNotNone(ws.warp_link(rec))
+        self.assertEqual(rec['client_mtu_warp'], 1280)
+        self.assertEqual(rec['warp']['repair_state']['state'], 'ok')
+        self.assertEqual(len(self.manager.uploads), 1)
+        self.assertTrue(self.manager.uploads[0]['warp_ctx']['active'])
+        self.assertEqual(probes, ['awg'])
+
+    def test_link_rolls_back_when_warp0_never_comes_up(self):
+        self.seed_state(registered=True)
+        self.ssh.account_present = True
+        self.ssh.conf_present = True
+
+        async def down(self, manager, protocol, attempts=5, delay=2.0):
+            return {'up': False, 'facts': {'WARP_ROUTE': 'missing'},
+                    'detail': ''}
+
+        with mock.patch.object(type(self.runtime), '_wait_warp_dataplane',
+                               down):
+            run_coro(self.runtime.link(0, 'srv-1', 'awg',
+                                       job_id='job-link-down'))
+
+        rec = self.record()
+        self.assertIsNone(ws.warp_link(rec))
+        self.assertIsNone(rec['client_mtu_warp'])
+        self.assertEqual(rec['warp']['repair_state']['state'], 'error')
+        self.assertEqual(rec['warp']['repair_state']['last_error'],
+                         'srv_warp_link_failed')
+        # The kill-switch must be removed again: start.sh is re-rendered
+        # without the warp block and the container is restarted.
+        self.assertEqual(len(self.manager.uploads), 2)
+        self.assertTrue(self.manager.uploads[0]['warp_ctx']['active'])
+        self.assertIsNone(self.manager.uploads[1]['warp_ctx'])
+
+    def test_link_confirms_dataplane_in_warp_link(self):
+        """Успешный link должен оставлять подтверждение датаплейна в записи."""
+        self.seed_state(registered=True)
+        self.ssh.account_present = True
+        self.ssh.conf_present = True
+
+        async def up(self, manager, protocol, attempts=5, delay=2.0):
+            return {'up': True, 'facts': {}, 'detail': ''}
+
+        with mock.patch.object(type(self.runtime), '_wait_warp_dataplane', up):
+            run_coro(self.runtime.link(0, 'srv-1', 'awg',
+                                       job_id='job-link-confirmed'))
+
+        link = ws.warp_link(self.record())
+        self.assertTrue(link['dataplane_ok'])
+        self.assertIsInstance(link['dataplane_ok_at'], int)
+        self.assertGreater(link['dataplane_ok_at'], 0)
+        # Метка подтверждения не затирает остальные поля линка.
+        self.assertEqual(link['protocol'], 'awg')
+        self.assertEqual(link['server_uid'], 'srv-1')
+        self.assertIsNone(link['stale'])
+        self.assertIsNotNone(link['applied_at'])
+
+    def test_link_rollback_leaves_no_dataplane_confirmation(self):
+        """При сбое warp0 запись линка (и подтверждения) не остаётся."""
+        self.seed_state(registered=True)
+        self.ssh.account_present = True
+        self.ssh.conf_present = True
+
+        async def down(self, manager, protocol, attempts=5, delay=2.0):
+            return {'up': False, 'facts': {'WARP_ROUTE': 'missing'},
+                    'detail': ''}
+
+        with mock.patch.object(type(self.runtime), '_wait_warp_dataplane',
+                               down):
+            run_coro(self.runtime.link(
+                0, 'srv-1', 'awg', job_id='job-link-no-confirmation'))
+
+        rec = self.record()
+        self.assertIsNone(rec['warp_link'])
+        self.assertIsNone(ws.warp_link(rec))
+        self.assertEqual(rec['warp']['repair_state']['last_error'],
+                         'srv_warp_link_failed')
+
+    def test_link_copies_profile_from_a_live_sibling(self):
+        # MRAK's Cloudflare registration API is SNI-filtered, but awg3__2 has
+        # a working profile: linking awg3__3 must copy it instead of calling
+        # wgcf register.
+        def seed_sibling(state):
+            rec = ws.proto_record(state, 'srv-1', 'awg')
+            rec['warp']['registered'] = True
+            rec['warp_link'] = {'active': True}
+
+        self.state_store.mutate(seed_sibling)
+        self.ssh.conf_present = False
+        sources = []
+
+        def source(self, manager, protocol, reuse=True):
+            sources.append(protocol)
+            return 'account body', 'profile body'
+
+        def write(self, manager, protocol, account, profile):
+            return 'copied-hash'
+
+        async def up(self, manager, protocol, attempts=5, delay=2.0):
+            return {'up': True, 'facts': {}, 'detail': ''}
+
+        with mock.patch.object(type(self.runtime), '_warp_dataplane',
+                               lambda self, manager, protocol:
+                               {'up': True, 'facts': {}, 'detail': ''}), \
+             mock.patch.object(type(self.runtime), '_wait_warp_dataplane', up), \
+             mock.patch.object(type(self.runtime), '_source_profile', source), \
+             mock.patch.object(type(self.runtime), '_write_imported_profile',
+                               write):
+            run_coro(self.runtime.link(0, 'srv-1', 'awg2',
+                                       job_id='job-link-copy'))
+
+        commands = '\n'.join(self.ssh.commands)
+        self.assertNotIn('wgcf register --accept-tos', commands)
+        self.assertEqual(sources, ['awg'])
+        rec = self.record('awg2')
+        self.assertTrue(rec['warp']['registered'])
+        self.assertEqual(rec['warp']['conf_hash'], 'copied-hash')
+        self.assertEqual(rec['warp']['imported_from_protocol'], 'awg')
+        self.assertIsNotNone(ws.warp_link(rec))
+        self.assertTrue(self.manager.uploads[-1]['warp_ctx']['active'])
+
+    def test_link_registers_when_sibling_dataplane_is_down(self):
+        def seed_sibling(state):
+            rec = ws.proto_record(state, 'srv-1', 'awg')
+            rec['warp']['registered'] = True
+            rec['warp_link'] = {'active': True}
+
+        self.state_store.mutate(seed_sibling)
+        self.ssh.conf_present = False
+
+        async def up(self, manager, protocol, attempts=5, delay=2.0):
+            return {'up': True, 'facts': {}, 'detail': ''}
+
+        with mock.patch.object(type(self.runtime), '_warp_dataplane',
+                               lambda self, manager, protocol:
+                               {'up': False, 'facts': {}, 'detail': ''}), \
+             mock.patch.object(type(self.runtime), '_wait_warp_dataplane', up):
+            run_coro(self.runtime.link(0, 'srv-1', 'awg2',
+                                       job_id='job-link-register'))
+
+        self.assertIn('wgcf register --accept-tos',
+                      '\n'.join(self.ssh.commands))
+        rec = self.record('awg2')
+        self.assertTrue(rec['warp']['registered'])
+        self.assertNotIn('imported_from_protocol', rec['warp'])
+
+    def test_link_skips_sibling_without_a_complete_profile(self):
+        def seed_sibling(state):
+            rec = ws.proto_record(state, 'srv-1', 'awg')
+            rec['warp']['registered'] = True
+            rec['warp_link'] = {'active': True}
+
+        self.state_store.mutate(seed_sibling)
+        self.ssh.conf_present = False
+        sourced = []
+
+        async def up(self, manager, protocol, attempts=5, delay=2.0):
+            return {'up': True, 'facts': {}, 'detail': ''}
+
+        def source(self, manager, protocol, reuse=True):
+            sourced.append(protocol)
+            return 'account', 'profile'
+
+        with mock.patch.object(type(self.runtime), '_warp_dataplane',
+                               lambda self, manager, protocol:
+                               {'up': True, 'facts': {}, 'detail': ''}), \
+             mock.patch.object(type(self.runtime), '_has_profile',
+                               lambda self, manager, protocol: False), \
+             mock.patch.object(type(self.runtime), '_wait_warp_dataplane', up), \
+             mock.patch.object(type(self.runtime), '_source_profile', source):
+            run_coro(self.runtime.link(0, 'srv-1', 'awg2',
+                                       job_id='job-link-no-source'))
+
+        self.assertEqual(sourced, [])
+        self.assertIn('wgcf register --accept-tos',
+                      '\n'.join(self.ssh.commands))
+        self.assertTrue(self.record('awg2')['warp']['registered'])
+
+    def test_repair_marks_error_when_dataplane_stays_down(self):
+        self.seed_state(registered=True, link={'active': True},
+                        client_mtu=1280)
+
+        async def down(self, manager, protocol, attempts=5, delay=2.0):
+            return {'up': False, 'facts': {'WARP_ROUTE': 'missing'},
+                    'detail': ''}
+
+        with mock.patch.object(type(self.runtime), '_wait_warp_dataplane', down):
+            run_coro(self.runtime.repair(
+                0, 'srv-1', protocol='awg', job_id='job-repair-down'))
+
+        state = self.record()['warp']['repair_state']
+        self.assertEqual(state['state'], 'error')
+        self.assertEqual(state['last_error'], 'srv_warp_link_failed')
+
     # ----- sanitizer -------------------------------------------------------
 
     def test_sanitize_warp_profile(self):
@@ -415,8 +631,16 @@ class WarpRuntimeHarness(unittest.TestCase):
         self.ssh.account_present = True
         self.ssh.conf_present = True
 
-        run_coro(self.runtime.repair(
-            0, 'srv-1', protocol='awg', job_id='job-repair-link'))
+        async def up(self, manager, protocol, attempts=5, delay=2.0):
+            return {'up': True, 'facts': {}, 'detail': ''}
+
+        def down(self, manager, protocol):
+            return {'up': False, 'facts': {}, 'detail': ''}
+
+        with mock.patch.object(type(self.runtime), '_warp_dataplane', down), \
+             mock.patch.object(type(self.runtime), '_wait_warp_dataplane', up):
+            run_coro(self.runtime.repair(
+                0, 'srv-1', protocol='awg', job_id='job-repair-link'))
 
         self.assertEqual(len(self.manager.writes), 1)
         self.assertEqual(len(self.manager.uploads), 1)
@@ -424,6 +648,132 @@ class WarpRuntimeHarness(unittest.TestCase):
         self.assertTrue(ctx['active'])
         self.assertEqual(ctx['client_mtu'], 1280)
         self.assertEqual(self.manager.writes[0]['warp_ctx'], ctx)
+        self.assertEqual(self.record()['warp']['repair_state']['state'], 'ok')
+
+    def test_repair_confirms_dataplane_on_active_link(self):
+        """Успешный repair активного линка сохраняет факт подтверждения."""
+        self.seed_state(
+            registered=True,
+            link={
+                'active': True,
+                'dns_via_warp': True,
+                'applied_at': 1,
+                'stale': None,
+                'server_uid': 'srv-1',
+                'entry_uid': 'srv-1',
+                'protocol': 'awg',
+            },
+            client_mtu=1280,
+        )
+        self.ssh.account_present = True
+        self.ssh.conf_present = True
+
+        async def up(self, manager, protocol, attempts=5, delay=2.0):
+            return {'up': True, 'facts': {}, 'detail': ''}
+
+        def down(self, manager, protocol):
+            return {'up': False, 'facts': {}, 'detail': ''}
+
+        with mock.patch.object(type(self.runtime), '_warp_dataplane', down), \
+             mock.patch.object(type(self.runtime), '_wait_warp_dataplane', up):
+            run_coro(self.runtime.repair(
+                0, 'srv-1', protocol='awg', job_id='job-repair-confirmed'))
+
+        rec = self.record()
+        link = ws.warp_link(rec)
+        self.assertTrue(link['dataplane_ok'])
+        self.assertIsInstance(link['dataplane_ok_at'], int)
+        self.assertGreater(link['dataplane_ok_at'], 0)
+        # Не подтверждённые поля линка сохраняются как есть.
+        self.assertTrue(link['dns_via_warp'])
+        self.assertEqual(link['applied_at'], 1)
+        self.assertEqual(rec['warp']['repair_state']['state'], 'ok')
+
+    def test_repair_failed_dataplane_marks_active_link_stale(self):
+        """Провал пробы активного линка снимает dataplane_ok и ставит stale."""
+        link = {
+            'active': True,
+            'dns_via_warp': False,
+            'applied_at': 1,
+            'stale': None,
+            'dataplane_ok': True,
+            'dataplane_ok_at': 1,
+            'server_uid': 'srv-1',
+            'entry_uid': 'srv-1',
+            'protocol': 'awg',
+        }
+        self.seed_state(registered=True, link=link, client_mtu=1280)
+        self.ssh.account_present = True
+        self.ssh.conf_present = True
+
+        async def down(self, manager, protocol, attempts=5, delay=2.0):
+            return {'up': False, 'facts': {'WARP_ROUTE': 'missing'},
+                    'detail': ''}
+
+        with mock.patch.object(type(self.runtime), '_wait_warp_dataplane', down):
+            run_coro(self.runtime.repair(
+                0, 'srv-1', protocol='awg', job_id='job-repair-down'))
+
+        rec = self.record()
+        state_link = ws.warp_link(rec)
+        self.assertEqual(state_link['stale'], ws.STALE_DATAPLANE_DOWN)
+        self.assertFalse(state_link['dataplane_ok'])
+        self.assertEqual(state_link['applied_at'], 1)
+        self.assertEqual(rec['warp']['repair_state']['last_error'],
+                         'srv_warp_link_failed')
+
+    def test_repair_success_clears_stale_on_active_link(self):
+        """Успешный repair возвращает линк в подтверждённое состояние."""
+        self.seed_state(
+            registered=True,
+            link={
+                'active': True,
+                'dns_via_warp': False,
+                'applied_at': 1,
+                'stale': 'dataplane_down',
+                'dataplane_ok': False,
+                'server_uid': 'srv-1',
+                'entry_uid': 'srv-1',
+                'protocol': 'awg',
+            },
+            client_mtu=1280,
+        )
+        self.ssh.account_present = True
+        self.ssh.conf_present = True
+
+        async def up(self, manager, protocol, attempts=5, delay=2.0):
+            return {'up': True, 'facts': {}, 'detail': ''}
+
+        with mock.patch.object(type(self.runtime), '_wait_warp_dataplane', up):
+            run_coro(self.runtime.repair(
+                0, 'srv-1', protocol='awg', job_id='job-repair-recover'))
+
+        state_link = ws.warp_link(self.record())
+        self.assertIsNone(state_link['stale'])
+        self.assertTrue(state_link['dataplane_ok'])
+
+    def test_switch_egress_does_not_clear_stale(self):
+        """Смена egress без пробы dataplane делает линк устаревшим."""
+        self.seed_state(
+            registered=True,
+            link={
+                'active': True,
+                'dns_via_warp': False,
+                'applied_at': 1,
+                'stale': 'container_restart',
+                'dataplane_ok': True,
+                'server_uid': 'srv-1',
+                'entry_uid': 'srv-1',
+                'protocol': 'awg',
+            },
+            client_mtu=1280,
+        )
+        run_coro(self.runtime.switch_egress(
+            0, 'srv-1', 'awg', job_id='job-switch'))
+
+        state_link = ws.warp_link(self.record())
+        self.assertEqual(state_link['stale'], ws.STALE_EGRESS_SWITCH)
+        self.assertFalse(state_link['dataplane_ok'])
 
     # ----- uninstall -------------------------------------------------------
 

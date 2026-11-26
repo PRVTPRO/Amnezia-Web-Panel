@@ -59,7 +59,7 @@ class FakeSSH:
         self.commands = []
         self.uploads = []
 
-    def upload_file_sudo(self, content, remote_path):
+    def upload_file_sudo(self, content, remote_path, mode=None):
         self.uploads.append((content, remote_path))
         self.files[remote_path] = content
         return True
@@ -67,6 +67,12 @@ class FakeSSH:
     def run_sudo_command(self, command, *args, **kwargs):
         cmd = command.strip()
         self.commands.append(cmd)
+        if cmd.startswith('mv -f -- '):
+            # the staged config is renamed over the live one
+            source, target = cmd.split()[-2:]
+            if source in self.files:
+                self.files[target] = self.files.pop(source)
+            return ('', '', 0)
         if 'docker ps --filter' in cmd:
             return ('Up 2 minutes', '', 0) if self.container_running else ('', '', 0)
         if cmd.startswith('ls -1'):

@@ -364,6 +364,7 @@ SUBSCRIPTION_KEYS = {
     'subscription_server_label', 'subscription_server_hint',
     'subscription_path_label', 'subscription_path_hint', 'subscription_push',
     'subscription_name_label', 'subscription_name_hint', 'subscription_copy',
+    'subscription_include_awg', 'subscription_include_awg_hint',
     'vless_enc_btn', 'vless_enc_title', 'vless_enc_subtitle',
     'vless_enc_enable', 'vless_enc_disable', 'vless_enc_state_on',
     'vless_enc_warning', 'vless_enc_xhttp_required', 'vless_enc_apply',
@@ -436,6 +437,9 @@ SRV_WARP_IMPORT_KEYS = {
     'srv_warp_err_source_not_found', 'srv_warp_err_source_no_targets',
     'srv_warp_err_source_unreachable', 'srv_warp_err_source_register',
     'srv_warp_err_handshake', 'srv_warp_err_quota',
+    # Per-instance link/registration failures and the MTU budget error.
+    'srv_warp_err_link_failed', 'srv_warp_err_register_failed',
+    'srv_warp_err_budget',
 }
 LATER_FEATURE_KEYS = {
     'exit_awg3', 'exit_awg3_hint',
@@ -743,7 +747,7 @@ class TestC6Translations(unittest.TestCase):
                                     - SSH_HELP_KEYS - SMARTROUTE_TIMER_KEYS
                                     - IPV4_POLICY_KEYS - SRV_CARD_CONTAINER_KEYS
                                     - SELF_SERVICE_DELETE_KEYS - PROXY_KEYS
-                                    - LAZY_EDITOR_KEYS))
+                                    - SRV_WARP_INSTANCE_KEYS - LAZY_EDITOR_KEYS))
         self.assertEqual(hashlib.sha256(previous.encode('utf-8')).hexdigest(),
                          PRE_PANEL_ACCESS_KEYS_SHA256,
                          'Existing catalogue changed outside the declared additions')
@@ -755,6 +759,8 @@ class TestC6Translations(unittest.TestCase):
                         | TORRENT_GUARD_KEYS | TORRENT_PLUGIN_KEYS | AWG_I1_KEYS | USER_LIMIT_KEYS | TELEGRAM_ACCOUNT_KEYS
                         | LIFECYCLE_FENCE_KEYS | SUBSCRIPTION_KEYS | CLOSE_KEYS
                         | SMARTROUTE_TIMER_KEYS | IPV4_POLICY_KEYS
+                        | SRV_WARP_INSTANCE_KEYS | SRV_WARP_IMPORT_KEYS
+                        | LAZY_EDITOR_KEYS | SRV_CARD_CONTAINER_KEYS
                         | SRV_WARP_INSTANCE_KEYS | SRV_CARD_CONTAINER_KEYS
                         | SELF_SERVICE_DELETE_KEYS | PROXY_KEYS | LAZY_EDITOR_KEYS):
                 self.assertIn(key, data)

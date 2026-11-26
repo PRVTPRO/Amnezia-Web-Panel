@@ -74,6 +74,7 @@ from managers.awg_plugin_updater import (
     stage_step as awg_plugin_stage_step,
 )
 from managers.xray_manager import (
+    XrayConfigRejected,
     XrayManager,
     XRAY_DEFAULT_FINGERPRINT,
     XRAY_FINGERPRINTS,
@@ -102,9 +103,12 @@ from warp_service import (
     WarpStateStore,
     WARP_CLIENT_MTU_CAP,
     WARP_REGISTER_LIMIT,
+    STALE_CONTAINER_RECREATED,
+    STALE_CONTAINER_RESTART,
     migrate_legacy_client_mtu,
     aggregate_state,
     classify_instance_state,
+    mark_warp_links_stale,
     proto_record,
     quota_exhausted,
     register_timestamps,
@@ -7489,9 +7493,13 @@ def _warp_status_payload(server, state):
         # No live SSH probes in the status endpoint: the projection is the
         # authoritative signal until the supervisor supplies handshake data.
         installed = bool(warp_record.get('registered'))
+        # Подтверждённый датаплейн — это уже установленное соединение; без
+        # подтверждения линк остаётся «подключаемым» (см. PR #403).
+        handshake_age = (0 if link and link.get('dataplane_ok')
+                         and not link.get('stale') else None)
         instance_state = classify_instance_state(
             installed=installed, link_active=bool(link),
-            rate_limited=rate_limited)
+            rate_limited=rate_limited, handshake_age=handshake_age)
         client_mtu = warp_ctx_for(state, uid, proto)['client_mtu']
         if client_mtu:
             budgets.append(int(client_mtu))
@@ -7503,12 +7511,14 @@ def _warp_status_payload(server, state):
             'link_active': bool(link),
             'client_mtu': client_mtu,
             'dns_via_warp': bool((link or {}).get('dns_via_warp')),
+            'dataplane_ok': bool((link or {}).get('dataplane_ok')),
             'quarantine': bool(warp_record.get('quarantine')),
             'state_stale': bool((link or {}).get('stale')),
             # Repair runs as a background task, so its outcome is only
             # observable here: without this field a failed repair left no
             # trace anywhere the panel could show.
             'repair_state': warp_record.get('repair_state') or None,
+            'last_error': (warp_record.get('repair_state') or {}).get('last_error') or '',
         })
 
     active_job = _WARP_JOBS.get(str(uid))
@@ -10166,6 +10176,15 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
         op_finish(op, 'success', {'protocol': install_protocol,
                                   'display_name': proto_record['display_name']})
         return result
+    except XrayConfigRejected as e:
+        # The core refused the configuration this install produced, so the
+        # instance was never started: that is not an internal fault.
+        logger.warning("Xray rejected the configuration while installing %s on server %s: %s",
+                       install_protocol, server_id, e)
+        if op is not None:
+            op_log(op, 'build', f"installation failed: {e}")
+            op_finish(op, 'failed', error={'code': 'install_failed', 'message': str(e)})
+        return JSONResponse({'error': str(e)}, status_code=400)
     except SrvWarpError:
         raise
     except Exception as e:
@@ -11505,6 +11524,18 @@ async def _run_awg_plugin_update(op_id, server_id, component, target, allow_inte
         # waiting for the next periodic pass: until then RU traffic leaves
         # through the exit node. Never let this delay the operation result.
         if op.get('state') in ('success', 'manual_step_required'):
+            # Обновление пересоздаёт контейнеры: подтверждение warp0 от
+            # предыдущей версии больше не гарантирует работающий датаплейн.
+            try:
+                data = load_data()
+                if 0 <= server_id < len(data.get('servers') or []):
+                    uid = data['servers'][server_id].get('uid')
+                    if uid:
+                        warp_state_store.mutate(
+                            lambda state: mark_warp_links_stale(
+                                state, uid, None, STALE_CONTAINER_RECREATED))
+            except Exception:
+                logger.exception("Не удалось пометить warp-линки после обновления плагина")
             asyncio.create_task(_smartroute_reconcile_after(server_id))
 
 
@@ -13258,6 +13289,16 @@ def api_container_toggle(request: Request, server_id: int, req: ContainerToggleR
         if hasattr(ssh, 'docker_ps_invalidate'):
             ssh.docker_ps_invalidate()
         ssh.disconnect()
+        # Контейнер перезапущен: warp0 внутри него поднимается заново, поэтому
+        # старое подтверждение датаплейна больше не описывает линк.
+        try:
+            uid = server.get('uid')
+            if uid:
+                warp_state_store.mutate(
+                    lambda state: mark_warp_links_stale(
+                        state, uid, None, STALE_CONTAINER_RESTART))
+        except Exception:
+            logger.exception("Не удалось пометить warp-линки после перезапуска контейнера")
         _invalidate_ip_status(server.get('uid') or f'#{server_id}')
         return {'status': 'success', 'action': action, 'container': container}
     except Exception as e:
@@ -14150,6 +14191,11 @@ def api_server_config_save(request: Request, server_id: int, req: ServerConfigSa
                 mgr.save_server_config(req.protocol, req.config)
         _invalidate_ip_status(server.get('uid'))
         return {'status': 'success'}
+    except XrayConfigRejected as e:
+        # The core refused the submitted configuration; nothing on the
+        # server changed, so this is not a server fault.
+        logger.warning("Xray rejected the configuration for server %s: %s", server_id, e)
+        return JSONResponse({'error': str(e)}, status_code=400)
     except SrvWarpError:
         raise
     except Exception as e:
@@ -14334,7 +14380,7 @@ def api_add_connection(request: Request, server_id: int, req: AddConnectionReque
             }
             data['user_connections'].append(conn)
             save_data(data)
-            if protocol_base(req.protocol) == 'xray':
+            if _subscription_carries(data, req.protocol):
                 # Refresh the owner's subscription file right away; the
                 # periodic monitor covers every other change source.
                 try:
@@ -15393,7 +15439,7 @@ async def api_add_user_connection(request: Request, user_id: str, req: AddUserCo
             data = load_data()
             data['user_connections'].append(conn)
             save_data(data)
-            if protocol_base(req.protocol) == 'xray':
+            if _subscription_carries(data, req.protocol):
                 # Refresh the user's subscription file right away; the
                 # periodic monitor covers every other change source.
                 try:
@@ -15992,7 +16038,8 @@ def subscription_settings(data):
     return {'enabled': bool(settings.get('enabled')),
             'server_uid': server_uid,
             'path': path,
-            'name': normalize_subscription_name(settings.get('name'))}
+            'name': normalize_subscription_name(settings.get('name')),
+            'include_awg': bool(settings.get('include_awg'))}
 
 
 def normalize_subscription_path(path):
@@ -16044,7 +16091,7 @@ def _subscription_userinfo(user):
 
 
 def _subscription_config_entries(data):
-    """[(token, userinfo), ...] for users with a token and xray targets."""
+    """[(token, userinfo), ...] for users with a token and subscription targets."""
     entries = []
     for user in data.get('users', []):
         token = user.get('sub_token')
@@ -16154,20 +16201,75 @@ def _subscription_mask_domain(nginx_server):
         return None
 
 
+def amneziawg_share_link(config_text, name):
+    """`amneziawg://<base64url of the wg-quick config>#name`, the AmneziaWG
+    share link YPtun reads: it decodes the body and hands the whole config
+    to its core. Not a standard scheme, which is why it is opt-in."""
+    payload = base64.urlsafe_b64encode(
+        config_text.strip().encode('utf-8')).decode('ascii').rstrip('=')
+    return f'amneziawg://{payload}#{urllib.parse.quote(name)}'
+
+
+def _subscription_carries(data, protocol):
+    """Whether subscriptions carry connections of this protocol: xray always,
+    AmneziaWG when the admin opted in (not every client understands those
+    links)."""
+    base = protocol_base(protocol or '')
+    if base == 'xray':
+        return True
+    return base in AWG_PROTOCOLS and subscription_settings(data)['include_awg']
+
+
 def _subscription_user_targets(data, user):
-    """[(server, [connection, ...])] for the user's xray connections."""
+    """[(server, [connection, ...])] for the user's connections a
+    subscription carries."""
     groups = {}
     for conn in data.get('user_connections', []):
         if conn.get('user_id') != user.get('id'):
             continue
-        protocol = conn.get('protocol') or ''
-        if not protocol.startswith('xray'):
+        if not _subscription_carries(data, conn.get('protocol')):
             continue
         server_id = conn.get('server_id')
         if isinstance(server_id, int) and 0 <= server_id < len(data.get('servers', [])):
             groups.setdefault(server_id, []).append(conn)
     return [(data['servers'][server_id], conns)
             for server_id, conns in groups.items()]
+
+
+def _subscription_connection_link(ssh, server, conn, instance_names):
+    """One connection as the subscription carries it, or None when the panel
+    has nothing to hand out for it."""
+    protocol = conn['protocol']
+    base = protocol_base(protocol)
+    proto_info = server.get('protocols', {}).get(protocol, {})
+    port = proto_info.get('port', 443 if base == 'xray' else 55424)
+    pub_host, pub_port = protocol_public_endpoint(server, protocol)
+    # An AmneziaWG config follows the instance's WARP link the way it did
+    # when the connection was created: the budget MTU, no IPv6 resolver
+    # through warp0.
+    extra = ({'warp_ctx': srv_warp_ctx(server, protocol)}
+             if base in AWG_PROTOCOLS else xray_fp_kwargs(server, protocol))
+    config = _manager_call(
+        get_protocol_manager(ssh, protocol), 'get_client_config',
+        protocol, conn.get('client_id'), pub_host, port,
+        public_port=pub_port, **extra)
+    if not config:
+        return None
+    # The link fragment is what the user sees in their client: "server ·
+    # instance". The panel-side connection name is the admin's private note
+    # and must not leak into the subscription.
+    instance_name = (proto_info.get('custom_name')
+                     or instance_names.get(protocol)
+                     or protocol_display_name(protocol))
+    entry_name = (f"{server.get('name') or server.get('host')}"
+                  f" · {instance_name}")
+    if base in AWG_PROTOCOLS:
+        # AmneziaWG travels as its wg-quick config
+        return amneziawg_share_link(config, entry_name)
+    fragment = urllib.parse.quote(entry_name)
+    return (config.rpartition('#')[0] + '#' + fragment
+            if '#' in config
+            else config + '#' + fragment)
 
 
 def push_user_subscription(data, user, sub_settings, nginx_server):
@@ -16186,36 +16288,24 @@ def push_user_subscription(data, user, sub_settings, nginx_server):
             ssh.connect()
             try:
                 for conn in conns:
-                    protocol = conn['protocol']
-                    proto_info = server.get('protocols', {}).get(protocol, {})
-                    port = proto_info.get('port', 443)
-                    pub_host, pub_port = protocol_public_endpoint(server, protocol)
-                    link = _manager_call(
-                        get_protocol_manager(ssh, protocol), 'get_client_config',
-                        protocol, conn.get('client_id'), pub_host, port,
-                        public_port=pub_port,
-                        **xray_fp_kwargs(server, protocol))
+                    try:
+                        link = _subscription_connection_link(
+                            ssh, server, conn, instance_names)
+                    except Exception as e:
+                        # A connection the panel cannot build (a peer that
+                        # is gone, a client without a stored key) must not
+                        # take the user's other links on this server with it.
+                        errors.append(f"{server.get('host')}: {e}")
+                        continue
                     if link:
-                        # The link fragment is what the user sees in their
-                        # client: "server · xray instance". The panel-side
-                        # connection name is the admin's private note and
-                        # must not leak into the subscription.
-                        instance_name = (proto_info.get('custom_name')
-                                         or instance_names.get(protocol)
-                                         or protocol_display_name(protocol))
-                        entry_name = (f"{server.get('name') or server.get('host')}"
-                                      f" · {instance_name}")
-                        fragment = urllib.parse.quote(entry_name)
-                        links.append(link.rpartition('#')[0] + '#' + fragment
-                                     if '#' in link
-                                     else link + '#' + fragment)
+                        links.append(link)
             finally:
                 ssh.disconnect()
         except Exception as e:
             errors.append(f"{server.get('host')}: {e}")
     if not links:
         raise RuntimeError('no links collected: '
-                           + ('; '.join(errors) or 'no xray connections'))
+                           + ('; '.join(errors) or 'no connections to carry'))
     payload = base64.b64encode('\n'.join(links).encode()).decode()
     sub_dir = f"{NginxManager.HTML_DIR}/{sub_settings['path']}"
     remote_path = f"{sub_dir}/{token}"
@@ -16257,7 +16347,7 @@ def auto_push_subscriptions(data, user_ids=None):
     updated = 0
     for user in targets:
         if not _subscription_user_targets(data, user):
-            user.pop('sub_url', None)  # all xray connections are gone
+            user.pop('sub_url', None)  # nothing left to serve
             continue
         try:
             token, count, errors, unchanged = push_user_subscription(
@@ -16296,6 +16386,9 @@ def push_all_subscriptions(data):
     valid_tokens = set()
     for user in data.get('users', []):
         if not _subscription_user_targets(data, user):
+            # Nothing to serve; the file that may have existed is pruned
+            # below, so the cached URL must not outlive it.
+            user.pop('sub_url', None)
             continue
         try:
             token, count, user_errors, unchanged = push_user_subscription(
@@ -16356,6 +16449,7 @@ class SubscriptionSettingsRequest(BaseModel):
     server_uid: Optional[str] = None
     path: Optional[str] = None
     name: Optional[str] = None
+    include_awg: bool = False
 
 
 @app.get('/api/subscription/status', tags=["Settings"])
@@ -16399,6 +16493,7 @@ def api_subscription_settings_save(request: Request, req: SubscriptionSettingsRe
         settings.pop('server_id', None)  # legacy index format
         settings['path'] = sub_path
         settings['name'] = sub_name
+        settings['include_awg'] = req.include_awg
         save_data(data)
         result = {'status': 'success', 'enabled': req.enabled, 'path': sub_path,
                   'pushed': [], 'errors': []}

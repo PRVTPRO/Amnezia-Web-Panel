@@ -5470,6 +5470,24 @@ PersistentKeepalive = 25
 """
         return split_tunnel.apply_to_config(config)
 
+    @staticmethod
+    def _config_without_peer(config, client_id):
+        sections = re.split(
+            r'(?=^[ \t]*\[(?:Interface|Peer)\][ \t]*(?:#[^\r\n]*)?\r?$)',
+            config, flags=re.MULTILINE | re.IGNORECASE,
+        )
+        kept = []
+        for section in sections:
+            if re.match(r'[ \t]*\[Peer\]', section, re.IGNORECASE):
+                key = re.search(
+                    r'^[ \t]*PublicKey[ \t]*=[ \t]*([^\s#]+)', section,
+                    re.MULTILINE | re.IGNORECASE,
+                )
+                if key and key.group(1) == client_id:
+                    continue
+            kept.append(section)
+        return ''.join(kept)
+
     @_serialized_table_write
     def toggle_client(self, protocol_type, client_id, enable):
         """Enable or disable a client by adding/removing their [Peer] from server config."""
@@ -5583,16 +5601,7 @@ PersistentKeepalive = 25
                     table_changed = True
                     break
 
-            sections = config.split('[')
-            new_sections = []
-            for section in sections:
-                if not section.strip():
-                    continue
-                if client_id in section:
-                    continue
-                new_sections.append(section)
-
-            new_config = '[' + '['.join(new_sections)
+            new_config = self._config_without_peer(config, client_id)
             self.ssh.upload_file(self._normalize_server_config(new_config), "/tmp/_amnz_config.conf")
             self.ssh.run_sudo_command(
                 f"docker cp /tmp/_amnz_config.conf {container_name}:{config_path}"
@@ -5679,17 +5688,7 @@ PersistentKeepalive = 25
         # Get current config
         config = self._get_server_config(protocol_type)
 
-        # Split by [Peer] sections and remove the matching one
-        sections = config.split('[')
-        new_sections = []
-        for section in sections:
-            if not section.strip():
-                continue
-            if client_id in section:
-                continue
-            new_sections.append(section)
-
-        new_config = '[' + '['.join(new_sections)
+        new_config = self._config_without_peer(config, client_id)
 
         # Upload new config into container via SFTP + docker cp
         self.ssh.upload_file(self._normalize_server_config(new_config), "/tmp/_amnz_config.conf")

@@ -231,5 +231,52 @@ class ClassifyStateTests(unittest.TestCase):
             ws.AGG_UNREACHABLE)
 
 
+class WarpLinkStaleTests(unittest.TestCase):
+    def _state(self):
+        state = ws._empty_state()
+        server = ws.server_record(state, 'srv-1')
+        server['protocols']['awg'] = {
+            'warp_link': {
+                'active': True,
+                'stale': None,
+                'dataplane_ok': True,
+                'dataplane_ok_at': 5,
+                'applied_at': 4,
+                'dns_via_warp': True,
+            },
+            'client_mtu_warp': 1280,
+        }
+        server['protocols']['awg2'] = {
+            'warp_link': {'active': False, 'stale': None, 'dataplane_ok': True},
+        }
+        return state
+
+    def test_mark_stale_touches_only_active_links(self):
+        state = self._state()
+        self.assertEqual(
+            ws.mark_warp_links_stale(state, 'srv-1', reason='container_restart'),
+            1)
+        link = ws.warp_link(state['servers']['srv-1']['protocols']['awg'])
+        self.assertEqual(link['stale'], 'container_restart')
+        self.assertFalse(link['dataplane_ok'])
+        # Остальные поля записи и неактивный линк не меняются.
+        self.assertEqual(link['dataplane_ok_at'], 5)
+        self.assertEqual(link['applied_at'], 4)
+        self.assertTrue(link['dns_via_warp'])
+        inactive = state['servers']['srv-1']['protocols']['awg2']['warp_link']
+        self.assertIsNone(inactive['stale'])
+        self.assertTrue(inactive['dataplane_ok'])
+
+    def test_clear_stale_keeps_dataplane_flag(self):
+        state = self._state()
+        link = ws.warp_link(state['servers']['srv-1']['protocols']['awg'])
+        link['stale'] = 'dataplane_down'
+        link['dataplane_ok'] = False
+        self.assertEqual(ws.clear_warp_links_stale(state, 'srv-1'), 1)
+        self.assertIsNone(link['stale'])
+        # Подтверждение выставляет только код после реальной пробы.
+        self.assertFalse(link['dataplane_ok'])
+
+
 if __name__ == '__main__':
     unittest.main()

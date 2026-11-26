@@ -41,6 +41,12 @@ class WarpExcludeTests(unittest.TestCase):
             'for root in "$work_dir/host" "$work_dir/container"; do', script,
         )
 
+    def test_xray_warp_identities_do_not_travel_either(self):
+        # every xray instance directory, current and future ones
+        script = self._script('xray', 'amnezia-xray')
+        archive = script.index('tar -C "$work_dir"')
+        self.assertLess(script.index('"$root"/opt/amnezia/xray*/warp'), archive)
+
     def test_non_awg_protocol_still_gets_the_harmless_cleanup(self):
         script = self._script('xray', 'amnezia-xray')
         archive = script.index('tar -C "$work_dir"')

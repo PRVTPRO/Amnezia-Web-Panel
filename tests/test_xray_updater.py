@@ -64,7 +64,7 @@ class FakeSSH:
             '/opt/amnezia/xray/clientsTable': '[]',
         }
 
-    def upload_file_sudo(self, content, remote_path):
+    def upload_file_sudo(self, content, remote_path, mode=None):
         self.uploads.append((content, remote_path))
         self.files[remote_path] = content
         return True
@@ -83,6 +83,15 @@ class FakeSSH:
         cmd = command.strip()
         self.commands.append(cmd)
         if cmd.startswith('sleep'):
+            return '', '', 0
+        if 'xray run -test' in cmd:
+            # a staged config, proven with the freshly built image
+            return 'Configuration OK.', '', 0
+        if cmd.startswith('mv -f -- '):
+            # the staged config is renamed over the live one
+            source, target = cmd.split()[-2:]
+            if source in self.files:
+                self.files[target] = self.files.pop(source)
             return '', '', 0
         if 'docker run --rm' in cmd:
             # The freshly built image: the build args decide the version.
