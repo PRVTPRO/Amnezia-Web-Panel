@@ -301,6 +301,27 @@ class StoreAndInstallTests(Base):
         self.plugin.set_health(node, 'awg3', {'error': 'denied'})
         self.assertEqual(self.plugin.health_for(node)['state'], 'degraded')
 
+    def test_removed_instance_does_not_keep_its_health_error(self):
+        """Health — память процесса: запись удалённого инстанса оставалась
+        навсегда и рисовала на карточке «Нужно запустить контейнер» по
+        контейнеру, которого уже нет."""
+        node = self.data()['servers'][0]
+        self.plugin.install(node, lambda proto: FakeGuard())
+        self.plugin.set_health(node, 'awg3', {
+            'error': 'Error response from daemon: container 32cc is not running'})
+        self.assertEqual(self.plugin.health_for(node)['state'], 'degraded')
+
+        node['protocols'] = {'awg3__2': {'installed': True, 'torrent_guard': 'on'}}
+        health = self.plugin.health_for(node)
+        self.assertEqual(health['protocols'], {})
+        self.assertEqual(health['state'], 'unknown')
+        self.assertNotEqual(self.plugin.status(node)['state'], 'degraded')
+        # Состояние живого инстанса не задевается.
+        self.plugin.set_health(node, 'awg3__2', {'error': ''})
+        health = self.plugin.health_for(node)
+        self.assertEqual(list(health['protocols']), ['awg3__2'])
+        self.assertEqual(health['state'], 'ok')
+
     def test_refresh_hides_peer_count_without_hooks(self):
         node = self.data()['servers'][0]
         self.plugin.install(node, lambda proto: FakeGuard())
