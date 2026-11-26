@@ -69,13 +69,19 @@ class FakeSSH:
         self.last_upload = (content, remote_path)
         return True
 
-    def upload_file_sudo(self, content, remote_path):
+    def upload_file_sudo(self, content, remote_path, mode=None):
         self.files[remote_path] = content
         self.last_upload = (content, remote_path)
         return True
 
     def run_sudo_command(self, command, **kwargs):
         cmd = command.strip()
+        if cmd.startswith('mv -f -- '):
+            # the staged config is renamed over the live one
+            source, target = cmd.split()[-2:]
+            if source in self.files:
+                self.files[target] = self.files.pop(source)
+            return ('', '', 0)
         if cmd.startswith('ls -1'):
             dir_path = cmd.split()[2]
             names = [p[len(dir_path):].lstrip('/')

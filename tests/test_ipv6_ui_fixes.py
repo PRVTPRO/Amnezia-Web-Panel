@@ -738,7 +738,7 @@ class TestC6Translations(unittest.TestCase):
                                     - TORRENT_GUARD_KEYS
                                     - TORRENT_PLUGIN_KEYS
                                     - AWG_I1_KEYS - SRV_WARP_NO_AWG_KEYS
-                                    - SRV_WARP_IMPORT_KEYS
+                                    - SRV_WARP_IMPORT_KEYS - SRV_WARP_INSTANCE_KEYS
                                     - COPY_INSTANCE_KEYS - LATER_FEATURE_KEYS
                                     - RELEASE_1811_KEYS - USER_LIMIT_KEYS - TELEGRAM_ACCOUNT_KEYS
                                     - LIFECYCLE_FENCE_KEYS - STORAGE_KEYS
@@ -760,7 +760,8 @@ class TestC6Translations(unittest.TestCase):
                         | SMARTROUTE_TIMER_KEYS | IPV4_POLICY_KEYS
                         | SRV_WARP_INSTANCE_KEYS | SRV_WARP_IMPORT_KEYS
                         | LAZY_EDITOR_KEYS | SRV_CARD_CONTAINER_KEYS
-                        | SELF_SERVICE_DELETE_KEYS | PROXY_KEYS):
+                        | SRV_WARP_INSTANCE_KEYS | SRV_CARD_CONTAINER_KEYS
+                        | SELF_SERVICE_DELETE_KEYS | PROXY_KEYS | LAZY_EDITOR_KEYS):
                 self.assertIn(key, data)
                 self.assertTrue(str(data[key]).strip(), "%s empty in %s" % (key, locale))
 

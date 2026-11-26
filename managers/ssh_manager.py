@@ -827,11 +827,14 @@ class SSHManager:
         finally:
             sftp.close()
 
-    def upload_file_sudo(self, content, remote_path):
+    def upload_file_sudo(self, content, remote_path, mode=None):
         """
         Upload text content to a remote file that requires root access.
         Uses SFTP to write to /tmp, then sudo mv to the target path.
         Also normalizes line endings to Unix-style (LF).
+        mode: permission bits for the installed file (644 when omitted). A
+        restrictive mode is applied while the file is still inside the
+        private staging directory, so it is never readable by others.
         """
         self.ensure_connected()
 
@@ -842,13 +845,19 @@ class SSHManager:
         try:
             tmp_path = tmp_dir + '/content'
             self.upload_file(content, tmp_path)
+            if mode is not None:
+                _, _, code = self.run_command(
+                    'chmod {:o} -- {}'.format(mode, shlex.quote(tmp_path)))
+                if code != 0:
+                    raise RuntimeError('Could not protect the staged file')
             out, err, code = self.run_sudo_command(
                 'mv -- ' + shlex.quote(tmp_path) + ' ' + shlex.quote(remote_path))
             if code != 0:
                 raise RuntimeError(err or out or 'Failed to install remote file')
         finally:
             self.run_command('rm -rf -- ' + shlex.quote(tmp_dir))
-        self.run_sudo_command(f"chmod 644 {remote_path}")
+        if mode is None:
+            self.run_sudo_command(f"chmod 644 {remote_path}")
         return True
 
     def download_file(self, remote_path):

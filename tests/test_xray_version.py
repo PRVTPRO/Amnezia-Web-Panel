@@ -11,11 +11,13 @@ class FakeSSH:
 
     def __init__(self):
         self.uploads = []
+        self.modes = {}
         self.commands = []
         self.scripts = []
 
-    def upload_file_sudo(self, content, remote_path):
+    def upload_file_sudo(self, content, remote_path, mode=None):
         self.uploads.append((content, remote_path))
+        self.modes[remote_path] = mode
         return True
 
     def run_sudo_script(self, script, **kwargs):

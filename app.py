@@ -74,6 +74,7 @@ from managers.awg_plugin_updater import (
     stage_step as awg_plugin_stage_step,
 )
 from managers.xray_manager import (
+    XrayConfigRejected,
     XrayManager,
     XRAY_DEFAULT_FINGERPRINT,
     XRAY_FINGERPRINTS,
@@ -10175,6 +10176,15 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
         op_finish(op, 'success', {'protocol': install_protocol,
                                   'display_name': proto_record['display_name']})
         return result
+    except XrayConfigRejected as e:
+        # The core refused the configuration this install produced, so the
+        # instance was never started: that is not an internal fault.
+        logger.warning("Xray rejected the configuration while installing %s on server %s: %s",
+                       install_protocol, server_id, e)
+        if op is not None:
+            op_log(op, 'build', f"installation failed: {e}")
+            op_finish(op, 'failed', error={'code': 'install_failed', 'message': str(e)})
+        return JSONResponse({'error': str(e)}, status_code=400)
     except SrvWarpError:
         raise
     except Exception as e:
@@ -14181,6 +14191,11 @@ def api_server_config_save(request: Request, server_id: int, req: ServerConfigSa
                 mgr.save_server_config(req.protocol, req.config)
         _invalidate_ip_status(server.get('uid'))
         return {'status': 'success'}
+    except XrayConfigRejected as e:
+        # The core refused the submitted configuration; nothing on the
+        # server changed, so this is not a server fault.
+        logger.warning("Xray rejected the configuration for server %s: %s", server_id, e)
+        return JSONResponse({'error': str(e)}, status_code=400)
     except SrvWarpError:
         raise
     except Exception as e:
