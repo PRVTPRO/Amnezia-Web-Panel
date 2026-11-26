@@ -10787,7 +10787,8 @@
     async function showConnectionConfig(clientId, connName, hasKey) {
         const proto = document.getElementById('connProtoSelect').value;
         currentConfigClientId = clientId;
-        const canEditCfg = ['awg', 'awg2', 'awg_legacy', 'wireguard'].includes(protoBase(proto));
+        const base = protoBase(proto);
+        const canEditCfg = AWG_PROTOCOLS.includes(base) || base === 'wireguard';
         document.getElementById('saveConnConfigBtn').style.display = canEditCfg ? '' : 'none';
         document.getElementById('configText').readOnly = !canEditCfg;
 
