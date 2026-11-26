@@ -131,6 +131,10 @@ _DOCKER_RUN_FAILURES = (125, 126, 127)
 # for a file they may not read just as for a missing one, and so does a sudo
 # that was refused.
 NO_LIVE_CONFIG = 3
+# What a config write is told to do with the VLESS Encryption key file,
+# which has to stay in step with the configuration: leave it, replace its
+# text, or remove it (None).
+KEEP = object()
 # Restart verification: one poll per second; the core counts as back after
 # START_STABLE consecutive "running" polls with an unmoved restart counter.
 START_POLLS = 6
@@ -156,6 +160,16 @@ class XrayStartError(RuntimeError):
 def _why(err, code):
     """The remote reason of a failed command, or its exit status."""
     return (err or '').strip() or f'exit code {code}'
+
+
+def _failed(done, doing, err, code):
+    """The error for a command that did not do what it was asked. A command
+    without an exit status may well have done its job: that is unknown, not
+    failed. `done` names the action for a failure ("install the file"),
+    `doing` for an unknown outcome ("installing the file")."""
+    if code < 0:
+        return XrayControlError(f'Could not confirm {doing}: ' + _why(err, code))
+    return RuntimeError(f'Could not {done}: ' + _why(err, code))
 
 
 def _core_verdict(text, limit=400):
@@ -770,12 +784,15 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
     def _save_server_json(self, data):
         return self._write_server_json(data, restart=True)
 
-    def _stage_config(self, text):
-        """Put `text` beside the live server.json as a private staging file
+    def _stage_config(self, text, name='server.json'):
+        """Put `text` beside the live file `name` as a private staging file
         (mode 600, unique name). Nothing is replaced yet."""
-        stage = f'{self._config_dir()}/.server.json.{uuid.uuid4().hex}.tmp'
+        stage = f'{self._config_dir()}/.{name}.{uuid.uuid4().hex}.tmp'
         self.ssh.upload_file_sudo(text, stage, mode=CONFIG_MODE)
         return stage
+
+    def _vlessenc_path(self):
+        return f'{self._config_dir()}/{VLESS_ENC_KEY_FILE}'
 
     def _config_test_command(self, host_file):
         """`xray run -test` for a config file, in a throwaway container built
@@ -801,9 +818,11 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         verdict about the configuration."""
         out, err, code = self.ssh.run_sudo_command(self._config_test_command(host_file))
         if code < 0 or code in _DOCKER_RUN_FAILURES:
+            # docker says why on stderr; the core on stdout.
             raise XrayControlError(
                 'Could not check the configuration with the core: '
-                + (_why(err, code) if code < 0 else _core_verdict(out)))
+                + (_why(err, code) if code < 0
+                   else _core_verdict((err or '') + '\n' + (out or ''))))
         if code != 0:
             raise XrayConfigRejected(
                 'Xray rejected the configuration: '
@@ -823,12 +842,6 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
     def _commit_config(self, stage):
         """Move the staged file over the live one with a rename, so a failed
         write can never leave a truncated config behind."""
-        def failed(action, err, code):
-            # A command without an exit status may well have done its job.
-            if code < 0:
-                return XrayControlError(f'Could not confirm {action}: ' + _why(err, code))
-            return RuntimeError(f'Could not {action}: ' + _why(err, code))
-
         try:
             if not self._config_dir_mounted():
                 # A container keeping its own copy needs it updated as well.
@@ -836,30 +849,70 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
                     f'docker cp -- {shlex.quote(stage)} '
                     f'{shlex.quote(self.container_name + ":" + self._config_path())}')
                 if code != 0:
-                    raise failed('copy the configuration into the container', out or err, code)
+                    raise _failed('copy the configuration into the container',
+                                  'copying the configuration into the container',
+                                  out or err, code)
             _, err, code = self.ssh.run_sudo_command(
                 f'mv -f -- {shlex.quote(stage)} {shlex.quote(self._config_path())}')
             if code != 0:
-                raise failed('install the new configuration', err, code)
+                raise _failed('install the new configuration',
+                              'installing the new configuration', err, code)
         except Exception:
             self.ssh.run_sudo_command(f'rm -f -- {shlex.quote(stage)}')
             raise
 
-    def _read_config_text(self):
-        """The live file's content; None when there is nothing to restore,
-        which is a file the host reports missing or one that holds nothing.
-        Any other failed read raises: a config that cannot be read is
-        exactly the one that must not be taken for "nothing to restore"."""
-        path = shlex.quote(self._config_path())
-        script = (f'if [ -e {path} ]; then cat {path}; '
+    def _read_file_text(self, path, what):
+        """A file's content, or None when there is none: a file the host
+        reports missing or one that holds nothing. Any other failed read
+        raises, naming the file as `what`: a file that cannot be read is
+        exactly the one that must not be taken for absent."""
+        quoted = shlex.quote(path)
+        script = (f'if [ -e {quoted} ]; then cat {quoted}; '
                   f'else exit {NO_LIVE_CONFIG}; fi')
         out, err, code = self.ssh.run_sudo_command('sh -c ' + shlex.quote(script))
         if code == NO_LIVE_CONFIG:
             return None
         if code != 0:
-            raise XrayControlError(
-                'Could not read the live configuration: ' + _why(err, code))
+            raise XrayControlError(f'Could not read {what}: ' + _why(err, code))
         return out if (out or '').strip() else None
+
+    def _read_config_text(self):
+        """The live server.json's content; None when there is nothing to
+        restore."""
+        return self._read_file_text(self._config_path(), 'the live configuration')
+
+    def _set_vlessenc(self, text):
+        """Make the VLESS Encryption key file hold `text`, as a private file
+        staged beside it first, or remove it when `text` is None. Raises
+        when that cannot be confirmed, and leaves no staging file behind."""
+        if text is None:
+            _, err, code = self.ssh.run_sudo_command(
+                f'rm -f -- {shlex.quote(self._vlessenc_path())}')
+            if code != 0:
+                raise _failed('remove the VLESS Encryption key file',
+                              'removing the VLESS Encryption key file', err, code)
+            return
+        stage = self._stage_config(text, VLESS_ENC_KEY_FILE)
+        try:
+            _, err, code = self.ssh.run_sudo_command(
+                f'mv -f -- {shlex.quote(stage)} {shlex.quote(self._vlessenc_path())}')
+        except Exception:
+            self.ssh.run_sudo_command(f'rm -f -- {shlex.quote(stage)}')
+            raise
+        if code != 0:
+            self.ssh.run_sudo_command(f'rm -f -- {shlex.quote(stage)}')
+            raise _failed('install the VLESS Encryption key file',
+                          'installing the VLESS Encryption key file', err, code)
+
+    def _put_vlessenc_back(self, text, cause):
+        """Put the key file back the way it was read. Failing at that is a
+        file out of step with its configuration, so it is never quiet."""
+        try:
+            self._set_vlessenc(text)
+        except Exception as exc:
+            raise RuntimeError(
+                'The VLESS Encryption key file could not be put back after the '
+                'configuration was not installed (' + str(exc) + ')') from cause
 
     def _container_state(self):
         """(status, restart count) of the container. Raises when docker
@@ -938,46 +991,107 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
             raise XrayStartError(
                 'Xray could not be confirmed running (' + str(exc) + ')') from exc
 
-    def _restore_config(self, text):
+    def _restore_config(self, text, sidecar=KEEP):
         """Put back a configuration that was running a moment ago - it needs
-        no proof - and bring the core up on it."""
+        no proof - and bring the core up on it. The VLESS Encryption key
+        file goes back with it, when one was named: after the configuration,
+        so that the restart policy brings the core up on the old one first
+        should putting the key file back fail."""
         self._commit_config(self._stage_config(text))
+        if sidecar is not KEEP:
+            self._set_vlessenc(sidecar)
         self._restart_core()
 
-    def _write_server_json(self, data, restart=True):
+    def _write_server_json(self, data, restart=True, sidecar=KEEP):
         """Apply a new server.json without ever leaving the instance worse
         off. The candidate is staged as a private file, checked against the
         core with `xray run -test`, renamed over the live file and - when
         the core must restart - watched until it is back. Whatever goes
         wrong before the rename changes nothing; whatever goes wrong after
         it, on a core that was running, gets the previous configuration
-        restored before the error surfaces."""
+        restored before the error surfaces.
+
+        The VLESS Encryption key file has to stay in step with the
+        configuration: links carry the layer only when both say it is on.
+        `sidecar` says what becomes of it - KEEP leaves it, a text replaces
+        it, None removes it - and it is changed with the configuration and
+        put back with it, so that the two are never restored apart. A
+        rename that loses its answer is not guessed at: the previous pair
+        is put back and the core is brought up on it."""
         stage = self._stage_config(json.dumps(data, indent=2))
         try:
             self._prove_config(stage)
             # A core that was down before the write has nothing to fall back
             # to: the config being replaced is the broken one.
             was_running = self._container_state()[0] if restart else None
-            previous = self._read_config_text() if restart else None
+            previous = (self._read_config_text()
+                        if restart or sidecar is not KEEP else None)
+            previous_sidecar = (self._read_file_text(
+                self._vlessenc_path(), 'the VLESS Encryption key file')
+                if sidecar is not KEEP else KEEP)
         except Exception:
             self.ssh.run_sudo_command(f'rm -f -- {shlex.quote(stage)}')
             raise
-        self._commit_config(stage)
-        if not restart:
-            return
+        can_restore = was_running == 'running' and previous is not None
+        if sidecar is not KEEP:
+            # The key file goes first: should the configuration then not
+            # install, putting it back is all it takes.
+            try:
+                self._set_vlessenc(sidecar)
+            except Exception as exc:
+                # Nothing else was touched: the key file goes back to the
+                # one that matches the configuration still in place.
+                self.ssh.run_sudo_command(f'rm -f -- {shlex.quote(stage)}')
+                self._put_vlessenc_back(previous_sidecar, exc)
+                raise
+        installed = False
         try:
-            self._restart_core()
+            self._commit_config(stage)
+            installed = True
+            if restart:
+                self._restart_core()
         except Exception as exc:
             detail = str(exc)
-            if was_running == 'running' and previous is not None:
-                try:
-                    self._restore_config(previous)
-                except Exception as restore_exc:
+            # A rename without an answer may or may not have happened.
+            unknown = not installed and isinstance(exc, XrayControlError)
+            if can_restore and (installed or (sidecar is not KEEP and unknown)):
+                self._restore_after_failure(
+                    exc, previous, previous_sidecar if sidecar is not KEEP else KEEP)
+                raise RuntimeError(
+                    detail + '; the previous configuration was restored and is running') from exc
+            if sidecar is not KEEP and not installed:
+                if unknown:
+                    # Changed for a configuration that may or may not be in
+                    # place, with nothing to restore against.
                     raise RuntimeError(
-                        'Xray could not be confirmed running after the previous '
-                        'configuration was restored (' + str(restore_exc) + ')') from exc
-                detail += '; the previous configuration was restored and is running'
-            raise RuntimeError(detail) from exc
+                        detail + '; the VLESS Encryption key file was changed for the '
+                        'new configuration and may be out of step with the one in place'
+                    ) from exc
+                # The configuration is known not to be in, and the core was
+                # not restarted: the key file goes back, and that is all.
+                self._put_vlessenc_back(previous_sidecar, exc)
+            if installed:
+                raise RuntimeError(detail) from exc
+            raise
+
+    def _restore_after_failure(self, failure, previous, sidecar=KEEP):
+        """After a failed write on a core that was running: put the previous
+        configuration back, with the key file when one was named, and bring
+        the core up on them. Raises with the outcome when that fails too;
+        `failure` stays the cause."""
+        try:
+            self._restore_config(previous, sidecar)
+        except XrayStartError as restore_exc:
+            # Put back, but not confirmed running on it.
+            raise RuntimeError(
+                'Xray could not be confirmed running after the previous '
+                'configuration was restored (' + str(restore_exc) + ')') from failure
+        except Exception as restore_exc:
+            # Not even put back: the instance is not what it was.
+            raise RuntimeError(
+                'The write failed (' + str(failure)
+                + '), and the previous state could not be fully restored ('
+                + str(restore_exc) + ')') from failure
 
     def _get_vless_inbound(self, config):
         for inbound in config.get('inbounds', []):
@@ -1126,12 +1240,6 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         except ValueError:
             return {}
         return pair if isinstance(pair, dict) else {}
-
-    def _write_vlessenc_pair(self, decryption, encryption):
-        self.ssh.upload_file_sudo(
-            json.dumps({'decryption': decryption,
-                        'encryption': encryption}, indent=2),
-            f"{self._config_dir()}/{VLESS_ENC_KEY_FILE}", mode=CONFIG_MODE)
 
     def _get_clients_table(self, strict=False):
         """Read clientsTable, trying both layout filenames.
@@ -1449,12 +1557,20 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         # layer enabled, on XHTTP as well. An empty flow means none.
         if runtime_flow:
             params.append("flow=" + urllib.parse.quote(runtime_flow, safe=''))
-        client_encryption = meta.get('vless_client_encryption')
         decryption = settings_node.get('decryption')
-        if (client_encryption and isinstance(decryption, str)
-                and decryption not in ('', 'none')):
-            # The second encryption layer rides every link of this inbound.
-            params.append("encryption=" + urllib.parse.quote(client_encryption, safe=''))
+        if isinstance(decryption, str) and decryption not in ('', 'none'):
+            # The second encryption layer rides every link of this inbound,
+            # and only the matching client string makes a link the core
+            # accepts. So none is issued while the key file is missing or
+            # out of step with the live configuration: a link without the
+            # parameter would be silently unusable.
+            pair = self._read_vlessenc_pair()
+            if pair.get('decryption') != decryption or not pair.get('encryption'):
+                raise RuntimeError(
+                    'VLESS Encryption is on for this instance, but its key file '
+                    'is missing or does not match the live configuration; '
+                    'no client link can be issued')
+            params.append("encryption=" + urllib.parse.quote(str(pair['encryption']), safe=''))
         # Format URL
         # vless://{id}@{host}:{port}?type=tcp&security=reality&pbk={public_key}&sni={sni}&fp=chrome&sid={short_id}&spx=%2F&flow=xtls-rprx-vision#{name}
 
@@ -1541,9 +1657,12 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         `xray vlessenc`, stores it in the key file, points the inbound's
         decryption at the server string, sets every client's flow to
         Vision and restarts. Disabling reverts to decryption 'none' and
-        empty flows. Existing client configs are invalidated: every user
-        must re-import the subscription, and only up-to-date Xray-core
-        clients carry the layer."""
+        empty flows. The key file and server.json are written as one: a
+        configuration that is refused, or a core that does not come back,
+        leaves the key file as it was or puts it back, so that issued
+        links keep matching the running core. Existing client configs are
+        invalidated: every user must re-import the subscription, and only
+        up-to-date Xray-core clients carry the layer."""
         config = self._get_server_json()
         if not config:
             raise RuntimeError('Xray live config is unavailable')
@@ -1559,16 +1678,18 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         if enable:
             decryption, encryption = self._generate_vlessenc_pair()
             settings['decryption'] = decryption
-            self._write_vlessenc_pair(decryption, encryption)
             for client in clients:
                 client['flow'] = 'xtls-rprx-vision'
+            # The matched pair travels with the configuration: the write
+            # installs both or puts both back.
+            sidecar = json.dumps({'decryption': decryption,
+                                  'encryption': encryption}, indent=2)
         else:
             settings['decryption'] = 'none'
             for client in clients:
                 client['flow'] = ''
-            self.ssh.run_sudo_command(
-                f"rm -f {shlex.quote(self._config_dir() + '/' + VLESS_ENC_KEY_FILE)}")
-        self._write_server_json(config, restart=True)
+            sidecar = None
+        self._write_server_json(config, restart=True, sidecar=sidecar)
         return self.get_vless_encryption_state()
 
     def apply_selfsteal(self, domain, dest):

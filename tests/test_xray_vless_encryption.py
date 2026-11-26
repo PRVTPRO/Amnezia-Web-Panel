@@ -86,10 +86,15 @@ class ToggleTests(unittest.TestCase):
                          'mlkem768x25519plus.native.600s.ServerPriv')
         self.assertEqual(inbound['settings']['clients'][0]['flow'],
                          'xtls-rprx-vision')
-        # the matched pair is persisted for the link builder
-        key_file = [path for _, path in manager.uploads
-                    if path.endswith(VLESS_ENC_KEY_FILE)]
-        self.assertEqual(key_file, [f'/opt/amnezia/xray/{VLESS_ENC_KEY_FILE}'])
+        # the matched pair is installed for the link builder: staged beside
+        # the live key file as a private file, then renamed over it, in the
+        # same write as the configuration
+        staged = [(content, path) for content, path in manager.uploads
+                  if path.startswith(f'/opt/amnezia/xray/.{VLESS_ENC_KEY_FILE}.')]
+        self.assertEqual(len(staged), 1)
+        self.assertEqual(json.loads(staged[0][0]), json.loads(self.VLESSENC_OUT))
+        self.assertIn(f'mv -f -- {staged[0][1]} /opt/amnezia/xray/{VLESS_ENC_KEY_FILE}',
+                      manager.sudo)
         # the core is stopped and started again (and watched until it is back)
         self.assertTrue(any(cmd.startswith('docker stop ') for cmd in manager.sudo))
         self.assertTrue(any(cmd.startswith('docker start ') for cmd in manager.sudo))
@@ -141,7 +146,8 @@ class LinkDerivationTests(unittest.TestCase):
         manager = self._manager(
             config, client_encryption='mlkem768x25519plus.native.0rtt.E')
         manager._read_vlessenc_pair = lambda: {
-            'decryption': 'D', 'encryption': 'mlkem768x25519plus.native.0rtt.E'}
+            'decryption': 'mlkem768x25519plus.native.600s.ServerPriv',
+            'encryption': 'mlkem768x25519plus.native.0rtt.E'}
 
         link = manager.get_client_config('xray', 'peer-1', '203.0.113.9', 443)
         query = dict(urllib.parse.parse_qsl(
@@ -159,6 +165,41 @@ class LinkDerivationTests(unittest.TestCase):
             urllib.parse.urlsplit(link).query, keep_blank_values=True))
         self.assertNotIn('flow', query)
         self.assertNotIn('encryption', query)
+
+    def test_a_leftover_key_file_does_not_reach_a_link_once_the_layer_is_off(self):
+        manager = self._manager(json.loads(json.dumps(XHTTP_CONFIG)))
+        manager._read_vlessenc_pair = lambda: {'decryption': 'native.gone',
+                                               'encryption': 'native.0rtt.E'}
+        link = manager.get_client_config('xray', 'peer-1', '203.0.113.9', 443)
+        self.assertNotIn('encryption=', link)
+
+    def test_no_link_is_issued_while_the_layer_is_on_and_the_key_file_is_gone(self):
+        # a toggle off that stopped half-way used to leave exactly this:
+        # the core demands the layer, and the link could not carry it
+        config = json.loads(json.dumps(XHTTP_CONFIG))
+        config['inbounds'][0]['settings']['decryption'] = \
+            'mlkem768x25519plus.native.600s.ServerPriv'
+        manager = self._manager(
+            config, client_encryption='mlkem768x25519plus.native.0rtt.E')
+        manager._read_vlessenc_pair = lambda: {}
+        with self.assertRaises(RuntimeError) as ctx:
+            manager.get_client_config('xray', 'peer-1', '203.0.113.9', 443)
+        self.assertIn('no client link can be issued', str(ctx.exception))
+
+    def test_no_link_is_issued_while_the_key_file_belongs_to_another_pair(self):
+        # a re-mint whose configuration did not stay would have left the
+        # client string of a new pair next to the server string of the old
+        config = json.loads(json.dumps(XHTTP_CONFIG))
+        config['inbounds'][0]['settings']['decryption'] = \
+            'mlkem768x25519plus.native.600s.ServerPriv'
+        manager = self._manager(
+            config, client_encryption='mlkem768x25519plus.native.0rtt.E')
+        manager._read_vlessenc_pair = lambda: {
+            'decryption': 'mlkem768x25519plus.native.600s.AnotherServer',
+            'encryption': 'mlkem768x25519plus.native.0rtt.E'}
+        with self.assertRaises(RuntimeError) as ctx:
+            manager.get_client_config('xray', 'peer-1', '203.0.113.9', 443)
+        self.assertIn('no client link can be issued', str(ctx.exception))
 
 
 

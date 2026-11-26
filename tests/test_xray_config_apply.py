@@ -28,6 +28,10 @@ STATE = "docker inspect -f '{{.State.Status}} {{.RestartCount}}'"
 # answers "there is no file" with an exit status of its own.
 READER = "sh -c 'if [ -e "
 PROOF = 'Failed to start: main: failed to add address 2606:4700::1/128 to wg0'
+KEY = '/opt/amnezia/xray/xray_vlessenc.key'
+OLD_DEC = 'mlkem768x25519plus.native.600s.OldServer'
+NEW_DEC = 'mlkem768x25519plus.native.600s.NewServer'
+VLESSENC = 'docker exec amnezia-xray /usr/bin/xray vlessenc'
 # What the SSH layer answers when a command did not run to an exit status.
 LOST = ('', 'SSH to node is still busy with a previous command', -1)
 UNKNOWN = 'unknown'   # a state query that never gets an answer
@@ -53,6 +57,13 @@ class FakeHost:
         # command prefix -> (stdout, stderr, code), for every call or just
         # the first one
         self.fail, self.fail_once = {}, {}
+        # (predicate on the command, reply), for the one command in a run
+        # of several alike; the second list answers once
+        self.fail_if, self.fail_once_if = [], []
+        # predicates of commands that do their job but whose answer never
+        # comes back: the SSH layer answers -1 then. The second list is
+        # used up by the first command it matches.
+        self.lose_answer, self.lose_once = [], []
         self.commands = []
         self.container_copies = []
 
@@ -71,6 +82,23 @@ class FakeHost:
         for prefix, reply in self.fail.items():
             if command.startswith(prefix):
                 return reply
+        for once, reply in self.fail_once_if:
+            if once(command):
+                self.fail_once_if.remove((once, reply))
+                return reply
+        for fails, reply in self.fail_if:
+            if fails(command):
+                return reply
+        result = self._answer(command)
+        if any(loses(command) for loses in self.lose_answer):
+            return LOST
+        for loses in list(self.lose_once):
+            if loses(command):
+                self.lose_once.remove(loses)
+                return LOST
+        return result
+
+    def _answer(self, command):
         if command.startswith('docker run --rm '):
             return self.verdict
         if command.startswith(MOUNTS):
@@ -97,6 +125,10 @@ class FakeHost:
             self.files.pop(command.split()[-1], None)
             self.modes.pop(command.split()[-1], None)
             return ('', '', 0)
+        if command.startswith('chmod ') and ' -- ' in command:
+            mode, path = command.split()[1], command.split()[-1]
+            self.modes[path] = int(mode, 8)
+            return ('', '', 0)
         if command.startswith('docker cp -- '):
             self.container_copies.append(command)
             return ('', '', 0)
@@ -107,6 +139,18 @@ def manager_for(host):
     manager = XrayManager(host)
     manager._get_server_json = lambda: json.loads(host.files.get(CONFIG) or 'null')
     return manager
+
+
+def encrypted(decryption=OLD_DEC):
+    """The live configuration of an XHTTP instance with the VLESS
+    Encryption layer on."""
+    return json.dumps({
+        'inbounds': [{'protocol': 'vless', 'port': 443, 'tag': 'proxy',
+                      'settings': {'clients': [{'id': 'peer-1', 'email': 'peer-1',
+                                                'flow': 'xtls-rprx-vision'}],
+                                   'decryption': decryption},
+                      'streamSettings': {'network': 'xhttp'}}],
+        'outbounds': [{'protocol': 'freedom'}]})
 
 
 class CoreVerdictTests(unittest.TestCase):
@@ -207,14 +251,28 @@ class WriteTests(unittest.TestCase):
         self.assertEqual(host.files, {CONFIG: OLD})
 
     def test_a_check_that_cannot_run_is_no_verdict_either(self):
-        # docker run itself failed: the core was never asked
-        host = FakeHost(verdict=('docker: Unable to find image amneziavpn/amnezia-xray',
-                                 '', 125))
+        # docker run itself failed, and docker says why on stderr: the core
+        # was never asked
+        host = FakeHost(verdict=('',
+                                 'docker: Error response from daemon: permission denied\n', 125))
         with self.assertRaises(XrayControlError) as ctx:
             manager_for(host)._write_server_json(json.loads(NEW), restart=False)
 
-        self.assertIn('Unable to find image', str(ctx.exception))
+        self.assertIn('Could not check the configuration with the core', str(ctx.exception))
+        self.assertIn('permission denied', str(ctx.exception))
+        self.assertNotIn('no error output', str(ctx.exception))
         self.assertEqual(host.files, {CONFIG: OLD})
+
+    def test_a_container_that_cannot_be_inspected_at_commit_leaves_no_staging_file(self):
+        # the mount inspect is what decides whether the container needs a
+        # copy: losing its answer fails the commit, and the staged file goes
+        host = FakeHost()
+        host.fail[MOUNTS] = LOST
+        with self.assertRaises(XrayControlError):
+            manager_for(host)._write_server_json(json.loads(NEW), restart=False)
+
+        self.assertEqual(host.files, {CONFIG: OLD})
+        self.assertFalse(any(name.rsplit('/', 1)[-1].startswith('.') for name in host.files))
 
     def test_an_unreadable_container_state_stops_the_write_before_anything_changes(self):
         host = FakeHost()
@@ -402,6 +460,201 @@ class RestartTests(unittest.TestCase):
 
         self.assertEqual(host.files, {CONFIG: OLD})
         self.assertIn('could not be confirmed', str(ctx.exception))
+
+
+class EncryptionToggleTests(unittest.TestCase):
+    """The VLESS Encryption key file and server.json change together and go
+    back together. A link carries the layer only when both say it is on, so
+    one of them restored without the other would issue links the core
+    refuses."""
+
+    OLD_PAIR = json.dumps({'decryption': OLD_DEC,
+                           'encryption': 'mlkem768x25519plus.native.0rtt.OldClient'},
+                          indent=2)
+    NEW_PAIR = {'decryption': NEW_DEC, 'encryption': 'mlkem768x25519plus.native.0rtt.NewClient'}
+    # running, stopped, back; or running, stopped, a crash on the new
+    # configuration, then a restored core that starts and holds
+    FINE = [('running', 0), ('exited', 0), ('running', 0), ('running', 0)]
+    CRASH = [('running', 0), ('exited', 0), ('running', 1),
+             ('exited', 1), ('running', 1), ('running', 1)]
+
+    def host(self, states=FINE, verdict=('', '', 0), live=None):
+        host = FakeHost(previous=live or encrypted(), states=states, verdict=verdict)
+        host.files[KEY] = self.OLD_PAIR
+        # an install from before this PR, when the file was not private
+        host.modes[KEY] = 0o644
+        host.fail[VLESSENC] = (json.dumps(self.NEW_PAIR), '', 0)
+        return host
+
+    def decryption_of(self, host):
+        return json.loads(host.files[CONFIG])['inbounds'][0]['settings']['decryption']
+
+    def staged_left(self, host):
+        return [name for name in host.files if name.rsplit('/', 1)[-1].startswith('.')]
+
+    def test_a_toggle_off_that_the_core_refuses_leaves_the_key_file(self):
+        host = self.host(verdict=(PROOF + ': invalid argument\n', '', 23))
+        with self.assertRaises(XrayConfigRejected):
+            manager_for(host).set_vless_encryption(False)
+
+        self.assertEqual(host.files, {CONFIG: encrypted(), KEY: self.OLD_PAIR})
+        self.assertFalse(any(c == f'rm -f -- {KEY}' for c in host.commands))
+
+    def test_a_toggle_off_whose_core_does_not_come_back_gets_the_key_file_back(self):
+        host = self.host(states=self.CRASH)
+        with self.assertRaises(RuntimeError) as ctx:
+            manager_for(host).set_vless_encryption(False)
+
+        self.assertIn('the previous configuration was restored and is running',
+                      str(ctx.exception))
+        self.assertEqual(host.files, {CONFIG: encrypted(), KEY: self.OLD_PAIR})
+        # put back the way this PR installs it, not with the mode it had
+        self.assertEqual(host.modes[KEY], CONFIG_MODE)
+        self.assertEqual(self.staged_left(host), [])
+
+    def test_a_remint_whose_core_does_not_come_back_gets_the_old_pair_back(self):
+        # Enabling an instance that already has the layer mints a new pair.
+        # Left as it was, the server string of the old pair would have run
+        # next to the client string of the new one.
+        host = self.host(states=self.CRASH)
+        with self.assertRaises(RuntimeError):
+            manager_for(host).set_vless_encryption(True)
+
+        self.assertEqual(host.files[KEY], self.OLD_PAIR)
+        self.assertEqual(self.decryption_of(host), OLD_DEC)
+
+    def test_a_toggle_that_works_keeps_the_key_file_in_step(self):
+        host = self.host()
+        manager_for(host).set_vless_encryption(False)
+        self.assertNotIn(KEY, host.files)
+        self.assertEqual(self.decryption_of(host), 'none')
+
+        host = FakeHost(previous=encrypted('none'), states=self.FINE)
+        host.fail[VLESSENC] = (json.dumps(self.NEW_PAIR), '', 0)
+        manager_for(host).set_vless_encryption(True)
+        self.assertEqual(json.loads(host.files[KEY]), self.NEW_PAIR)
+        self.assertEqual(host.modes[KEY], CONFIG_MODE)
+        self.assertEqual(self.decryption_of(host), NEW_DEC)
+
+    def test_the_key_file_changes_first_so_a_refused_install_can_put_it_back(self):
+        host = self.host()
+        manager_for(host).set_vless_encryption(False)
+
+        commands = host.commands
+        key_gone = commands.index(f'rm -f -- {KEY}')
+        config_in = next(i for i, c in enumerate(commands)
+                         if c.startswith('mv -f -- ') and c.endswith(' ' + CONFIG))
+        self.assertLess(key_gone, config_in)
+
+    def test_a_configuration_that_does_not_install_takes_the_key_file_back(self):
+        host = self.host()
+        host.fail_if.append(
+            (lambda c: c.startswith('mv -f -- ') and c.endswith(' ' + CONFIG),
+             ('', 'mv: cannot move: Read-only file system', 1)))
+        with self.assertRaises(RuntimeError) as ctx:
+            manager_for(host).set_vless_encryption(False)
+
+        self.assertIn('Could not install the new configuration', str(ctx.exception))
+        self.assertIn('Read-only file system', str(ctx.exception))
+        self.assertEqual(host.files, {CONFIG: encrypted(), KEY: self.OLD_PAIR})
+        self.assertEqual(self.staged_left(host), [])
+
+    def test_a_key_file_that_cannot_be_put_back_is_never_quiet(self):
+        host = self.host()
+        host.fail_if.extend([
+            (lambda c: c.startswith('mv -f -- ') and c.endswith(' ' + CONFIG),
+             ('', 'mv: cannot move', 1)),
+            (lambda c: c.startswith('mv -f -- ') and c.endswith(' ' + KEY),
+             ('', 'mv: cannot move', 1))])
+        with self.assertRaises(RuntimeError) as ctx:
+            manager_for(host).set_vless_encryption(False)
+
+        self.assertIn('The VLESS Encryption key file could not be put back',
+                      str(ctx.exception))
+        self.assertEqual(self.staged_left(host), [])
+
+    def test_a_key_file_that_cannot_be_changed_stops_before_the_configuration(self):
+        host = self.host()
+        host.fail_if.append((lambda c: c == f'rm -f -- {KEY}',
+                             ('', 'rm: cannot remove: Read-only file system', 1)))
+        with self.assertRaises(RuntimeError) as ctx:
+            manager_for(host).set_vless_encryption(False)
+
+        self.assertIn('Could not remove the VLESS Encryption key file', str(ctx.exception))
+        self.assertEqual(host.files, {CONFIG: encrypted(), KEY: self.OLD_PAIR})
+        self.assertFalse(any(c.startswith('mv -f -- ') and c.endswith(' ' + CONFIG)
+                             for c in host.commands))
+
+    def test_a_rename_that_loses_its_answer_gets_the_pair_back_and_the_core_up(self):
+        # The SSH layer answers -1 when a command did not run to an exit
+        # status: the rename may or may not have happened. That is not
+        # guessed at: the previous pair goes back, and the core is brought
+        # up on it.
+        host = self.host()
+        host.fail_once_if.append(
+            (lambda c: c.startswith('mv -f -- ') and c.endswith(' ' + CONFIG), LOST))
+        with self.assertRaises(RuntimeError) as ctx:
+            manager_for(host).set_vless_encryption(False)
+
+        self.assertIn('Could not confirm installing the new configuration', str(ctx.exception))
+        self.assertIn('the previous configuration was restored and is running',
+                      str(ctx.exception))
+        self.assertEqual(host.files, {CONFIG: encrypted(), KEY: self.OLD_PAIR})
+        self.assertEqual(sum(c.startswith('docker start ') for c in host.commands), 1)
+
+    def test_a_rename_that_loses_its_answer_on_a_core_that_was_down_says_so(self):
+        # Nothing to restore against: the instance was down before the
+        # write. The key file is not silently swapped back next to a
+        # configuration that may be the new one; the error says the two may
+        # be out of step.
+        host = self.host(states=[('restarting', 7), ('exited', 7)])
+        host.fail_once_if.append(
+            (lambda c: c.startswith('mv -f -- ') and c.endswith(' ' + CONFIG), LOST))
+        with self.assertRaises(RuntimeError) as ctx:
+            manager_for(host).set_vless_encryption(False)
+
+        self.assertIn('may be out of step with the one in place', str(ctx.exception))
+        self.assertNotIn(KEY, host.files)
+
+    def test_a_key_file_change_whose_answer_is_lost_is_put_back(self):
+        # The removal may well have happened. Putting the previous file back
+        # is what makes the instance what it was, either way.
+        host = self.host()
+        host.lose_answer.append(lambda c: c == f'rm -f -- {KEY}')
+        with self.assertRaises(XrayControlError) as ctx:
+            manager_for(host).set_vless_encryption(False)
+
+        self.assertIn('Could not confirm removing the VLESS Encryption key file',
+                      str(ctx.exception))
+        self.assertEqual(host.files, {CONFIG: encrypted(), KEY: self.OLD_PAIR})
+        self.assertEqual(host.modes[KEY], CONFIG_MODE)
+        self.assertFalse(any(c.startswith('mv -f -- ') and c.endswith(' ' + CONFIG)
+                             for c in host.commands))
+
+    def test_a_new_key_file_whose_answer_is_lost_is_taken_back(self):
+        # the same on the way up: the new pair may be in place already
+        host = self.host(states=self.CRASH[:1] + self.FINE[1:])
+        host.lose_once.append(
+            lambda c: c.startswith('mv -f -- ') and c.endswith(' ' + KEY))
+        with self.assertRaises(XrayControlError) as ctx:
+            manager_for(host).set_vless_encryption(True)
+
+        self.assertIn('Could not confirm installing the VLESS Encryption key file',
+                      str(ctx.exception))
+        self.assertEqual(host.files, {CONFIG: encrypted(), KEY: self.OLD_PAIR})
+        self.assertEqual(self.decryption_of(host), OLD_DEC)
+
+    def test_the_key_file_is_read_before_anything_changes(self):
+        # "unknown" is not "there is none": a key file that cannot be read
+        # stops the toggle before the configuration is touched
+        host = self.host()
+        host.fail_if.append((lambda c: c.startswith(READER) and KEY in c, LOST))
+        with self.assertRaises(XrayControlError) as ctx:
+            manager_for(host).set_vless_encryption(False)
+
+        self.assertIn('Could not read the VLESS Encryption key file', str(ctx.exception))
+        self.assertEqual(host.files, {CONFIG: encrypted(), KEY: self.OLD_PAIR})
+        self.assertFalse(any(c.startswith('mv -f -- ') for c in host.commands))
 
 
 class ClientChangeTests(unittest.TestCase):
