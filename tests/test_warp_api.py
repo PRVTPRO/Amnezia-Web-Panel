@@ -302,7 +302,15 @@ class WarpApiTests(unittest.TestCase):
 
         panel.warp_state_store.mutate(confirm)
         ssh = mock.Mock()
-        ssh.run_sudo_command.return_value = ('false', '', '')
+
+        def run(command, timeout=60):
+            if 'docker inspect -f' in command:
+                if '.State.Running' in command:
+                    return 'false', '', 0
+                return 'running', '', 0
+            return '', '', 0
+
+        ssh.run_sudo_command.side_effect = run
         with mock.patch.object(panel, 'get_ssh', return_value=ssh):
             response = self.client.post(
                 '/api/servers/0/container/toggle', json={'protocol': 'awg'})

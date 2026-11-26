@@ -55,7 +55,8 @@ import public_port_forward
 from managers.ssh_manager import SSHManager, configure_jump_resolver
 from managers import ssh_trust
 from managers import split_tunnel
-from managers.awg_manager import AWGManager, normalize_special_junk
+from managers.awg_manager import (AWGManager, ensure_start_script_executable,
+                                  normalize_special_junk)
 from managers.awg_junk import (
     DEVICE_PROFILES as AWG_I1_DEVICE_PROFILES,
     catalog as awg_i1_catalog,
@@ -64,7 +65,9 @@ from managers.awg_junk import (
     parse_i1 as awg_parse_i1,
     pool_for as awg_i1_pool_for,
 )
-from managers.awg_manager import AWGManager, ICMP_ECHO_ALLOW_SCRIPT, normalize_special_junk
+from managers.awg_manager import (AWGManager, ICMP_ECHO_ALLOW_SCRIPT,
+                                  ensure_start_script_executable,
+                                  normalize_special_junk)
 from server_stats import collect_host_stats
 from managers.awg_plugin_updater import (
     COMPONENTS as AWG_PLUGIN_COMPONENTS,
@@ -13253,6 +13256,38 @@ async def api_instance_copy_cancel(request: Request, server_id: int, op_id: str)
     return {'status': op.get('state')}
 
 
+def _await_container_running(ssh, container, timeout=8.0):
+    """Wait for a started container to reach a stable 'running' state.
+
+    `docker start` exits 0 even when the entrypoint dies immediately, so the
+    exit code alone reports a restart loop as success. The state is polled
+    until it is 'running' on two consecutive checks, or until it is known to
+    be dead (restarting/exited/dead) - then waiting cannot help.
+    """
+    deadline = time.time() + timeout
+    status = 'unknown'
+    running_seen = False
+    while True:
+        out, _err, _code = ssh.run_sudo_command(
+            "docker inspect -f '{{.State.Status}} {{.State.Restarting}}' "
+            + container)
+        parts = (out or '').split()
+        status = parts[0] if parts else 'unknown'
+        restarting = len(parts) > 1 and parts[1].lower() == 'true'
+        if status == 'running' and not restarting:
+            if running_seen:
+                return True, status
+            running_seen = True
+            time.sleep(0.4)
+            continue
+        running_seen = False
+        if status in ('restarting', 'exited', 'dead'):
+            return False, status
+        if time.time() >= deadline:
+            return False, status
+        time.sleep(0.4)
+
+
 @app.post('/api/servers/{server_id}/container/toggle', tags=["Protocols"])
 def api_container_toggle(request: Request, server_id: int, req: ContainerToggleRequest):
     """Start or stop a protocol Docker container. Stopping an exit node that
@@ -13270,11 +13305,16 @@ def api_container_toggle(request: Request, server_id: int, req: ContainerToggleR
         server = data['servers'][server_id]
         ssh = get_ssh(server)
         ssh.connect()
-        # Check current state
+        # Check current state. A container in a restart loop has
+        # .State.Running=true but is not 'Up' (what the UI reads from
+        # `docker ps`), so counting it as running made a 'Старт' click run
+        # `docker stop`.
         out, _, _ = ssh.run_sudo_command(
-            f"docker inspect -f '{{{{.State.Running}}}}' {container} 2>/dev/null"
-        )
-        is_running = out.strip().lower() == 'true'
+            "docker inspect -f '{{.State.Running}} {{.State.Restarting}}' "
+            + container + " 2>/dev/null")
+        parts = (out or '').split()
+        is_running = (bool(parts) and parts[0].lower() == 'true'
+                      and not (len(parts) > 1 and parts[1].lower() == 'true'))
         if is_running and protocol_base(req.protocol) == 'exit' and not req.force:
             entries = exit_link_svc.linked_entries(data, server.get('uid'))
             if entries:
@@ -13284,7 +13324,33 @@ def api_container_toggle(request: Request, server_id: int, req: ContainerToggleR
             ssh.run_sudo_command(f"docker stop {container}")
             action = 'stopped'
         else:
-            ssh.run_sudo_command(f"docker start {container}")
+            _out, err, code = ssh.run_sudo_command(f"docker start {container}")
+            if code != 0:
+                ssh.disconnect()
+                return JSONResponse(
+                    {'error': 'start_failed', 'container': container,
+                     'detail': (err or _out or '').strip()}, status_code=500)
+            healthy, state = _await_container_running(ssh, container)
+            if not healthy:
+                logs, _e, _c = ssh.run_sudo_command(
+                    f"docker logs --tail 20 {container} 2>&1")
+                # Known cause: the entrypoint lost its executable bit, so
+                # Docker loops on 'Permission denied'. Repair it once and
+                # retry before reporting a failure to the user.
+                if 'permission denied' in (logs or '').lower():
+                    repaired, detail = ensure_start_script_executable(ssh, container)
+                    logger.warning("start.sh repair attempt on %s: %s",
+                                   container, detail)
+                    if repaired:
+                        ssh.run_sudo_command(f"docker start {container}")
+                        healthy, state = _await_container_running(ssh, container)
+                if not healthy:
+                    ssh.disconnect()
+                    return JSONResponse(
+                        {'error': 'container_failed_to_start',
+                         'container': container, 'state': state,
+                         'log': (logs or '').strip()[-2000:]},
+                        status_code=500)
             action = 'started'
         if hasattr(ssh, 'docker_ps_invalidate'):
             ssh.docker_ps_invalidate()
