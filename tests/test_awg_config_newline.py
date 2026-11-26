@@ -47,6 +47,19 @@ class ConfigNewlineTests(unittest.TestCase):
         mgr.toggle_client('awg2', 'PEER_B', False)
         self.assert_append_safe(ssh.files[path])
 
+    def test_disable_and_delete_preserve_comments_before_interface(self):
+        preamble = '# Native server configuration [AWG]\n\n'
+        for action in ('disable', 'delete'):
+            with self.subTest(action=action):
+                mgr, ssh, path = self.manager('awg2', preamble + SERVER_CONFIG)
+                if action == 'disable':
+                    mgr.toggle_client('awg2', 'PEER_B', False)
+                else:
+                    mgr.remove_client('awg2', 'PEER_B')
+
+                expected = preamble + SERVER_CONFIG.rsplit('[Peer]', 1)[0].rstrip('\n') + '\n'
+                self.assertEqual(ssh.files[path], expected)
+
     def test_manual_save_normalizes_missing_lf_and_crlf(self):
         for suffix in ('', '\n', '\n\n', '\r\n\r\n'):
             with self.subTest(suffix=suffix):
