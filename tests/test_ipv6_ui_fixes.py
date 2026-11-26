@@ -735,14 +735,15 @@ class TestC6Translations(unittest.TestCase):
                                     - TORRENT_GUARD_KEYS
                                     - TORRENT_PLUGIN_KEYS
                                     - AWG_I1_KEYS - SRV_WARP_NO_AWG_KEYS
-                                    - SRV_WARP_IMPORT_KEYS
+                                    - SRV_WARP_IMPORT_KEYS - SRV_WARP_INSTANCE_KEYS
                                     - COPY_INSTANCE_KEYS - LATER_FEATURE_KEYS
                                     - RELEASE_1811_KEYS - USER_LIMIT_KEYS - TELEGRAM_ACCOUNT_KEYS
                                     - LIFECYCLE_FENCE_KEYS - STORAGE_KEYS
                                     - SUBSCRIPTION_KEYS - CLOSE_KEYS
                                     - SSH_HELP_KEYS - SMARTROUTE_TIMER_KEYS
                                     - IPV4_POLICY_KEYS - SRV_CARD_CONTAINER_KEYS
-                                    - SELF_SERVICE_DELETE_KEYS - PROXY_KEYS))
+                                    - SELF_SERVICE_DELETE_KEYS - PROXY_KEYS
+                                    - LAZY_EDITOR_KEYS))
         self.assertEqual(hashlib.sha256(previous.encode('utf-8')).hexdigest(),
                          PRE_PANEL_ACCESS_KEYS_SHA256,
                          'Existing catalogue changed outside the declared additions')
@@ -755,7 +756,7 @@ class TestC6Translations(unittest.TestCase):
                         | LIFECYCLE_FENCE_KEYS | SUBSCRIPTION_KEYS | CLOSE_KEYS
                         | SMARTROUTE_TIMER_KEYS | IPV4_POLICY_KEYS
                         | SRV_WARP_INSTANCE_KEYS | SRV_CARD_CONTAINER_KEYS
-                        | SELF_SERVICE_DELETE_KEYS | PROXY_KEYS):
+                        | SELF_SERVICE_DELETE_KEYS | PROXY_KEYS | LAZY_EDITOR_KEYS):
                 self.assertIn(key, data)
                 self.assertTrue(str(data[key]).strip(), "%s empty in %s" % (key, locale))
 

@@ -1654,7 +1654,6 @@
   "self_service_delete_restore_required": "سرور نتیجه را تأیید نکرد. هیچ چیز حذف نشد؛ مدیر باید وضعیت اتصال را بررسی کند.",
   "self_service_delete_link_disappeared": "این اتصال تغییر یافته یا حذف شده است. صفحه را تازه کنید و دوباره تلاش کنید.",
   "self_service_delete_not_found": "اتصال یافت نشد. صفحه را تازه کنید.",
-  "srv_warp_err_registered": "WARP قبلاً روی یکی از نمونه‌های این سرور ثبت شده است. ابتدا آن را جدا کنید.",
   "srv_warp_err_install_failed": "نصب WARP در این نمونه ناموفق بود",
   "srv_warp_err_repair_failed": "تعمیر WARP در این نمونه ناموفق بود",
   "editor_load_failed": "بارگذاری ویرایشگر کد ممکن نشد — از فیلد متنی ساده استفاده میشود",

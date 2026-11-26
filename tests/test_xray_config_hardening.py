@@ -39,7 +39,7 @@ class InstallHardeningTests(unittest.TestCase):
         manager.ssh.run_sudo_command = lambda *a, **k: ('', '', 0)
         manager.ssh.run_command = lambda *a, **k: ('', '', 0)
         uploads = []
-        manager.ssh.upload_file_sudo = lambda content, path: uploads.append((content, path))
+        manager.ssh.upload_file_sudo = lambda content, path, mode=None: uploads.append((content, path))
 
         manager.install_protocol(port=443)
 

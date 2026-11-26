@@ -111,6 +111,76 @@ VLESS_ENC_KEY_FILE = 'xray_vlessenc.key'
 # (field-tested; see the 2026 censorship-research synthesis).
 XRAY_DEFAULT_FINGERPRINT = 'firefox'
 
+# ---- safe configuration apply --------------------------------------------
+# server.json carries the Reality private key and the VLESS Encryption
+# secret: it is staged and stored readable by root only.
+CONFIG_MODE = 0o600
+# How the throwaway validation container sees a staged candidate. Told
+# nothing, the core guesses the format from the name's extension and refuses
+# a name it does not know without reading the file, so it ends in .json and
+# the format is passed to it explicitly as well.
+_CANDIDATE = '/tmp/.server.candidate.json'
+# What a core container is granted; the validation container gets the same,
+# so that it builds the configuration under the conditions of the live one.
+PRIVILEGES = '--privileged --cap-add=NET_ADMIN'
+# Exit codes of `docker run` itself (125: daemon or image, 126/127: the
+# command could not be invoked): the core was never asked.
+_DOCKER_RUN_FAILURES = (125, 126, 127)
+# What the live-config reader exits with when there is no file to read. The
+# script picks it, so nothing else answers with it: `cat` and `test` exit 1
+# for a file they may not read just as for a missing one, and so does a sudo
+# that was refused.
+NO_LIVE_CONFIG = 3
+# What a config write is told to do with the VLESS Encryption key file,
+# which has to stay in step with the configuration: leave it, replace its
+# text, or remove it (None).
+KEEP = object()
+# Restart verification: one poll per second; the core counts as back after
+# START_STABLE consecutive "running" polls with an unmoved restart counter.
+START_POLLS = 6
+START_STABLE = 2
+_CRASH_STATES = ('restarting', 'exited', 'dead', 'removing')
+
+
+class XrayConfigRejected(RuntimeError):
+    """The core cannot build a configuration; nothing was changed."""
+
+
+class XrayControlError(RuntimeError):
+    """A command could not be run on the server, or its answer could not be
+    read, so its outcome is unknown. This says nothing about the
+    configuration: the SSH layer answers -1 when a command did not run to an
+    exit status, and a state that cannot be read is never assumed healthy."""
+
+
+class XrayStartError(RuntimeError):
+    """The core is not confirmed running after its container was restarted."""
+
+
+def _why(err, code):
+    """The remote reason of a failed command, or its exit status."""
+    return (err or '').strip() or f'exit code {code}'
+
+
+def _failed(done, doing, err, code):
+    """The error for a command that did not do what it was asked. A command
+    without an exit status may well have done its job: that is unknown, not
+    failed. `done` names the action for a failure ("install the file"),
+    `doing` for an unknown outcome ("installing the file")."""
+    if code < 0:
+        return XrayControlError(f'Could not confirm {doing}: ' + _why(err, code))
+    return RuntimeError(f'Could not {done}: ' + _why(err, code))
+
+
+def _core_verdict(text, limit=400):
+    """The core's own last word from `xray run -test` output or the
+    container log: the line that says why it refused to start."""
+    lines = [line.strip() for line in (text or '').splitlines() if line.strip()]
+    for line in reversed(lines):
+        if 'Failed to start' in line:
+            return line[-limit:]
+    return lines[-1][-limit:] if lines else 'no error output'
+
 class XrayManager:
     """Manages Xray (VLESS-Reality) protocol installation and client management."""
     
@@ -446,8 +516,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         bind = f"{ingress_ip}:" if ingress_ip else ""
         return f"""docker run -d \\
 --restart always \\
---privileged \\
---cap-add=NET_ADMIN \\
+{PRIVILEGES} \\
 -p {bind}{port}:{port}/tcp \\
 -p {bind}{port}:{port}/udp \\
 -v {self._config_dir()}:{self._config_dir()} \\
@@ -625,12 +694,16 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         }
         
         self.ssh.run_sudo_command(f"mkdir -p {config_dir}")
-        self.ssh.upload_file_sudo(json.dumps(server_json, indent=2), f"{config_dir}/server.json")
+        # server.json carries the Reality private key, and the key file is
+        # the key itself: root-only from the moment they land.
+        self.ssh.upload_file_sudo(json.dumps(server_json, indent=2),
+                                  f"{config_dir}/server.json", mode=CONFIG_MODE)
         # Native layout — separate key files matching the official Amnezia client install.
         # Everything lands in THIS instance's config_dir: a second instance
         # (xray__2 -> /opt/amnezia/xray-2) must not share the base keys.
         # See client/server_scripts/xray/configure_container.sh for the canonical layout.
-        self.ssh.upload_file_sudo(priv_key + '\n', f"{config_dir}/xray_private.key")
+        self.ssh.upload_file_sudo(priv_key + '\n', f"{config_dir}/xray_private.key",
+                                  mode=CONFIG_MODE)
         self.ssh.upload_file_sudo(pub_key + '\n', f"{config_dir}/xray_public.key")
         self.ssh.upload_file_sudo(short_id + '\n', f"{config_dir}/xray_short_id.key")
         # xray_uuid.key marks the install-time "default" client whose ID gets skipped on
@@ -645,6 +718,9 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         results.append("Applying host network tuning (BBR)...")
         AWGManager(self.ssh).setup_host_tuning()
         results.append("Host network tuning applied")
+
+        results.append("Checking the configuration with the core...")
+        self._prove_config(f"{config_dir}/server.json")
 
         results.append("Starting container...")
         run_cmd = self._container_run_cmd(port, ingress_ip)
@@ -708,19 +784,314 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
     def _save_server_json(self, data):
         return self._write_server_json(data, restart=True)
 
-    def _write_server_json(self, data, restart=True):
-        """Write server.json into container via docker cp AND sync to host path."""
-        tmp_file = "/tmp/_xray_server.json"
-        self.ssh.upload_file_sudo(json.dumps(data, indent=2), tmp_file)
-        self.ssh.run_sudo_command(
-            f"docker cp {tmp_file} {self.container_name}:{self._config_path()}"
-        )
-        # Also keep host copy in sync (handles both volume-mount and no-mount installs)
-        self.ssh.run_sudo_command(
-            f"cp {tmp_file} {self._config_path()} 2>/dev/null || true"
-        )
-        if restart:
-            self.ssh.run_sudo_command(f"docker restart {self.container_name}")
+    def _stage_config(self, text, name='server.json'):
+        """Put `text` beside the live file `name` as a private staging file
+        (mode 600, unique name). Nothing is replaced yet."""
+        stage = f'{self._config_dir()}/.{name}.{uuid.uuid4().hex}.tmp'
+        self.ssh.upload_file_sudo(text, stage, mode=CONFIG_MODE)
+        return stage
+
+    def _vlessenc_path(self):
+        return f'{self._config_dir()}/{VLESS_ENC_KEY_FILE}'
+
+    def _config_test_command(self, host_file):
+        """`xray run -test` for a config file, in a throwaway container built
+        from the live image with the live privileges and config directory.
+        It makes the core load and build the configuration, which is all it
+        does: the core exits before any listener starts, so a failure at
+        start-up is caught by the restart watch, not here. The container has
+        a network namespace of its own, so the build happens under the
+        conditions of a fresh start, and a kernel-tun outbound cannot
+        collide with the running core."""
+        return (
+            f'docker run --rm {PRIVILEGES} '
+            f'-v {shlex.quote(self._config_dir())}:{shlex.quote(self._config_dir())}:ro '
+            f'-v {shlex.quote(host_file)}:{_CANDIDATE}:ro '
+            f'--entrypoint="" {self.image_name} '
+            f'/usr/bin/xray run -test -c {_CANDIDATE} -format json')
+
+    def _prove_config(self, host_file):
+        """Refuse a configuration the core cannot build, before anything
+        live is touched. `xray run -test` reports a build failure on stdout
+        and exits with a code of its own. Anything else - the panel losing
+        the answer, or docker failing to run the check at all - is not a
+        verdict about the configuration."""
+        out, err, code = self.ssh.run_sudo_command(self._config_test_command(host_file))
+        if code < 0 or code in _DOCKER_RUN_FAILURES:
+            # docker says why on stderr; the core on stdout.
+            raise XrayControlError(
+                'Could not check the configuration with the core: '
+                + (_why(err, code) if code < 0
+                   else _core_verdict((err or '') + '\n' + (out or ''))))
+        if code != 0:
+            raise XrayConfigRejected(
+                'Xray rejected the configuration: '
+                + _core_verdict((err or '') + '\n' + (out or '')))
+
+    def _config_dir_mounted(self):
+        """Whether the container reads its config from the host directory
+        (every container the panel creates does)."""
+        out, err, code = self.ssh.run_sudo_command(
+            f"docker inspect -f '{{{{range .Mounts}}}}{{{{.Destination}}}}"
+            f"{{{{println}}}}{{{{end}}}}' {shlex.quote(self.container_name)} 2>/dev/null")
+        if code < 0:
+            raise XrayControlError(
+                'Could not inspect the Xray container: ' + _why(err, code))
+        return code == 0 and self._config_dir() in (out or '').split()
+
+    def _commit_config(self, stage):
+        """Move the staged file over the live one with a rename, so a failed
+        write can never leave a truncated config behind."""
+        try:
+            if not self._config_dir_mounted():
+                # A container keeping its own copy needs it updated as well.
+                out, err, code = self.ssh.run_sudo_command(
+                    f'docker cp -- {shlex.quote(stage)} '
+                    f'{shlex.quote(self.container_name + ":" + self._config_path())}')
+                if code != 0:
+                    raise _failed('copy the configuration into the container',
+                                  'copying the configuration into the container',
+                                  out or err, code)
+            _, err, code = self.ssh.run_sudo_command(
+                f'mv -f -- {shlex.quote(stage)} {shlex.quote(self._config_path())}')
+            if code != 0:
+                raise _failed('install the new configuration',
+                              'installing the new configuration', err, code)
+        except Exception:
+            self.ssh.run_sudo_command(f'rm -f -- {shlex.quote(stage)}')
+            raise
+
+    def _read_file_text(self, path, what):
+        """A file's content, or None when there is none: a file the host
+        reports missing or one that holds nothing. Any other failed read
+        raises, naming the file as `what`: a file that cannot be read is
+        exactly the one that must not be taken for absent."""
+        quoted = shlex.quote(path)
+        script = (f'if [ -e {quoted} ]; then cat {quoted}; '
+                  f'else exit {NO_LIVE_CONFIG}; fi')
+        out, err, code = self.ssh.run_sudo_command('sh -c ' + shlex.quote(script))
+        if code == NO_LIVE_CONFIG:
+            return None
+        if code != 0:
+            raise XrayControlError(f'Could not read {what}: ' + _why(err, code))
+        return out if (out or '').strip() else None
+
+    def _read_config_text(self):
+        """The live server.json's content; None when there is nothing to
+        restore."""
+        return self._read_file_text(self._config_path(), 'the live configuration')
+
+    def _set_vlessenc(self, text):
+        """Make the VLESS Encryption key file hold `text`, as a private file
+        staged beside it first, or remove it when `text` is None. Raises
+        when that cannot be confirmed, and leaves no staging file behind."""
+        if text is None:
+            _, err, code = self.ssh.run_sudo_command(
+                f'rm -f -- {shlex.quote(self._vlessenc_path())}')
+            if code != 0:
+                raise _failed('remove the VLESS Encryption key file',
+                              'removing the VLESS Encryption key file', err, code)
+            return
+        stage = self._stage_config(text, VLESS_ENC_KEY_FILE)
+        try:
+            _, err, code = self.ssh.run_sudo_command(
+                f'mv -f -- {shlex.quote(stage)} {shlex.quote(self._vlessenc_path())}')
+        except Exception:
+            self.ssh.run_sudo_command(f'rm -f -- {shlex.quote(stage)}')
+            raise
+        if code != 0:
+            self.ssh.run_sudo_command(f'rm -f -- {shlex.quote(stage)}')
+            raise _failed('install the VLESS Encryption key file',
+                          'installing the VLESS Encryption key file', err, code)
+
+    def _put_vlessenc_back(self, text, cause):
+        """Put the key file back the way it was read. Failing at that is a
+        file out of step with its configuration, so it is never quiet."""
+        try:
+            self._set_vlessenc(text)
+        except Exception as exc:
+            raise RuntimeError(
+                'The VLESS Encryption key file could not be put back after the '
+                'configuration was not installed (' + str(exc) + ')') from cause
+
+    def _container_state(self):
+        """(status, restart count) of the container. Raises when docker
+        cannot be asked or answers something else: an unreadable state is
+        never reported as a healthy one."""
+        out, err, code = self.ssh.run_sudo_command(
+            f"docker inspect -f '{{{{.State.Status}}}} {{{{.RestartCount}}}}' "
+            f"{shlex.quote(self.container_name)} 2>/dev/null")
+        parts = (out or '').split()
+        if code != 0 or len(parts) != 2 or not parts[1].isdigit():
+            raise XrayControlError(
+                'Could not read the Xray container state'
+                + (': ' + _why(err, code) if code < 0 else ''))
+        return parts[0], int(parts[1])
+
+    def _restart_core(self):
+        """Stop the container, start it again and make sure the core is back.
+        A config the core cannot start makes the container crash-loop under
+        --restart always, so "running" alone proves nothing: the restart
+        counter has to stay put as well. An explicit stop also breaks a
+        crash-loop the instance may already be in, which is the state it is
+        in when a broken config gets fixed.
+
+        Every ending without a confirmed core raises XrayStartError, and
+        that includes a state the panel could not read: an unverified start
+        is never passed off as a success."""
+        try:
+            for _ in range(START_POLLS):
+                self.ssh.run_sudo_command(f'docker stop {shlex.quote(self.container_name)}')
+                try:
+                    status, seen = self._container_state()
+                except XrayControlError:
+                    status, seen = None, None
+                if status is not None and status not in ('running', 'paused', 'restarting'):
+                    break
+                self.ssh.run_sudo_command('sleep 1')
+            else:
+                raise XrayStartError(
+                    'Xray could not be confirmed stopped: the container is '
+                    'still up or its state could not be read')
+
+            _, err, code = self.ssh.run_sudo_command(
+                f'docker start {shlex.quote(self.container_name)}')
+            if code > 0:
+                raise XrayStartError(
+                    'Xray did not come back (could not start the container: '
+                    + _why(err, code) + ')')
+            # A lost answer to the start is no failure in itself: the polls
+            # below are what decides.
+            stable, unverified = 0, None
+            for _ in range(START_POLLS):
+                _, _, paused = self.ssh.run_sudo_command('sleep 1')
+                if paused != 0:
+                    # A poll right after a pause that never happened proves
+                    # nothing: a crashing core would not have had the time.
+                    continue
+                try:
+                    status, count = self._container_state()
+                except XrayControlError as exc:
+                    stable, unverified = 0, exc
+                    continue
+                if status in _CRASH_STATES or count > seen:
+                    out, _, _ = self.ssh.run_sudo_command(
+                        f'docker logs --tail 30 {shlex.quote(self.container_name)} 2>&1')
+                    raise XrayStartError(
+                        'Xray did not come back (' + _core_verdict(out) + ')')
+                seen = count
+                stable = stable + 1 if status == 'running' else 0
+                if stable >= START_STABLE:
+                    return
+            if unverified is not None:
+                raise XrayStartError(
+                    'Xray could not be confirmed running (' + str(unverified) + ')')
+            raise XrayStartError('Xray did not come back (still starting)')
+        except XrayControlError as exc:
+            raise XrayStartError(
+                'Xray could not be confirmed running (' + str(exc) + ')') from exc
+
+    def _restore_config(self, text, sidecar=KEEP):
+        """Put back a configuration that was running a moment ago - it needs
+        no proof - and bring the core up on it. The VLESS Encryption key
+        file goes back with it, when one was named: after the configuration,
+        so that the restart policy brings the core up on the old one first
+        should putting the key file back fail."""
+        self._commit_config(self._stage_config(text))
+        if sidecar is not KEEP:
+            self._set_vlessenc(sidecar)
+        self._restart_core()
+
+    def _write_server_json(self, data, restart=True, sidecar=KEEP):
+        """Apply a new server.json without ever leaving the instance worse
+        off. The candidate is staged as a private file, checked against the
+        core with `xray run -test`, renamed over the live file and - when
+        the core must restart - watched until it is back. Whatever goes
+        wrong before the rename changes nothing; whatever goes wrong after
+        it, on a core that was running, gets the previous configuration
+        restored before the error surfaces.
+
+        The VLESS Encryption key file has to stay in step with the
+        configuration: links carry the layer only when both say it is on.
+        `sidecar` says what becomes of it - KEEP leaves it, a text replaces
+        it, None removes it - and it is changed with the configuration and
+        put back with it, so that the two are never restored apart. A
+        rename that loses its answer is not guessed at: the previous pair
+        is put back and the core is brought up on it."""
+        stage = self._stage_config(json.dumps(data, indent=2))
+        try:
+            self._prove_config(stage)
+            # A core that was down before the write has nothing to fall back
+            # to: the config being replaced is the broken one.
+            was_running = self._container_state()[0] if restart else None
+            previous = (self._read_config_text()
+                        if restart or sidecar is not KEEP else None)
+            previous_sidecar = (self._read_file_text(
+                self._vlessenc_path(), 'the VLESS Encryption key file')
+                if sidecar is not KEEP else KEEP)
+        except Exception:
+            self.ssh.run_sudo_command(f'rm -f -- {shlex.quote(stage)}')
+            raise
+        can_restore = was_running == 'running' and previous is not None
+        if sidecar is not KEEP:
+            # The key file goes first: should the configuration then not
+            # install, putting it back is all it takes.
+            try:
+                self._set_vlessenc(sidecar)
+            except Exception as exc:
+                # Nothing else was touched: the key file goes back to the
+                # one that matches the configuration still in place.
+                self.ssh.run_sudo_command(f'rm -f -- {shlex.quote(stage)}')
+                self._put_vlessenc_back(previous_sidecar, exc)
+                raise
+        installed = False
+        try:
+            self._commit_config(stage)
+            installed = True
+            if restart:
+                self._restart_core()
+        except Exception as exc:
+            detail = str(exc)
+            # A rename without an answer may or may not have happened.
+            unknown = not installed and isinstance(exc, XrayControlError)
+            if can_restore and (installed or (sidecar is not KEEP and unknown)):
+                self._restore_after_failure(
+                    exc, previous, previous_sidecar if sidecar is not KEEP else KEEP)
+                raise RuntimeError(
+                    detail + '; the previous configuration was restored and is running') from exc
+            if sidecar is not KEEP and not installed:
+                if unknown:
+                    # Changed for a configuration that may or may not be in
+                    # place, with nothing to restore against.
+                    raise RuntimeError(
+                        detail + '; the VLESS Encryption key file was changed for the '
+                        'new configuration and may be out of step with the one in place'
+                    ) from exc
+                # The configuration is known not to be in, and the core was
+                # not restarted: the key file goes back, and that is all.
+                self._put_vlessenc_back(previous_sidecar, exc)
+            if installed:
+                raise RuntimeError(detail) from exc
+            raise
+
+    def _restore_after_failure(self, failure, previous, sidecar=KEEP):
+        """After a failed write on a core that was running: put the previous
+        configuration back, with the key file when one was named, and bring
+        the core up on them. Raises with the outcome when that fails too;
+        `failure` stays the cause."""
+        try:
+            self._restore_config(previous, sidecar)
+        except XrayStartError as restore_exc:
+            # Put back, but not confirmed running on it.
+            raise RuntimeError(
+                'Xray could not be confirmed running after the previous '
+                'configuration was restored (' + str(restore_exc) + ')') from failure
+        except Exception as restore_exc:
+            # Not even put back: the instance is not what it was.
+            raise RuntimeError(
+                'The write failed (' + str(failure)
+                + '), and the previous state could not be fully restored ('
+                + str(restore_exc) + ')') from failure
 
     def _get_vless_inbound(self, config):
         for inbound in config.get('inbounds', []):
@@ -736,7 +1107,9 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         tmp_name = f"/tmp/_xray_api_{uuid.uuid4().hex}.json"
         container_tmp = tmp_name
         try:
-            self.ssh.upload_file_sudo(json.dumps(payload, indent=2), tmp_name)
+            # the payload carries a client's credentials
+            self.ssh.upload_file_sudo(json.dumps(payload, indent=2), tmp_name,
+                                      mode=CONFIG_MODE)
             _, err, code = self.ssh.run_sudo_command(
                 f"docker cp {tmp_name} {self.container_name}:{container_tmp}"
             )
@@ -867,12 +1240,6 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         except ValueError:
             return {}
         return pair if isinstance(pair, dict) else {}
-
-    def _write_vlessenc_pair(self, decryption, encryption):
-        self.ssh.upload_file_sudo(
-            json.dumps({'decryption': decryption,
-                        'encryption': encryption}, indent=2),
-            f"{self._config_dir()}/{VLESS_ENC_KEY_FILE}")
 
     def _get_clients_table(self, strict=False):
         """Read clientsTable, trying both layout filenames.
@@ -1046,7 +1413,13 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
                 raise RuntimeError('Xray live config is unavailable')
             return []
 
-        self._upgrade_config_for_stats(config, restart=False)
+        try:
+            self._upgrade_config_for_stats(config, restart=False)
+        except Exception:
+            # A read must not fail on the write side: the in-memory config
+            # is upgraded either way, and the next real change reports why
+            # the file could not be persisted.
+            logger.warning("Xray config upgrade could not be persisted", exc_info=True)
 
         # Collect all client IDs currently registered in the Xray server config
         xray_clients = []
@@ -1184,12 +1557,20 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         # layer enabled, on XHTTP as well. An empty flow means none.
         if runtime_flow:
             params.append("flow=" + urllib.parse.quote(runtime_flow, safe=''))
-        client_encryption = meta.get('vless_client_encryption')
         decryption = settings_node.get('decryption')
-        if (client_encryption and isinstance(decryption, str)
-                and decryption not in ('', 'none')):
-            # The second encryption layer rides every link of this inbound.
-            params.append("encryption=" + urllib.parse.quote(client_encryption, safe=''))
+        if isinstance(decryption, str) and decryption not in ('', 'none'):
+            # The second encryption layer rides every link of this inbound,
+            # and only the matching client string makes a link the core
+            # accepts. So none is issued while the key file is missing or
+            # out of step with the live configuration: a link without the
+            # parameter would be silently unusable.
+            pair = self._read_vlessenc_pair()
+            if pair.get('decryption') != decryption or not pair.get('encryption'):
+                raise RuntimeError(
+                    'VLESS Encryption is on for this instance, but its key file '
+                    'is missing or does not match the live configuration; '
+                    'no client link can be issued')
+            params.append("encryption=" + urllib.parse.quote(str(pair['encryption']), safe=''))
         # Format URL
         # vless://{id}@{host}:{port}?type=tcp&security=reality&pbk={public_key}&sni={sni}&fp=chrome&sid={short_id}&spx=%2F&flow=xtls-rprx-vision#{name}
 
@@ -1276,9 +1657,12 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         `xray vlessenc`, stores it in the key file, points the inbound's
         decryption at the server string, sets every client's flow to
         Vision and restarts. Disabling reverts to decryption 'none' and
-        empty flows. Existing client configs are invalidated: every user
-        must re-import the subscription, and only up-to-date Xray-core
-        clients carry the layer."""
+        empty flows. The key file and server.json are written as one: a
+        configuration that is refused, or a core that does not come back,
+        leaves the key file as it was or puts it back, so that issued
+        links keep matching the running core. Existing client configs are
+        invalidated: every user must re-import the subscription, and only
+        up-to-date Xray-core clients carry the layer."""
         config = self._get_server_json()
         if not config:
             raise RuntimeError('Xray live config is unavailable')
@@ -1294,16 +1678,18 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         if enable:
             decryption, encryption = self._generate_vlessenc_pair()
             settings['decryption'] = decryption
-            self._write_vlessenc_pair(decryption, encryption)
             for client in clients:
                 client['flow'] = 'xtls-rprx-vision'
+            # The matched pair travels with the configuration: the write
+            # installs both or puts both back.
+            sidecar = json.dumps({'decryption': decryption,
+                                  'encryption': encryption}, indent=2)
         else:
             settings['decryption'] = 'none'
             for client in clients:
                 client['flow'] = ''
-            self.ssh.run_sudo_command(
-                f"rm -f {shlex.quote(self._config_dir() + '/' + VLESS_ENC_KEY_FILE)}")
-        self._write_server_json(config, restart=True)
+            sidecar = None
+        self._write_server_json(config, restart=True, sidecar=sidecar)
         return self.get_vless_encryption_state()
 
     def apply_selfsteal(self, domain, dest):
@@ -1331,6 +1717,23 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
             stream.setdefault('xhttpSettings', {})['host'] = domain
         self._write_server_json(config, restart=True)
         return {'dest': dest, 'sni': domain, 'network': stream.get('network', 'tcp')}
+
+    def _persist_clients_change(self, config, added=(), removed=()):
+        """Write the config after a hot client change made through the
+        runtime API. Should the write fail, the live change is taken back
+        so the running core and the config file stay in step."""
+        try:
+            self._write_server_json(config, restart=False)
+        except Exception:
+            for client in added:
+                if not self._xray_api_remove_user(config, client['id']):
+                    logger.warning("Xray client %s stays live after a failed config write",
+                                   client['id'][:8])
+            for client in removed:
+                if not self._xray_api_add_user(config, client):
+                    logger.warning("Xray client %s stays disabled after a failed config write",
+                                   client['id'][:8])
+            raise
 
     @_serialized_table_write
     def add_client(self, protocol, client_name, server_host, port, public_port=None,
@@ -1360,7 +1763,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
                 "Restart the Xray container manually and try again."
             )
         clients_node.append(client)
-        self._write_server_json(config, restart=False)
+        self._persist_clients_change(config, added=[client])
 
         # Update table
         clients_table = self._get_clients_table(strict=True)
@@ -1388,6 +1791,7 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         if not inbound:
             raise RuntimeError("Xray VLESS inbound not found.")
         clients_node = inbound.setdefault('settings', {}).setdefault('clients', [])
+        added, removed = [], []
 
         # If toggling on and not present, we can re-add it from clientsTable
         if enable:
@@ -1400,12 +1804,14 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
                 if not self._xray_api_add_user(config, client):
                     raise RuntimeError("Xray runtime API failed to enable the client without restarting the container.")
                 clients_node.append(client)
+                added.append(client)
         else:
             if not self._xray_api_remove_user(config, client_id):
                 raise RuntimeError("Xray runtime API failed to disable the client without restarting the container.")
+            removed = [c for c in clients_node if c['id'] == client_id]
             inbound['settings']['clients'] = [c for c in clients_node if c['id'] != client_id]
 
-        self._write_server_json(config, restart=False)
+        self._persist_clients_change(config, added, removed)
 
         clients_table = self._get_clients_table(strict=True)
         for c in clients_table:
@@ -1421,10 +1827,11 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
         if not inbound:
             raise RuntimeError("Xray VLESS inbound not found.")
         clients_node = inbound.setdefault('settings', {}).setdefault('clients', [])
+        removed = [c for c in clients_node if c['id'] == client_id]
         if not self._xray_api_remove_user(config, client_id):
             raise RuntimeError("Xray runtime API failed to remove the client without restarting the container.")
         inbound['settings']['clients'] = [c for c in clients_node if c['id'] != client_id]
-        self._write_server_json(config, restart=False)
+        self._persist_clients_change(config, removed=removed)
 
         clients_table = self._get_clients_table(strict=True)
         clients_table = [c for c in clients_table if c['clientId'] != client_id]
