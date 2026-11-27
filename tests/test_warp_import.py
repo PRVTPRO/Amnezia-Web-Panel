@@ -386,14 +386,16 @@ class WarpRegisterFailureClassTests(unittest.TestCase):
     def test_a_blocked_api_raises_the_dedicated_code(self):
         manager = self.make_manager('000')
         with self.assertRaises(panel.SrvWarpError) as ctx:
-            panel.warp_runtime._register_and_write_conf(manager, 'awg3')
+            panel.warp_runtime._register_and_write_conf(
+                manager, 'awg3', 'source-uid')
         self.assertEqual(ctx.exception.code,
                          'srv_warp_register_api_unreachable')
 
     def test_any_other_register_failure_keeps_the_generic_code(self):
         manager = self.make_manager('200')
         with self.assertRaises(panel.SrvWarpError) as ctx:
-            panel.warp_runtime._register_and_write_conf(manager, 'awg3')
+            panel.warp_runtime._register_and_write_conf(
+                manager, 'awg3', 'source-uid')
         self.assertEqual(ctx.exception.code, 'srv_warp_register_failed')
 
 
@@ -444,7 +446,9 @@ class WarpImportHandshakeCleanupTests(unittest.TestCase):
             ('get_ssh', lambda server: object()),
             ('awg_manager_factory', lambda ssh: manager),
             ('_container_running', lambda m, p: True),
-            ('_source_profile', lambda m, p: ('ACC', 'PROFILE')),
+            ('_source_profile',
+             lambda m, p, reuse=True, uid=None, source='import_source':
+             ('ACC', 'PROFILE')),
             ('_write_imported_profile', lambda m, p, a, pf: 'deadbeef'),
             ('_handshake_probe', lambda m, p: None),
             ('_remove_imported_profile', remove),
@@ -465,6 +469,76 @@ class WarpImportHandshakeCleanupTests(unittest.TestCase):
         rec = (server_state.get('protocols') or {}).get('awg3') or {}
         self.assertFalse((rec.get('warp') or {}).get('registered', False))
         self.assertIsNone((rec.get('warp') or {}).get('conf_hash'))
+
+
+class WarpImportAccountingTests(unittest.TestCase):
+    """One import entry, in the store; ``installed`` stays in data.json."""
+
+    def _runtime_with_store(self):
+        runtime = panel.warp_runtime
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        store = WarpStateStore(os.path.join(tmp, 'warp_state.json'))
+        old_store = runtime.state_store
+        runtime.state_store = store
+        self.addCleanup(setattr, runtime, 'state_store', old_store)
+        return runtime, store
+
+    def _patch(self, runtime, data, **replacements):
+        base = {
+            'load_data': lambda: data,
+            'get_ssh': lambda server: object(),
+            'awg_manager_factory': lambda ssh: mock.MagicMock(),
+            '_container_running': lambda m, p: True,
+            '_write_imported_profile': lambda m, p, a, pf: 'deadbeef',
+            'job_end': mock.MagicMock(),
+        }
+        base.update(replacements)
+        for name, replacement in base.items():
+            patcher = mock.patch.object(runtime, name, replacement)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_successful_import_records_one_entry_and_keeps_installed(self):
+        runtime, store = self._runtime_with_store()
+        data = {'servers': [
+            server_record('target-uid', 'Blocked', {'awg3': {}}),
+            server_record('source-uid', 'Open', {'awg3': {}}),
+        ]}
+        self._patch(
+            runtime, data,
+            _source_profile=lambda m, p, reuse=True, uid=None,
+            source='import_source': ('ACC', 'PROFILE'),
+            _handshake_probe=lambda m, p: 12345,
+        )
+        asyncio.run(runtime.import_profile(
+            0, 'target-uid', 'source-uid', protocol='awg3'))
+
+        registers = (store.load()['servers']['target-uid']
+                     .get('registers_ts') or [])
+        self.assertEqual(len(registers), 1)
+        self.assertEqual(registers[0]['source'], 'import')
+        self.assertEqual(registers[0]['protocol'], 'awg3')
+        self.assertEqual(registers[0]['source_uid'], 'source-uid')
+        warp = data['servers'][0]['warp']
+        self.assertTrue(warp['installed'])
+        self.assertNotIn('registers_ts', warp)
+
+    def test_source_quota_is_not_disguised_as_a_register_failure(self):
+        runtime, _store = self._runtime_with_store()
+        data = {'servers': [
+            server_record('target-uid', 'Blocked', {'awg3': {}}),
+            server_record('source-uid', 'Open', {'awg3': {}}),
+        ]}
+
+        def quota(m, p, reuse=True, uid=None, source='import_source'):
+            raise panel.SrvWarpError('srv_warp_quota_exhausted', 409)
+
+        self._patch(runtime, data, _source_profile=quota)
+        with self.assertRaises(panel.SrvWarpError) as ctx:
+            asyncio.run(runtime.import_profile(
+                0, 'target-uid', 'source-uid', protocol='awg3'))
+        self.assertEqual(ctx.exception.code, 'srv_warp_quota_exhausted')
 
 
 if __name__ == '__main__':

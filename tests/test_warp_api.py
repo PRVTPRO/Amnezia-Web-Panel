@@ -672,5 +672,40 @@ class WarpApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 202, response.text)
 
 
+class WarpStatePruneTests(unittest.TestCase):
+    """A deleted server leaves no record; an absent record writes nothing."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.old_store = panel.warp_state_store
+        panel.warp_state_store = WarpStateStore(
+            os.path.join(self.tmp, 'data.json.srv_warp_state.json'))
+        self.addCleanup(setattr, panel, 'warp_state_store', self.old_store)
+
+    def seed(self, *uids):
+        def mutate(state):
+            for uid in uids:
+                panel.proto_record(state, uid, 'awg')
+        panel.warp_state_store.mutate(mutate)
+
+    def test_prune_removes_only_that_server(self):
+        self.seed('a', 'b')
+        self.assertTrue(panel._drop_warp_server_state('a'))
+        state = panel.warp_state_store.load()
+        self.assertNotIn('a', state['servers'])
+        self.assertIn('b', state['servers'])
+
+    def test_prune_of_an_absent_record_writes_nothing(self):
+        path = panel.warp_state_store.path
+        self.assertFalse(panel._drop_warp_server_state('missing'))
+        self.assertFalse(os.path.exists(path))
+
+    def test_prune_failure_is_logged_not_raised(self):
+        with mock.patch.object(panel.warp_state_store, 'mutate',
+                               side_effect=OSError('synthetic failure')):
+            self.assertFalse(panel._drop_warp_server_state('a'))
+
+
 if __name__ == '__main__':
     unittest.main()

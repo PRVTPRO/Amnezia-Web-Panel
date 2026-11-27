@@ -21,7 +21,7 @@ from typing import List, Optional
 
 FUNCTIONS = {'load_data', 'save_data', 'find_server_by_uid', '_finish_locked_worker',
              '_finish_server_operation', '_server_identity',
-             '_classify_ssh_error', '_exception_text',
+             '_classify_ssh_error', '_exception_text', '_drop_warp_server_state',
              'api_add_server', 'api_edit_server', 'api_reorder_servers', 'api_delete_server'}
 MODELS = {'AddServerRequest', 'EditServerRequest', 'ReorderServersRequest'}
 
@@ -58,6 +58,8 @@ class CrudTests(unittest.IsolatedAsyncioTestCase):
                       _check_admin=lambda r: r.headers.get('x-role', 'admin') == 'admin',
                       _traffic_removal_guard=lambda *a, **k: None,
                       ownership_rows=lambda *a, **k: [],
+                      warp_state_store=Mock(),
+                      SKIP_SAVE=object(),
                       serialize_peer_lifecycle=lambda f: f,
                       SSHManager=Mock(return_value=self.ssh), drop_ssh=Mock(), exit_link_svc=self.exit)
         exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), 'exec'), self.p)
@@ -285,6 +287,20 @@ class CrudTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(payload['deletion_committed'])
         self.assertEqual(self.data(), before)
         self.p['drop_ssh'].assert_not_called()
+
+    async def test_delete_prunes_only_the_removed_warp_record(self):
+        result = await self.p['api_delete_server'](self.request, 0)
+        self.assertEqual(self.status(result), 200)
+        mutate = self.p['warp_state_store'].mutate
+        self.assertTrue(mutate.call_args_list)
+        drop = mutate.call_args_list[-1].args[0]
+        state = {'servers': {'a': {'protocols': {'awg': {}}},
+                             'b': {'protocols': {}}}}
+        self.assertTrue(drop(state))
+        self.assertNotIn('a', state['servers'])
+        self.assertIn('b', state['servers'])
+        # An absent record asks for no write at all (SKIP_SAVE).
+        self.assertIs(drop({'servers': {'b': {}}}), self.p['SKIP_SAVE'])
 
     async def test_invalid_server_indices_never_touch_ssh_or_state(self):
         for index in [-1, -999, 3, 99]:
