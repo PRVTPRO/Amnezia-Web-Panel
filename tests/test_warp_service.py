@@ -7,6 +7,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 import warp_service as ws
 
@@ -276,6 +277,153 @@ class WarpLinkStaleTests(unittest.TestCase):
         self.assertIsNone(link['stale'])
         # Подтверждение выставляет только код после реальной пробы.
         self.assertFalse(link['dataplane_ok'])
+
+
+class WarpStateMigrationTests(unittest.TestCase):
+    """The store never loses records and never overwrites a newer file."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix='warp-migrate-')
+        self.path = os.path.join(self.dir, 'state.json')
+
+    def tearDown(self):
+        for name in os.listdir(self.dir):
+            os.remove(os.path.join(self.dir, name))
+        os.rmdir(self.dir)
+
+    def write(self, payload):
+        with open(self.path, 'w', encoding='utf-8') as fh:
+            json.dump(payload, fh)
+
+    def raw_bytes(self):
+        with open(self.path, 'rb') as fh:
+            return fh.read()
+
+    def test_legacy_registers_migrate_without_losing_records(self):
+        payload = {
+            'version': 1,
+            'servers': {
+                'uid-1': {
+                    'protocols': {
+                        'awg': {
+                            'warp': {'registered': True, 'conf_hash': 'abc'},
+                            'warp_link': {'active': True},
+                            'client_mtu_warp': 1280,
+                            'warp_egress_regen': {'uid-1:awg': {'mtu': 1280}},
+                        },
+                    },
+                    'exit': {'registered': True},
+                    'registers': [{'ts': 10, 'source': 'import'}],
+                    'future_field': {'keep': 'me'},
+                },
+            },
+        }
+        self.write(payload)
+        store = ws.WarpStateStore(self.path)
+        state = store.load()
+        record = state['servers']['uid-1']
+        self.assertEqual(state['version'], ws.STATE_VERSION)
+        self.assertEqual(record['registers_ts'],
+                         [{'ts': 10, 'source': 'import'}])
+        self.assertEqual(record['future_field'], {'keep': 'me'})
+        self.assertTrue(record['protocols']['awg']['warp']['registered'])
+        self.assertEqual(record['protocols']['awg']['client_mtu_warp'], 1280)
+        self.assertEqual(record['exit'], {'registered': True})
+        # The migrated file is rewritten once and stays stable afterwards.
+        first = self.raw_bytes()
+        store.load()
+        self.assertEqual(self.raw_bytes(), first)
+
+    def test_current_file_is_not_rewritten_on_read(self):
+        self.write({'version': ws.STATE_VERSION,
+                    'servers': {'uid': {'registers_ts': []}}})
+        before = self.raw_bytes()
+        ws.WarpStateStore(self.path).load()
+        self.assertEqual(self.raw_bytes(), before)
+
+    def test_missing_file_is_not_created_by_a_read(self):
+        ws.WarpStateStore(self.path).load()
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_newer_version_is_read_only_and_the_file_is_untouched(self):
+        self.write({'version': 99, 'servers': {'uid': {'protocols': {}}}})
+        before = self.raw_bytes()
+        store = ws.WarpStateStore(self.path)
+        state = store.load()
+        self.assertEqual(state[ws.STATE_VERSION_MARKER], 99)
+        with self.assertRaises(ws.WarpStateUnsupportedVersion):
+            store.mutate(lambda current: current.setdefault('servers', {}))
+        with self.assertRaises(ws.WarpStateUnsupportedVersion):
+            store.save(state)
+        self.assertEqual(self.raw_bytes(), before)
+
+    def test_unparsable_version_is_read_only(self):
+        for value in ('2', None, True):
+            with self.subTest(value=value):
+                self.write({'version': value, 'servers': {}})
+                before = self.raw_bytes()
+                store = ws.WarpStateStore(self.path)
+                state = store.load()
+                self.assertIn(ws.STATE_VERSION_MARKER, state)
+                with self.assertRaises(ws.WarpStateUnsupportedVersion):
+                    store.save(state)
+                self.assertEqual(self.raw_bytes(), before)
+
+    def test_write_back_failure_still_returns_the_migrated_state(self):
+        self.write({'version': 1, 'servers': {'uid': {'registers': [{'ts': 5}]}}})
+        store = ws.WarpStateStore(self.path)
+        with mock.patch.object(store, 'save', side_effect=OSError('ro')):
+            state = store.load()
+        self.assertEqual(state['servers']['uid']['registers_ts'], [{'ts': 5}])
+        self.assertEqual(state['version'], ws.STATE_VERSION)
+
+    def test_skip_save_does_not_create_the_file(self):
+        store = ws.WarpStateStore(self.path)
+        result = store.mutate(lambda state: ws.SKIP_SAVE)
+        self.assertIs(result, ws.SKIP_SAVE)
+        self.assertFalse(os.path.exists(self.path))
+
+
+class MergedRegisterTests(unittest.TestCase):
+    NOW = 1_700_000_000
+
+    def test_legacy_and_store_entries_are_merged_and_deduplicated(self):
+        server = {'warp': {'registers': [{'ts': 5}, 6]}}
+        state = {'servers': {'uid': {
+            'registers_ts': [{'ts': 5},
+                             {'ts': 7, 'source': 'install', 'protocol': 'awg'}],
+        }}}
+        merged = ws.merged_registers(server, state, 'uid')
+        self.assertEqual([entry['ts'] for entry in merged], [5, 6, 7])
+        self.assertEqual(merged[-1]['source'], 'install')
+        self.assertEqual(merged[-1]['protocol'], 'awg')
+
+    def test_empty_registers_ts_does_not_hide_legacy_registers(self):
+        server = {'warp': {'registers_ts': [],
+                           'registers': [{'ts': 5}]}}
+        merged = ws.merged_registers(server, {}, 'uid')
+        self.assertEqual([entry['ts'] for entry in merged], [5])
+
+    def test_malformed_entries_are_skipped_not_raised(self):
+        server = {'warp': {'registers': [{'ts': 'nope'}, {'source': 'x'},
+                                         None, 11]}}
+        merged = ws.merged_registers(server, {}, 'uid')
+        self.assertEqual([entry['ts'] for entry in merged], [11])
+        self.assertEqual(merged[0]['source'], '')
+
+    def test_quota_sees_both_sources(self):
+        server = {'warp': {'registers_ts': [{'ts': self.NOW - 10}]}}
+        state = {'servers': {'uid': {'registers_ts': [
+            {'ts': self.NOW - 20}, {'ts': self.NOW - 30}]}}}
+        self.assertTrue(ws.quota_exhausted(
+            ws.merged_registers(server, state, 'uid'), now=self.NOW))
+
+    def test_old_entries_do_not_count_and_are_not_dropped_by_merge(self):
+        server = {'warp': {'registers': [
+            {'ts': self.NOW - 8 * 24 * 3600}, {'ts': self.NOW - 9 * 24 * 3600}]}}
+        merged = ws.merged_registers(server, {}, 'uid')
+        self.assertEqual(len(merged), 2)
+        self.assertFalse(ws.quota_exhausted(merged, now=self.NOW))
 
 
 if __name__ == '__main__':

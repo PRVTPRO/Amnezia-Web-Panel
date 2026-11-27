@@ -33,10 +33,13 @@ State layout (``<DATA_FILE>.srv_warp_state.json``)::
 
 import ipaddress
 import json
+import logging
 import os
 import tempfile
 import threading
 import time
+
+logger = logging.getLogger(__name__)
 
 # --- constants (single source of truth) -------------------------------------
 
@@ -76,6 +79,8 @@ WARP_PREF_B_TRANSIT = 171
 WARP_PREF_CATCH_ALL = WARP_TABLE  # pref convention: pref == table number
 
 STATE_VERSION = 1
+# Set on a state loaded from a newer panel: reads are allowed, writes are not.
+STATE_VERSION_MARKER = '_unsupported_version'
 
 # Instance states (per-instance view; aggregate is separate).
 ST_NOT_INSTALLED = 'not_installed'
@@ -316,6 +321,73 @@ def _empty_state():
     return {'version': STATE_VERSION, 'servers': {}}
 
 
+class WarpStateUnsupportedVersion(RuntimeError):
+    """State written by a newer panel: read-only here.
+
+    Raising (instead of returning an empty state) keeps the file intact: the
+    old behaviour wiped every AWG registration on the next save.
+    """
+
+    def __init__(self, found, supported=STATE_VERSION):
+        super().__init__('warp state version %r is newer than supported %r'
+                         % (found, supported))
+        self.found = found
+        self.supported = supported
+
+
+# A mutate() callback returns this when there is nothing to write. Without it
+# an idempotent prune would create the state file on hosts that have none.
+SKIP_SAVE = object()
+
+
+def _coerce_state_version(raw):
+    """Version of a parsed state file, or None when it cannot be trusted."""
+    if not isinstance(raw, dict):
+        return None
+    if 'version' not in raw:
+        return 1
+    value = raw['version']
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def migrate_state(raw):
+    """Normalize a supported state without losing any record.
+
+    The version is deliberately *not* bumped: an older panel returns an empty
+    state for any unknown version and its next save overwrites the file, so a
+    bump would make a rollback destructive. Only additive normalization
+    happens here (``registers`` -> ``registers_ts``), and every unknown key is
+    preserved for the same reason.
+    """
+    if not isinstance(raw, dict):
+        return _empty_state(), False
+    state = dict(raw)
+    changed = False
+    if state.get('version') != STATE_VERSION:
+        state['version'] = STATE_VERSION
+        changed = True
+    servers = state.get('servers')
+    if not isinstance(servers, dict):
+        state['servers'] = {}
+        changed = True
+        servers = state['servers']
+    for record in servers.values():
+        if not isinstance(record, dict):
+            continue
+        current = record.get('registers_ts')
+        if current is None:
+            legacy = record.get('registers')
+            record['registers_ts'] = (list(legacy)
+                                      if isinstance(legacy, list) else [])
+            changed = True
+        elif not isinstance(current, list):
+            record['registers_ts'] = []
+            changed = True
+    return state, changed
+
+
 class WarpStateStore:
     """Atomic JSON store for operational warp state.
 
@@ -336,12 +408,28 @@ class WarpStateStore:
                     raw = json.load(fh)
             except (OSError, ValueError):
                 return _empty_state()
-            if not isinstance(raw, dict) or raw.get('version') != STATE_VERSION:
+            if not isinstance(raw, dict):
                 return _empty_state()
-            raw.setdefault('servers', {})
-            return raw
+            version = _coerce_state_version(raw)
+            if version is None or version > STATE_VERSION:
+                state = dict(raw)
+                if not isinstance(state.get('servers'), dict):
+                    state['servers'] = {}
+                state[STATE_VERSION_MARKER] = version
+                return state
+            state, changed = migrate_state(raw)
+            if changed:
+                # Read paths must keep working on a read-only or full disk.
+                try:
+                    self.save(state)
+                except OSError:
+                    logger.warning("warp state migration could not be saved",
+                                   exc_info=True)
+            return state
 
     def save(self, state):
+        if isinstance(state, dict) and STATE_VERSION_MARKER in state:
+            raise WarpStateUnsupportedVersion(state.get(STATE_VERSION_MARKER))
         directory = os.path.dirname(os.path.abspath(self.path))
         with self._lock:
             os.makedirs(directory, exist_ok=True)
@@ -366,7 +454,12 @@ class WarpStateStore:
         """Load, mutate in place, save atomically. Returns fn's result."""
         with self._lock:
             state = self.load()
+            if isinstance(state, dict) and STATE_VERSION_MARKER in state:
+                raise WarpStateUnsupportedVersion(
+                    state.get(STATE_VERSION_MARKER))
             result = fn(state)
+            if result is SKIP_SAVE:
+                return result
             self.save(state)
             return result
 
@@ -549,6 +642,62 @@ def registers_prune(registers, keep=WARP_REGISTERS_KEEP):
 
 def quota_exhausted(registers, now=None):
     return len(register_timestamps(registers, now)) >= WARP_REGISTER_LIMIT
+
+
+def _normalize_register(item):
+    """One registration entry as ``{ts, source, protocol, source_uid}`` or None."""
+    if isinstance(item, dict):
+        raw_ts = item.get('ts')
+    else:
+        raw_ts = item
+    try:
+        ts = int(raw_ts)
+    except (TypeError, ValueError):
+        return None
+
+    def text(value):
+        return '' if value is None else str(value)
+
+    if not isinstance(item, dict):
+        return {'ts': ts, 'source': '', 'protocol': '', 'source_uid': ''}
+    return {
+        'ts': ts,
+        'source': text(item.get('source')),
+        'protocol': text(item.get('protocol')),
+        'source_uid': text(item.get('source_uid')),
+    }
+
+
+def merged_registers(server, state, uid):
+    """Registration timestamps from ``data.json`` and the state store.
+
+    Imports used to record timestamps in ``data.json``; registration accounting
+    now writes them to the store. The quota window must see both, and legacy
+    entries must keep counting without migrating ``data.json``.
+    """
+    record = ((state or {}).get('servers') or {}).get(_norm_uid(uid)) or {}
+    buckets = ((server or {}).get('warp') or {}, record)
+    seen = set()
+    merged = []
+    for bucket in buckets:
+        if not isinstance(bucket, dict):
+            continue
+        for key in ('registers_ts', 'registers'):
+            value = bucket.get(key)
+            if not isinstance(value, list):
+                continue
+            for item in value:
+                entry = _normalize_register(item)
+                if entry is None:
+                    continue
+                dedup = (entry['ts'], entry['source'],
+                         entry['protocol'], entry['source_uid'])
+                if dedup in seen:
+                    continue
+                seen.add(dedup)
+                merged.append(entry)
+    merged.sort(key=lambda entry: entry['ts'])
+    return registers_prune(merged)
 
 
 # --- state classification ----------------------------------------------------

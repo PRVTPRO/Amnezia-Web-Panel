@@ -102,6 +102,8 @@ from exit_link_service import ExitLinkError, ExitLinkService
 from smartroute_service import SmartRouteError, SmartRouteService, split_instances
 from warp_service import (
     INSTANCE_STATES,
+    SKIP_SAVE,
+    STATE_VERSION_MARKER,
     SrvWarpError,
     WarpStateStore,
     WARP_CLIENT_MTU_CAP,
@@ -112,6 +114,7 @@ from warp_service import (
     aggregate_state,
     classify_instance_state,
     mark_warp_links_stale,
+    merged_registers,
     proto_record,
     quota_exhausted,
     register_timestamps,
@@ -4507,8 +4510,14 @@ async def startup():
     _refresh_panel_access(data)
     # One-time WARP MTU rewrite: records saved with the old 1220 cap must be
     # updated in the store, not on every read (a real 1220 budget is legal).
+    # A store written by a newer panel is read-only here: saving it would raise
+    # and the whole panel would fail to start.
     warp_state = warp_state_store.load()
-    if migrate_legacy_client_mtu(warp_state):
+    if isinstance(warp_state, dict) and STATE_VERSION_MARKER in warp_state:
+        logger.warning("WARP state was written by a newer panel (version %r); "
+                       "skipping the MTU migration",
+                       warp_state.get(STATE_VERSION_MARKER))
+    elif migrate_legacy_client_mtu(warp_state):
         warp_state_store.save(warp_state)
     if data.get(DISASTER_HOLD):
         raise RuntimeError('Disaster recovery requires independent node reconciliation before startup')
@@ -6439,6 +6448,7 @@ async def api_delete_server(request: Request, server_id: int, server_uid: Option
                 async with DATA_LOCK:
                     index, server = find_server_by_uid(load_data(), uid)
                     if server is None:
+                        _drop_warp_server_state(uid)
                         return {'status': 'success', 'already_deleted': True}
                 if panel_only:
                     async with DATA_LOCK:
@@ -6446,6 +6456,7 @@ async def api_delete_server(request: Request, server_id: int, server_uid: Option
                         data = load_data()
                         index, current = find_server_by_uid(data, uid)
                         if current is None:
+                            _drop_warp_server_state(uid)
                             return {'status': 'success', 'already_deleted': True}
                         blocked = ownership_rows(data, server_id=index)
                         operation_id = uuid.uuid4().hex
@@ -6489,6 +6500,7 @@ async def api_delete_server(request: Request, server_id: int, server_uid: Option
                             recovery_digest({'server_uid': uid, 'mode': 'panel_only'}),
                             before, data)
                     deletion_committed = True
+                    _drop_warp_server_state(uid)
                     await _finish_locked_worker(lambda: drop_ssh(server))
                     return {
                         'status': 'success', 'panel_only': True,
@@ -6524,6 +6536,7 @@ async def api_delete_server(request: Request, server_id: int, server_uid: Option
                     data = load_data()
                     index, current = find_server_by_uid(data, uid)
                     if current is None:
+                        _drop_warp_server_state(uid)
                         return {'status': 'success', 'already_deleted': True}
                     current_blocked = ownership_rows(data, server_id=index)
                     if current_blocked and not archive_blocking:
@@ -6569,6 +6582,7 @@ async def api_delete_server(request: Request, server_id: int, server_uid: Option
                                 c['server_id'] -= 1
                         save_data(data)
                     deletion_committed = True
+                _drop_warp_server_state(uid)
                 await _finish_locked_worker(lambda: drop_ssh(server))
                 response = {'status': 'success'}
                 if blocked:
@@ -7467,14 +7481,8 @@ def _warp_named_protocol(req, server=None, required=False):
 
 
 def _warp_registers(server, state, uid):
-    warp = server.get('warp') or {}
-    registers = warp.get('registers_ts')
-    if registers is None:
-        registers = warp.get('registers')
-    if registers is None:
-        record = (state.get('servers') or {}).get(str(uid)) or {}
-        registers = record.get('registers_ts') or record.get('registers') or []
-    return registers or []
+    """Legacy data.json entries and the store, merged for the quota window."""
+    return merged_registers(server, state, uid)
 
 
 def _warp_status_payload(server, state):
@@ -7597,6 +7605,32 @@ def _drop_warp_instance_state(uid, protocol):
         warp_state_store.mutate(drop)
     except Exception:
         logger.exception("Failed to drop warp state for %s/%s", uid, protocol)
+
+
+def _drop_warp_server_state(uid):
+    """Forget every warp record of a server removed from the inventory.
+
+    Idempotent and best-effort: a failure here must never turn a committed
+    deletion into a 500. When there is no record, nothing is written at all —
+    an unconditional save would create the state file on hosts that have none.
+    """
+    uid = str(uid or '')
+    if not uid:
+        return False
+
+    def drop(state):
+        servers = state.get('servers') or {}
+        if uid not in servers:
+            return SKIP_SAVE
+        servers.pop(uid, None)
+        return True
+
+    try:
+        result = warp_state_store.mutate(drop)
+        return False if result is SKIP_SAVE else bool(result)
+    except Exception:
+        logger.exception("Failed to drop warp state for server %s", uid)
+        return False
 
 
 def _warp_link_preflight(data, server_id, server, uid, protocol):

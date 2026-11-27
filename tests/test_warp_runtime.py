@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -194,6 +195,19 @@ class WarpRuntimeHarness(unittest.TestCase):
     def record(self, protocol='awg'):
         return ws.proto_record(self.state_store.load(), 'srv-1', protocol)
 
+    def registrations(self, uid='srv-1'):
+        record = (self.state_store.load().get('servers') or {}).get(uid) or {}
+        return record.get('registers_ts') or []
+
+    def seed_registers(self, count, age=0):
+        now = ws.now_ts()
+        def seed(state):
+            record = ws.server_record(state, 'srv-1')
+            record['registers_ts'] = [
+                {'ts': now - age - index, 'source': 'install',
+                 'protocol': 'awg'} for index in range(count)]
+        self.state_store.mutate(seed)
+
     # ----- install ---------------------------------------------------------
 
     def test_install_registers_generates_and_does_not_restart(self):
@@ -224,6 +238,89 @@ class WarpRuntimeHarness(unittest.TestCase):
                             for script in self.ssh.scripts))
         self.assertTrue(any('MTU = 1280' in script
                             for script in self.ssh.scripts))
+
+    def test_install_records_its_registration_in_the_store(self):
+        run_coro(self.runtime.install(
+            0, 'srv-1', protocol='awg', job_id='job-record'))
+        registers = self.registrations()
+        self.assertEqual(len(registers), 1)
+        self.assertEqual(registers[0]['source'], 'install')
+        self.assertEqual(registers[0]['protocol'], 'awg')
+
+    def test_install_with_an_existing_account_spends_no_quota(self):
+        self.ssh.account_present = True
+        run_coro(self.runtime.install(
+            0, 'srv-1', protocol='awg', job_id='job-existing'))
+        self.assertNotIn('wgcf register --accept-tos',
+                         '\n'.join(self.ssh.commands))
+        self.assertEqual(self.registrations(), [])
+
+    def test_quota_blocks_a_new_registration_before_wgcf(self):
+        self.seed_registers(3)
+        with self.assertRaises(ws.SrvWarpError) as ctx:
+            run_coro(self.runtime.install(
+                0, 'srv-1', protocol='awg', job_id='job-quota'))
+        self.assertEqual(ctx.exception.code, 'srv_warp_quota_exhausted')
+        self.assertNotIn('wgcf register --accept-tos',
+                         '\n'.join(self.ssh.commands))
+        self.assertEqual(len(self.registrations()), 3)
+
+    def test_registrations_outside_the_window_are_allowed(self):
+        self.seed_registers(3, age=8 * 24 * 3600)
+        run_coro(self.runtime.install(
+            0, 'srv-1', protocol='awg', job_id='job-old-quota'))
+        registers = self.registrations()
+        self.assertEqual(len(registers), 4)
+        self.assertEqual(registers[-1]['source'], 'install')
+
+    def test_two_registrations_cannot_pass_the_gate_together(self):
+        # Distinct seconds: a dedup key equal to the new entry would hide one.
+        self.seed_registers(2, age=10)
+        entered = threading.Event()
+        release = threading.Event()
+        calls = []
+        original = self.ssh.run_sudo_command
+
+        def slow(command, timeout=60):
+            if 'wgcf register' in command:
+                calls.append(command)
+                entered.set()
+                release.wait(5)
+            return original(command, timeout)
+
+        self.ssh.run_sudo_command = slow
+        results = []
+
+        def run():
+            try:
+                self.runtime._register_and_write_conf(
+                    self.manager, 'awg', 'srv-1', 'install')
+                results.append('ok')
+            except ws.SrvWarpError as exc:
+                results.append(exc.code)
+
+        first = threading.Thread(target=run)
+        first.start()
+        self.assertTrue(entered.wait(5))
+        second = threading.Thread(target=run)
+        second.start()
+        release.set()
+        first.join(5)
+        second.join(5)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(sorted(results),
+                         ['ok', 'srv_warp_quota_exhausted'])
+        self.assertEqual(len(self.registrations()), 3)
+
+    def test_a_newer_state_file_blocks_jobs_before_ssh(self):
+        with open(self.state_store.path, 'w', encoding='utf-8') as fh:
+            json.dump({'version': 99,
+                       'servers': {'srv-1': {'protocols': {}}}}, fh)
+        with self.assertRaises(ws.WarpStateUnsupportedVersion):
+            run_coro(self.runtime.install(
+                0, 'srv-1', protocol='awg', job_id='job-newer'))
+        self.assertEqual(self.ssh.commands, [])
+        self.assertEqual(self.manager.writes, [])
 
     def test_install_with_every_container_stopped_is_an_error(self):
         # A "success" with no registered profile is what left the marketplace
@@ -437,7 +534,8 @@ class WarpRuntimeHarness(unittest.TestCase):
         self.ssh.conf_present = False
         sources = []
 
-        def source(self, manager, protocol, reuse=True):
+        def source(self, manager, protocol, reuse=True, uid=None,
+                   source_name='import_source'):
             sources.append(protocol)
             return 'account body', 'profile body'
 
@@ -491,6 +589,9 @@ class WarpRuntimeHarness(unittest.TestCase):
         rec = self.record('awg2')
         self.assertTrue(rec['warp']['registered'])
         self.assertNotIn('imported_from_protocol', rec['warp'])
+        registers = self.registrations()
+        self.assertEqual(len(registers), 1)
+        self.assertEqual(registers[0]['source'], 'link')
 
     def test_link_skips_sibling_without_a_complete_profile(self):
         def seed_sibling(state):
@@ -505,7 +606,8 @@ class WarpRuntimeHarness(unittest.TestCase):
         async def up(self, manager, protocol, attempts=5, delay=2.0):
             return {'up': True, 'facts': {}, 'detail': ''}
 
-        def source(self, manager, protocol, reuse=True):
+        def source(self, manager, protocol, reuse=True, uid=None,
+                   source_name='import_source'):
             sourced.append(protocol)
             return 'account', 'profile'
 
@@ -523,6 +625,21 @@ class WarpRuntimeHarness(unittest.TestCase):
         self.assertIn('wgcf register --accept-tos',
                       '\n'.join(self.ssh.commands))
         self.assertTrue(self.record('awg2')['warp']['registered'])
+
+    def test_repair_records_a_real_registration(self):
+        self.seed_state(registered=True, link={'active': True})
+        self.ssh.conf_present = False
+
+        async def up(self, manager, protocol, attempts=5, delay=2.0):
+            return {'up': True, 'facts': {}, 'detail': ''}
+
+        with mock.patch.object(type(self.runtime), '_wait_warp_dataplane', up):
+            run_coro(self.runtime.repair(
+                0, 'srv-1', protocol='awg', job_id='job-repair-record'))
+
+        registers = self.registrations()
+        self.assertEqual(len(registers), 1)
+        self.assertEqual(registers[0]['source'], 'repair')
 
     def test_repair_marks_error_when_dataplane_stays_down(self):
         self.seed_state(registered=True, link={'active': True},

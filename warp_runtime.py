@@ -12,10 +12,27 @@ deliberately sequential and idempotent.
 
 import asyncio
 import logging
+import threading
 
 import warp_service as ws
 
 logger = logging.getLogger(__name__)
+
+# One lock per server uid. The quota check, the real wgcf registration and the
+# timestamp write must be one critical section: an import registers on its
+# source server while target jobs are serialized on another uid.
+_REGISTER_LOCKS = {}
+_REGISTER_LOCKS_GUARD = threading.Lock()
+
+
+def _register_lock(uid):
+    key = str(uid or '')
+    with _REGISTER_LOCKS_GUARD:
+        lock = _REGISTER_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _REGISTER_LOCKS[key] = lock
+        return lock
 
 # awg_legacy is rejected by the warp contour (srv_warp_protocol_unsupported).
 WARP_AWG_BASES = ('awg', 'awg2', 'awg3')
@@ -608,12 +625,53 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
         return list(await asyncio.gather(
             *[one(source, protocols) for source, protocols in candidates]))
 
-    def _register_and_write_conf(self, manager, protocol, uid=None):
+    def _require_supported_state(self):
+        """Refuse a mutating job before any SSH when the file is newer."""
+        state = self.state_store.load()
+        if isinstance(state, dict) and ws.STATE_VERSION_MARKER in state:
+            raise ws.WarpStateUnsupportedVersion(
+                state.get(ws.STATE_VERSION_MARKER))
+
+    def _quota_gate(self, uid):
+        """True when this server has spent its registration budget."""
+        data = self.load_data()
+        _idx, server = self._server(data, None, uid)
+        if server is None:
+            return False
+        return ws.quota_exhausted(self._registers_for(server, uid))
+
+    def _remember_registration(self, uid, protocol, source, source_uid=None):
+        """Record one real ``wgcf register`` in the state store."""
+        entry = {'ts': ws.now_ts(), 'source': source, 'protocol': protocol}
+        if source_uid:
+            entry['source_uid'] = ws._norm_uid(source_uid)
+
+        def remember(state):
+            record = ws.server_record(state, uid)
+            registers = list(record.get('registers_ts') or [])
+            registers.append(dict(entry))
+            record['registers_ts'] = ws.registers_prune(registers)
+
+        try:
+            self.state_store.mutate(remember)
+        except ws.WarpStateUnsupportedVersion:
+            # Accounting must never hide the reason a write is refused.
+            raise
+        except Exception:
+            logger.exception("warp: could not record registration for %s/%s",
+                             uid, protocol)
+
+    def _register_and_write_conf(self, manager, protocol, uid,
+                                 source='install'):
         """Register (if needed), generate and sanitize warp0.conf.
 
-        Returns the sha256 of the profile. When ``uid`` is supplied the warp
-        state record is updated with ``conf_hash`` and ``registered=True``.
+        Returns the sha256 of the profile. A new Cloudflare registration is
+        counted against the server's rolling quota *before* ``wgcf`` runs; an
+        existing ``account.toml`` costs nothing and is not gated.
         """
+        uid = ws._norm_uid(uid)
+        if not uid:
+            raise ValueError('warp registration needs a server uid')
         warp_dir = _warp_dir(protocol)
         self._sh(manager, protocol,
                  'mkdir -p %s && chmod 700 %s' % (warp_dir, warp_dir))
@@ -621,22 +679,31 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
         _out, _err, code = self._sh(
             manager, protocol, 'test -f %s/account.toml' % warp_dir)
         if code != 0:
-            # wgcf defaults to wgcf-account.toml/wgcf-profile.conf; pin the
-            # panel artifact names explicitly instead of relying on those.
-            _out, err, code = self._sh(
-                manager, protocol,
-                'cd %s && wgcf register --accept-tos --config account.toml'
-                % warp_dir,
-                timeout=120,
-            )
-            if code != 0:
-                logger.warning("wgcf register failed for %s: %s", protocol, err)
-                # A provider TLS/SNI block looks different from every other
-                # failure: the WARP dataplane still works, only registration
-                # is broken. Say so, so the UI can offer a profile import.
-                if self._registration_api_reachable(manager, protocol) is False:
-                    raise ws.SrvWarpError('srv_warp_register_api_unreachable', 502)
-                raise ws.SrvWarpError('srv_warp_register_failed', 502)
+            with _register_lock(uid):
+                if self._quota_gate(uid):
+                    raise ws.SrvWarpError('srv_warp_quota_exhausted', 409)
+                # wgcf defaults to wgcf-account.toml/wgcf-profile.conf; pin the
+                # panel artifact names explicitly instead of relying on those.
+                _out, err, code = self._sh(
+                    manager, protocol,
+                    'cd %s && wgcf register --accept-tos --config account.toml'
+                    % warp_dir,
+                    timeout=120,
+                )
+                if code != 0:
+                    logger.warning("wgcf register failed for %s: %s",
+                                   protocol, err)
+                    # A provider TLS/SNI block looks different from every other
+                    # failure: the WARP dataplane still works, only registration
+                    # is broken. Say so, so the UI can offer a profile import.
+                    if self._registration_api_reachable(
+                            manager, protocol) is False:
+                        raise ws.SrvWarpError(
+                            'srv_warp_register_api_unreachable', 502)
+                    raise ws.SrvWarpError('srv_warp_register_failed', 502)
+                # The Cloudflare account exists now: count it before generating,
+                # so a failing generate does not lose the attempt.
+                self._remember_registration(uid, protocol, source)
 
         _out, err, code = self._sh(
             manager, protocol,
@@ -668,13 +735,12 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
                            protocol, err)
             raise ws.SrvWarpError('srv_warp_register_failed', 502)
 
-        if uid is not None:
-            def mark(state):
-                record = ws.proto_record(state, uid, protocol)
-                record['warp']['conf_hash'] = conf_hash
-                record['warp']['registered'] = True
+        def mark(state):
+            record = ws.proto_record(state, uid, protocol)
+            record['warp']['conf_hash'] = conf_hash
+            record['warp']['registered'] = True
 
-            self.state_store.mutate(mark)
+        self.state_store.mutate(mark)
         return conf_hash
 
     # ----- jobs -------------------------------------------------------------
@@ -690,6 +756,7 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
                                    exc_info=True)
 
         try:
+            self._require_supported_state()
             report('start', 'starting Cloudflare WARP installation')
             data = self.load_data()
             idx, server = self._server(data, server_id, uid)
@@ -722,7 +789,8 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
                     await asyncio.to_thread(self._ensure_wgcf, manager, proto)
                     report('register', 'registering with Cloudflare')
                     await asyncio.to_thread(
-                        self._register_and_write_conf, manager, proto, uid)
+                        self._register_and_write_conf, manager, proto, uid,
+                        'install')
                     report('profile', 'preparing the sanitized WARP profile')
                     # No restart on install: the running container keeps its
                     # current dataplane until the operator links WARP.
@@ -781,12 +849,15 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
             return ''
         return parts[0]
 
-    def _source_profile(self, manager, protocol, reuse=True):
+    def _source_profile(self, manager, protocol, reuse=True, uid=None,
+                        source='import_source'):
         """(account_toml, sanitized_profile) read from the source instance.
 
         Registration is attempted only when the source has no usable profile:
         a server that can reach ``api.cloudflareclient.com`` supplies the
         account, a blocked one may already hold a previously imported one.
+        A real registration on the source consumes *its* quota, so the quota
+        answer is never disguised as a generic source failure.
         """
         account = profile = ''
         if reuse and self._conf_present(manager, protocol):
@@ -795,8 +866,10 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
         if not account or not (profile or '').strip():
             try:
                 self._ensure_wgcf(manager, protocol)
-                self._register_and_write_conf(manager, protocol, None)
+                self._register_and_write_conf(manager, protocol, uid, source)
             except ws.SrvWarpError as exc:
+                if exc.code == 'srv_warp_quota_exhausted':
+                    raise
                 # The source may be behind the same SNI filter as the target:
                 # report that instead of a generic registration failure.
                 logger.warning("warp import: source register failed for %s: %s",
@@ -872,6 +945,7 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
                                    exc_info=True)
 
         try:
+            self._require_supported_state()
             report('start', 'starting Cloudflare WARP profile import')
             data = self.load_data()
             idx, server = self._server(data, server_id, uid)
@@ -906,7 +980,8 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
                 raise ws.SrvWarpError('srv_warp_source_unreachable', 502)
             try:
                 account, profile = await asyncio.to_thread(
-                    self._source_profile, source_manager, source_proto)
+                    self._source_profile, source_manager, source_proto, True,
+                    src_uid, 'import_source')
             except ws.SrvWarpError:
                 raise
             except Exception as exc:
@@ -964,23 +1039,21 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
                     manager._write_start_script, proto,
                     self._config_path(manager, proto), None)
 
-            now = ws.now_ts()
-            entry = {'ts': now, 'source': 'import',
-                     'source_uid': src_uid, 'protocol': source_proto}
-
             def remember(current):
                 _idx, current_server = self._server(current, None, target_uid)
                 if current_server is None:
                     return False
-                warp = current_server.setdefault('warp', {})
-                registers = list(warp.get('registers_ts')
-                                 or warp.get('registers') or [])
-                registers.append(dict(entry))
-                warp['registers_ts'] = ws.registers_prune(registers)
-                warp['installed'] = True
+                # ``installed`` stays in data.json: the server card reads it
+                # from there, and a moved registration entry must not drop it.
+                current_server.setdefault('warp', {})['installed'] = True
                 return True
 
-            await self._mutate_data(remember)
+            installed = await self._mutate_data(remember)
+            if installed:
+                # Exactly one entry per import, named by the source protocol.
+                # The copy itself does not create a Cloudflare account.
+                self._remember_registration(target_uid, source_proto, 'import',
+                                            src_uid)
             report('done', 'Cloudflare WARP profile imported')
             if failed:
                 # Partial success: the imported instances are live, the rest
@@ -999,19 +1072,12 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
             self._finish(uid, job_id)
 
     def _registers_for(self, server, uid):
-        """Registration timestamps of a server, visible to the quota gate."""
-        warp = server.get('warp') or {}
-        registers = warp.get('registers_ts')
-        if registers is None:
-            registers = warp.get('registers')
-        if registers is None:
-            record = ((self.state_store.load().get('servers') or {})
-                      .get(ws._norm_uid(uid)) or {})
-            registers = record.get('registers_ts') or record.get('registers')
-        return registers or []
+        """Registration timestamps from data.json and the store, merged."""
+        return ws.merged_registers(server, self.state_store.load(), uid)
 
     async def uninstall(self, server_id, uid, protocol=None, job_id=None):
         try:
+            self._require_supported_state()
             data = self.load_data()
             idx, server = self._server(data, server_id, uid)
             if idx is None:
@@ -1090,6 +1156,7 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
 
     async def repair(self, server_id, uid, protocol=None, job_id=None):
         try:
+            self._require_supported_state()
             data = self.load_data()
             idx, server = self._server(data, server_id, uid)
             if idx is None:
@@ -1119,7 +1186,8 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
                     if not await asyncio.to_thread(
                             self._conf_present, manager, proto):
                         await asyncio.to_thread(
-                            self._register_and_write_conf, manager, proto, uid)
+                            self._register_and_write_conf, manager, proto, uid,
+                            'repair')
                     current = self.state_store.load()
                     if ws.warp_link(ws.proto_record(current, uid, proto)):
                         ctx = ws.warp_ctx_for(current, uid, proto)
@@ -1196,6 +1264,7 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
                    job_id=None):
         applied = False
         try:
+            self._require_supported_state()
             data = self.load_data()
             idx, server = self._server(data, server_id, uid)
             if idx is None:
@@ -1230,7 +1299,8 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
                     manager, server, uid, protocol)
                 if sibling:
                     account, profile = await asyncio.to_thread(
-                        self._source_profile, manager, sibling, True)
+                        self._source_profile, manager, sibling, True, uid,
+                        'link')
                     conf_hash = await asyncio.to_thread(
                         self._write_imported_profile, manager, protocol,
                         account, profile)
@@ -1247,7 +1317,8 @@ if [ -n "$HS" ] && [ "$HS" != "0" ]; then echo "HANDSHAKE $HS"; else echo NO_HAN
                 else:
                     await asyncio.to_thread(self._ensure_wgcf, manager, protocol)
                     await asyncio.to_thread(
-                        self._register_and_write_conf, manager, protocol, uid)
+                        self._register_and_write_conf, manager, protocol, uid,
+                        'link')
 
             now = ws.now_ts()
 
