@@ -31,6 +31,8 @@ from datetime import datetime
 from email.message import EmailMessage
 from email.utils import formataddr, formatdate, make_msgid
 
+from config_naming import CONF_FILENAME_MAX_STEM, resolve_config_name_template
+
 logger = logging.getLogger(__name__)
 
 
@@ -240,13 +242,14 @@ class SmtpTransport:
 
 # ===================== message building =====================
 
-def _safe_filename(name, protocol, used):
+def _safe_filename(name, protocol, used, *, max_stem=48):
     base = re.sub(r'[^A-Za-z0-9_.-]+', '_', str(name or protocol or 'config')).strip('._-')
-    base = (base or 'config')[:48]
+    base = (base or 'config')[:max_stem]
     candidate = f'{base}.conf'
     index = 2
     while candidate.lower() in used:
-        candidate = f'{base}_{index}.conf'
+        suffix = f'_{index}'
+        candidate = f'{base[:max_stem - len(suffix)]}{suffix}.conf'
         index += 1
     used.add(candidate.lower())
     return candidate
@@ -379,7 +382,13 @@ def build_message(*, settings, recipient, username, items, options, translate, a
                 f'font-size:13px;color:{s["accent"]};">{html.escape(item["link"])}</div>'
             )
         if options.include_configs and item.get('config') and len(attachments) < MAX_ATTACHMENTS_PER_MESSAGE:
-            filename = _safe_filename(item.get('name'), item.get('protocol'), used_names)
+            raw_conf_name = str(item.get('conf_filename') or '').strip()
+            if raw_conf_name.lower().endswith('.conf'):
+                raw_conf_name = raw_conf_name[:-5]
+            filename = _safe_filename(
+                raw_conf_name or item.get('name'), item.get('protocol'), used_names,
+                max_stem=CONF_FILENAME_MAX_STEM if raw_conf_name else 48,
+            )
             attachments.append((filename, item['config']))
             label = translate('mail_file_label')
             lines.append(f"  {label}: {filename}")
@@ -544,12 +553,17 @@ class MailService:
                 'config': '',
                 'link': '',
             }
-            if self._protocol_base(protocol) in LINK_ONLY_PROTOCOLS:
-                item['link'] = str(config).strip()
+            link_only = self._protocol_base(protocol) in LINK_ONLY_PROTOCOLS
+            payloads = {}
+            if not link_only or resolve_config_name_template(server, protocol):
+                payloads = self._config_payloads(config, server, protocol, client_name=name)
+            if link_only:
+                item['link'] = str(payloads.get('config') or config).strip()
             else:
-                payloads = self._config_payloads(config, server, protocol)
                 item['config'] = payloads.get('config') or config
                 item['link'] = payloads.get('vpn_link') or ''
+                if payloads.get('conf_filename'):
+                    item['conf_filename'] = payloads['conf_filename']
             items.append(item)
         return items, errors
 

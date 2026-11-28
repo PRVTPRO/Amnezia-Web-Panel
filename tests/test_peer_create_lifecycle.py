@@ -90,7 +90,7 @@ class AdminCreateLifecycle(unittest.IsolatedAsyncioTestCase):
             ('load_data', lambda: copy.deepcopy(self.data)), ('save_data', save),
             ('get_ssh', lambda server: Mock()), ('get_protocol_manager', lambda ssh, proto: self.remote),
             ('protocol_public_endpoint', lambda server, proto: (server['host'], None)),
-            ('config_payloads', lambda *args: {})):
+            ('config_payloads', lambda *args, **kwargs: {})):
             self.stack.enter_context(patch.object(panel, name, value, create=True))
         self.request = SimpleNamespace(cookies={})
         self.op_id = str(uuid.uuid4())

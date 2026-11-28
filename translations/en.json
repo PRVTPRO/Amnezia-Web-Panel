@@ -1790,5 +1790,13 @@
   "proxy_install_http_enabled": "HTTP proxy enabled",
   "proxy_install_http_enabled_hint": "Clear it — the amnezia-httpproxy container is not started",
   "proxy_socks_port_hint": "Account keys use this port: socks5://…@host:{port}",
-  "proxy_log_format_vars": "Variables: %U login, %I bytes in, %O bytes out, %N service, %C client IP."
+  "proxy_log_format_vars": "Variables: %U login, %I bytes in, %O bytes out, %N service, %C client IP.",
+  "config_name_title": "Config name in client",
+  "config_name_for": "Name template for configs issued by {}",
+  "config_name_template_label": "Name template",
+  "config_name_placeholders_hint": "Click a placeholder to insert: {client} — client name, {server} — server name, {protocol} — protocol, {instance} — instance name, {exit} — exit node.",
+  "config_name_preview_client": "Amnezia (vpn:// / vless://)",
+  "config_name_preview_file": "Download file (.conf)",
+  "config_name_hint": "Leave empty to keep the default naming. Server config files (awg0.conf) are never modified; .conf filenames are automatically sanitized to ASCII for native WireGuard/AWG clients.",
+  "config_name_reset": "Reset"
 }

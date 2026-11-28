@@ -932,7 +932,7 @@
             if (result.config) {
                 currentConfig = result.config;
                 currentVpnLink = result.vpn_link || '';
-                currentConfigName = body.username;
+                currentConfigName = result.conf_filename ? result.conf_filename.replace(/\.conf$/i, '') : body.username;
                 document.getElementById('configModalTitle').textContent = `${_('config')} — ${body.username}`;
                 document.getElementById('configText').textContent = result.config;
                 document.getElementById('vpnLinkText').textContent = currentVpnLink;
@@ -1135,7 +1135,7 @@
             if (result.config && mode !== 'existing') {
                 currentConfig = result.config;
                 currentVpnLink = result.vpn_link || '';
-                currentConfigName = document.getElementById('ucName').value.replace(/\s+/g, '_');
+                currentConfigName = result.conf_filename ? result.conf_filename.replace(/\.conf$/i, '') : document.getElementById('ucName').value.replace(/\s+/g, '_');
                 document.getElementById('configModalTitle').textContent = _('config');
                 document.getElementById('configText').textContent = result.config;
                 document.getElementById('vpnLinkText').textContent = currentVpnLink;
@@ -1392,12 +1392,12 @@
         try {
             showToast(_('loading'), 'info');
             const result = await apiCall(`/api/servers/${serverId}/connections/config`, 'POST', {
-                protocol: protocol, client_id: clientId,
+                protocol: protocol, client_id: clientId, client_name: connName,
             });
             if (result.config) {
                 currentConfig = result.config;
                 currentVpnLink = result.vpn_link || '';
-                currentConfigName = connName.replace(/\s+/g, '_');
+                currentConfigName = result.conf_filename ? result.conf_filename.replace(/\.conf$/i, '') : connName.replace(/\s+/g, '_');
                 document.getElementById('configModalTitle').textContent = `${_('config')} — ${connName}`;
                 document.getElementById('configText').textContent = result.config;
                 document.getElementById('vpnLinkText').textContent = currentVpnLink;

@@ -1790,5 +1790,13 @@
   "proxy_install_http_enabled": "Proxy HTTP activé",
   "proxy_install_http_enabled_hint": "Décocher — le conteneur amnezia-httpproxy ne démarre pas",
   "proxy_socks_port_hint": "Les clés des comptes utilisent ce port : socks5://…@hôte:{port}",
-  "proxy_log_format_vars": "Variables : %U identifiant, %I octets entrants, %O octets sortants, %N service, %C IP client."
+  "proxy_log_format_vars": "Variables : %U identifiant, %I octets entrants, %O octets sortants, %N service, %C IP client.",
+  "config_name_title": "Nom des configurations (client)",
+  "config_name_for": "Modèle de nom pour les configurations émises par {}",
+  "config_name_template_label": "Modèle de nom",
+  "config_name_placeholders_hint": "Cliquez pour insérer : {client} — client, {server} — serveur, {protocol} — protocole, {instance} — nom de l’instance, {exit} — nœud de sortie.",
+  "config_name_preview_client": "Amnezia (vpn:// / vless://)",
+  "config_name_preview_file": "Fichier téléchargé (.conf)",
+  "config_name_hint": "Laissez vide pour conserver le nommage par défaut. Le fichier awg0.conf du serveur n’est pas modifié ; le nom .conf est normalisé en ASCII pour les clients WireGuard/AWG.",
+  "config_name_reset": "Réinitialiser"
 }

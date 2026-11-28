@@ -347,7 +347,7 @@
             if (result.config) {
                 currentConfig = result.config;
                 currentVpnLink = result.vpn_link || '';
-                currentConfigName = name.replace(/\s+/g, '_');
+                currentConfigName = result.conf_filename ? result.conf_filename.replace(/\.conf$/i, '') : name.replace(/\s+/g, '_');
                 document.getElementById('configModalTitle').textContent = `${_('connection_created')}`;
                 document.getElementById('configText').textContent = result.config;
                 document.getElementById('vpnLinkText').textContent = currentVpnLink;
@@ -390,7 +390,7 @@
             if (result.config) {
                 currentConfig = result.config;
                 currentVpnLink = result.vpn_link || '';
-                currentConfigName = name.replace(/\s+/g, '_');
+                currentConfigName = result.conf_filename ? result.conf_filename.replace(/\.conf$/i, '') : name.replace(/\s+/g, '_');
                 document.getElementById('configModalTitle').textContent = `${_('config')} — ${name}`;
                 document.getElementById('configText').textContent = result.config;
                 document.getElementById('vpnLinkText').textContent = currentVpnLink;

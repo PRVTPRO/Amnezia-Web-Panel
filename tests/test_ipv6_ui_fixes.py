@@ -385,6 +385,11 @@ IPV4_POLICY_KEYS = {
 
 # Lazy CodeMirror loader (P6): the one user-visible failure message.
 LAZY_EDITOR_KEYS = {'editor_load_failed'}
+CONFIG_NAME_KEYS = {
+    'config_name_title', 'config_name_for', 'config_name_template_label',
+    'config_name_placeholders_hint', 'config_name_preview_client',
+    'config_name_preview_file', 'config_name_hint', 'config_name_reset',
+}
 
 # I1 masking block (per-instance special-junk packet): install and settings.
 AWG_I1_KEYS = {
@@ -747,7 +752,8 @@ class TestC6Translations(unittest.TestCase):
                                     - SSH_HELP_KEYS - SMARTROUTE_TIMER_KEYS
                                     - IPV4_POLICY_KEYS - SRV_CARD_CONTAINER_KEYS
                                     - SELF_SERVICE_DELETE_KEYS - PROXY_KEYS
-                                    - SRV_WARP_INSTANCE_KEYS - LAZY_EDITOR_KEYS))
+                                    - SRV_WARP_INSTANCE_KEYS - LAZY_EDITOR_KEYS
+                                    - CONFIG_NAME_KEYS))
         self.assertEqual(hashlib.sha256(previous.encode('utf-8')).hexdigest(),
                          PRE_PANEL_ACCESS_KEYS_SHA256,
                          'Existing catalogue changed outside the declared additions')
@@ -762,7 +768,8 @@ class TestC6Translations(unittest.TestCase):
                         | SRV_WARP_INSTANCE_KEYS | SRV_WARP_IMPORT_KEYS
                         | LAZY_EDITOR_KEYS | SRV_CARD_CONTAINER_KEYS
                         | SRV_WARP_INSTANCE_KEYS | SRV_CARD_CONTAINER_KEYS
-                        | SELF_SERVICE_DELETE_KEYS | PROXY_KEYS | LAZY_EDITOR_KEYS):
+                        | SELF_SERVICE_DELETE_KEYS | PROXY_KEYS | LAZY_EDITOR_KEYS
+                        | CONFIG_NAME_KEYS):
                 self.assertIn(key, data)
                 self.assertTrue(str(data[key]).strip(), "%s empty in %s" % (key, locale))
 

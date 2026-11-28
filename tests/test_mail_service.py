@@ -134,7 +134,7 @@ def make_service(data, smtp_client=None, dead_hosts=(), **kwargs):
         get_ssh=get_ssh,
         get_protocol_manager=lambda ssh, protocol: FakeManager(configs),
         manager_call=lambda manager, method, protocol, *a, **kw: getattr(manager, method)(protocol, *a, **kw),
-        config_payloads=lambda config, server, protocol: {
+        config_payloads=lambda config, server, protocol, client_name='': {
             'config': config, 'vpn_link': 'vpn://KEY-' + protocol, 'vpn_qr_chunks': [],
             'vpn_name': protocol},
         protocol_display_name=lambda protocol, *metadata: protocol.upper(),
