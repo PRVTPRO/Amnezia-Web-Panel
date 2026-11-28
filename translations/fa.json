@@ -1790,5 +1790,13 @@
   "proxy_install_http_enabled": "پروکسی HTTP فعال",
   "proxy_install_http_enabled_hint": "برداشتن تیک — کانتینر amnezia-httpproxy بالا نمی‌آید",
   "proxy_socks_port_hint": "کلیدهای حساب از این درگاه استفاده می‌کنند: socks5://…@میزبان:{port}",
-  "proxy_log_format_vars": "متغیرها: %U کاربر، %I بایت ورودی، %O بایت خروجی، %N سرویس، %C IP کلاینت."
+  "proxy_log_format_vars": "متغیرها: %U کاربر، %I بایت ورودی، %O بایت خروجی، %N سرویس، %C IP کلاینت.",
+  "config_name_title": "نام پیکربندی در کلاینت",
+  "config_name_for": "الگوی نام پیکربندی‌های صادرشده توسط {}",
+  "config_name_template_label": "الگوی نام",
+  "config_name_placeholders_hint": "برای درج کلیک کنید: {client} — کلاینت، {server} — سرور، {protocol} — پروتکل، {instance} — نام نمونه، {exit} — گره خروجی.",
+  "config_name_preview_client": "در Amnezia (vpn:// / vless://)",
+  "config_name_preview_file": "نام فایل دانلود (.conf)",
+  "config_name_hint": "برای رفتار پیش‌فرض خالی بگذارید. فایل awg0.conf سرور تغییر نمی‌کند؛ نام فایل .conf به‌طور خودکار برای کلاینت‌های WireGuard/AWG به ASCII ایمن تبدیل می‌شود.",
+  "config_name_reset": "بازنشانی"
 }

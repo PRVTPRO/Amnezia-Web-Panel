@@ -31,6 +31,7 @@ def isolated_panel():
         'xray_fp_kwargs': Mock(return_value={}),
         'protocol_public_endpoint': Mock(return_value=('example.invalid', None)),
         'config_payloads': Mock(return_value={}),
+        '_resolve_client_name': Mock(return_value=''),
         '_touch_api_token': Mock(return_value=False), 'save_data': Mock(),
     }
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), 'exec'), namespace)

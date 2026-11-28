@@ -103,6 +103,7 @@ class ConnectionService:
         generate_vpn_link,
         protocol_public_endpoint=None,
         finalize_peer=None,
+        config_payloads=None,
     ):
         self.load_data = load_data
         self.save_data = save_data
@@ -119,6 +120,7 @@ class ConnectionService:
         # commit, tombstone). Injected by app.py; a service without it cannot
         # delete safely and says so instead of dropping an owner silently.
         self.finalize_peer = finalize_peer
+        self.config_payloads = config_payloads
         self._provision_locks = defaultdict(asyncio.Lock)
         self._rate_events = defaultdict(list)
 
@@ -217,7 +219,11 @@ class ConnectionService:
                 response = {'status': 'success', 'connection': conn}
                 if result.get('config'):
                     response['config'] = result['config']
-                    response['vpn_link'] = self.generate_vpn_link(result['config'])
+                    if self.config_payloads is not None:
+                        response.update(self.config_payloads(
+                            result['config'], server, protocol, client_name=clean_name))
+                    else:
+                        response['vpn_link'] = self.generate_vpn_link(result['config'])
                 return response
             except Exception:
                 if remote_client_id:

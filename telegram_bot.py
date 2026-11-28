@@ -5,6 +5,7 @@ Runs as a background asyncio task alongside the FastAPI app.
 """
 from peer_accounting import serialize_peer_lifecycle
 from protocol_names import server_protocol_names
+from config_naming import resolve_config_name_template
 import asyncio
 import hashlib
 import html
@@ -863,13 +864,15 @@ def is_running() -> bool:
 _ssh_credential_resolver = None
 
 
-def launch_bot(token: str, load_data_fn: Callable, generate_vpn_link_fn: Callable, save_data_fn: Optional[Callable] = None, self_service_svc=None, credential_resolver=None):
+def launch_bot(token: str, load_data_fn: Callable, generate_vpn_link_fn: Callable, save_data_fn: Optional[Callable] = None, self_service_svc=None, credential_resolver=None,
+               config_payloads=None):
     global _bot_task, _ssh_credential_resolver
     if is_running():
         return _bot_task
     _ssh_credential_resolver = credential_resolver
     _bot_task = asyncio.create_task(
-        _supervise_bot(token, load_data_fn, generate_vpn_link_fn, save_data_fn, self_service_svc),
+        _supervise_bot(token, load_data_fn, generate_vpn_link_fn,
+                       save_data_fn, self_service_svc, config_payloads),
         name="telegram_bot",
     )
     return _bot_task
@@ -896,12 +899,12 @@ class _InvalidBotToken(Exception):
 
 
 async def _supervise_bot(token, load_data_fn, generate_vpn_link_fn,
-                         save_data_fn=None, self_service_svc=None):
+                         save_data_fn=None, self_service_svc=None, config_payloads=None):
     delay = 5
     while True:
         try:
             await _run_bot(token, load_data_fn, generate_vpn_link_fn,
-                           save_data_fn, self_service_svc)
+                           save_data_fn, self_service_svc, config_payloads)
             return
         except asyncio.CancelledError:
             raise
@@ -920,9 +923,10 @@ async def _supervise_bot(token, load_data_fn, generate_vpn_link_fn,
 #  Low-level Telegram API helpers
 # ----------------------------------------------------------------------- #
 class TelegramAPI:
-    def __init__(self, token: str, client: httpx.AsyncClient):
+    def __init__(self, token: str, client: httpx.AsyncClient, config_payloads=None):
         self.base = f"https://api.telegram.org/bot{token}"
         self.client = client
+        self.config_payloads = config_payloads
 
     async def call(self, method: str, **params) -> dict:
         r = await self.client.post(f"{self.base}/{method}", json=params, timeout=30)
@@ -1783,9 +1787,11 @@ async def _send_config_by_client(api: TelegramAPI, chat_id: int, server: dict, p
         server_name = server.get("name") or server.get("host", _tt(lang, "default_unknown"))
         await api.send_message(chat_id, f"✅ <b>{_e(conn_name)}</b>\n🌐 {_tt(lang, 'servers_title')}: <b>{_e(server_name)}</b>\n🔌 {_tt(lang, 'protocol_label')}: <b>{_e(proto.upper())}</b>")
 
+        payloads = _custom_config_payloads(api, config, server, proto, conn_name)
         is_link_proto = protocol_base(proto) in ("xray", "telemt")
         if is_link_proto:
-            await api.send_message(chat_id, f"🔗 <b>{_tt(lang, 'connection_link_label')}</b> ({_tt(lang, 'tap_to_copy')}):\n<code>{_e(config)}</code>")
+            link_text = payloads.get('config') or config
+            await api.send_message(chat_id, f"🔗 <b>{_tt(lang, 'connection_link_label')}</b> ({_tt(lang, 'tap_to_copy')}):\n<code>{_e(link_text)}</code>")
         else:
             MAX_LEN = 4000
             if len(config) <= MAX_LEN:
@@ -1795,10 +1801,10 @@ async def _send_config_by_client(api: TelegramAPI, chat_id: int, server: dict, p
                 for i, chunk in enumerate(chunks, 1):
                     await api.send_message(chat_id, f"<b>📄 {_tt(lang, 'config_part', part=i, total=len(chunks))}:</b>\n<pre>{_e(chunk)}</pre>")
 
-            vpn_link = generate_vpn_link_fn(config, server, proto) if config else ""
+            vpn_link = payloads.get('vpn_link') or (generate_vpn_link_fn(config, server, proto) if config else "")
             if vpn_link:
                 await api.send_message(chat_id, f"🔗 <b>{_tt(lang, 'vpn_link_label')}</b> ({_tt(lang, 'tap_to_copy')}):\n<code>{_e(vpn_link)}</code>")
-            filename = f"{str(conn_name).replace(' ', '_')}.conf"
+            filename = payloads.get('conf_filename') or f"{str(conn_name).replace(' ', '_')}.conf"
             await api.send_document(chat_id, filename=filename, content=config.encode("utf-8"), caption=f"📁 {_tt(lang, 'config_file_label')}: {conn_name}")
     except Exception as e:
         logger.exception("Bot: error getting config")
@@ -2153,16 +2159,27 @@ async def _admin_create_client(api: TelegramAPI, chat_id: int, message_id: int, 
         await api.edit_message(chat_id, message_id, f" {_tt(lang, 'error')}: {_e(e)}", reply_markup={"inline_keyboard": [[{"text": f"⬅️ {_tt(lang, 'btn_protocol')}", "callback_data": _ref("proto", {"sid": server_id, "proto": proto})}]]})
 
 
+def _custom_config_payloads(api, config, server, proto, conn_name):
+    if resolve_config_name_template(server, proto):
+        payloads = getattr(api, 'config_payloads', None)
+        if payloads is not None:
+            return payloads(config, server, proto, client_name=conn_name)
+    return {}
+
+
 async def _send_config_text(api: TelegramAPI, chat_id: int, server: dict, proto: str, conn_name: str, config: str, generate_vpn_link_fn: Callable, lang: str = "en"):
     await api.send_message(chat_id, f"✅ <b>{_e(conn_name)}</b>\n🌐 {_tt(lang, 'servers_title')}: <b>{_e(server.get('name') or server.get('host'))}</b>\n {_tt(lang, 'protocol_label')}: <b>{_e(proto.upper())}</b>")
+    payloads = _custom_config_payloads(api, config, server, proto, conn_name)
     if protocol_base(proto) in ("xray", "telemt"):
-        await api.send_message(chat_id, f"🔗 <b>{_tt(lang, 'connection_link_label')}</b>:\n<code>{_e(config)}</code>")
+        link_text = payloads.get('config') or config
+        await api.send_message(chat_id, f"🔗 <b>{_tt(lang, 'connection_link_label')}</b>:\n<code>{_e(link_text)}</code>")
     else:
         await api.send_message(chat_id, f"<b>📄 {_tt(lang, 'config_label')}:</b>\n<pre>{_e(config)}</pre>")
-        vpn_link = generate_vpn_link_fn(config, server, proto) if config else ""
+        vpn_link = payloads.get('vpn_link') or (generate_vpn_link_fn(config, server, proto) if config else "")
         if vpn_link:
             await api.send_message(chat_id, f" <b>{_tt(lang, 'vpn_link_label')}</b>:\n<code>{_e(vpn_link)}</code>")
-        await api.send_document(chat_id, filename=f"{conn_name}.conf", content=config.encode("utf-8"), caption=f" {_tt(lang, 'config_file_label')}: {conn_name}")
+        filename = payloads.get('conf_filename') or f"{conn_name}.conf"
+        await api.send_document(chat_id, filename=filename, content=config.encode("utf-8"), caption=f" {_tt(lang, 'config_file_label')}: {conn_name}")
 
 
 async def _admin_toggle_client(api: TelegramAPI, chat_id: int, message_id: int, server_id: int, proto: str, client_id: str, enable: bool, load_data_fn: Callable, lang: str = "en"):
@@ -2651,12 +2668,13 @@ async def _user_create_connection(api: TelegramAPI, chat_id: int, panel_user: di
 # ----------------------------------------------------------------------- #
 #  Main polling loop and dispatcher
 # ----------------------------------------------------------------------- #
-async def _run_bot(token: str, load_data_fn: Callable, generate_vpn_link_fn: Callable, save_data_fn: Optional[Callable] = None, self_service_svc=None):
+async def _run_bot(token: str, load_data_fn: Callable, generate_vpn_link_fn: Callable,
+                   save_data_fn: Optional[Callable] = None, self_service_svc=None, config_payloads=None):
     offset = 0
     logger.info("Telegram bot started (raw httpx polling).")
 
     async with httpx.AsyncClient() as client:
-        api = TelegramAPI(token, client)
+        api = TelegramAPI(token, client, config_payloads=config_payloads)
 
         me = await api.call("getMe")
         if not me.get("ok"):

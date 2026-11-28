@@ -127,6 +127,7 @@ from mail_service import (
     merge_mail_settings,
 )
 from protocol_names import protocol_display_name, server_protocol_names
+import config_naming
 from pwa import build_manifest
 from captcha_challenges import captcha_challenges
 from credential_store import CredentialError, CredentialStore, default_key_path
@@ -2537,12 +2538,23 @@ def protocol_short_name(protocol: str, header_protection=False, protocol_version
     return name if idx <= 1 else f'{name}#{idx}'
 
 
-def connection_display_name(server=None, protocol=None) -> str:
-    """`<node> <container>`, e.g. `nl-01 AWG3` -- the name the client will show."""
-    node = str((server or {}).get('name') or (server or {}).get('host') or '').strip()
-    record = ((server or {}).get('protocols') or {}).get(protocol) or {} if protocol else {}
-    tag = protocol_short_name(protocol, record.get('header_protection'), record.get('protocol_version')) if protocol else ''
-    return ' '.join(part for part in (node, tag) if part)
+def _config_names(server=None, protocol=None, client_name=''):
+    """Return the client-facing name and its optional native config filename."""
+    template = config_naming.resolve_config_name_template(server, protocol)
+    warp_ctx = srv_warp_ctx(server, protocol) if '{exit}' in template else None
+    name = config_naming.connection_display_name(
+        server, protocol, client_name=client_name,
+        short_name_fn=protocol_short_name, warp_ctx=warp_ctx,
+    )
+    filename = config_naming.sanitize_conf_filename(name) if (
+        template and protocol_base(protocol) in AWG_PROTOCOLS + ('wireguard',)
+    ) else ''
+    return name, filename
+
+
+def connection_display_name(server=None, protocol=None, client_name='') -> str:
+    """Client-facing config display name (custom instance template or default)."""
+    return _config_names(server, protocol, client_name)[0]
 
 
 def parse_wg_config(config_text):
@@ -2850,7 +2862,7 @@ def amnezia_qr_chunks(config_text, description):
     return chunks
 
 
-def generate_vpn_link(config_text, server=None, protocol=None):
+def generate_vpn_link(config_text, server=None, protocol=None, client_name=''):
     """Encode a config as a vpn:// key.
 
     Amnezia decodes with QByteArray::Base64UrlEncoding|OmitTrailingEquals,
@@ -2859,14 +2871,18 @@ def generate_vpn_link(config_text, server=None, protocol=None):
     emits '+' or '/' -- which a config containing '>' or '?' does, the
     default I1 packet among them.
     """
-    key = amnezia_vpn_key(config_text, connection_display_name(server, protocol))
+    key = amnezia_vpn_key(config_text, connection_display_name(server, protocol, client_name=client_name))
     if key:
         return f"vpn://{key}"
+    return _raw_vpn_link(config_text)
+
+
+def _raw_vpn_link(config_text):
     b64 = base64.urlsafe_b64encode(config_text.strip().encode('utf-8')).decode('utf-8')
     return f"vpn://{b64.rstrip('=')}"
 
 
-def config_payloads(config_text, server=None, protocol=None):
+def config_payloads(config_text, server=None, protocol=None, client_name=''):
     """What every config view needs: the config, the key, the QR frames, the name.
 
     The frames carry no `vpn://` prefix -- extractConfigFromQr() hands the
@@ -2875,17 +2891,23 @@ def config_payloads(config_text, server=None, protocol=None):
     The list is empty when the config is not a WireGuard/AmneziaWG one; the QR
     then stays on the raw config, which is all such clients understand anyway.
     """
-    name = connection_display_name(server, protocol)
+    name, conf_filename = _config_names(server, protocol, client_name)
     if not str(config_text or '').strip():
-        return {'config': config_text, 'vpn_link': '', 'vpn_qr_chunks': [], 'vpn_name': name}
+        payload = {'config': config_text, 'vpn_link': '', 'vpn_qr_chunks': [], 'vpn_name': name}
+        if conf_filename:
+            payload['conf_filename'] = conf_filename
+        return payload
     config_text = apply_link_name(config_text, name)
     key = amnezia_vpn_key(config_text, name)
-    return {
+    payload = {
         'config': config_text,
-        'vpn_link': f"vpn://{key}" if key else generate_vpn_link(config_text),
+        'vpn_link': f"vpn://{key}" if key else _raw_vpn_link(config_text),
         'vpn_qr_chunks': amnezia_qr_chunks(config_text, name),
         'vpn_name': name,
     }
+    if conf_filename:
+        payload['conf_filename'] = conf_filename
+    return payload
 
 
 from peer_create import PeerCreateService, PeerCreateError
@@ -3048,6 +3070,7 @@ self_service_connections = ConnectionService(
     generate_vpn_link=generate_vpn_link,
     protocol_public_endpoint=protocol_public_endpoint,
     finalize_peer=_self_service_finalize_peer,
+    config_payloads=config_payloads,
 )
 
 
@@ -4053,6 +4076,13 @@ class PublicEndpointRequest(BaseModel):
     public_port: str = ''  # empty = the instance's listen port
 
 
+class ConfigNameTemplateRequest(BaseModel):
+    protocol: str = ''
+    template: str = ''  # empty = restore default naming
+    server_uid: Optional[str] = None
+    preview: bool = False
+
+
 class AddConnectionRequest(BaseModel):
     protocol: str = 'awg'
     name: str = 'Connection'
@@ -4080,6 +4110,7 @@ class ConnectionActionRequest(BaseModel):
     server_uid: Optional[str] = None
     protocol: str = 'awg'
     client_id: str = ''
+    client_name: Optional[str] = None
     allow_unverified: bool = False
 
 
@@ -4113,6 +4144,7 @@ class XrayFingerprintRequest(BaseModel):
 class SaveConnectionConfigRequest(BaseModel):
     protocol: str = 'awg'
     client_id: str = ''
+    client_name: Optional[str] = None
     config: str = ''
 
 
@@ -4498,6 +4530,14 @@ def _start_conn_monitor():
     logger.info(f"Connection-flood monitor started (every {CONN_MONITOR_INTERVAL}s)")
 
 
+def _launch_telegram_bot(token):
+    return tg_bot.launch_bot(
+        token, load_data, generate_vpn_link, save_data, self_service_svc=self_service_connections,
+        credential_resolver=lambda server: _credential_store().resolve(server),
+        config_payloads=config_payloads,
+    )
+
+
 @app.on_event("startup")
 async def startup():
     global _panel_lease
@@ -4635,7 +4675,7 @@ async def startup():
     tg_cfg = data.get('settings', {}).get('telegram', {})
     if tg_cfg.get('enabled') and tg_cfg.get('token'):
         logger.info("Starting Telegram bot from saved settings...")
-        tg_bot.launch_bot(tg_cfg['token'], load_data, generate_vpn_link, save_data, self_service_svc=self_service_connections, credential_resolver=lambda server: _credential_store().resolve(server))
+        _launch_telegram_bot(tg_cfg['token'])
 
 
 def _auto_backup_due(auto_backup: dict, now: Optional[datetime] = None) -> bool:
@@ -9819,13 +9859,13 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
             raise SrvWarpError('srv_warp_registered_unlink_first', 409)
         # A reinstalled entry keeps its exit link and is re-linked below
         previous_link = None
-        # Where an instance is published is a property of the network, not
-        # of this install: reinstalling must not move clients back to the
-        # address the panel happens to manage the box through.
+        # Preserve the instance's public endpoint and naming on reinstall.
         previous_record = (server.get('protocols') or {}).get(install_protocol) or {}
-        previous_public = {key: previous_record[key]
-                           for key in ('public_host', 'public_port')
-                           if previous_record.get(key)}
+        previous_instance_options = {
+            key: previous_record[key]
+            for key in ('public_host', 'public_port', 'custom_name', 'config_name_template')
+            if previous_record.get(key)
+        }
         # Reinstalling an instance is not the same as adding one: an instance a
         # user deliberately left unlinked must not be linked behind their back.
         reinstall = install_protocol in (server.get('protocols') or {})
@@ -9959,8 +9999,8 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
                 tls_emulation=req.tls_emulation if req.tls_emulation is not None else True,
                 tls_domain=req.tls_domain,
                 max_connections=req.max_connections if req.max_connections is not None else 0,
-                public_host=previous_public.get('public_host'),
-                public_port=previous_public.get('public_port'),
+                public_host=previous_instance_options.get('public_host'),
+                public_port=previous_instance_options.get('public_port'),
             )
         elif install_base == 'xray':
             install_args = ()
@@ -10124,7 +10164,7 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
         proto_record['container_name'] = protocol_container_name(install_protocol)
         if previous_link:
             proto_record['exit_link'] = previous_link
-        proto_record.update(previous_public)
+        proto_record.update(previous_instance_options)
         server['protocols'][install_protocol] = proto_record
         result['protocol'] = install_protocol
         result['base_protocol'] = install_base
@@ -13652,6 +13692,45 @@ async def api_set_protocol_public_endpoint(request: Request, server_id: int, req
         return JSONResponse({'error': str(e)}, status_code=500)
 
 
+@app.post('/api/servers/{server_id}/protocol/config-name', tags=["Protocols"])
+async def api_set_protocol_config_name(request: Request, server_id: int, req: ConfigNameTemplateRequest):
+    """Set or clear the client-facing config name template for one protocol instance."""
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    try:
+        async with DATA_LOCK:
+            data = load_data()
+            if server_id < 0 or server_id >= len(data['servers']):
+                return JSONResponse({'error': 'Server not found'}, status_code=404)
+            server = data['servers'][server_id]
+            if req.server_uid is not None and req.server_uid != server.get('uid'):
+                return JSONResponse({'error': 'Server identity changed'}, status_code=409)
+            proto = req.protocol.strip()
+            protocols = server.get('protocols') or {}
+            if proto not in protocols or protocol_base(proto) not in AWG_PROTOCOLS + ('wireguard', 'xray'):
+                return JSONResponse({'error': 'Protocol not found'}, status_code=404)
+            template = config_naming.normalize_config_name_template(req.template)
+            record = protocols[proto]
+            if req.preview:
+                preview_server = {
+                    **server,
+                    'protocols': {**protocols, proto: {**record, 'config_name_template': template}},
+                }
+                name, filename = _config_names(preview_server, proto, 'Alice')
+                if not template and protocol_base(proto) != 'xray':
+                    filename = 'Alice.conf'
+                return {'vpn_name': name, 'conf_filename': filename}
+            if template:
+                record['config_name_template'] = template
+            else:
+                record.pop('config_name_template', None)
+            save_data(data)
+        return {'status': 'success', 'protocol': proto, 'template': template}
+    except Exception as e:
+        logger.exception("Error setting protocol config name template")
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
 # Public ports are published on the box itself: UDP for the WireGuard family,
 # TCP for the rest. DNS resolvers and the exit node have nothing to publish.
 PUBLIC_FORWARD_L4 = {
@@ -14431,7 +14510,7 @@ def api_add_connection(request: Request, server_id: int, req: AddConnectionReque
         ssh.disconnect()
 
         if result.get('config'):
-            result.update(config_payloads(result['config'], server, req.protocol))
+            result.update(config_payloads(result['config'], server, req.protocol, client_name=req.name))
 
         # Link connection to user if specified
         if req.user_id and result.get('client_id'):
@@ -14958,6 +15037,32 @@ async def api_set_connection_speed(request: Request, server_id: int, req: Connec
         return JSONResponse({'error': 'Speed limit could not be applied or verified'}, status_code=502)
 
 
+def _resolve_client_name(data, server_id, protocol, client_id, explicit_name=None, manager=None):
+    name = str(explicit_name or '').strip()
+    if name:
+        return name
+    conn = find_connection(data, server_id, protocol, client_id)
+    if conn and str(conn.get('name') or '').strip():
+        return str(conn['name']).strip()
+    server = (data.get('servers') or [])[server_id] if 0 <= server_id < len(data.get('servers') or []) else {}
+    tmpl = config_naming.resolve_config_name_template(server, protocol)
+    if manager is not None and '{client}' in tmpl and client_id:
+        try:
+            clients = _manager_call(manager, 'get_clients', protocol)
+            if isinstance(clients, list):
+                for item in clients:
+                    if not isinstance(item, dict):
+                        continue
+                    cid = item.get('clientId') or item.get('id') or item.get('uuid') or item.get('name')
+                    if str(cid) == str(client_id):
+                        found = (item.get('userData') or {}).get('clientName') or item.get('name') or ''
+                        if str(found).strip():
+                            return str(found).strip()
+        except Exception:
+            pass
+    return ''
+
+
 @app.post('/api/servers/{server_id}/connections/config/save', tags=["Connections"])
 @serialize_peer_lifecycle
 def api_save_connection_config(request: Request, server_id: int, req: SaveConnectionConfigRequest):
@@ -14965,7 +15070,7 @@ def api_save_connection_config(request: Request, server_id: int, req: SaveConnec
         return JSONResponse({'error': 'Forbidden'}, status_code=403)
     try:
         data = load_data()
-        if server_id >= len(data['servers']):
+        if server_id < 0 or server_id >= len(data['servers']):
             return JSONResponse({'error': 'Server not found'}, status_code=404)
         server = data['servers'][server_id]
         config_text = (req.config or '').strip()
@@ -14977,13 +15082,17 @@ def api_save_connection_config(request: Request, server_id: int, req: SaveConnec
         # folded so the client keeps following later changes to the list.
         config_text = split_tunnel.fold_config(config_text)
         ssh = get_ssh(server)
-        ssh.connect()
-        manager = get_protocol_manager(ssh, req.protocol)
-        _manager_call(manager, 'save_client_config', req.protocol, req.client_id,
-                      config_text, warp_ctx=srv_warp_ctx(server, req.protocol))
-        ssh.disconnect()
+        try:
+            ssh.connect()
+            manager = get_protocol_manager(ssh, req.protocol)
+            _manager_call(manager, 'save_client_config', req.protocol, req.client_id,
+                          config_text, warp_ctx=srv_warp_ctx(server, req.protocol))
+            client_name = _resolve_client_name(
+                data, server_id, req.protocol, req.client_id, getattr(req, 'client_name', None), manager=manager)
+        finally:
+            ssh.disconnect()
         shown = split_tunnel.apply_to_config(config_text)
-        return {'status': 'success', **config_payloads(shown, server, req.protocol)}
+        return {'status': 'success', **config_payloads(shown, server, req.protocol, client_name=client_name)}
     except Exception as e:
         logger.exception("Error saving connection config")
         return JSONResponse({'error': str(e)}, status_code=500)
@@ -15023,10 +15132,12 @@ def api_get_connection_config(request: Request, server_id: int, req: ConnectionA
             return JSONResponse({'error': 'Protocol instance not found'}, status_code=404)
         proto_info = server.get('protocols', {}).get(req.protocol, {})
         instance_fields = ('installed', 'base_protocol', 'instance', 'container_name',
-                           'port', 'public_host', 'public_port')
+                           'port', 'public_host', 'public_port', 'config_name_template', 'custom_name')
         instance_identity = tuple(proto_info.get(key) for key in instance_fields)
         port = proto_info.get('port', '55424')
         pub_host, pub_port = protocol_public_endpoint(server, req.protocol)
+        client_name = _resolve_client_name(
+            data, server_id, req.protocol, req.client_id, getattr(req, 'client_name', None))
         ssh = get_ssh(server)
         try:
             ssh.connect()
@@ -15041,6 +15152,9 @@ def api_get_connection_config(request: Request, server_id: int, req: ConnectionA
                 public_port=pub_port,
                 **xray_fp_kwargs(server, req.protocol)
             )
+            if not client_name:
+                client_name = _resolve_client_name(
+                    data, server_id, req.protocol, req.client_id, None, manager=manager)
         finally:
             ssh.disconnect()
 
@@ -15076,11 +15190,7 @@ def api_get_connection_config(request: Request, server_id: int, req: ConnectionA
             ):
                 return JSONResponse({'error': 'Forbidden'}, status_code=403)
 
-        return {
-            'config': config,
-            **config_payloads(config, server, req.protocol)
-        }
-        return {'config': config, **config_payloads(config, server, req.protocol)}
+        return {'config': config, **config_payloads(config, server, req.protocol, client_name=client_name)}
     except Exception as e:
         logger.exception("Error getting connection config")
         return JSONResponse({'error': str(e)}, status_code=500)
@@ -15264,7 +15374,7 @@ def api_add_user(request: Request, req: AddUserRequest):
                     result['connection_created'] = True
                     if conn_result.get('config'):
                         result['config'] = conn_result['config']
-                        result.update(config_payloads(conn_result['config'], server, req.protocol))
+                        result.update(config_payloads(conn_result['config'], server, req.protocol, client_name=conn_name))
         return result
     except Exception as e:
         logger.exception("Error adding user")
@@ -15428,7 +15538,7 @@ async def api_add_user_connection(request: Request, user_id: str, req: AddUserCo
             response = {'status': 'success', 'operation_id': result['operation_id']}
             if result.get('config'):
                 response['config'] = result['config']
-                response.update(config_payloads(result['config'], server, req.protocol))
+                response.update(config_payloads(result['config'], server, req.protocol, client_name=req.name))
             return response
         data = load_data()
         user = next((u for u in data['users'] if u['id'] == user_id), None)
@@ -15517,7 +15627,7 @@ async def api_add_user_connection(request: Request, user_id: str, req: AddUserCo
         resp = {'status': 'success'}
         if result.get('config'):
             resp['config'] = result['config']
-            resp.update(config_payloads(result['config'], server, req.protocol))
+            resp.update(config_payloads(result['config'], server, req.protocol, client_name=req.name))
         return resp
     except PeerCreateError as error:
         return JSONResponse({'error': str(error), 'operation_id': error.operation_id},
@@ -15873,7 +15983,8 @@ def api_share_config(token: str, connection_id: str, request: Request):
         manager = get_protocol_manager(ssh, conn['protocol'])
         config = _manager_call(manager, 'get_client_config', conn['protocol'], conn['client_id'], pub_host, port, public_port=pub_port, **xray_fp_kwargs(server, conn['protocol']))
         ssh.disconnect()
-        return {'config': config, **config_payloads(config, server, conn['protocol'])}
+        return {'config': config, **config_payloads(
+            config, server, conn['protocol'], client_name=conn.get('name', ''))}
     except Exception as e:
         logger.exception("Error getting shared config")
         return JSONResponse({'error': str(e)}, status_code=500)
@@ -15905,7 +16016,8 @@ def api_my_connection_config(request: Request, connection_id: str):
         manager = get_protocol_manager(ssh, conn['protocol'])
         config = _manager_call(manager, 'get_client_config', conn['protocol'], conn['client_id'], pub_host, port, public_port=pub_port, **xray_fp_kwargs(server, conn['protocol']))
         ssh.disconnect()
-        return {'config': config, **config_payloads(config, server, conn['protocol'])}
+        return {'config': config, **config_payloads(
+            config, server, conn['protocol'], client_name=conn.get('name', ''))}
     except Exception as e:
         logger.exception("Error getting my connection config")
         return JSONResponse({'error': str(e)}, status_code=500)
@@ -16888,7 +17000,7 @@ async def _save_settings(request: Request, payload: SaveSettingsRequest):
     if previous_telegram.get('token') != tg_cfg.get('token') or not tg_cfg.get('token') or not tg_cfg['enabled']:
         await tg_bot.stop_bot()
     if tg_cfg['enabled'] and tg_cfg.get('token') and not tg_bot.is_running():
-        tg_bot.launch_bot(tg_cfg['token'], load_data, generate_vpn_link, save_data, self_service_svc=self_service_connections, credential_resolver=lambda server: _credential_store().resolve(server))
+        _launch_telegram_bot(tg_cfg['token'])
 
     return {"status": "success", "bot_running": tg_bot.is_running(),
             "bot_enabled": tg_cfg['enabled'], "warnings": warnings}
@@ -17070,7 +17182,7 @@ async def api_telegram_toggle(request: Request, payload: Optional[TelegramToggle
         save_data(data)
         if enabled:
             if not tg_bot.is_running():
-                tg_bot.launch_bot(token, load_data, generate_vpn_link, save_data, self_service_svc=self_service_connections, credential_resolver=lambda server: _credential_store().resolve(server))
+                _launch_telegram_bot(token)
         else:
             await tg_bot.stop_bot()
         return {'status': 'started' if enabled else 'stopped',

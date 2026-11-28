@@ -1790,5 +1790,13 @@
   "proxy_install_http_enabled": "HTTP-прокси включён",
   "proxy_install_http_enabled_hint": "Снять — контейнер amnezia-httpproxy не поднимается",
   "proxy_socks_port_hint": "Ключ учётки использует этот порт: socks5://…@host:{port}",
-  "proxy_log_format_vars": "Переменные: %U логин, %I входящие байты, %O исходящие, %N сервис, %C IP клиента."
+  "proxy_log_format_vars": "Переменные: %U логин, %I входящие байты, %O исходящие, %N сервис, %C IP клиента.",
+  "config_name_title": "Название конфигов (в клиенте)",
+  "config_name_for": "Шаблон названия конфигов, выдаваемых инстансом {}",
+  "config_name_template_label": "Шаблон названия",
+  "config_name_placeholders_hint": "Нажмите на переменную для вставки: {client} — имя клиента, {server} — сервер, {protocol} — протокол, {instance} — название инстанса, {exit} — выходной узел.",
+  "config_name_preview_client": "В приложении Amnezia (vpn:// / vless://)",
+  "config_name_preview_file": "Имя скачиваемого файла (.conf)",
+  "config_name_hint": "Пустое поле — стандартное поведение. Серверный конфиг awg0.conf не меняется; имя .conf-файла автоматически приводится к безопасному ASCII для нативных клиентов WireGuard/AWG.",
+  "config_name_reset": "Сбросить"
 }

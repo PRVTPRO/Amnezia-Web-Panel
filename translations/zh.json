@@ -1790,5 +1790,13 @@
   "proxy_install_http_enabled": "启用 HTTP 代理",
   "proxy_install_http_enabled_hint": "取消勾选——不启动 amnezia-httpproxy 容器",
   "proxy_socks_port_hint": "账户密钥使用此端口：socks5://…@主机:{port}",
-  "proxy_log_format_vars": "变量：%U 用户名，%I 入站字节，%O 出站字节，%N 服务，%C 客户端 IP。"
+  "proxy_log_format_vars": "变量：%U 用户名，%I 入站字节，%O 出站字节，%N 服务，%C 客户端 IP。",
+  "config_name_title": "客户端配置名称",
+  "config_name_for": "实例 {} 签发配置的名称模板",
+  "config_name_template_label": "名称模板",
+  "config_name_placeholders_hint": "点击插入占位符：{client} — 客户端名称，{server} — 服务器，{protocol} — 协议，{instance} — 实例名称，{exit} — 出口节点。",
+  "config_name_preview_client": "Amnezia 中显示 (vpn:// / vless://)",
+  "config_name_preview_file": "下载文件名 (.conf)",
+  "config_name_hint": "留空则保持默认命名。不会修改服务端 awg0.conf；.conf 文件名会自动转为适用于原生 WireGuard/AWG 客户端的安全 ASCII 名称。",
+  "config_name_reset": "重置"
 }

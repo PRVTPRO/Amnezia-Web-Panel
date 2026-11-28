@@ -3221,6 +3221,42 @@
     </div>
 </div>
 
+<!-- Config Name Template Modal -->
+<div class="modal-backdrop" id="configNameModal">
+    <div class="modal">
+        <div class="modal-header">
+            <h2 class="modal-title">🏷️ {{ _('config_name_title') }}</h2>
+            <button class="modal-close" onclick="closeModal('configNameModal')">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="text-muted text-sm" style="margin-bottom: var(--space-md);" id="configNameHint"></div>
+            <div class="form-group">
+                <label class="form-label" for="configNameTemplateInput">{{ _('config_name_template_label') }}</label>
+                <input type="text" class="form-input" id="configNameTemplateInput" maxlength="128"
+                       placeholder="{server} {protocol} ({client})" oninput="updateConfigNamePreview()">
+                <div style="display:flex; flex-wrap:wrap; gap:6px; margin-top: var(--space-xs);">
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="insertConfigNamePlaceholder('{client}')">{client}</button>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="insertConfigNamePlaceholder('{server}')">{server}</button>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="insertConfigNamePlaceholder('{protocol}')">{protocol}</button>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="insertConfigNamePlaceholder('{instance}')">{instance}</button>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="insertConfigNamePlaceholder('{exit}')">{exit}</button>
+                </div>
+                <div class="text-muted text-sm" style="margin-top: var(--space-xs);">{{ _('config_name_placeholders_hint') }}</div>
+            </div>
+            <div id="configNamePreviewBox" style="padding: 10px 12px; border-radius: var(--radius-md); border: 1px solid var(--border-color); background: rgba(0,0,0,0.12); margin-bottom: var(--space-md); font-size: 0.85rem;">
+                <div style="margin-bottom: 4px;"><span class="text-muted">{{ _('config_name_preview_client') }}:</span> <code id="configNamePreviewDisplay"></code></div>
+                <div><span class="text-muted">{{ _('config_name_preview_file') }}:</span> <code id="configNamePreviewFile"></code></div>
+            </div>
+            <div class="text-muted text-sm">{{ _('config_name_hint') }}</div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="clearConfigNameTemplate()">{{ _('config_name_reset') }}</button>
+            <button class="btn btn-secondary" onclick="closeModal('configNameModal')">{{ _('cancel') }}</button>
+            <button class="btn btn-primary" onclick="saveConfigNameTemplate()" id="configNameSaveBtn">{{ _('save') }}</button>
+        </div>
+    </div>
+</div>
+
 <!-- Rename Instance Modal -->
 <div class="modal-backdrop" id="renameProtoModal">
     <div class="modal">
@@ -4687,6 +4723,11 @@
         {{ proto|tojson }}: { host: {{ (info.get('public_host') or '')|tojson }}, port: {{ (info.get('public_port') or '')|tojson }} },
         {%- endfor %}
     };
+    const CONFIG_NAME_TEMPLATES = {
+        {%- for proto, info in (server.get('protocols') or {}).items() if info.get('config_name_template') %}
+        {{ proto|tojson }}: {{ info.get('config_name_template')|tojson }},
+        {%- endfor %}
+    };
     // Protocol records known at render time. The marketplace uses this to tell
     // a host with no AmneziaWG instance (nothing to install WARP into) from one
     // where the app simply is not active yet.
@@ -4724,6 +4765,7 @@
     let currentVpnLink = '';
     let currentConfigName = 'connection';
     let currentConfigClientId = null;
+    let currentConfigClientName = '';
     let installedProtocols = {};
     let currentProtocolStatus = {};
     let installedAppsLoading = true;
@@ -6694,7 +6736,8 @@
         // skip quietly rather than throwing so a partial UI still renders.
         if (!statusEl || !actionsEl) return;
 
-        const isService = SERVICE_PROTOS.includes(protoBase(proto));
+        const base = protoBase(proto);
+        const isService = SERVICE_PROTOS.includes(base);
 
         if (info.container_running) {
             installedProtocols[proto] = true;
@@ -6821,6 +6864,11 @@
                     const endpointBtn = ENDPOINT_PROTOCOLS.includes(protoBase(proto))
                         ? `<button class="btn btn-secondary btn-sm" onclick="openPublicEndpointModal('${proto}')" title="${_('public_endpoint_title')}">🌐${ep ? ' ' + escapeHtml(publicEndpointLabel(ep)) : ''}</button>`
                         : '';
+                    const cfgTmpl = CONFIG_NAME_TEMPLATES[proto] || '';
+                    const cfgTmplShort = cfgTmpl.length > 18 ? cfgTmpl.slice(0, 17) + '…' : cfgTmpl;
+                    const configNameBtn = (AWG_PROTOCOLS.includes(base) || base === 'wireguard' || base === 'xray')
+                        ? `<button class="btn btn-secondary btn-sm" onclick="openConfigNameModal('${proto}')" title="${_('config_name_title')}">🏷️${cfgTmpl ? ' ' + escapeHtml(cfgTmplShort) : ''}</button>`
+                        : '';
                     const selfstealBtn = protoBase(proto) === 'xray'
                         ? `<button class="btn btn-secondary btn-sm" onclick="openSelfstealModal('${proto}')" title="${_('xray_selfsteal_title')}">🎭 ${_('xray_selfsteal')}</button>`
                         : '';
@@ -6838,6 +6886,7 @@
                         ${exitBtn}
                         ${warpExitBtn}
                         ${endpointBtn}
+                        ${configNameBtn}
                         ${selfstealBtn}
                         ${vlessEncBtn}
                         ${fingerprintBtn}
@@ -7167,6 +7216,90 @@
             } else {
                 showToast(_('success') || 'Saved', 'success');
             }
+            checkServer();
+        } catch (err) {
+            showToast((_('error') || 'Error') + ': ' + err.message, 'error');
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    // ---------- per-instance client config naming template ----------
+    let configNameTarget = null;
+    let configNamePreviewTimer;
+    let configNamePreviewRevision = 0;
+
+    function updateConfigNamePreview() {
+        clearTimeout(configNamePreviewTimer);
+        const protocol = configNameTarget;
+        if (!protocol) return;
+        const template = document.getElementById('configNameTemplateInput').value;
+        const display = document.getElementById('configNamePreviewDisplay');
+        const filename = document.getElementById('configNamePreviewFile');
+        const revision = ++configNamePreviewRevision;
+        display.textContent = filename.textContent = '…';
+        filename.parentElement.hidden = protoBase(protocol) === 'xray';
+        configNamePreviewTimer = setTimeout(async () => {
+            try {
+                const result = await apiCall(`/api/servers/${SERVER_ID}/protocol/config-name`, 'POST', {
+                    protocol, template, server_uid: document.body.dataset.serverUid, preview: true,
+                });
+                if (revision !== configNamePreviewRevision) return;
+                display.textContent = result.vpn_name || '—';
+                filename.textContent = result.conf_filename || '—';
+            } catch {
+                if (revision !== configNamePreviewRevision) return;
+                display.textContent = filename.textContent = '—';
+            }
+        }, 200);
+    }
+
+    function insertConfigNamePlaceholder(token) {
+        const input = document.getElementById('configNameTemplateInput');
+        if (!input) return;
+        const start = input.selectionStart ?? input.value.length;
+        const end = input.selectionEnd ?? input.value.length;
+        input.value = input.value.slice(0, start) + token + input.value.slice(end);
+        const pos = start + token.length;
+        input.focus();
+        input.setSelectionRange(pos, pos);
+        updateConfigNamePreview();
+    }
+
+    function clearConfigNameTemplate() {
+        const input = document.getElementById('configNameTemplateInput');
+        if (input) input.value = '';
+        updateConfigNamePreview();
+    }
+
+    function openConfigNameModal(proto) {
+        configNameTarget = proto;
+        document.getElementById('configNameTemplateInput').value = CONFIG_NAME_TEMPLATES[proto] || '';
+        document.getElementById('configNameHint').textContent =
+            _('config_name_for').replace('{}', getProtoTitle(proto));
+        updateConfigNamePreview();
+        openModal('configNameModal');
+    }
+
+    async function saveConfigNameTemplate() {
+        const proto = configNameTarget;
+        if (!proto) return;
+        const template = document.getElementById('configNameTemplateInput').value.trim();
+        const btn = document.getElementById('configNameSaveBtn');
+        btn.disabled = true;
+        try {
+            const res = await apiCall(`/api/servers/${SERVER_ID}/protocol/config-name`, 'POST', {
+                protocol: proto,
+                template,
+                server_uid: document.body.dataset.serverUid,
+            });
+            if (res && res.template) {
+                CONFIG_NAME_TEMPLATES[proto] = res.template;
+            } else {
+                delete CONFIG_NAME_TEMPLATES[proto];
+            }
+            closeModal('configNameModal');
+            showToast(_('success') || 'Saved', 'success');
             checkServer();
         } catch (err) {
             showToast((_('error') || 'Error') + ': ' + err.message, 'error');
@@ -10522,8 +10655,9 @@
                 if (result.config) {
                     currentConfig = result.config;
                     currentVpnLink = result.vpn_link || '';
-                    currentConfigName = connName.replace(/\s+/g, '_');
+                    currentConfigName = configDownloadStem(result, connName);
                     currentConfigClientId = result.client_id || null;
+                    currentConfigClientName = connName;
                     document.getElementById('configModalTitle').textContent = `${_('config')} — ${connName}`;
                     const cfgTa = document.getElementById('configText'); cfgTa.value = result.config; cfgTa.readOnly = false;
                     document.getElementById('vpnLinkText').textContent = currentVpnLink;
@@ -10754,6 +10888,7 @@
             if (currentConfigClientId === clientId &&
                 document.getElementById('configModal').classList.contains('active')) {
                 document.getElementById('configModalTitle').textContent = `${_('config')} — ${result.name}`;
+                currentConfigClientName = result.name;
                 currentConfigName = result.name.replace(/\s+/g, '_');
             }
             await loadConnections(true, true); // silent refresh, no overlay
@@ -10761,6 +10896,11 @@
         } catch (err) {
             showToast(_('error') + ': ' + err.message, 'error');
         }
+    }
+
+    function configDownloadStem(payload, clientName) {
+        return payload.conf_filename ? payload.conf_filename.replace(/\.conf$/i, '')
+            : clientName.replace(/\s+/g, '_');
     }
 
     async function saveConnectionConfig() {
@@ -10772,12 +10912,14 @@
         }
         try {
             const result = await apiCall(`/api/servers/${SERVER_ID}/connections/config/save`, 'POST', {
-                protocol: proto, client_id: currentConfigClientId, config: text,
+                protocol: proto, client_id: currentConfigClientId, client_name: currentConfigClientName, config: text,
             });
-            currentConfig = text;
+            currentConfig = result.config || text;
             currentVpnLink = result.vpn_link || '';
+            currentConfigName = configDownloadStem(result, currentConfigClientName);
+            document.getElementById('configText').value = currentConfig;
             document.getElementById('vpnLinkText').textContent = currentVpnLink;
-            generateQR(text, result.vpn_qr_chunks);
+            generateQR(currentConfig, result.vpn_qr_chunks);
             showToast(_('config_saved'), 'success');
         } catch (err) {
             showToast(_('error') + ': ' + err.message, 'error');
@@ -10787,6 +10929,7 @@
     async function showConnectionConfig(clientId, connName, hasKey) {
         const proto = document.getElementById('connProtoSelect').value;
         currentConfigClientId = clientId;
+        currentConfigClientName = connName;
         const canEditCfg = ['awg', 'awg2', 'awg_legacy', 'wireguard'].includes(protoBase(proto));
         document.getElementById('saveConnConfigBtn').style.display = canEditCfg ? '' : 'none';
         document.getElementById('configText').readOnly = !canEditCfg;
@@ -10818,12 +10961,12 @@
         try {
             showToast(_('loading'), 'info');
             const result = await apiCall(`/api/servers/${SERVER_ID}/connections/config`, 'POST', {
-                protocol: proto, client_id: clientId,
+                protocol: proto, client_id: clientId, client_name: connName,
             });
             if (result.config) {
                 currentConfig = result.config;
                 currentVpnLink = result.vpn_link || '';
-                currentConfigName = connName.replace(/\s+/g, '_');
+                currentConfigName = configDownloadStem(result, connName);
                 document.getElementById('configModalTitle').textContent = `${_('config')} — ${connName}`;
                 const cfgTa = document.getElementById('configText'); cfgTa.value = result.config; cfgTa.readOnly = false;
                 document.getElementById('vpnLinkText').textContent = currentVpnLink;

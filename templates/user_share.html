@@ -282,7 +282,7 @@
             document.getElementById('configModalTitle').textContent = name;
 
             const dl = document.getElementById('downloadBtn');
-            dl.onclick = () => downloadFile(data.config, `${name}.conf`);
+            dl.onclick = () => downloadFile(data.config, data.conf_filename || `${name}.conf`);
 
             generateQR(data.config, data.vpn_qr_chunks);
 
