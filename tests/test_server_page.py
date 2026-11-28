@@ -13,6 +13,58 @@ def read(*parts):
         return f.read()
 
 
+class ClientConfigEditorTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('node'), 'Node.js required')
+    def test_save_visibility_and_read_only_state_after_loading_config(self):
+        page = read('templates', 'server.html')
+        protocols = re.search(r'const AWG_PROTOCOLS = .*?;', page).group()
+        proto_base = re.search(r'function protoBase\(.*?\n    \}', page, re.S).group()
+        editor = re.search(r'async function showConnectionConfig\(.*?\n    \}', page, re.S).group()
+        script = protocols + proto_base + editor + '''
+const SERVER_ID = 1;
+let currentConfigClientId, currentConfig, currentConfigName, currentVpnLink;
+let configLoads = 0;
+const fields = new Map();
+const document = {
+  getElementById(id) {
+    if (!fields.has(id)) fields.set(id, {style: {}});
+    return fields.get(id);
+  },
+  querySelectorAll() { return [{style: {}}, {style: {}}, {style: {}}]; },
+};
+const _ = key => key;
+const apiCall = async () => { configLoads++; return {config: 'test config'}; };
+const generateQR = () => {};
+const switchConfigTab = () => {};
+const openModal = () => {};
+const showToast = (message, kind) => { if (kind === 'error') throw new Error(message); };
+
+(async () => {
+  const states = [];
+  for (const [proto, hasKey] of [
+    ['awg3', true], ['awg3__2', true], ['awg3', false],
+    ['wireguard', true], ['xray', true],
+  ]) {
+    document.getElementById('connProtoSelect').value = proto;
+    const before = configLoads;
+    await showConnectionConfig('test-peer', 'Test peer', hasKey);
+    states.push([
+      document.getElementById('saveConnConfigBtn').style.display,
+      document.getElementById('configText').readOnly,
+      configLoads - before,
+    ]);
+  }
+  console.log(JSON.stringify(states));
+})().catch(error => { console.error(error); process.exitCode = 1; });
+'''
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), [
+            ['', False, 1], ['', False, 1], ['none', True, 0],
+            ['', False, 1], ['none', True, 1],
+        ])
+
+
 class PublicEndpointPortCheckTests(unittest.TestCase):
     """The public-endpoint modal gates Save behind a port check: the checker
     button and result element must exist, the JS must call the port-check API
