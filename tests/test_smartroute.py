@@ -602,19 +602,21 @@ class ManagerFlowTests(unittest.TestCase):
 class ApplyHardeningTests(unittest.TestCase):
     """Regression tests for partial route-application failures (review feedback)."""
 
-    @unittest.skipUnless(shutil.which('bash') and shutil.which('awk'), 'requires bash and awk')
-    def test_duplicate_prefix_does_not_skip_later_unique_prefix(self):
+    def run_apply(self, prefixes):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             routes = root / 'routes'
             routes.write_text('192.0.2.0/24\n')
-            (root / 'smartr_v4.cidr').write_text(
-                '198.51.100.0/24\n198.51.100.0/24\n198.51.100.128/25\n')
+            if prefixes is not None:
+                (root / 'smartr_v4.cidr').write_text(prefixes)
+            ip_calls = root / 'ip_calls'
+            ip_calls.touch()
 
             # Model ip -batch stopping on the first duplicate route add.
             ip = root / 'ip'
             ip.write_text("""#!/bin/bash
 set -eu
+printf '%s\\n' "$*" >> "$IP_CALLS"
 case "$2" in
   route) awk '{print "throw " $0}' "$ROUTES" ;;
   -batch)
@@ -642,17 +644,41 @@ esac
                 CONTAINER_APPLY_FINAL,
                 config_path='/opt/amnezia/awg/awg0.conf',
                 subnet_default='10.8.0.0/24',
-            ).replace('/tmp/smartr_', f'{root}/smartr_')
+            ).replace('/tmp/smartr_', 'smartr_')
             result = subprocess.run(
                 ['bash', '-c', script],
-                env={**os.environ, 'PATH': f'{root}:{os.environ["PATH"]}', 'ROUTES': str(routes)},
+                cwd=root,
+                env={
+                    **os.environ, 'PATH': f'{root}{os.pathsep}{os.environ["PATH"]}',
+                    'ROUTES': str(routes), 'IP_CALLS': str(ip_calls),
+                },
                 capture_output=True, text=True, timeout=10,
             )
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertIn('2 throw routes', result.stdout)
-            self.assertEqual(routes.read_text().splitlines(), [
-                '198.51.100.0/24', '198.51.100.128/25',
-            ])
+            return result, routes.read_text().splitlines(), ip_calls.read_text().splitlines()
+
+    @unittest.skipUnless(
+        os.name == 'posix' and shutil.which('bash') and shutil.which('awk'),
+        'requires POSIX, bash and awk',
+    )
+    def test_duplicate_prefix_does_not_skip_later_unique_prefix(self):
+        result, routes, _ = self.run_apply(
+            '198.51.100.0/24\n198.51.100.0/24\n198.51.100.128/25\n')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('2 throw routes', result.stdout)
+        self.assertEqual(routes, ['198.51.100.0/24', '198.51.100.128/25'])
+
+    @unittest.skipUnless(
+        os.name == 'posix' and shutil.which('bash') and shutil.which('awk'),
+        'requires POSIX, bash and awk',
+    )
+    def test_empty_or_missing_prefix_list_keeps_existing_routes(self):
+        for prefixes in (None, '', ' \n# no prefixes\n'):
+            with self.subTest(prefixes=prefixes):
+                result, routes, ip_calls = self.run_apply(prefixes)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn('missing or empty IPv4 prefix list', result.stderr)
+                self.assertEqual(routes, ['192.0.2.0/24'])
+                self.assertFalse(any('-batch' in call for call in ip_calls))
 
     def test_apply_snapshots_routes_before_delete(self):
         # last-known-good snapshot must exist BEFORE the del batch runs,

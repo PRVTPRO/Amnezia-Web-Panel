@@ -165,15 +165,17 @@ APPLY_RC=0
 # sent to ip -batch, which stops when a duplicate route add fails.
 WANT=0
 if [ -s /tmp/smartr_v4.cidr ]; then
-  awk 'NF && !seen[$1]++{print "route add throw "$1" table '$TABLE'"}' /tmp/smartr_v4.cidr > /tmp/smartr_add.batch || exit 1
+  awk 'NF && $1 !~ /^#/ && !seen[$1]++{print "route add throw "$1" table '$TABLE'"}' /tmp/smartr_v4.cidr > /tmp/smartr_add.batch || exit 1
   WANT=$(wc -l < /tmp/smartr_add.batch) || exit 1
+fi
+if [ "$WANT" -eq 0 ]; then
+  echo "smartroute: missing or empty IPv4 prefix list; existing routes kept" >&2
+  exit 1
 fi
 ip -4 route show table $TABLE | awk '$1==\"throw\"{print $2}' > /tmp/smartr_lkg.cidr
 ip -4 route show table $TABLE | awk '$1==\"throw\"{print \"route del throw \"$2\" table '$TABLE'\"}' > /tmp/smartr_del.batch
 [ -s /tmp/smartr_del.batch ] && ip -4 -batch /tmp/smartr_del.batch 2>/dev/null
-if [ "$WANT" -gt 0 ]; then
-  ip -4 -batch /tmp/smartr_add.batch 2>/dev/null || APPLY_RC=1
-fi
+ip -4 -batch /tmp/smartr_add.batch 2>/dev/null || APPLY_RC=1
 GOT=$(ip -4 route show table $TABLE | grep -c '^throw')
 if [ "$APPLY_RC" != 0 ] || [ "$WANT" -ne "$GOT" ]; then
   echo "smartroute: apply mismatch (wanted $WANT, have $GOT) - restoring last-known-good"
