@@ -3708,6 +3708,7 @@ def tpl(request, template, **kwargs):
         'server_protocol_names': server_protocol_names,
         'server_protocol_labels': [server_protocol_names(s) for s in kwargs.get('servers', [])],
         'default_protocol_labels': {p: protocol_display_name(p) for p in BASE_PROTOCOLS},
+        'protocol_short_name': protocol_short_name,
         'site_settings': data.get('settings', {}).get('appearance', {}),
         'captcha_settings': data.get('settings', {}).get('captcha', {}),
         'telegram_settings': data.get('settings', {}).get('telegram', {}),

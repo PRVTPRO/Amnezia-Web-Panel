@@ -54,6 +54,13 @@ class ServerPageRenderTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, path)
         return response.text
 
+    def test_dashboard_renders_the_awg2_protocol_badge(self):
+        with TestClient(panel.app) as client:
+            login = client.post('/api/auth/login', json={'username': 'admin', 'password': 'admin'})
+            self.assertEqual(login.status_code, 200, login.text)
+            page = self.render(client, '/')
+        self.assertRegex(page, r'<span class="badge-dot"></span>\s+AWG2\s+</span>')
+
     def test_server_pages_render_with_exit_node_ui(self):
         with TestClient(panel.app) as client:
             login = client.post('/api/auth/login', json={'username': 'admin', 'password': 'admin'})
