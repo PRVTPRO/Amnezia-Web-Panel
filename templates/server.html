@@ -10826,7 +10826,9 @@
                 currentVpnLink = result.vpn_link || '';
                 currentConfigName = connName.replace(/\s+/g, '_');
                 document.getElementById('configModalTitle').textContent = `${_('config')} — ${connName}`;
-                const cfgTa = document.getElementById('configText'); cfgTa.value = result.config; cfgTa.readOnly = false;
+                const cfgTa = document.getElementById('configText');
+                cfgTa.value = result.config;
+                cfgTa.readOnly = !canEditCfg;
                 document.getElementById('vpnLinkText').textContent = currentVpnLink;
                 switchConfigTab('conf');
                 openModal('configModal');
